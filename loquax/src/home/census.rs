@@ -101,7 +101,7 @@ pub const RUN_LOCALS: &[(&str, &str)] = &[
     ("stop", "-"),
     ("census", "-"),
     ("next_census", "-"),
-    ("census_owed", "-"),
+    ("census_ask", "-"),
     ("usr1", "-"),
     ("unstarted", "-"),
     ("turns", "-"),

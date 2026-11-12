@@ -564,10 +564,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     // The census (order 1585): every CENSUS_PERIOD into the log, and on
     // SIGUSR1 with every node's transport census on stderr, once the
     // engines answered or ANSWER_WAIT passed. The home engine's answer;
-    // the groups' are on their engines.
+    // the groups' are on their engines. `census_ask` names the census
+    // owed, and only its answers are kept (1732).
     let mut census: Option<crate::outbox::EngineCensus> = None;
     let mut next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
-    let mut census_owed: Option<(tokio::time::Instant, bool)> = None;
+    let mut census_ask = CensusAsk::default();
     let mut usr1 = match terminate {
         Some(_) => Some(
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
@@ -738,7 +739,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let busy = !events.is_empty()
                     || fetch.is_some()
                     || !pn_asks.is_empty()
-                    || census_owed.is_some();
+                    || census_ask.is_owed();
                 quiet_pumps = if busy { 0 } else { quiet_pumps.saturating_add(1) };
                 next_pump = tokio::time::Instant::now()
                     + if quiet_pumps >= QUIET_PUMPS { PUMP_QUIET } else { PUMP };
@@ -789,7 +790,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
                         }
-                        OutboxEvent::Census(answer) => census = Some(answer),
+                        OutboxEvent::Census(answer) => census_ask.keep(&mut census, answer),
                         // A node proved an upload (1409): asked about at the
                         // end of the next sync rounds.
                         OutboxEvent::Uploaded { message_id, transient_id, node: proved_by } => {
@@ -867,7 +868,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     break Err(fatal);
                 }
                 for hosted in &mut groups {
-                    pump_group(&mut store, &mut sender, hosted, selected_pn);
+                    pump_group(&mut store, &mut sender, hosted, selected_pn, &census_ask);
                 }
                 if let Some(task) = fetch.take_if(|task| task.is_finished()) {
                     let pulled = task.await.ok().flatten();
@@ -906,31 +907,28 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 for due in wakes.due(now_ms()) {
                     send_wake(&node, &mut store, &mut wakes, &mut costs, due).await;
                 }
-                if let Some((due, dump)) = census_owed {
-                    let answered = census.is_some() && groups.iter().all(|g| g.census.is_some());
-                    if answered || tokio::time::Instant::now() >= due {
-                        census_owed = None;
-                        let held = Held {
-                            outgoing: &outgoing,
-                            groups: &groups,
-                            sender: &sender,
-                            relations: &relations,
-                            asker: &asker,
-                            wakes: &wakes,
-                            costs: &costs,
-                            pn_asks: pn_asks.len(),
-                            home: census.take(),
-                            store: &store,
-                            turns,
-                        };
-                        let line = held.census();
-                        line.log(if dump { "signal" } else { "period" });
-                        if dump {
-                            eprint!("{}", census_dump(&node, &groups, &line));
-                        }
-                        for hosted in &mut groups {
-                            hosted.census = None;
-                        }
+                let answered = census.is_some() && groups.iter().all(|g| g.census.is_some());
+                if let Some(dump) = census_ask.ready(answered, tokio::time::Instant::now()) {
+                    let held = Held {
+                        outgoing: &outgoing,
+                        groups: &groups,
+                        sender: &sender,
+                        relations: &relations,
+                        asker: &asker,
+                        wakes: &wakes,
+                        costs: &costs,
+                        pn_asks: pn_asks.len(),
+                        home: census.take(),
+                        store: &store,
+                        turns,
+                    };
+                    let line = held.census();
+                    line.log(if dump { "signal" } else { "period" });
+                    if dump {
+                        eprint!("{}", census_dump(&node, &groups, &line));
+                    }
+                    for hosted in &mut groups {
+                        hosted.census = None;
                     }
                 }
                 if fetch.is_none() {
@@ -951,14 +949,14 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             }
             _ = tokio::time::sleep_until(next_census) => {
                 next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
-                forget_answers(&mut census, &mut groups);
-                ask_census(&attached, &groups);
-                census_owed.get_or_insert((tokio::time::Instant::now() + super::census::ANSWER_WAIT, false));
+                if let Some(seq) = census_ask.periodic(tokio::time::Instant::now()) {
+                    ask_census(&attached, &groups, seq);
+                }
             }
             _ = user_signal(usr1.as_mut()) => {
-                forget_answers(&mut census, &mut groups);
-                ask_census(&attached, &groups);
-                census_owed = Some((tokio::time::Instant::now() + super::census::ANSWER_WAIT, true));
+                if let Some(seq) = census_ask.signal(tokio::time::Instant::now()) {
+                    ask_census(&attached, &groups, seq);
+                }
             }
             _ = signalled(terminate.as_mut()) => break Ok(()),
             _ = stopped(stop.as_mut()) => break Ok(()),
@@ -1159,6 +1157,7 @@ fn pump_group<O: Outbox>(
     sender: &mut Sender,
     group: &mut GroupEngine<O>,
     selected_pn: Option<[u8; 16]>,
+    census: &CensusAsk,
 ) {
     loop {
         let event = match group.engine.try_next_event() {
@@ -1175,7 +1174,7 @@ fn pump_group<O: Outbox>(
             }
         };
         match event {
-            OutboxEvent::Census(answer) => group.census = Some(answer),
+            OutboxEvent::Census(answer) => census.keep(&mut group.census, answer),
             OutboxEvent::Packed {
                 message_id, packed, ..
             } if group.ended => {
@@ -1518,26 +1517,103 @@ async fn user_signal(usr1: Option<&mut tokio::signal::unix::Signal>) {
     }
 }
 
-/// Drop the engines' census answers still held: one that came after its
-/// census had printed without it would otherwise stand in for the next
-/// census's own, and its counts would be a census old (1723).
-fn forget_answers<O>(
-    census: &mut Option<crate::outbox::EngineCensus>,
-    groups: &mut [GroupEngine<O>],
-) {
-    *census = None;
-    for hosted in groups {
-        hosted.census = None;
+/// The census the daemon waits on (1732). Every census is asked under a
+/// number of its own and every engine echoes it in its answer, so an answer
+/// that came after its census printed without it cannot stand in for a
+/// later census's own. While one is owed, neither the periodic tick nor a
+/// SIGUSR1 asks another: either would drop the answers already in.
+#[derive(Debug, Default)]
+struct CensusAsk {
+    /// The number the last census was asked under; 0 before the first.
+    seq: u64,
+    /// The census asked and not yet printed.
+    owed: Option<Owed>,
+}
+
+/// A census asked and not yet printed.
+#[derive(Debug, Clone, Copy)]
+struct Owed {
+    seq: u64,
+    /// When it prints without the answers still missing.
+    due: tokio::time::Instant,
+    /// SIGUSR1's: the dump on stderr beside the line.
+    dump: bool,
+}
+
+impl CensusAsk {
+    /// The periodic tick: the number of a new census to ask under, or
+    /// `None` while one is owed.
+    fn periodic(&mut self, now: tokio::time::Instant) -> Option<u64> {
+        if self.owed.is_some() {
+            return None;
+        }
+        Some(self.ask(now, false))
+    }
+
+    /// SIGUSR1: the number of a new census to ask under, or `None` when one
+    /// is owed already, which then prints as the dump.
+    fn signal(&mut self, now: tokio::time::Instant) -> Option<u64> {
+        if let Some(owed) = &mut self.owed {
+            owed.dump = true;
+            return None;
+        }
+        Some(self.ask(now, true))
+    }
+
+    fn ask(&mut self, now: tokio::time::Instant, dump: bool) -> u64 {
+        self.seq = self.seq.wrapping_add(1);
+        self.owed = Some(Owed {
+            seq: self.seq,
+            due: now + super::census::ANSWER_WAIT,
+            dump,
+        });
+        self.seq
+    }
+
+    fn is_owed(&self) -> bool {
+        self.owed.is_some()
+    }
+
+    /// Keep `answer` in `slot` only when it answers the census owed.
+    fn keep(
+        &self,
+        slot: &mut Option<crate::outbox::EngineCensus>,
+        answer: crate::outbox::EngineCensus,
+    ) {
+        if self.owed.is_some_and(|owed| owed.seq == answer.seq) {
+            *slot = Some(answer);
+        }
+    }
+
+    /// Whether the census owed prints now, all `answered` or its wait
+    /// passed: `Some(dump)`, and it is owed no more.
+    fn ready(&mut self, answered: bool, now: tokio::time::Instant) -> Option<bool> {
+        let owed = self.owed?;
+        if answered || now >= owed.due {
+            self.owed = None;
+            return Some(owed.dump);
+        }
+        None
     }
 }
 
-/// Ask every engine for its census (order 1585); the answers come back as
-/// [`OutboxEvent::Census`] through the pumps. An engine that went away is
-/// said by its pump.
-fn ask_census(home: &Attached, groups: &[GroupEngine<Attached>]) {
-    let _ = home.outbox.submit(Command::Census);
+/// Ask every engine for its census under `seq` (order 1585); the answers
+/// come back as [`OutboxEvent::Census`] through the pumps. An engine that
+/// went away is said by its pump.
+fn ask_census(home: &Attached, groups: &[GroupEngine<Attached>], seq: u64) {
+    let _ = home.outbox.submit(Command::Census { seq });
     for hosted in groups {
-        let _ = hosted.engine.submit(Command::Census);
+        let _ = hosted.engine.submit(Command::Census { seq });
+    }
+}
+
+/// Fold the engines' answers into `census`, one each (order 1585).
+fn fold_answers<'a>(
+    census: &mut super::census::MailboxCensus,
+    answers: impl IntoIterator<Item = &'a crate::outbox::EngineCensus>,
+) {
+    for answer in answers {
+        census.engine(answer);
     }
 }
 
@@ -1586,13 +1662,12 @@ impl<O> Held<'_, O> {
             turns: self.turns,
             ..Default::default()
         };
-        for answer in self
-            .home
-            .iter()
-            .chain(self.groups.iter().filter_map(|g| g.census.as_ref()))
-        {
-            census.engine(answer);
-        }
+        fold_answers(
+            &mut census,
+            self.home
+                .iter()
+                .chain(self.groups.iter().filter_map(|g| g.census.as_ref())),
+        );
         census
     }
 }
@@ -2986,7 +3061,13 @@ mod tests {
             proven: Vec::new(),
             lines: Default::default(),
         };
-        pump_group(&mut store, &mut sender, &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert_eq!(
             commands[0],
@@ -3021,14 +3102,26 @@ mod tests {
             last: Some(MessageState::Delivered),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let proven = store.group_copy(&bob_copy).expect("row").expect("copy");
         assert_eq!(proven.state, crate::store::groups::COPY_PROVEN);
         let page = store.archive_since(0, usize::MAX).expect("archive");
         assert_eq!(page.entries.len(), 1, "no entry for the owner's devices");
         // The same message again: proven, nothing sent.
         engine.engine.events.push_back(arrived);
-        pump_group(&mut store, &mut sender, &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         assert_eq!(
             engine.engine.commands.take(),
             [Command::Prove {
@@ -3106,7 +3199,13 @@ mod tests {
             proven: Vec::new(),
             lines: Default::default(),
         };
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let _ = engine.engine.commands.take();
         let copies = store
             .group_copies(&hosted.group.address, &original.message_id)
@@ -3121,7 +3220,13 @@ mod tests {
             last: Some(MessageState::Failed),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert_eq!(
             commands[0],
@@ -3154,7 +3259,13 @@ mod tests {
             last: Some(MessageState::Failed),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert!(
             matches!(
@@ -3234,7 +3345,13 @@ mod tests {
             proven: Vec::new(),
             lines: Default::default(),
         };
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let _ = engine.engine.commands.take();
         let copies = store
             .group_copies(&hosted.group.address, &original.message_id)
@@ -3245,13 +3362,25 @@ mod tests {
             last: Some(MessageState::Failed),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         engine.engine.events.push_back(OutboxEvent::Left {
             message_id: bobs,
             last: Some(MessageState::Sent),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert!(
             matches!(
@@ -3269,7 +3398,13 @@ mod tests {
             name: None,
             path_response: true,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert!(commands.is_empty(), "a path response: {commands:?}");
 
@@ -3278,7 +3413,13 @@ mod tests {
             name: None,
             path_response: false,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert!(
             matches!(
@@ -3355,7 +3496,13 @@ mod tests {
             proven: Vec::new(),
             lines: Default::default(),
         };
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let _ = engine.engine.commands.take();
         let bobs = store
             .group_copy_for(&hosted.group.address, &original.message_id, &bob.1)
@@ -3367,7 +3514,13 @@ mod tests {
             last: Some(MessageState::Failed),
             failure: None,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let propagated = |commands: &[Command]| {
             matches!(
                 commands,
@@ -3383,7 +3536,13 @@ mod tests {
             message_id: bobs,
             destination: bob.1,
         });
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         assert_eq!(engine.outgoing.in_flight(&bobs), None, "on no leg");
         assert!(engine.engine.commands.take().is_empty());
         let acts = engine.outgoing.tick(unix_now());
@@ -3395,7 +3554,13 @@ mod tests {
             path_response: true,
         };
         engine.engine.events.push_back(path_response.clone());
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let commands = engine.engine.commands.take();
         assert!(propagated(&commands), "the key came: {commands:?}");
         engine.engine.events.push_back(OutboxEvent::Left {
@@ -3404,7 +3569,13 @@ mod tests {
             failure: None,
         });
         engine.engine.events.push_back(path_response);
-        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut sender,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         assert!(
             engine.engine.commands.take().is_empty(),
             "handed on, a path response sends nothing"
@@ -3496,7 +3667,13 @@ mod tests {
             census: None,
         };
         let mut first_sender = sender();
-        pump_group(&mut store, &mut first_sender, &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut first_sender,
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let before = sends(engine.engine.commands.take());
         assert_eq!(before.len(), 3, "Lew, Bob and Cara");
         // Cara's copy is proven before the daemon dies.
@@ -3510,7 +3687,13 @@ mod tests {
             last: Some(MessageState::Delivered),
             failure: None,
         });
-        pump_group(&mut store, &mut first_sender, &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut first_sender,
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         // Killed: the engine, its outbox and the store go.
         drop(engine);
         drop(store);
@@ -3587,7 +3770,13 @@ mod tests {
                 failure: None,
             });
         }
-        pump_group(&mut store, &mut sender(), &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender(),
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let states: Vec<i64> = store
             .group_copies(&hosted.group.address, &original.message_id)
             .expect("copies")
@@ -3690,7 +3879,13 @@ mod tests {
             ended: false,
             census: None,
         };
-        pump_group(&mut store, &mut sender(), &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender(),
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let before = sends(engine.engine.commands.take());
         assert_eq!(before.len(), 2, "Lew and Bob");
         let bobs = store
@@ -3762,7 +3957,13 @@ mod tests {
             last: Some(MessageState::Delivered),
             failure: None,
         });
-        pump_group(&mut store, &mut sender(), &mut engine, None);
+        pump_group(
+            &mut store,
+            &mut sender(),
+            &mut engine,
+            None,
+            &CensusAsk::default(),
+        );
         let row = store.group_copy(&bobs).expect("row").expect("copy");
         assert_eq!(row.state, crate::store::groups::COPY_PROVEN);
     }
@@ -3834,7 +4035,13 @@ mod tests {
             census: None,
         };
         let mut first = sender();
-        pump_group(&mut store, &mut first, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut first,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let copies = store
             .group_copies(&hosted.group.address, &original.message_id)
             .expect("copies");
@@ -3853,7 +4060,13 @@ mod tests {
                 last: Some(last),
                 failure: None,
             });
-            pump_group(&mut store, &mut first, &mut engine, Some(PN));
+            pump_group(
+                &mut store,
+                &mut first,
+                &mut engine,
+                Some(PN),
+                &CensusAsk::default(),
+            );
         }
         assert!(
             store
@@ -3905,7 +4118,13 @@ mod tests {
                 failure: None,
             });
         }
-        pump_group(&mut store, &mut again, &mut engine, Some(PN));
+        pump_group(
+            &mut store,
+            &mut again,
+            &mut engine,
+            Some(PN),
+            &CensusAsk::default(),
+        );
         let uploads: Vec<[u8; 32]> = engine
             .engine
             .commands
@@ -3927,5 +4146,182 @@ mod tests {
             })
             .collect();
         assert_eq!(uploads, [lews], "Lew's handed on, Bob's not again");
+    }
+
+    /// The census line of the answers a census holds, as `Held::census`
+    /// folds them (1732).
+    fn census_line(answers: &[Option<crate::outbox::EngineCensus>]) -> String {
+        let mut line = super::super::census::MailboxCensus::default();
+        fold_answers(&mut line, answers.iter().filter_map(Option::as_ref));
+        line.line()
+    }
+
+    fn answer(seq: u64, ticks: u64) -> crate::outbox::EngineCensus {
+        crate::outbox::EngineCensus {
+            seq,
+            ticks,
+            ..Default::default()
+        }
+    }
+
+    /// 1732: an engine's answer that comes after its census printed
+    /// without it carries that census's number, and the next census,
+    /// asked under a new one, does not take it as its own.
+    #[test]
+    fn a_late_answer_does_not_stand_in_for_the_next_census() {
+        let now = tokio::time::Instant::now();
+        let mut ask = CensusAsk::default();
+        let first = ask.periodic(now).expect("nothing owed, so it asks");
+        // The engine stayed silent for ANSWER_WAIT: the line printed
+        // without its answer.
+        assert_eq!(
+            ask.ready(false, now + super::super::census::ANSWER_WAIT),
+            Some(false)
+        );
+        let second = ask
+            .signal(now + Duration::from_secs(5))
+            .expect("asks again");
+        assert_ne!(first, second);
+        let mut home = None;
+        ask.keep(&mut home, answer(first, 40));
+        assert_eq!(home, None, "the first census's late answer is not kept");
+        let line = census_line(&[home]);
+        assert!(
+            line.ends_with(" answered=0 turns=0 engine_ticks=0"),
+            "{line}"
+        );
+    }
+
+    /// The twin: the answer that carries the number of the census owed is
+    /// the census's own.
+    #[test]
+    fn the_answer_to_the_census_owed_is_kept() {
+        let now = tokio::time::Instant::now();
+        let mut ask = CensusAsk::default();
+        let first = ask.periodic(now).expect("asks");
+        assert_eq!(
+            ask.ready(false, now + super::super::census::ANSWER_WAIT),
+            Some(false)
+        );
+        let second = ask
+            .signal(now + Duration::from_secs(5))
+            .expect("asks again");
+        let mut home = None;
+        ask.keep(&mut home, answer(second, 40));
+        assert_eq!(home, Some(answer(second, 40)));
+        assert_eq!(
+            ask.ready(home.is_some(), now + Duration::from_secs(5)),
+            Some(true)
+        );
+        let line = census_line(&[home]);
+        assert!(
+            line.ends_with(" answered=1 turns=0 engine_ticks=40"),
+            "{line}"
+        );
+        assert_ne!(first, second);
+    }
+
+    /// 1732: a SIGUSR1 census that the periodic tick overlaps prints with
+    /// the answers it received, as the dump it was asked as: the tick
+    /// neither forgets them nor asks again.
+    #[test]
+    fn a_periodic_tick_keeps_the_answers_of_a_signalled_census() {
+        let now = tokio::time::Instant::now();
+        let mut ask = CensusAsk::default();
+        let seq = ask.signal(now).expect("asks");
+        let mut home = None;
+        ask.keep(&mut home, answer(seq, 7));
+        assert_eq!(ask.periodic(now), None, "an owed census is not asked again");
+        let mut group = None;
+        ask.keep(&mut group, answer(seq, 5));
+        assert_eq!(ask.ready(false, now), None, "still waiting on its answers");
+        assert_eq!(ask.ready(true, now), Some(true), "printed as the dump");
+        let line = census_line(&[home, group]);
+        assert!(
+            line.ends_with(" answered=2 turns=0 engine_ticks=12"),
+            "{line}"
+        );
+        // Printed, nothing is owed: the next tick asks a census of its own.
+        let next = ask.periodic(now).expect("asks");
+        assert_ne!(next, seq);
+    }
+
+    /// The other overlap: a SIGUSR1 during an owed periodic census keeps
+    /// that census's answers and turns it into the dump.
+    #[test]
+    fn a_signal_during_a_periodic_census_keeps_its_answers() {
+        let now = tokio::time::Instant::now();
+        let mut ask = CensusAsk::default();
+        let seq = ask.periodic(now).expect("asks");
+        let mut home = None;
+        ask.keep(&mut home, answer(seq, 3));
+        assert_eq!(ask.signal(now), None, "an owed census is not asked again");
+        let mut group = None;
+        ask.keep(&mut group, answer(seq, 4));
+        assert_eq!(ask.ready(true, now), Some(true), "printed as the dump");
+        let line = census_line(&[home, group]);
+        assert!(
+            line.ends_with(" answered=2 turns=0 engine_ticks=7"),
+            "{line}"
+        );
+    }
+
+    /// 1732: a group's engine's answer goes through `pump_group` under the
+    /// same check: one of an earlier census stays out, the one owed is
+    /// kept.
+    #[test]
+    fn a_groups_census_answer_is_kept_only_for_the_census_owed() {
+        use crate::outbox::fake::FakeOutbox;
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna) = (person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into())],
+            100,
+        )
+        .expect("create");
+        let mut ask = CensusAsk::default();
+        let now = tokio::time::Instant::now();
+        let stale = ask.periodic(now).expect("asks");
+        assert_eq!(
+            ask.ready(false, now + super::super::census::ANSWER_WAIT),
+            Some(false)
+        );
+        let owed = ask.signal(now).expect("asks again");
+        let mut engine = GroupEngine {
+            hosted,
+            engine: FakeOutbox::new(vec![OutboxEvent::Census(answer(stale, 9))]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
+            ended: false,
+            census: None,
+        };
+        let mut sender = Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: false,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+            lines: Default::default(),
+        };
+        pump_group(&mut store, &mut sender, &mut engine, None, &ask);
+        assert_eq!(engine.census, None, "the earlier census's answer stays out");
+        engine
+            .engine
+            .events
+            .push_back(OutboxEvent::Census(answer(owed, 11)));
+        pump_group(&mut store, &mut sender, &mut engine, None, &ask);
+        assert_eq!(engine.census, Some(answer(owed, 11)));
     }
 }

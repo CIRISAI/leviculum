@@ -752,8 +752,8 @@ impl Engine {
                     }
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
-                Command::Census => {
-                    let census = self.census(ready.router.heap_bytes());
+                Command::Census { seq } => {
+                    let census = self.census(seq, ready.router.heap_bytes());
                     self.emit(OutboxEvent::Census(census));
                 }
                 Command::AnnouncePosition { position } => {
@@ -968,8 +968,8 @@ impl Engine {
                     });
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
-                Command::Census => {
-                    let census = self.census(0);
+                Command::Census { seq } => {
+                    let census = self.census(seq, 0);
                     self.emit(OutboxEvent::Census(census));
                 }
                 // A client receives nothing over the mesh, so it holds no proof.
@@ -2023,8 +2023,8 @@ impl Engine {
     }
 
     /// The engine's own tables beside `router_bytes`, its router's
-    /// (order 1585).
-    fn census(&self, router_bytes: usize) -> crate::outbox::EngineCensus {
+    /// (order 1585), as the answer to the census asked under `seq`.
+    fn census(&self, seq: u64, router_bytes: usize) -> crate::outbox::EngineCensus {
         use leviculum_core::heap_census::{btree_map_bytes, vec_deque_bytes};
         let engine_bytes = vec_deque_bytes(&self.events)
             + vec_deque_bytes(&self.commands)
@@ -2042,6 +2042,7 @@ impl Engine {
                 .sum::<usize>()
             + btree_map_bytes(&self.recipients);
         crate::outbox::EngineCensus {
+            seq,
             router_bytes,
             engine_bytes,
             tracked: self.tracked.len(),
@@ -3962,5 +3963,39 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(events[3], OutboxEvent::Fenced { token: 3 });
+    }
+
+    /// 1732: a home node's engine and a client's echo the number of the
+    /// census they answer, so the mailbox can tell the census an answer
+    /// belongs to.
+    #[test]
+    fn an_engine_answers_a_census_under_its_number() {
+        let census_seq = |events: Vec<OutboxEvent>| {
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    OutboxEvent::Census(answer) => Some(answer.seq),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no census answer"))
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        engine.submit(Command::Census { seq: 41 });
+        let _ = engine.on_tick(&mut core, now_ms);
+        assert_eq!(census_seq(drain(&mut engine)), 41);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, _address, mut engine, mut core) = client_setup(dir.path());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        engine.submit(Command::Census { seq: 42 });
+        let _ = engine.on_tick(&mut core, now_ms);
+        assert_eq!(census_seq(drain(&mut engine)), 42);
     }
 }

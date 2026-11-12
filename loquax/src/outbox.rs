@@ -130,8 +130,10 @@ pub enum Command {
     /// commands caused were handed out before it.
     Fence { token: u64 },
     /// Answered with [`OutboxEvent::Census`]: the engine's own tables and
-    /// its router's, for the mailbox's `MAILBOX_CENSUS` (order 1585).
-    Census,
+    /// its router's, for the mailbox's `MAILBOX_CENSUS` (order 1585). The
+    /// answer carries `seq` back, so the mailbox keeps only the answers to
+    /// the census it is waiting for (1732).
+    Census { seq: u64 },
     /// Announce our own position on `lev.position` (1302,
     /// [`crate::mesh_position`]), registering the destination of our
     /// identity on first use: `loquax announce`, the device walk's seed of
@@ -215,6 +217,8 @@ pub struct MailboxInput {
 /// are not followed, as in lnpnd's `PN_CENSUS mailbox=`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EngineCensus {
+    /// The `seq` of the [`Command::Census`] this answers (1732).
+    pub seq: u64,
     /// [`leviculum_lxmf::router::LxmfRouter::heap_bytes`]; 0 for a client,
     /// which has no router of its own.
     pub router_bytes: usize,
