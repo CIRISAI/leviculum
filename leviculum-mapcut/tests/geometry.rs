@@ -17,11 +17,19 @@ use leviculum_map::region::{Bounds, Region, TileId};
 use leviculum_mapcut::cut::{cut, cut_tile, CutOptions};
 use leviculum_mapcut::mvt;
 use leviculum_mapcut::pmtiles::Archive;
+use leviculum_mapcut::simplify::douglas_peucker;
 use leviculum_mapcut::Res;
 use leviculum_mapfill::fixture::{Fixture, Kind};
 use leviculum_mapfill::style::Class;
 
 const FIXTURE: &[u8] = include_bytes!("../fixtures/oltrarno.pmtiles");
+
+/// The ceiling of [`the_held_cut_keeps_a_measured_share_of_the_z14_road_vertices`].
+/// Measured 0.731 (2,358 of 3,227) on 2026-11-12; plain Douglas-Peucker
+/// keeps 2,031 (0.629), an anchor test that always says near 2,424
+/// (0.751), an edge strip that takes every vertex more. The ceiling lies
+/// between the held cut and the nearest of those.
+const MAX_Z14_SHARE: f64 = 0.74;
 
 struct InMemory;
 
@@ -137,6 +145,21 @@ fn simplified(z: u8) -> ZoomLayers {
     profile::layers(profile::CUT_1, z).expect("profile")
 }
 
+/// `src` simplified as the cut did before 1707: each line alone by
+/// plain Douglas-Peucker at the zoom's profile 1 tolerance, nothing held.
+fn plain_cut(src: &[Vec<P2>], z: u8) -> Vec<Vec<P2>> {
+    let tol = i64::from(simplified(z).tolerance);
+    src.iter()
+        .map(|l| {
+            let pts: Vec<[i32; 2]> = l.iter().map(|p| [p[0] as i32, p[1] as i32]).collect();
+            douglas_peucker(&pts, tol)
+                .into_iter()
+                .map(|p| [f64::from(p[0]), f64::from(p[1])])
+                .collect()
+        })
+        .collect()
+}
+
 /// The joined ends of `src` (an end within half a unit of another line)
 /// and what `cut` leaves between the end and the rest: `(end, gap)` per
 /// joined end whose line the cut still has.
@@ -189,21 +212,29 @@ fn a_joined_road_end_stays_within_one_unit_in_the_cut() {
             .collect();
         assert!(!tiles.is_empty(), "no z{z} tiles");
         let mut ends = 0usize;
+        let mut control_parted = 0usize;
         let mut parted: Vec<(P2, f64)> = Vec::new();
         for t in tiles {
             let raw = a.mvt(t).expect("mvt").expect("tile");
             let src = source_roads(&raw);
-            // Positive control: the same measure on the undecoded source
-            // parts nothing.
-            let control = joined_gaps(&src, &src);
-            let broken = control.iter().filter(|(_, g)| *g > 1.0).count();
-            assert_eq!(broken, 0, "control: the source parts its own ends at z{z}");
+            // Positive control (1727): the same measure on a plain
+            // Douglas-Peucker cut of the same lines, which holds no
+            // joined end, parts some.
+            control_parted += joined_gaps(&src, &plain_cut(&src, z))
+                .iter()
+                .filter(|(_, g)| *g > 1.0)
+                .count();
             let blob = cut_tile(&raw, simplified(z)).expect("cut").0.expect("blob");
             let gaps = joined_gaps(&src, &blob_roads(&blob));
             ends += gaps.len();
             parted.extend(gaps.into_iter().filter(|(_, g)| *g > 1.0));
         }
         assert!(ends >= 100, "only {ends} joined ends measured at z{z}");
+        assert!(
+            control_parted >= 1,
+            "control: a plain Douglas-Peucker cut parts no joined end at z{z}, \
+             so the measure cannot see a gap"
+        );
         parted.sort_by(|a, b| b.1.total_cmp(&a.1));
         assert!(
             parted.is_empty(),
@@ -296,10 +327,15 @@ fn a_buffer_end_lies_on_the_neighbour_tiles_copy() {
 
 /// The whole fixture cut as the product cuts it (profile 2, 1707).
 fn product_region() -> Vec<u8> {
+    region_of(profile::CUT_2)
+}
+
+/// The whole fixture cut, z14 to z15, under `profile`.
+fn region_of(profile: u8) -> Vec<u8> {
     let opts = CutOptions {
         bounds: bounds(),
         zooms: 14..=15,
-        profile: 2,
+        profile,
         attribution: "© OpenStreetMap contributors".to_owned(),
         notice: "test".to_owned(),
         threads: 2,
@@ -309,7 +345,7 @@ fn product_region() -> Vec<u8> {
         round: leviculum_mapcut::cut::ROUND,
     };
     let mut out = std::io::Cursor::new(Vec::new());
-    cut(&archive(), &opts, &mut out).expect("cut profile 2");
+    cut(&archive(), &opts, &mut out).expect("cut");
     out.into_inner()
 }
 
@@ -488,16 +524,12 @@ fn same_as(name: &str, rgb: &[u8], w: u32, h: u32) {
     }
 }
 
-/// Item 1 of 1707: the region's deepest zoom keeps the source's geometry.
-/// Every source vertex of a z15 road line lies within one unit of the cut
-/// line; under profile 1 the half-pixel tolerance left vertices 8 units
-/// off, which every view deeper than z15 enlarges.
-#[test]
-fn the_deepest_zoom_keeps_every_source_vertex() {
+/// The worst distance of a z15 source road vertex from the cut lines of
+/// `region` at z15, and how many vertices were measured.
+fn deepest_vertex_worst(region: &[u8]) -> (f64, usize) {
     let a = archive();
-    let region = product_region();
-    let r = Region::from_bytes(&region).expect("region");
-    let mut vertices = 0usize;
+    let r = Region::from_bytes(region).expect("region");
+    let (mut worst, mut vertices) = (0.0f64, 0usize);
     for n in 0..r.header().tiles {
         let e = r.entry(n).expect("entry");
         if e.id.z != 15 {
@@ -524,15 +556,75 @@ fn the_deepest_zoom_keeps_every_source_vertex() {
         for line in source_roads(&raw) {
             for p in line {
                 vertices += 1;
-                let d = near(p, &cut_lines, None);
-                assert!(
-                    d <= 1.0,
-                    "a z15 source vertex at {p:?} in {:?} lies {d:.2} units \
-                     off the cut line",
-                    e.id,
-                );
+                worst = worst.max(near(p, &cut_lines, None));
             }
         }
     }
+    (worst, vertices)
+}
+
+/// Item 1 of 1707: the region's deepest zoom keeps the source's geometry.
+/// Every source vertex of a z15 road line lies within one unit of the cut
+/// line; under profile 1 the half-pixel tolerance left vertices 8 units
+/// off, which every view deeper than z15 enlarges.
+#[test]
+fn the_deepest_zoom_keeps_every_source_vertex() {
+    let (worst, vertices) = deepest_vertex_worst(&product_region());
     assert!(vertices >= 1000, "only {vertices} source vertices measured");
+    assert!(
+        worst <= 1.0,
+        "a z15 source vertex lies {worst:.2} units off the cut line"
+    );
+}
+
+/// The positive control of [`the_deepest_zoom_keeps_every_source_vertex`]
+/// (1727, the audit of 1707): the same measure on a profile 1 cut of the
+/// same z14-15 box, whose deepest zoom is simplified, finds a vertex over
+/// one unit off, so the measure can see what profile 2 prevents.
+#[test]
+fn the_deepest_zoom_check_fails_on_a_profile_one_cut() {
+    let (worst, vertices) = deepest_vertex_worst(&region_of(profile::CUT_1));
+    assert!(vertices >= 1000, "only {vertices} source vertices measured");
+    assert!(
+        worst > 1.0,
+        "profile 1 left every z15 source vertex within one unit ({worst:.2}): \
+         the check cannot fail"
+    );
+}
+
+/// The held cut's price at z14 (1727, the audit of 1707): the share of
+/// the source's road vertices the simplified tile keeps. Holding the
+/// joined ends and the edge strip keeps more than plain Douglas-Peucker,
+/// and a held cut that kept every vertex would pass every gap test above
+/// while simplifying nothing; this test pins the share under a measured
+/// ceiling, so a hold that grows to everything (an anchor test that
+/// always says near, an edge strip that takes the whole tile) goes red.
+/// Measured on 2026-11-12: 2,358 of 3,227 (0.731), ceiling [`MAX_Z14_SHARE`].
+#[test]
+fn the_held_cut_keeps_a_measured_share_of_the_z14_road_vertices() {
+    let a = archive();
+    let (mut source, mut kept, mut plain) = (0usize, 0usize, 0usize);
+    for t in a.tiles().expect("tiles").into_iter().filter(|t| t.z == 14) {
+        let raw = a.mvt(t).expect("mvt").expect("tile");
+        let src = source_roads(&raw);
+        source += src.iter().map(Vec::len).sum::<usize>();
+        plain += plain_cut(&src, 14).iter().map(Vec::len).sum::<usize>();
+        let blob = cut_tile(&raw, simplified(14))
+            .expect("cut")
+            .0
+            .expect("blob");
+        kept += blob_roads(&blob).iter().map(Vec::len).sum::<usize>();
+    }
+    assert!(source >= 1000, "only {source} source road vertices at z14");
+    let share = kept as f64 / source as f64;
+    println!("z14 road vertices: kept {kept} of {source}, share {share:.4}, plain {plain}");
+    assert!(
+        kept >= plain,
+        "the held cut keeps fewer than plain: {kept} < {plain}"
+    );
+    assert!(
+        share <= MAX_Z14_SHARE,
+        "the held cut keeps {kept} of {source} z14 road vertices ({share:.3}), \
+         over the ceiling {MAX_Z14_SHARE}"
+    );
 }

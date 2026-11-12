@@ -1504,3 +1504,48 @@ fn a_zoom_the_source_lacks_moves_no_part_of_the_deepest_cut() {
     );
     assert_eq!(blobs(&asked_bytes), blobs(&have_bytes));
 }
+
+/// A footprint over the device's vertex capacity at the corner-exact
+/// tolerance 0 (1727, the audit of 1707: `footprints` resimplifies from
+/// tolerance 1 when the base is 0, a branch no fixture reached). A round
+/// building of 6,000 corners comes back simplified, kept, and within
+/// [`leviculum_map::buildings::MAX_VERTICES`].
+#[test]
+fn a_footprint_over_the_device_capacity_is_resimplified_and_kept() {
+    use leviculum_map::buildings::MAX_VERTICES;
+    use leviculum_mapcut::cut::{footprints, ZoomStats, BUILDING_TOLERANCE};
+
+    assert_eq!(BUILDING_TOLERANCE, 0);
+    let n = 6000;
+    let mut ring: Vec<[i32; 2]> = Vec::new();
+    for i in 0..n {
+        let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+        let p = [
+            2048 + (1500.0 * a.cos()).round() as i32,
+            2048 + (1500.0 * a.sin()).round() as i32,
+        ];
+        if ring.last() != Some(&p) {
+            ring.push(p);
+        }
+    }
+    assert!(ring.len() > MAX_VERTICES, "{} corners", ring.len());
+    let mut st = ZoomStats::default();
+    let started = std::time::Instant::now();
+    let out = footprints(&[vec![ring]], &mut st);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(out.len(), 1, "kept: {st:?}");
+    assert!(st.resimplified >= 1, "{st:?}");
+    assert_eq!(
+        (
+            st.buildings_out,
+            st.buildings_degenerate,
+            st.buildings_over_device
+        ),
+        (1, 0, 0)
+    );
+    let corners: usize = out[0].iter().map(Vec::len).sum();
+    assert!(
+        (16..=MAX_VERTICES).contains(&corners),
+        "{corners} corners after resimplifying"
+    );
+}

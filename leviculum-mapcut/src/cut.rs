@@ -418,7 +418,11 @@ struct LineEnds {
 /// anchor, and a segment's search stops at its edge, so a source line
 /// running 10^8 units past the tile costs the search no more than one
 /// crossing the window (the audit of 1707 found such a line held the cut
-/// for ever, its segments' boxes 10^12 cells).
+/// for ever, its segments' boxes 10^12 cells). No hold is lost: every
+/// vertex past the [`EDGE_EXACT`] strip is held exactly ([`exact_of`]),
+/// so an anchor beyond the strip rests on a segment kept as it is; the
+/// window's width is a bound on work, not on what is held (which is
+/// also why cargo-mutants finds its upper bound free to move).
 fn held_window(extent: i32) -> (i32, i32) {
     (-extent, 2 * extent - 1)
 }
