@@ -312,3 +312,83 @@ fn a_frame_without_its_checksum_is_refused() {
         Err(TileFault::NoChecksum)
     );
 }
+
+/// A frame cut short (`TileDecoder::decode`'s "source ran dry" refusal)
+/// and a frame holding fewer bytes than one tile are both refused, and the
+/// decoder that refused them decodes an intact frame afterwards exactly as
+/// a fresh decoder does: a bad tile does not poison the next.
+#[test]
+fn a_truncated_or_short_frame_is_refused_and_the_decoder_recovers() {
+    let heights = ramp_tile(3, 5);
+    let intact = frame(&heights);
+    let mut fresh = vec![0i16; TILE_CELLS];
+    TileDecoder::new()
+        .decode(&intact, &mut fresh)
+        .expect("a fresh decoder reads the intact frame");
+    assert_eq!(fresh, heights);
+
+    let mut decoder = TileDecoder::new();
+    let mut out = vec![0i16; TILE_CELLS];
+    // Truncated: the frame's blocks end before the frame does.
+    let truncated = &intact[..intact.len() / 2];
+    assert_eq!(
+        decoder.decode(truncated, &mut out),
+        Err(TileFault::Frame),
+        "truncated frame"
+    );
+    out.fill(7);
+    decoder
+        .decode(&intact, &mut out)
+        .expect("the same decoder reads the intact frame after a truncated one");
+    assert_eq!(out, fresh);
+
+    // Short: a complete, checksummed frame of 131,071 bytes.
+    let mut planes = vec![0u8; TILE_BYTES];
+    heights_to_planes(&heights, &mut planes);
+    let short = compress_to_vec(&planes[..TILE_BYTES - 1], CompressionLevel::Fastest);
+    assert_eq!(
+        decoder.decode(&short, &mut out),
+        Err(TileFault::Size),
+        "a frame one byte short of a tile"
+    );
+    out.fill(7);
+    decoder
+        .decode(&intact, &mut out)
+        .expect("the same decoder reads the intact frame after a short one");
+    assert_eq!(out, fresh);
+}
+
+/// The directory-side refusals the audit proved green, kept: a trailing
+/// byte after the directory piece, a trailing byte after the last block,
+/// a directory entry off the block grid, and pieces shorter than their
+/// own header.
+#[test]
+fn directory_side_refusals_hold() {
+    let (_, ranges) = split(CHEBBI).expect("split the fixture");
+    let directory = &CHEBBI[ranges[0].clone()];
+    let block = &CHEBBI[ranges[1].clone()];
+
+    let mut long = directory.to_vec();
+    long.push(0);
+    assert_eq!(Directory::parse(&long).err(), Some(ElevationError::Length));
+
+    let mut long = CHEBBI.to_vec();
+    long.push(0);
+    assert!(split(&long).is_err(), "a byte after the last block");
+
+    // The first entry's x past z11's 2048-wide grid.
+    let entry = directory.len() - 8;
+    let mut bad = directory.to_vec();
+    bad[entry..entry + 4].copy_from_slice(&4096u32.to_le_bytes());
+    assert_eq!(
+        Directory::parse(&bad).err(),
+        Some(ElevationError::Coordinates)
+    );
+
+    for n in 0..8 {
+        assert!(Directory::parse(&directory[..n]).is_err(), "directory {n}");
+        assert!(Block::parse(&block[..n]).is_err(), "block {n}");
+    }
+    assert!(Directory::parse(&directory[..39]).is_err());
+    assert!(Block::parse(&block[..23]).is_err());
+}
