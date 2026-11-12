@@ -451,18 +451,17 @@ fn kill_during_flush_leaves_a_complete_file() {
             let _ = self.0.wait();
         }
     }
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "kill_during_flush_leaves_a_complete_file",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_ENV, dir.path())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut child = KillOnDrop(child);
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "kill_during_flush_leaves_a_complete_file",
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env(CHILD_ENV, dir.path())
+    .stdout(std::process::Stdio::null());
+    // Supervised: the child dies with this test even if it is killed itself.
+    let mut child = KillOnDrop(leviculum_std::process::spawn_supervised(cmd).unwrap());
 
     // Kill at the first sign of a write: a temp file beside the store with
     // bytes in it, or the store itself no longer the file we wrote (a
