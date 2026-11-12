@@ -1095,6 +1095,8 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
         // run), and the fixed three-second settle that stood here then
         // let the wake's pull inherit the rest of the 800-message
         // fixture: it said 361 where the test expects 1 (2026-11-12).
+        // retry-guard: allow each pull is the next page of the sync, not a
+        // re-issue of a failed one; the loop ends when a pull brings zero
         loop {
             session.request(Request::Pull).expect("a settling pull");
             let zero = loop {
