@@ -3214,6 +3214,7 @@ dependencies = [
  "md-5",
  "rand_core 0.6.4",
  "regex",
+ "rmp",
  "rmp-serde",
  "rmpv",
  "serde",

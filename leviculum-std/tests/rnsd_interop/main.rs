@@ -69,6 +69,7 @@ mod identify_loss_proxy;
 mod ifac_interop_tests;
 mod interface_mode_tests;
 mod known_destinations_age_interop_tests;
+mod known_destinations_stream_interop_tests;
 mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;

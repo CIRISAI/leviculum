@@ -16,6 +16,12 @@ pub(crate) use leviculum_core::known_destinations::{
 
 pub(crate) const KNOWN_DESTINATIONS_FILE: &str = "known_destinations";
 
+/// How long a never-used destination stays in the file after its announce
+/// when this node no longer holds it: the reference's
+/// `UNUSED_DESTINATION_LINGER` (`reference/Reticulum/RNS/Transport.py:92`),
+/// which its cull reads at `Identity.py:349`.
+pub(crate) const UNUSED_DESTINATION_LINGER_SECS: f64 = 6.0 * 60.0;
+
 /// Decode a known_destinations msgpack blob into entries.
 ///
 /// Python format: msgpack map where keys are 16-byte binary (dest hashes)
@@ -23,135 +29,180 @@ pub(crate) const KNOWN_DESTINATIONS_FILE: &str = "known_destinations";
 pub(crate) fn decode_known_destinations(
     data: &[u8],
 ) -> Result<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>> {
-    let value: rmpv::Value = rmpv::decode::read_value(&mut &data[..])
-        .map_err(|e| Error::Serialization(format!("msgpack decode error: {e}")))?;
-
-    let map = value
-        .as_map()
-        .ok_or_else(|| Error::Serialization("known_destinations: expected map".into()))?;
-
     let mut entries = BTreeMap::new();
-    for (key, val) in map {
-        // Key: 16-byte binary
-        let key_bytes = match key.as_slice() {
-            Some(b) if b.len() == TRUNCATED_HASHBYTES => {
-                let mut arr = [0u8; TRUNCATED_HASHBYTES];
-                arr.copy_from_slice(b);
-                arr
-            }
-            _ => continue, // Skip invalid keys (Python does the same length check)
-        };
-
-        // Value: array of at least 4 elements. rnsd writes 5-element values
-        // `[ts, packet_hash, pubkey, app_data, use_state]` (Identity.py:107);
-        // a shorter one is a pre-#321 file of ours, which the reference's own
-        // loader fills up with a `0` use-state (Identity.py:252-254).
-        let arr = match val.as_array() {
-            Some(a) if a.len() >= 4 => a,
-            _ => continue,
-        };
-
-        // [0] timestamp: f64
-        let timestamp = match &arr[0] {
-            rmpv::Value::F64(f) => *f,
-            rmpv::Value::F32(f) => *f as f64,
-            rmpv::Value::Integer(i) => i.as_f64().unwrap_or(0.0),
-            _ => continue,
-        };
-
-        // [1] packet_hash: binary (typically 32 bytes)
-        let packet_hash = match arr[1].as_slice() {
-            Some(b) => b.to_vec(),
-            None => vec![0u8; PACKET_HASH_LEN],
-        };
-
-        // [2] public_key: binary (64 bytes)
-        let public_key = match arr[2].as_slice() {
-            Some(b) if b.len() == IDENTITY_KEY_SIZE => {
-                let mut arr = [0u8; IDENTITY_KEY_SIZE];
-                arr.copy_from_slice(b);
-                arr
-            }
-            _ => continue,
-        };
-
-        // [3] app_data: binary or nil
-        let app_data = match &arr[3] {
-            rmpv::Value::Nil => None,
-            rmpv::Value::Binary(b) => {
-                if b.is_empty() {
-                    None
-                } else {
-                    Some(b.clone())
-                }
-            }
-            _ => None,
-        };
-
-        // [4] use_state: the cull field (Codeberg #321). Absent in files we
-        // wrote before this, and in that case never-used, exactly as the
-        // reference reads them.
-        let use_state = match arr.get(4) {
-            Some(rmpv::Value::Integer(i)) => {
-                KnownDestUseState::from_seconds(i.as_f64().unwrap_or(0.0))
-            }
-            Some(rmpv::Value::F64(f)) => KnownDestUseState::from_seconds(*f),
-            Some(rmpv::Value::F32(f)) => KnownDestUseState::from_seconds(*f as f64),
-            _ => KnownDestUseState::NeverUsed,
-        };
-
-        entries.insert(
-            key_bytes,
-            KnownDestEntry {
-                timestamp,
-                packet_hash,
-                public_key,
-                app_data,
-                use_state,
-            },
-        );
-    }
-
+    for_each_known_destination(&mut &data[..], |hash, entry| {
+        entries.insert(hash, entry);
+        Ok(())
+    })?;
     Ok(entries)
+}
+
+/// Read a known_destinations file one entry at a time (order 1749).
+///
+/// Only the map header and one key and one value are ever decoded at once,
+/// so reading a file costs one entry of memory whatever its size: the
+/// whole-file `rmpv::Value` tree this replaced held 6.3 times the file at
+/// its peak, 59 MB for the mailbox's 9 MB file. Entries that do not have
+/// the shape below are skipped, as Python's loader skips a key of the wrong
+/// length (`Identity.py:249`). Returns how many map pairs it read.
+///
+/// `f` sees every valid entry in file order and may stop the read with an
+/// error of its own.
+pub(crate) fn for_each_known_destination<R: std::io::Read>(
+    reader: &mut R,
+    mut f: impl FnMut([u8; TRUNCATED_HASHBYTES], KnownDestEntry) -> Result<()>,
+) -> Result<u32> {
+    let pairs = rmp::decode::read_map_len(reader)
+        .map_err(|e| Error::Serialization(format!("known_destinations: expected map: {e}")))?;
+    for _ in 0..pairs {
+        let key = rmpv::decode::read_value(reader)
+            .map_err(|e| Error::Serialization(format!("msgpack decode error: {e}")))?;
+        let val = rmpv::decode::read_value(reader)
+            .map_err(|e| Error::Serialization(format!("msgpack decode error: {e}")))?;
+        if let Some((hash, entry)) = entry_from_values(&key, &val) {
+            f(hash, entry)?;
+        }
+    }
+    Ok(pairs)
+}
+
+/// One map pair of the file as an entry, or `None` for a pair the loader
+/// skips.
+fn entry_from_values(
+    key: &rmpv::Value,
+    val: &rmpv::Value,
+) -> Option<([u8; TRUNCATED_HASHBYTES], KnownDestEntry)> {
+    // Key: 16-byte binary (Python does the same length check)
+    let key_bytes: [u8; TRUNCATED_HASHBYTES] = key.as_slice()?.try_into().ok()?;
+
+    // Value: array of at least 4 elements. rnsd writes 5-element values
+    // `[ts, packet_hash, pubkey, app_data, use_state]` (Identity.py:107);
+    // a shorter one is a pre-#321 file of ours, which the reference's own
+    // loader fills up with a `0` use-state (Identity.py:252-254).
+    let arr = val.as_array().filter(|a| a.len() >= 4)?;
+
+    // [0] timestamp: f64
+    let timestamp = match &arr[0] {
+        rmpv::Value::F64(f) => *f,
+        rmpv::Value::F32(f) => *f as f64,
+        rmpv::Value::Integer(i) => i.as_f64().unwrap_or(0.0),
+        _ => return None,
+    };
+
+    // [1] packet_hash: binary (typically 32 bytes)
+    let packet_hash = match arr[1].as_slice() {
+        Some(b) => b.to_vec(),
+        None => vec![0u8; PACKET_HASH_LEN],
+    };
+
+    // [2] public_key: binary (64 bytes)
+    let public_key: [u8; IDENTITY_KEY_SIZE] = arr[2].as_slice()?.try_into().ok()?;
+
+    // [3] app_data: binary or nil
+    let app_data = match &arr[3] {
+        rmpv::Value::Binary(b) if !b.is_empty() => Some(b.clone()),
+        _ => None,
+    };
+
+    // [4] use_state: the cull field (Codeberg #321). Absent in files we
+    // wrote before this, and in that case never-used, exactly as the
+    // reference reads them.
+    let use_state = match arr.get(4) {
+        Some(rmpv::Value::Integer(i)) => KnownDestUseState::from_seconds(i.as_f64().unwrap_or(0.0)),
+        Some(rmpv::Value::F64(f)) => KnownDestUseState::from_seconds(*f),
+        Some(rmpv::Value::F32(f)) => KnownDestUseState::from_seconds(*f as f64),
+        _ => KnownDestUseState::NeverUsed,
+    };
+
+    Some((
+        key_bytes,
+        KnownDestEntry {
+            timestamp,
+            packet_hash,
+            public_key,
+            app_data,
+            use_state,
+        },
+    ))
 }
 
 /// Encode entries into Python-compatible msgpack format.
 pub(crate) fn encode_known_destinations(
     entries: &BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>,
 ) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    write_known_destinations_header(&mut buf, entries.len())?;
+    for (hash, entry) in entries {
+        write_known_destination(&mut buf, hash, entry)?;
+    }
+    Ok(buf)
+}
+
+/// The map header of a file of `len` entries. A msgpack map is its header
+/// followed by its pairs, so this and [`write_known_destination`] once per
+/// entry give the bytes `rmpv` writes for the whole map (order 1749).
+pub(crate) fn write_known_destinations_header<W: std::io::Write>(
+    writer: &mut W,
+    len: usize,
+) -> Result<()> {
+    let len = u32::try_from(len)
+        .map_err(|_| Error::Serialization("known_destinations: too many entries".into()))?;
+    rmp::encode::write_map_len(writer, len)
+        .map_err(|e| Error::Serialization(format!("msgpack encode error: {e}")))?;
+    Ok(())
+}
+
+/// One map pair: the 16-byte key and the five-element entry.
+pub(crate) fn write_known_destination<W: std::io::Write>(
+    writer: &mut W,
+    hash: &[u8; TRUNCATED_HASHBYTES],
+    entry: &KnownDestEntry,
+) -> Result<()> {
     use rmpv::Value;
 
-    // Build a msgpack map: Vec<(Value, Value)>
-    let pairs: Vec<(Value, Value)> = entries
-        .iter()
-        .map(|(hash, entry)| {
-            let key = Value::Binary(hash.to_vec());
-            let val = Value::Array(vec![
-                Value::F64(entry.timestamp),
-                Value::Binary(entry.packet_hash.clone()),
-                Value::Binary(entry.public_key.to_vec()),
-                match &entry.app_data {
-                    Some(data) => Value::Binary(data.clone()),
-                    None => Value::Nil,
-                },
-                // The fifth element, in the same msgpack types the reference
-                // writes: integers for the two sentinels, a float for a
-                // `time.time()` stamp (Identity.py:107, 272, 281).
-                match entry.use_state {
-                    KnownDestUseState::NeverUsed => Value::from(0i64),
-                    KnownDestUseState::Retained => Value::from(-1i64),
-                    KnownDestUseState::Used(secs) => Value::F64(secs),
-                },
-            ]);
-            (key, val)
-        })
-        .collect();
+    let key = Value::Binary(hash.to_vec());
+    let val = Value::Array(vec![
+        Value::F64(entry.timestamp),
+        Value::Binary(entry.packet_hash.clone()),
+        Value::Binary(entry.public_key.to_vec()),
+        match &entry.app_data {
+            Some(data) => Value::Binary(data.clone()),
+            None => Value::Nil,
+        },
+        // The fifth element, in the same msgpack types the reference
+        // writes: integers for the two sentinels, a float for a
+        // `time.time()` stamp (Identity.py:107, 272, 281).
+        match entry.use_state {
+            KnownDestUseState::NeverUsed => Value::from(0i64),
+            KnownDestUseState::Retained => Value::from(-1i64),
+            KnownDestUseState::Used(secs) => Value::F64(secs),
+        },
+    ]);
+    for value in [&key, &val] {
+        rmpv::encode::write_value(writer, value)
+            .map_err(|e| Error::Serialization(format!("msgpack encode error: {e}")))?;
+    }
+    Ok(())
+}
 
-    let map = Value::Map(pairs);
-    let mut buf = Vec::new();
-    rmpv::encode::write_value(&mut buf, &map)
-        .map_err(|e| Error::Serialization(format!("msgpack encode error: {e}")))?;
-    Ok(buf)
+/// Whether the file keeps an entry this node no longer holds in memory
+/// (order 1749): the three arms on which the reference's cull spares a
+/// pathless destination (`Identity.py:336-352`). A retained one always; a
+/// used one for `DESTINATION_TIMEOUT * 1.25` after its last use; a
+/// never-used one for `UNUSED_DESTINATION_LINGER` after its announce.
+///
+/// The reference reads a never-used entry's last use as `0`, so its second
+/// test (`unused_for > DESTINATION_TIMEOUT*1.25`) culls such an entry at
+/// once whatever its announce time; this keeps it for the linger, a superset
+/// of what the reference keeps.
+pub(crate) fn disk_only_entry_is_kept(entry: &KnownDestEntry, now: f64) -> bool {
+    match entry.use_state {
+        KnownDestUseState::Retained => true,
+        KnownDestUseState::Used(at) => {
+            now - at <= leviculum_core::constants::KNOWN_DEST_USED_LINGER_MS as f64 / 1000.0
+        }
+        KnownDestUseState::NeverUsed => now - entry.timestamp <= UNUSED_DESTINATION_LINGER_SECS,
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +590,99 @@ mod tests {
             "a short entry reads as never-used, as the reference's loader \
              fills it (Identity.py:252-254)"
         );
+    }
+
+    /// Order 1749: the streaming encoder writes the bytes `rmpv` wrote for
+    /// the whole map, so the file's wire format did not move; and the
+    /// streaming reader reads a map16 and a map32 header, the two a file of
+    /// Python's or ours carries above fifteen entries.
+    #[test]
+    fn streaming_codec_matches_the_whole_map_codec() {
+        use rmpv::Value;
+
+        for n in [0usize, 1, 15, 16, 70_000] {
+            let mut entries = BTreeMap::new();
+            for i in 0..n {
+                let mut hash = [0u8; TRUNCATED_HASHBYTES];
+                hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                entries.insert(
+                    hash,
+                    KnownDestEntry {
+                        timestamp: 1708300000.5 + i as f64,
+                        packet_hash: vec![i as u8; PACKET_HASH_LEN],
+                        public_key: [0x42; IDENTITY_KEY_SIZE],
+                        app_data: (i % 2 == 0).then(|| vec![0xA0, i as u8]),
+                        use_state: match i % 3 {
+                            0 => KnownDestUseState::NeverUsed,
+                            1 => KnownDestUseState::Retained,
+                            _ => KnownDestUseState::Used(1_756_000_000.0),
+                        },
+                    },
+                );
+            }
+            let whole = Value::Map(
+                entries
+                    .iter()
+                    .map(|(hash, e)| {
+                        (
+                            Value::Binary(hash.to_vec()),
+                            Value::Array(vec![
+                                Value::F64(e.timestamp),
+                                Value::Binary(e.packet_hash.clone()),
+                                Value::Binary(e.public_key.to_vec()),
+                                e.app_data.clone().map_or(Value::Nil, Value::Binary),
+                                match e.use_state {
+                                    KnownDestUseState::NeverUsed => Value::from(0i64),
+                                    KnownDestUseState::Retained => Value::from(-1i64),
+                                    KnownDestUseState::Used(t) => Value::F64(t),
+                                },
+                            ]),
+                        )
+                    })
+                    .collect(),
+            );
+            let mut expected = Vec::new();
+            rmpv::encode::write_value(&mut expected, &whole).unwrap();
+            let streamed = encode_known_destinations(&entries).unwrap();
+            assert!(streamed == expected, "{n} entries: bytes differ");
+            let decoded = decode_known_destinations(&streamed).unwrap();
+            assert_eq!(decoded.len(), n);
+        }
+    }
+
+    /// The reference cull's three arms, as the file applies them to an
+    /// entry this node no longer holds (order 1749).
+    #[test]
+    fn disk_only_retention_follows_the_reference_cull() {
+        const NOW: f64 = 1_800_000_000.0;
+        let at = |timestamp: f64, use_state| KnownDestEntry {
+            timestamp,
+            packet_hash: vec![0; PACKET_HASH_LEN],
+            public_key: [0; IDENTITY_KEY_SIZE],
+            app_data: None,
+            use_state,
+        };
+        let day = 86_400.0;
+        assert!(disk_only_entry_is_kept(
+            &at(0.0, KnownDestUseState::Retained),
+            NOW
+        ));
+        assert!(disk_only_entry_is_kept(
+            &at(0.0, KnownDestUseState::Used(NOW - 8.75 * day)),
+            NOW
+        ));
+        assert!(!disk_only_entry_is_kept(
+            &at(NOW, KnownDestUseState::Used(NOW - 8.75 * day - 1.0)),
+            NOW
+        ));
+        assert!(disk_only_entry_is_kept(
+            &at(NOW - 360.0, KnownDestUseState::NeverUsed),
+            NOW
+        ));
+        assert!(!disk_only_entry_is_kept(
+            &at(NOW - 361.0, KnownDestUseState::NeverUsed),
+            NOW
+        ));
     }
 
     #[test]
