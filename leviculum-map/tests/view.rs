@@ -379,6 +379,11 @@ fn a_name_carries_its_german_and_its_local_form() {
 /// A desert is named (1712): the Sahara is a `Desert` label in the table
 /// at z3 over North Africa, and the one placement rule sets it, with the
 /// countries and the places around it, in boxes the size of its letters.
+/// This pins behaviour that existed before order 1712: the 1683 table
+/// already carried the Sahara and the rule already placed it, and the
+/// test passes with 1712's non-test changes taken out (the 1733 audit's
+/// mutation check). It was added as coverage that was missing, not as a
+/// reproducer of a fault 1712 fixed.
 #[test]
 fn the_sahara_is_named_and_placed_at_z3() {
     use leviculum_map::labels::{place, LabelKind, Rect, Rule};
@@ -444,12 +449,14 @@ fn boxed(labels: &[leviculum_map::labels::ViewLabel]) -> Vec<leviculum_map::labe
 /// A country's name is served before a city's (1712, the decision
 /// `labels::LabelKind::priority` documents): over the world, where only
 /// the world table brings countries, a country is the larger fact, and a
-/// city that stands on its label point gives way. At z2 over Europe,
-/// in boxes of 7 pixels a letter, Paris stands on France's label: France
-/// is set and Paris is not. Italy is not asserted: its label point lies
-/// 49 pixels from France's at z3 and closer at z2, nearer than half
-/// their names' widths, so one of the two gives way at any order. The
-/// pure case: one box, a country and a city.
+/// city that stands on its box gives way. The pure case, through the one
+/// placement rule: one box, a country and a city, and behind the places a
+/// country before a sea. What a frontend sets over the world at z2 is not
+/// asserted here (1733): that depends on its own letter metrics, which
+/// this crate does not have, so the window's test
+/// (`loquax::gui::map`, `the_world_view_names_its_countries_and_seas_at_z2_and_z6`)
+/// asserts it with `loquax::mapnames`' typesetter: Deutschland and Italien
+/// set, Paris not. Italien is checked there.
 #[test]
 fn a_country_is_placed_before_a_city_that_covers_it() {
     use leviculum_map::labels::{place, Candidate, LabelKind, Rect, Rule};
@@ -483,21 +490,6 @@ fn a_country_is_placed_before_a_city_that_covers_it() {
         one(LabelKind::Country, "Frankreich", 0),
     ];
     assert_eq!(place(&sea, &[], rule), [1]);
-    // The world at z2 over Europe, through the same rule.
-    let view = Viewport::new(project(LatLon::from_degrees(50.0, 10.0)), 2, 480, 320);
-    let mut out = Vec::new();
-    outline::names(outline::NAMES_50M, &view, &mut out);
-    let candidates = boxed(&out);
-    let placed: Vec<&str> = place(&candidates, &[], rule)
-        .iter()
-        .map(|&i| candidates[i].text.as_str())
-        .collect();
-    for c in ["Deutschland", "Frankreich", "Spanien"] {
-        assert!(placed.contains(&c), "{c} not placed: {placed:?}");
-    }
-    // Paris is in the table at z2 and in the view, and gives way.
-    assert!(out.iter().any(|l| l.text == "Paris"), "{out:?}");
-    assert!(!placed.contains(&"Paris"), "{placed:?}");
 }
 
 /// A name table of `points` (kind, x, y at 18 bits, text), each with its

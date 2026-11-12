@@ -387,6 +387,38 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     let overview = drawn_on_board(&model);
     support::check("m9-map-overview.png", &overview);
     assert!(inks_of(&overview) > 8, "the world is drawn");
+    // The names the board sets on that picture (1733), from the renderer's
+    // own inputs: the painted view, the own pin's cell and the overview's
+    // two rows of words. Three countries, and why no more:
+    // - Deutschland's and Frankreich's boxes touch the own pin at Frankfurt
+    //   (the cell below), which is placed first and never covered.
+    // - Vereinigtes Königreich is 22 cells wide and its label point lies 9
+    //   cells from the left edge: the name does not fit the picture whole.
+    // - London gives way to Irland and Paris and Rom to Italien, which are
+    //   drawn: no name gives way to one that is not.
+    // - Spanien, Portugal, Griechenland, Madrid, Istanbul and the
+    //   Mittelmeer lie in the bottom row the words keep, Estland, Dänemark
+    //   and Stockholm in or beside the top one; Ukraine, Türkei and the
+    //   Schwarzes Meer do not fit the picture whole.
+    // - Belarus and Berlin give way to Polen, Rumänien, Österreich and the
+    //   Alpen to Italien (Österreich and Berlin to the pin as well).
+    let (view, pins) = map::view(&model).expect("map");
+    let painted = map::with_bottom(&view);
+    let mut taken = map::pin_cells(&pins);
+    assert!(taken.contains(&(16, 5, 1)), "the own pin: {taken:?}");
+    taken.extend(map::overview_rows());
+    let rows = (painted.size().1 / CELL_PX.1 as u32) as u16;
+    let (names, stats) = map::names(&board.region, &painted, rows, &taken, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(texts, ["Italien", "Irland", "Polen"], "{names:?}");
+    assert!(stats.found > texts.len(), "{stats:?}");
+    // The control: without the own pin, Deutschland is set, and Frankreich
+    // still gives way, now to Deutschland's box beside it.
+    let free = map::overview_rows().to_vec();
+    let (names, _) = map::names(&board.region, &painted, rows, &free, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert!(texts.contains(&"Deutschland"), "{texts:?}");
+    assert!(!texts.contains(&"Frankreich"), "{texts:?}");
 
     // Past the overview's zooms: no region at all.
     if let Some(state) = model.map.as_mut() {
