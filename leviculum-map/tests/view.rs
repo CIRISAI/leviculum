@@ -319,6 +319,29 @@ fn a_countrys_name_comes_at_its_label_zoom() {
     assert!(!z1.iter().any(|t| t == "Spanien"), "{z1:?}");
 }
 
+/// The M9's names table keeps every country at every zoom its overview
+/// shows (1733): the board draws the world overview from z0 to the
+/// outline's deepest zoom, and a cut of the table at z3 left a small
+/// country such as Malta (label zoom 4) or Luxemburg (5.7) unnamed at
+/// every zoom the board could show it at. At z6 on a 480 by 320 view over
+/// each, the M9's table names it as a country, as the full table does.
+#[test]
+fn the_m9_table_names_every_country_its_overview_shows() {
+    use leviculum_map::labels::LabelKind;
+    for (name, lat, lon) in [("Malta", 35.9, 14.4), ("Luxemburg", 49.7, 6.1)] {
+        let view = Viewport::new(project(LatLon::from_degrees(lat, lon)), 6, 480, 320);
+        for (table, which) in [(outline::NAMES_M9, "M9"), (outline::NAMES_50M, "full")] {
+            let mut out = Vec::new();
+            outline::names(table, &view, &mut out);
+            assert!(
+                out.iter()
+                    .any(|l| l.text == name && l.kind == LabelKind::Country),
+                "{which}: no {name} at z6: {out:?}"
+            );
+        }
+    }
+}
+
 /// The table carries each name twice where they differ (1712): the German
 /// one a frontend shows (`text`) and the local one, the name in the
 /// place's own country's language (`local`), not Natural Earth's English

@@ -25,6 +25,10 @@ name and, where it differs, the German one (the locale the tables are
 baked for, as the region fixtures are cut for German). The local name is
 the name in the language of the feature's country (`LANGUAGE`), else the
 source's `NAME`, which is English or international.
+`--names-max-zoom N OUT.lwn SOURCES...` bakes the same table without the
+names first shown deeper than zoom N, except the countries, which are
+kept at every zoom (the M9's table, 1733). A country's missing
+`MIN_LABEL` counts as a null one: its zoom is the deepest.
 
 A point is the Web Mercator world coordinate of leviculum-map's
 mercator.rs shifted right by 32 - BITS: with BITS = 18, 262,144 steps
@@ -378,7 +382,9 @@ def countries(props):
     # `MIN_ZOOM` is 0 for every country in the source; `MIN_LABEL` is the
     # zoom its name first belongs on (1712: Malta, Barbados and Cabo Verde
     # stood at z2 where Germany and France did not).
-    return COUNTRY, floor_zoom(props.get("MIN_LABEL", 0)), rank_of(props, "LABELRANK")
+    # A country without a `MIN_LABEL` is treated as one whose value is
+    # null: shown from the deepest zoom only (1733), never at z0.
+    return COUNTRY, floor_zoom(props.get("MIN_LABEL")), rank_of(props, "LABELRANK")
 
 
 def marine(props):
@@ -416,7 +422,8 @@ SOURCES = {
 
 def names(dst, sources, max_zoom=MAX_ZOOM):
     """Bake the name table "LWN1" from the source files in `sources`, of
-    the names a view at most `max_zoom` deep shows."""
+    the names a view at most `max_zoom` deep shows, and every country
+    whatever its zoom."""
     points = []
     for path in sources:
         stem = path.rsplit("/", 1)[-1].removesuffix(".geojson")
@@ -427,7 +434,11 @@ def names(dst, sources, max_zoom=MAX_ZOOM):
             if made is None:
                 continue
             kind, min_zoom, rank = made
-            if min_zoom > max_zoom:
+            # Countries are kept at every zoom (1733): the M9 draws its
+            # overview down to the outline's deepest zoom, and a country
+            # labelled past the cut (Malta at 4, Luxembourg at 5.7) would
+            # have no name at any zoom the board shows it at.
+            if min_zoom > max_zoom and kind != COUNTRY:
                 continue
             at = anchor_of(props)
             if at is None:

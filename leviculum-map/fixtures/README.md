@@ -207,11 +207,18 @@ Verde at z2), a place's its `MIN_ZOOM`, rounded.
 | table | kinds | points | alternates | strings | bytes | baked sha256 |
 |---|---|---|---|---|---|---|
 | `ne_50m_names.lwn` | city, town, village, country, sea, mountain range and peak, desert | 1,851 | 902 | 2,704 | 63,899 | `f69f4a81be95be54c382da1ccfa1101282dca26e3605af012d2e2284da420829` |
-| `ne_50m_names_m9.lwn` | the same, zooms 0 to 3 only | 206 | 138 | 340 | 7,421 | `36300f0b08c9944c82dc30f1688a2fd2455ee08a86e9afe3c22148c0951403e2` |
+| `ne_50m_names_m9.lwn` | the same, zooms 0 to 3 only, but every country at every zoom (1733) | 341 | 222 | 555 | 12,759 | `f5af03fe7f0776ad4a98d0b8051ebb0ee48b89d4f184556ddecaf21399665654` |
 
 The full table is the one the desktop, the terminal and the phone read
-where no region covers the view; the M9's is cut to its z0 to z3 overview
-and costs it about 7 KB of flash. The sources, all of the same release:
+where no region covers the view; the M9's is cut to z3 for every kind but
+the countries and costs it about 13 KB of flash. The countries are kept
+whole (1733): the board draws its overview at every zoom the world region
+offers, and a country labelled past z3 (Malta at 4, Luxemburg at 5.7)
+would otherwise have no name at any zoom it shows it at. A country whose
+`MIN_LABEL` is missing counts as one whose value is null, shown from the
+deepest zoom only; no country of this release lacks one or has a null
+one, so that rule moves no byte: the full table re-bakes to the sha256
+above, unchanged by 1733. The sources, all of the same release:
 
 | source | bytes | sha256 | what becomes names |
 |---|---|---|---|
@@ -271,8 +278,8 @@ Since 1683 the board draws the country borders and the disputed lines of
 `../data/ne_50m_admin_0_boundary_lines_land.lwl` and
 `../data/ne_50m_admin_0_boundary_lines_disputed_areas.lwl` over that
 region — 51,340 bytes — with the world view's own names over them from
-`../data/ne_50m_names_m9.lwn` (7,421 bytes, zooms 0 to 3, the layers
-above). The region's own 183 places stay; a name both tables carry is
+`../data/ne_50m_names_m9.lwn` (12,759 bytes, zooms 0 to 3 and every
+country, the layers above). The region's own 183 places stay; a name both tables carry is
 placed once, by its text.
 
 The same ODbL notice as above applies; the file carries it inside itself.

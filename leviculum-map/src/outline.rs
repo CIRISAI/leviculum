@@ -52,8 +52,8 @@
 //! [`ViewLabel`]'s `text` is the German name, its `local` the local one;
 //! every frontend shows `text`. [`names`] reads the ones a view shows; the
 //! frontends place them by the core's one rule. The M9 carries
-//! [`NAMES_M9`] (7,421 bytes), the same names down to its z0 to z3
-//! overview without the places it draws from that overview.
+//! [`NAMES_M9`] (12,759 bytes), the same names down to z3 and every
+//! country at every zoom, as its overview shows the countries deeper.
 
 use alloc::string::String;
 use alloc::vec;
