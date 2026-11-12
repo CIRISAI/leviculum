@@ -2262,9 +2262,11 @@ mod tests {
 
     /// The terminal shows one world at most (1131): a pane 300 pixels wide
     /// asked for z0, where the world is 256 wide, is drawn at z1 by the
-    /// model's view, and no column of its ground repeats. The view as
-    /// asked, the control, repeats every 256 columns. The names are off:
-    /// they are placed per view (1683), not per copy of the world.
+    /// model's view, and no column of its ground repeats. Since 1710 the
+    /// view as asked is a blended world view and holds the world once by
+    /// construction: Mercator's 256-column tiling, the old control,
+    /// cannot appear at any zoom. The names are off: they are placed per
+    /// view (1683), not per copy of the world.
     #[test]
     fn the_terminal_never_shows_the_world_twice() {
         let setup = MapSetup {
@@ -2278,7 +2280,7 @@ mod tests {
             selected: None,
         };
         let asked = Viewport::new(state.centre, 0, 300, 120);
-        assert_eq!(period(&halfblock_columns(asked)), Some(256), "the control");
+        assert_ne!(period(&halfblock_columns(asked)), Some(256), "the control");
         let view = loquax::ui::map::viewport(&state, area, &setup);
         assert_eq!(view.zoom(), 1);
         assert_eq!(period(&halfblock_columns(view)), None);
