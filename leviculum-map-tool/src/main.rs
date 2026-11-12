@@ -48,7 +48,7 @@ enum Cmd {
         min_zoom: u8,
         #[arg(long, default_value_t = 15)]
         max_zoom: u8,
-        #[arg(long, default_value_t = leviculum_map::profile::CUT_1)]
+        #[arg(long, default_value_t = leviculum_map::profile::CUT_2)]
         profile: u8,
         /// Worker threads; the output does not depend on it.
         #[arg(long)]

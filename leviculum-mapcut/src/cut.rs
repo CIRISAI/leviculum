@@ -30,7 +30,10 @@ use leviculum_mapfill::fixture::{write, Kind};
 use leviculum_mapfill::style::Class;
 
 use crate::mvt::{self, Name};
-use crate::simplify::{area2, douglas_peucker, quantise_path, simplify_ring, Pt};
+use crate::simplify::{
+    area2, douglas_peucker, douglas_peucker_held, near_segment_half, quantise_path, simplify_ring,
+    Pt,
+};
 use crate::{Res, TileSource};
 
 /// Blobs up to this size are stored once and shared by every tile that
@@ -48,12 +51,22 @@ pub const DEVICE_RINGS: usize = 1024;
 /// The coarsest tolerance a feature over [`DEVICE_POINTS`] is simplified
 /// at, in sub-pixels: four pixels.
 pub const MAX_TOLERANCE: i64 = 64;
-/// The tolerance building footprints are simplified at, in sub-pixels of
-/// a z15 tile: half a pixel, about 1.5 m in Frankfurt, as profile 1
-/// simplifies every other class at z15. A building is four to six
-/// vertices, so a coarser tolerance saves little (the 1191 study: 1.89 M
-/// vertices at source detail, 1.49 M at this one, over Frankfurt's box).
-pub const BUILDING_TOLERANCE: i64 = 8;
+/// The width of the strip at a tile's edge whose line geometry the cut
+/// keeps exactly (1707): the source carries every line 64 units into the
+/// neighbouring tile, the draw paints both copies, and two copies each
+/// simplified alone drift up to the tolerance apart, which shows as a
+/// doubled line. Holding the strip exact keeps both copies on the
+/// source line, so they agree to the quantisation, 0 at the full extent.
+pub const EDGE_EXACT: i32 = 64;
+/// The tolerance building footprints are simplified at: none (1707).
+/// Footprints are drawn from z16 only, always overzoomed from z15 data,
+/// and overzoom magnifies any tolerance past a pixel — the old half
+/// pixel put corners 8 units (1.1 m in Frankfurt) off, 4 px at a z18
+/// view. Measured on `frankfurt/roemer` (2026-11-12): section bytes
+/// 78,368 at tolerance 8, 99,863 at 2, 106,569 at 0 (+36 %), and at 0
+/// the 66 footprints the old tolerance collapsed return. A footprint
+/// over the device's capacity is still resimplified ([`footprints`]).
+pub const BUILDING_TOLERANCE: i64 = 0;
 
 /// What to cut.
 pub struct CutOptions {
@@ -347,7 +360,8 @@ pub fn footprints(parts: &[Vec<Vec<Pt>>], st: &mut ZoomStats) -> Vec<Vec<Vec<(i1
         let mut t = BUILDING_TOLERANCE;
         let mut rings = at(part, t);
         while !fits(&rings) && t < MAX_TOLERANCE {
-            t = (t * 2).min(MAX_TOLERANCE);
+            // From 1 when the base tolerance is 0 (1707), else doubling.
+            t = (t * 2).clamp(1, MAX_TOLERANCE);
             rings = at(part, t);
             st.resimplified += 1;
         }
@@ -382,6 +396,91 @@ pub fn footprints(parts: &[Vec<Vec<Pt>>], st: &mut ZoomStats) -> Vec<Vec<Vec<(i1
         out.push(rings);
     }
     out
+}
+
+/// The ends of every kept line of a tile, on a coarse grid (1707): the
+/// points the simplification must not pull another line away from. The
+/// vertex a side road ends on used to fall to Douglas-Peucker and the
+/// through road moved up to the tolerance away from the end; measured on
+/// `fixtures/oltrarno.pmtiles`, 25 of 182 joined road ends parted by
+/// over a unit, 7.8 units at the worst.
+struct LineEnds {
+    /// Cell (x >> 7, y >> 7) to the distinct line ends in it.
+    cells: HashMap<(i32, i32), Vec<Pt>>,
+}
+
+impl LineEnds {
+    fn gather(features: &[mvt::SourceFeature], layers: &ZoomLayers) -> Self {
+        let mut ends: Vec<Pt> = Vec::new();
+        for f in features {
+            if f.kind != Kind::Line || !layers.keeps(f.class) {
+                continue;
+            }
+            for part in &f.parts {
+                for line in part {
+                    if line.len() >= 2 {
+                        ends.push(line[0]);
+                        ends.push(line[line.len() - 1]);
+                    }
+                }
+            }
+        }
+        ends.sort_unstable();
+        ends.dedup();
+        let mut cells: HashMap<(i32, i32), Vec<Pt>> = HashMap::new();
+        for e in ends {
+            cells.entry((e[0] >> 7, e[1] >> 7)).or_default().push(e);
+        }
+        Self { cells }
+    }
+
+    /// The anchors of `line`: every end of another line that rests on a
+    /// segment of it in the source, within half a unit, by segment
+    /// index. The line's own two ends are left out: they are kept as
+    /// they are.
+    fn anchors_of(&self, line: &[Pt]) -> Vec<(usize, Pt)> {
+        let (first, last) = (line[0], line[line.len() - 1]);
+        let mut out = Vec::new();
+        for (i, w) in line.windows(2).enumerate() {
+            let (x0, x1) = (w[0][0].min(w[1][0]) - 1, w[0][0].max(w[1][0]) + 1);
+            let (y0, y1) = (w[0][1].min(w[1][1]) - 1, w[0][1].max(w[1][1]) + 1);
+            for cy in (y0 >> 7)..=(y1 >> 7) {
+                for cx in (x0 >> 7)..=(x1 >> 7) {
+                    for &e in self.cells.get(&(cx, cy)).map_or(&[][..], Vec::as_slice) {
+                        if e != first
+                            && e != last
+                            && (x0..=x1).contains(&e[0])
+                            && (y0..=y1).contains(&e[1])
+                            && near_segment_half(e, w[0], w[1])
+                        {
+                            out.push((i, e));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The vertices of `line` held exactly (1707): those in the
+/// [`EDGE_EXACT`] strip and their neighbours, so every segment that
+/// reaches the strip traces the source and the neighbour tile's copy
+/// agrees with it; an exactly collinear vertex may still drop, which
+/// both tiles decide the same way.
+fn exact_of(line: &[Pt], extent: i32) -> Vec<bool> {
+    let strip = |p: Pt| {
+        p[0] <= EDGE_EXACT
+            || p[0] >= extent - EDGE_EXACT
+            || p[1] <= EDGE_EXACT
+            || p[1] >= extent - EDGE_EXACT
+    };
+    let n = line.len();
+    (0..n)
+        .map(|i| {
+            strip(line[i]) || (i > 0 && strip(line[i - 1])) || (i + 1 < n && strip(line[i + 1]))
+        })
+        .collect()
 }
 
 /// [`cut_tile_named`], and with `with_buildings` the tile's building
@@ -451,6 +550,11 @@ pub fn cut_tile_full(
     // doubled shoelace area.
     let units_per_px = i64::from(extent / i32::from(TILE_VIEW)).max(1);
     let min_area2 = 2 * i64::from(layers.thin_px2) * units_per_px * units_per_px;
+    // 1707: connected ways stay connected. A simplified tile at the full
+    // extent holds every joined line end and keeps the tile-edge strip
+    // exact; the region zooms (coarser extent) stay as they were, their
+    // own grid dominates there (1707 item 3).
+    let held = (k == 0 && tol > 0).then(|| LineEnds::gather(&decoded.features, &layers));
     let mut feats: Vec<write::Feature> = Vec::new();
     let mut building_parts: Vec<Vec<Vec<Pt>>> = Vec::new();
     for f in decoded.features {
@@ -500,7 +604,16 @@ pub fn cut_tile_full(
                 }
                 Kind::Line => {
                     for line in part {
-                        let l = quantise_path(&douglas_peucker(line, tol), k, false);
+                        let simple = match &held {
+                            Some(ends) => douglas_peucker_held(
+                                line,
+                                tol,
+                                &exact_of(line, extent),
+                                &ends.anchors_of(line),
+                            ),
+                            None => douglas_peucker(line, tol),
+                        };
+                        let l = quantise_path(&simple, k, false);
                         // A line longer than the device holds is cut into
                         // pieces sharing their end points.
                         let mut at = 0;
@@ -796,12 +909,6 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
     if lo > hi || hi > leviculum_map::region::MAX_ZOOM {
         return Err(format!("zoom range {lo}..={hi}").into());
     }
-    let mut layers = BTreeMap::new();
-    for z in lo..=hi {
-        let l =
-            profile::layers(opts.profile, z).ok_or(format!("unknown profile {}", opts.profile))?;
-        layers.insert(z, l);
-    }
     let mut ids: Vec<TileId> = src
         .tiles_in(&opts.bounds, opts.zooms.clone())?
         .into_iter()
@@ -809,6 +916,16 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         .collect();
     ids.sort_unstable();
     ids.dedup();
+    // The deepest zoom the source actually has in the box: its tiles are
+    // the ones every deeper view overzooms, and under profile 2 they
+    // keep the source's geometry (1707).
+    let deepest = ids.last().map_or(hi, |t| t.z);
+    let mut layers = BTreeMap::new();
+    for z in lo..=hi {
+        let l = profile::layers_deepest(opts.profile, z, z == deepest)
+            .ok_or(format!("unknown profile {}", opts.profile))?;
+        layers.insert(z, l);
+    }
 
     let with_buildings = opts.buildings && opts.zooms.contains(&BUILDING_ZOOM);
     // The pois are cut at the deepest zoom, which holds every poi the

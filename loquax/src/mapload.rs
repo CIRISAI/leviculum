@@ -73,8 +73,12 @@ pub const BACKOFF_MAX_MS: u64 = 3_600_000;
 pub const MAX_RUNNING: usize = 2;
 /// The most queued boxes the view left that are kept, the newest.
 pub const MAX_AWAY: usize = 8;
-/// The layer profile the autoload cuts under, the map tool's default.
-const PROFILE: u8 = leviculum_map::profile::CUT_1;
+/// The layer profile the autoload cuts under, the map tool's default:
+/// profile 2 (1707), whose deepest zoom keeps the source's geometry. A
+/// region cut the old way no longer covers the screen
+/// ([`crate::ui::viewload`]), so an autoloaded one is asked for again
+/// and replaced in place under its own name.
+const PROFILE: u8 = leviculum_map::profile::CUT_2;
 /// What the region's notice names as the program that cut it.
 const BY: &str = "loquax";
 /// The least time between two progress bumps of a region being written

@@ -14,7 +14,10 @@ use leviculum_map::region::{
     BuildingTables, Header, Region, RegionError, HEADER_LEN, HEADER_LEN_3, VERSION_2, VERSION_3,
 };
 
-const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
+/// The cut of the Florence region before 1291, frozen: the version 2 sample
+/// the old-version reading tests hold to (1707; the live fixture is
+/// version 4 now).
+const OLD_V2: &[u8] = include_bytes!("../fixtures/old/firenze-v2.lmr");
 
 type Footprint = Vec<Vec<(i16, i16)>>;
 
@@ -268,7 +271,7 @@ fn the_cells_a_deeper_tile_reads_are_its_part_of_the_z15_tile() {
 
 #[test]
 fn a_version_2_region_still_reads_without_buildings() {
-    let r = Region::from_bytes(FLORENCE).expect("open");
+    let r = Region::from_bytes(OLD_V2).expect("open");
     assert_eq!(r.header().version_of(), VERSION_2);
     assert_eq!(r.header().buildings, None);
     assert_eq!(r.building_sections(), 0);
@@ -282,7 +285,7 @@ fn a_version_2_region_still_reads_without_buildings() {
 
 #[test]
 fn a_version_3_header_is_refused_by_the_version_2_reader() {
-    let r = Region::from_bytes(FLORENCE).expect("open");
+    let r = Region::from_bytes(OLD_V2).expect("open");
     let h = Header {
         buildings: Some(BuildingTables {
             index: 1000,

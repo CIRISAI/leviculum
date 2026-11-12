@@ -234,7 +234,7 @@ mod tests {
             assert!(Region::from_bytes(bytes).is_ok());
         }
         let said = said(Path::new("/dev/ttyUSB0"), &entries);
-        assert!(said.contains("firenze (197972 bytes)"), "{said}");
+        assert!(said.contains("firenze (210647 bytes)"), "{said}");
 
         let readme = fixture("leviculum-map/fixtures/README.md");
         let refused = area_of(&[readme]).expect_err("no region");

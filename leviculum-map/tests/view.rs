@@ -100,7 +100,7 @@ fn the_lines_ink_fills_nothing() {
     assert_eq!(inked + bg, 240 * 320, "only the ink and the background");
     assert_eq!(
         (st.features, st.stroke.pixels, inked),
-        (283, 31_840, 17_631)
+        (283, 32_017, 17_634)
     );
 }
 

@@ -3123,9 +3123,11 @@ dependencies = [
 name = "leviculum-mapcut"
 version = "0.10.0-dev.10"
 dependencies = [
+ "embedded-graphics",
  "flate2",
  "leviculum-map",
  "leviculum-mapfill",
+ "png",
  "prost",
  "serde_json",
  "tinymvt",

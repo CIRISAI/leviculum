@@ -181,6 +181,7 @@ skip  leviculum-map region                    # reads the committed region, but 
 skip  leviculum-map timezones                 # the zone lookup, TZif and POSIX readers and the board table; reads host tzdata, takes seconds; subject is the code
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
 skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
+skip  leviculum-mapcut geometry               # cuts the fixture and holds joins, buffers and goldens; subject is the code
 skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load
 skip  leviculum-mapcut partial                # cuts in memory and reads every round back; subject is the writer and the reader
 skip  leviculum-mapcut pmtiles                # writes a temp archive and reads it back; subject is the reader

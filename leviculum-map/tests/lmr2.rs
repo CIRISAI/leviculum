@@ -15,6 +15,10 @@ use leviculum_map::region::{
 use leviculum_mapfill::fixture::Kind;
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
+/// The same region as the cut wrote it before 1291: a frozen version 2
+/// file, the sample the old-version reading tests hold to (1707 re-cut
+/// the live fixtures, which are version 4 now).
+const OLD_V2: &[u8] = include_bytes!("../fixtures/old/firenze-v2.lmr");
 
 fn point(kind: LabelKind, string: u32, x: i16, y: i16) -> PointLabel {
     PointLabel {
@@ -143,7 +147,14 @@ fn the_florence_region_names_its_places_and_streets() {
     assert!(named
         .iter()
         .any(|(k, n, _)| *k == LabelKind::Town && *n == "Fiesole"));
-    assert_eq!(s.lines().count(), 0, "no street names below z14");
+    // Rivers are named from their own min_zoom (1685): the Arno and its
+    // brooks are line labels here; streets are not.
+    let lines: Vec<LabelKind> = s.lines().map(|(_, l)| l.kind).collect();
+    assert!(!lines.is_empty(), "the Arno is named at z11");
+    assert!(
+        lines.iter().all(|k| !k.is_road()),
+        "no street names below z14: {lines:?}"
+    );
 
     // z15: street names, each a line feature of its own tile.
     let z15 = TileId {
@@ -207,7 +218,7 @@ fn as_version_1(v2: &Region<&[u8]>) -> Vec<u8> {
 
 #[test]
 fn a_version_1_file_still_reads_without_names() {
-    let v2 = Region::from_bytes(FLORENCE).expect("open");
+    let v2 = Region::from_bytes(OLD_V2).expect("open");
     let bytes = as_version_1(&v2);
     assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
     let v1 = Region::from_bytes(&bytes).expect("a version 1 file opens");
@@ -226,14 +237,14 @@ fn a_version_1_file_still_reads_without_names() {
 
 #[test]
 fn a_version_this_reader_does_not_know_is_refused() {
-    let mut b = FLORENCE.to_vec();
+    let mut b = OLD_V2.to_vec();
     b[4] = 6;
     assert_eq!(Region::from_bytes(&b).err(), Some(RegionError::Version(6)));
     // A version 1 reader's check is the same field: it sees 2 and stops,
     // where reading on would take the label index for tiles. Here a v2
     // file claiming version 1, 3, 4 or 5 is caught by its header length.
     for v in [1, 3, 4, 5] {
-        let mut b = FLORENCE.to_vec();
+        let mut b = OLD_V2.to_vec();
         b[4] = v;
         assert_eq!(
             Region::from_bytes(&b).err(),
@@ -242,9 +253,9 @@ fn a_version_this_reader_does_not_know_is_refused() {
         );
     }
     // The label index must end where the tile index starts.
-    let r = Region::from_bytes(FLORENCE).expect("open");
+    let r = Region::from_bytes(OLD_V2).expect("open");
     let mut h = *r.header();
-    let mut b = FLORENCE.to_vec();
+    let mut b = OLD_V2.to_vec();
     if let Some(l) = h.labels.as_mut() {
         l.index -= ENTRY_LEN as u64;
     }

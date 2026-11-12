@@ -1004,7 +1004,7 @@ mod tests {
             let opts = CutOptions {
                 bounds,
                 zooms: 14..=15,
-                profile: leviculum_map::profile::CUT_1,
+                profile: leviculum_map::profile::CUT_2,
                 attribution: "© OpenStreetMap contributors".to_string(),
                 notice: "test".to_string(),
                 threads: 1,

@@ -57,7 +57,7 @@ fn main() -> Res<()> {
         zooms: 0..=15,
         floor: 15,
         cap: u64::MAX,
-        profile: leviculum_map::profile::CUT_1,
+        profile: leviculum_map::profile::CUT_2,
         locale: None,
         buildings: true,
         pois: true,
