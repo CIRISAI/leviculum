@@ -1441,3 +1441,66 @@ fn a_line_reaching_far_past_the_tile_is_cut_at_once() {
     assert!(has_blob);
     assert_eq!(st.features_out, 2, "the earth and the road: {st:?}");
 }
+
+/// One deepest zoom for the geometry, the names and the pois (1727, the
+/// audit of 1707): a cut asked for a zoom deeper than the source has in
+/// the box takes the deepest zoom the source has as the region's deepest
+/// for all three. The geometry did so already; the names and the pois
+/// took the zoom asked for, so a z14-16 cut of a z14-15 source carried no
+/// poi and dropped the names only the deepest zoom carries.
+#[test]
+fn a_zoom_the_source_lacks_moves_no_part_of_the_deepest_cut() {
+    struct InMemory(&'static [u8]);
+    impl leviculum_mapcut::pmtiles::RangeRead for InMemory {
+        fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+            let at = (offset as usize).min(self.0.len());
+            let end = at.saturating_add(len as usize).min(self.0.len());
+            Ok(self.0[at..end].to_vec())
+        }
+    }
+    let archive = leviculum_mapcut::pmtiles::Archive::from_source(InMemory(include_bytes!(
+        "../fixtures/oltrarno.pmtiles"
+    )))
+    .expect("open");
+    let cut_to = |hi: u8| {
+        let opts = CutOptions {
+            bounds: Bounds {
+                west: 112_615_000,
+                south: 437_405_000,
+                east: 112_825_000,
+                north: 437_545_000,
+            },
+            zooms: 14..=hi,
+            ..options(2)
+        };
+        let mut out = Cursor::new(Vec::new());
+        let stats = cut(&archive, &opts, &mut out).expect("cut");
+        (stats, out.into_inner())
+    };
+    let (have, have_bytes) = cut_to(15);
+    let (asked, asked_bytes) = cut_to(16);
+    assert!(
+        !asked.zooms.contains_key(&16) || asked.zooms[&16].tiles == 0,
+        "the source has no z16: {:?}",
+        asked.zooms.get(&16)
+    );
+    let (h, a) = (have.zooms[&15], asked.zooms[&15]);
+    assert!(h.pois > 10, "{h:?}");
+    assert_eq!(
+        (
+            a.pois,
+            a.poi_ways,
+            a.point_labels,
+            a.line_labels,
+            a.label_bytes
+        ),
+        (
+            h.pois,
+            h.poi_ways,
+            h.point_labels,
+            h.line_labels,
+            h.label_bytes
+        ),
+    );
+    assert_eq!(blobs(&asked_bytes), blobs(&have_bytes));
+}

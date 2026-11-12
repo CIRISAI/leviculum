@@ -946,9 +946,11 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         .collect();
     ids.sort_unstable();
     ids.dedup();
-    // The deepest zoom the source actually has in the box: its tiles are
-    // the ones every deeper view overzooms, and under profile 2 they
-    // keep the source's geometry (1707).
+    // The region's deepest zoom: the deepest the source actually has in
+    // the box. Its tiles are the ones every deeper view overzooms, so
+    // under profile 2 they keep the source's geometry (1707), and they
+    // carry the names only the deepest carries and the pois (1727: one
+    // definition for all three, a zoom asked for but absent moves none).
     let deepest = ids.last().map_or(hi, |t| t.z);
     let mut layers = BTreeMap::new();
     for z in lo..=hi {
@@ -1026,10 +1028,10 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
                                 let names = Names {
                                     locale,
                                     z: t.z,
-                                    deepest: t.z == hi,
+                                    deepest: t.z == deepest,
                                 };
                                 let b = with_buildings && t.z == BUILDING_ZOOM;
-                                let p = with_pois && t.z == hi;
+                                let p = with_pois && t.z == deepest;
                                 cut_tile_full(&raw, layers[&t.z], Some(names), b, p)
                             })
                             .collect::<Vec<_>>()
