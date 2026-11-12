@@ -651,7 +651,10 @@ fn the_map_carries_names_at_z13_and_z16() {
 /// 1531: places are set first, then the streets and rivers, then from
 /// z15 the parks: over Berlin's Mitte (the map core's second fixture,
 /// which holds the city's point) "Berlin" is the first name at every
-/// zoom, and a park comes only from z15.
+/// zoom its box is wide enough to hold it, and a park comes only from
+/// z15. Since 1727 a region's names stay on the ground it covers: the
+/// box is 0.01 degrees wide, 29 pixels at z12 and 58 at z13, under the
+/// 60 "Berlin" takes, so from z14.
 #[test]
 fn places_come_first_and_parks_from_z15() {
     use leviculum_map::labels::LabelKind;
@@ -662,7 +665,12 @@ fn places_come_first_and_parks_from_z15() {
     let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
     let region = Region::from_bytes(bytes).expect("region");
     let at = project(LatLon::from_e6(52_517_500, 13_395_000));
-    for zoom in 12..=16 {
+    for zoom in 12..=13 {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
+        assert!(names.is_empty() && stats.found > 0, "z{zoom}: {names:?}");
+    }
+    for zoom in 14..=16 {
         let view = Viewport::new(at, zoom, 320, 240);
         let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
         println!("z{zoom}: {stats:?} {names:?}");
@@ -685,12 +693,17 @@ fn places_come_first_and_parks_from_z15() {
             "{kinds:?}"
         );
     }
-    let view = Viewport::new(at, 15, 320, 240);
-    let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
-    assert!(
-        names.iter().any(|n| n.kind == LabelKind::Park),
-        "the control: z15 sets a park"
-    );
+    // The control: z15 sets a park and z14 none. No park name of the
+    // fixtures lies on its region's own ground, so the control reads the
+    // names as the overview does, which keeps the world's names anywhere
+    // on screen (1727); the park-zoom rule is the same either way.
+    let parks = |zoom| {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[], true);
+        names.iter().any(|n| n.kind == LabelKind::Park)
+    };
+    assert!(parks(15), "the control: z15 sets a park");
+    assert!(!parks(14), "the control: z14 sets none");
 }
 
 /// 1531: the map's chrome. No title row and no legend: the picture
@@ -792,4 +805,45 @@ fn the_time_zone_view_writes_the_boards_clocks() {
         "{names:?}"
     );
     assert!(names.iter().any(|n| n.text == "14:00"), "{names:?}");
+}
+
+/// 1727 (the audit of 1707): no name in the chip rows, the picture's top
+/// row (the receiver's words and the credit) and its bottom row (the
+/// hint, the card), whose words would cut it; and no name of the region
+/// on ground the region does not cover, where it stood over blank paper
+/// ("Viale Giacomo Matteotti" in the top row, west of the Florence cut).
+/// Over the fixture at every zoom it names.
+#[test]
+fn no_name_in_the_chip_rows_nor_off_the_region() {
+    let region = Map::new(FIXTURE).expect("region");
+    let mut checked = 0;
+    for zoom in 13..=18 {
+        let model = at_zoom(zoom);
+        let (view, pins) = map::view(&model).expect("map");
+        let tall = map::with_bottom(&view);
+        let taken = map::pin_cells(&pins);
+        let (names, _) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken, false);
+        let area = tall.area_of(&region.region.header().bounds);
+        let (cw, ch) = (i64::from(CELL_PX.0), i64::from(CELL_PX.1));
+        for name in &names {
+            checked += 1;
+            assert!(
+                name.row != 0 && name.row != map::BOTTOM,
+                "z{zoom}: {name:?} in a chip row"
+            );
+            let width = i64::try_from(name.text.chars().count()).unwrap_or(0);
+            let (x0, y0) = (i64::from(name.col) * cw, i64::from(name.row) * ch);
+            let (x1, y1) = (x0 + width * cw, y0 + ch);
+            let (ax, ay) = (i64::from(area.top_left.x), i64::from(area.top_left.y));
+            let (aw, ah) = (i64::from(area.size.width), i64::from(area.size.height));
+            assert!(
+                x0 >= ax && y0 >= ay && x1 <= ax + aw && y1 <= ay + ah,
+                "z{zoom}: {name:?} off the region drawn at {area:?}"
+            );
+        }
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} names checked (7 on 2026-11-12)"
+    );
 }

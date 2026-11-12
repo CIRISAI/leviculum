@@ -436,6 +436,13 @@ pub fn bottom<B: InputBuffer>(
     Some(card(&pin.label, pin.age.as_deref(), credit, cols))
 }
 
+/// The picture's rows its words take (1727): the top row, the receiver's
+/// words on the left and the credit on the right, and [`BOTTOM`], the
+/// hint or the chosen pin's card and the credit. No name is set there:
+/// the words would cut it, or a name would stand in the way the moment
+/// they come.
+pub const CHIP_ROWS: [u16; 2] = [0, BOTTOM];
+
 /// The names the label pass sets at most on one screen (1531): eight,
 /// the most the 32 x 12 cells hold apart without covering the streets
 /// they name.
@@ -477,8 +484,14 @@ impl NameStats {
 /// point's name centred on its anchor, a street's or a river's centred on
 /// the midpoint of one of its [`STRETCHES`] longest straight stretches,
 /// horizontal (the atlas cannot turn text). A name that does not fit the
-/// picture whole is no candidate.
-fn candidates(labels: &[ViewLabel], cols: i64, rows: i64) -> Vec<Candidate> {
+/// picture whole is no candidate, nor one in a chip row ([`CHIP_ROWS`])
+/// or one outside `within`, the cells the drawn region covers (1727).
+fn candidates(
+    labels: &[ViewLabel],
+    cols: i64,
+    rows: i64,
+    within: Option<LabelRect>,
+) -> Vec<Candidate> {
     let sub = leviculum_map::labels::SUBPIXEL;
     let (cw, ch) = (i64::from(CELL_PX.0) * sub, i64::from(CELL_PX.1) * sub);
     let mut out = Vec::new();
@@ -520,6 +533,13 @@ fn candidates(labels: &[ViewLabel], cols: i64, rows: i64) -> Vec<Candidate> {
             else {
                 continue;
             };
+            if CHIP_ROWS.iter().any(|&r| i32::from(r) == y0) {
+                continue;
+            }
+            let inside = |w: &LabelRect| x0 >= w.x0 && y0 >= w.y0 && x0 + n <= w.x1 && y0 < w.y1;
+            if within.as_ref().is_some_and(|w| !inside(w)) {
+                continue;
+            }
             out.push(Candidate {
                 kind: l.kind,
                 rank: l.rank,
@@ -564,7 +584,28 @@ pub fn names(
     if overview {
         outline::names(outline::NAMES_M9, view, &mut found);
     }
-    place_names(found, view, rows, taken)
+    // The region's names on the ground it covers (1727), the world's
+    // anywhere: the world region covers every view.
+    let within = (!overview).then(|| covered_cells(view, &region.header().bounds));
+    place_names(found, view, rows, taken, within)
+}
+
+/// The whole cells of the picture that `bounds` covers in `view`: the
+/// area the region is drawn into ([`Viewport::area_of`]), shrunk to whole
+/// cells, empty when it covers none.
+fn covered_cells(view: &Viewport, bounds: &leviculum_map::region::Bounds) -> LabelRect {
+    let area = view.area_of(bounds);
+    let (cw, ch) = (i32::from(CELL_PX.0), i32::from(CELL_PX.1));
+    let (x, y) = (area.top_left.x, area.top_left.y);
+    let w = i32::try_from(area.size.width).unwrap_or(i32::MAX);
+    let h = i32::try_from(area.size.height).unwrap_or(i32::MAX);
+    let ceil = |v: i32, c: i32| v.div_euclid(c) + i32::from(v.rem_euclid(c) != 0);
+    LabelRect {
+        x0: ceil(x, cw),
+        y0: ceil(y, ch),
+        x1: x.saturating_add(w).div_euclid(cw),
+        y1: y.saturating_add(h).div_euclid(ch),
+    }
 }
 
 /// The time zone view's names (1684): each zone's clock at `unix` by the
@@ -588,7 +629,7 @@ pub fn zone_names(
         l.text = alloc::format!("{:02}:{:02}", minute / 60, minute % 60);
         true
     });
-    place_names(found, view, rows, taken)
+    place_names(found, view, rows, taken, None)
 }
 
 /// Whether the time zone view is on, and the minute its clocks show
@@ -606,11 +647,12 @@ fn place_names(
     view: &Viewport,
     rows: u16,
     taken: &[(u16, u16, u16)],
+    within: Option<LabelRect>,
 ) -> (Vec<NameCell>, NameStats) {
     let zoom = view.zoom();
     let poi = |k: LabelKind| matches!(k, LabelKind::Park | LabelKind::Water);
     found.retain(|l| zoom >= POI_ZOOM || !poi(l.kind));
-    let all = candidates(&found, i64::from(PICTURE.width), i64::from(rows));
+    let all = candidates(&found, i64::from(PICTURE.width), i64::from(rows), within);
     let mut boxes: Vec<LabelRect> = taken
         .iter()
         .map(|&(col, row, width)| LabelRect {
