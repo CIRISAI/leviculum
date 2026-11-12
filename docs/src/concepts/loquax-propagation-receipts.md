@@ -139,7 +139,7 @@ fields[0xFC] = map {
   message (`loquax/src/ui.rs:3773-3777`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
-  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:602`).
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:607`).
 - **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:182`):
   bit 2 in the message's own mark (since 1462 however it came), and not a
   bare receipt of either kind; an answer a receipt rides on is a message
@@ -358,7 +358,7 @@ other key in either map (`lev_status::announced_version`).
   reached `collected`, `delivered` or a receipt is never asked again.
   Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
   asked only after its announce said `{"lev": {"status": _}}`
-  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1969`);
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1974`);
   the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
   → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
   `collected`, `delivered`, `expired` and `evicted` close an id, `held`

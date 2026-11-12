@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1831`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1836`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -488,12 +488,12 @@ which.
 
 `SIGUSR1` prints a `MAILBOX_CENSUS` line, one estimated heap figure per
 table the daemon holds (`COLUMNS` and `RUN_LOCALS`,
-`loquax/src/home/census.rs:67`), each embedded node's transport census
+`loquax/src/home/census.rs:73`), each embedded node's transport census
 under `--- node home ---` and `--- node group <address> ---`, and lnsd's
 process sections with one `gap:` line over all of it
 (`compose_multi_node_dump`, `leviculum-std/src/census.rs:59`). The same
 line goes into the log as a structured `MAILBOX_CENSUS` event every ten
-minutes (`CENSUS_PERIOD`, `loquax/src/home/census.rs:42`). A build with
+minutes (`CENSUS_PERIOD`, `loquax/src/home/census.rs:48`). A build with
 `--features heap-accounting` adds the measured live line and honours
 `LEVICULUM_HEAP_SAMPLE`, as lnpnd's does. A unit test reads the bindings
 of the daemon's loop out of its source and fails on a table without a
