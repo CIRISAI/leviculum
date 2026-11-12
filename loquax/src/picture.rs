@@ -862,8 +862,17 @@ mod tests {
                 labels.iter().any(|l| l.kind == LabelKind::Country),
                 "z{zoom}: no country"
             );
-            // At z6 the view is central Germany: no sea, and the Alps
-            // are south of it. The waters and the ranges show at z2.
+            // At z6 the view is central Germany: no sea, and the Alps'
+            // label lies south of it, so the waters and the ranges are
+            // asked of z2 and the places of z6, Frankfurt among them.
+            if zoom == 6 {
+                assert!(
+                    labels
+                        .iter()
+                        .any(|l| l.text == "Frankfurt" && l.kind.is_place()),
+                    "z6: no Frankfurt"
+                );
+            }
             if zoom == 2 {
                 assert!(
                     labels

@@ -41,14 +41,18 @@
 //! lines, stroked dashed. [`draw_world`] draws them all in that order;
 //! [`draw`] is the land and the borders alone.
 //!
-//! The names the world view sets come from [`NAMES_50M`] (59,859 bytes,
+//! The names the world view sets come from [`NAMES_50M`] (63,899 bytes,
 //! `LWN1`): populated places, country names, the seas, the mountain
 //! ranges, deserts and peaks, each a point with the kind, rank and
-//! shallowest zoom [`crate::labels::LabelKind`] gives it, and the German
-//! name where it differs (the locale the table is baked for, as the
-//! region fixtures are cut for German). [`names`] reads the ones a view
-//! shows; the frontends place them by the core's one rule. The M9 carries
-//! [`NAMES_M9`] (12,146 bytes), the same names down to its z0 to z3
+//! shallowest zoom [`crate::labels::LabelKind`] gives it (a country's from
+//! Natural Earth's `MIN_LABEL`, 1712), its local name (the name in its
+//! country's language where the bake maps that language, else Natural
+//! Earth's `NAME`) and the German one where it differs (the locale the
+//! table is baked for, as the region fixtures are cut for German). A
+//! [`ViewLabel`]'s `text` is the German name, its `local` the local one;
+//! every frontend shows `text`. [`names`] reads the ones a view shows; the
+//! frontends place them by the core's one rule. The M9 carries
+//! [`NAMES_M9`] (7,421 bytes), the same names down to its z0 to z3
 //! overview without the places it draws from that overview.
 
 use alloc::string::String;

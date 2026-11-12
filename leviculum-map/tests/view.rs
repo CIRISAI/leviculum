@@ -228,24 +228,36 @@ fn the_name_table_gives_the_world_views_names() {
     outline::names(NAMES_M9, &view, &mut out);
     assert_eq!(out.len(), full.len(), "the M9's cut thins only past z3");
     assert!(out.iter().all(|l| l.min_zoom <= 3), "{out:?}");
-    // A kind the reader does not know: one point of kind 200 in the
-    // middle of a z2 view, skipped rather than guessed.
-    let mut table = Vec::new();
-    table.extend_from_slice(b"LWN1");
-    table.push(18);
-    table.push(1); // one string
-    table.extend_from_slice(&0u32.to_le_bytes());
-    table.extend_from_slice(&1u32.to_le_bytes());
-    table.push(b'X');
-    table.push(1); // one point
-    table.extend_from_slice(&[200, 0, 0, 0]);
-    table.extend_from_slice(&[0x80, 0x80, 0x02]); // x = 32768, centre-ish
-    table.extend_from_slice(&[0x80, 0x80, 0x02]);
-    table.push(0);
-    table.push(0);
+    // A kind the reader does not know (1712): a point of kind 200 at the
+    // view's very centre, so it is the kind and not the view that drops
+    // it; the same point as a city is the positive control, exactly one
+    // label; and a city after the unknown point is still read, so the
+    // reader stepped over the unknown one's bytes and did not stop there.
+    let centre = project(LatLon::from_degrees(50.0, 10.0));
+    let (x18, y18) = (centre.x >> 14, centre.y >> 14);
+    let unknown = name_table(&[(200, x18, y18, "X")]);
     out.clear();
-    outline::names(&table, &view, &mut out);
-    assert!(out.is_empty(), "{out:?}");
+    outline::names(&unknown, &view, &mut out);
+    assert!(out.is_empty(), "the unknown kind was set: {out:?}");
+    let known = name_table(&[(1, x18, y18, "X")]);
+    out.clear();
+    outline::names(&known, &view, &mut out);
+    assert_eq!(out.len(), 1, "the control: {out:?}");
+    assert_eq!((out[0].kind, out[0].text.as_str()), (LabelKind::City, "X"));
+    let (w, h) = view.size();
+    assert_eq!(
+        out[0].anchor,
+        (i64::from(w) * sub / 2, i64::from(h) * sub / 2),
+        "the control lies at the view's centre"
+    );
+    let both = name_table(&[(200, x18, y18, "X"), (1, x18 + 4, y18, "Y")]);
+    out.clear();
+    outline::names(&both, &view, &mut out);
+    assert_eq!(
+        out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+        ["Y"],
+        "the point after the unknown one: {out:?}"
+    );
     // Cut short anywhere, no name invented and never a panic: the reader
     // keeps the points it has whole and stops at the rest.
     for cut in [0, 4, 5, 6, 7, 12, NAMES_50M.len() - 1] {
@@ -253,6 +265,240 @@ fn the_name_table_gives_the_world_views_names() {
         outline::names(&NAMES_50M[..cut], &view, &mut out);
         assert!(out.len() <= full.len(), "{cut}: {out:?}");
     }
+}
+
+/// The texts of the world's names a view at `zoom` over the whole world
+/// shows: the world at z2 is 1024 pixels square, one view takes it all.
+fn world_names(zoom: u8, kind: leviculum_map::labels::LabelKind) -> Vec<String> {
+    let side = 256u32 << zoom;
+    let view = Viewport::new(project(LatLon::from_degrees(0.0, 0.0)), zoom, side, side);
+    let mut out = Vec::new();
+    outline::names(outline::NAMES_50M, &view, &mut out);
+    out.into_iter()
+        .filter(|l| l.kind == kind)
+        .map(|l| l.text)
+        .collect()
+}
+
+/// A country's name comes at the zoom Natural Earth labels it at (1712):
+/// `MIN_LABEL`, floored, not `MIN_ZOOM`, which is 0 for every country. At
+/// z2 the world shows Deutschland, Frankreich, Italien and Spanien and
+/// not Malta, Barbados or Kap Verde, whose labels begin at z4; at z4 those
+/// three are there, the control that the table has them at all.
+#[test]
+fn a_countrys_name_comes_at_its_label_zoom() {
+    use leviculum_map::labels::LabelKind;
+    let z2 = world_names(2, LabelKind::Country);
+    for big in ["Deutschland", "Frankreich", "Italien", "Spanien"] {
+        assert!(z2.iter().any(|t| t == big), "{big} missing at z2: {z2:?}");
+    }
+    let small = ["Malta", "Barbados", "Kap Verde"];
+    for s in small {
+        assert!(!z2.iter().any(|t| t == s), "{s} at z2: {z2:?}");
+    }
+    let z4 = world_names(4, LabelKind::Country);
+    for s in small {
+        assert!(z4.iter().any(|t| t == s), "{s} missing at z4");
+    }
+    // Germany, France, Russia and the United States begin at 1.7, so z1.
+    let z1 = world_names(1, LabelKind::Country);
+    assert!(z1.iter().any(|t| t == "Deutschland"), "{z1:?}");
+    assert!(!z1.iter().any(|t| t == "Spanien"), "{z1:?}");
+}
+
+/// The table carries each name twice where they differ (1712): the German
+/// one a frontend shows (`text`) and the local one, the name in the
+/// place's own country's language (`local`), not Natural Earth's English
+/// `NAME`. Italy is Italien and Italia, Moscow Moskau and Москва, Milan
+/// Mailand and Milano; Germany and Munich are Deutschland and München
+/// both ways; a sea has no country and keeps the source's name.
+#[test]
+fn a_name_carries_its_german_and_its_local_form() {
+    use leviculum_map::labels::LabelKind;
+    let view = Viewport::new(project(LatLon::from_degrees(0.0, 0.0)), 5, 8192, 8192);
+    let mut out = Vec::new();
+    outline::names(outline::NAMES_50M, &view, &mut out);
+    let pair = |text: &str| -> (LabelKind, String) {
+        let l = out
+            .iter()
+            .find(|l| l.text == text)
+            .unwrap_or_else(|| panic!("{text} not in the table"));
+        (l.kind, l.local.clone())
+    };
+    assert_eq!(pair("Italien"), (LabelKind::Country, "Italia".into()));
+    assert_eq!(
+        pair("Deutschland"),
+        (LabelKind::Country, "Deutschland".into())
+    );
+    assert_eq!(pair("Frankreich"), (LabelKind::Country, "France".into()));
+    assert_eq!(pair("Moskau"), (LabelKind::City, "Москва".into()));
+    assert_eq!(pair("Mailand").1, "Milano");
+    assert_eq!(pair("München").1, "München");
+    assert_eq!(pair("Wien").1, "Wien");
+    // A place of a country whose language the table does not map keeps
+    // the source's name as its local one: Prague is Prag and Prague.
+    assert_eq!(pair("Prag").1, "Prague");
+}
+
+/// A desert is named (1712): the Sahara is a `Desert` label in the table
+/// at z3 over North Africa, and the one placement rule sets it, with the
+/// countries and the places around it, in boxes the size of its letters.
+#[test]
+fn the_sahara_is_named_and_placed_at_z3() {
+    use leviculum_map::labels::{place, LabelKind, Rect, Rule};
+    let view = Viewport::new(project(LatLon::from_degrees(22.0, 10.0)), 3, 480, 320);
+    let mut out = Vec::new();
+    outline::names(outline::NAMES_50M, &view, &mut out);
+    let sahara: Vec<_> = out.iter().filter(|l| l.kind == LabelKind::Desert).collect();
+    assert!(
+        sahara.iter().any(|l| l.text == "Sahara"),
+        "no Sahara at z3: {out:?}"
+    );
+    let candidates = boxed(&out);
+    let rule = Rule {
+        margin: 3,
+        block: (0, 0),
+        repeat: 300,
+    };
+    let placed = place(&candidates, &[], rule);
+    let set: Vec<&str> = placed
+        .iter()
+        .map(|&i| candidates[i].text.as_str())
+        .collect();
+    assert!(set.contains(&"Sahara"), "the Sahara not placed: {set:?}");
+    // The control: a pin's box over the Sahara's own takes its place.
+    let i = candidates
+        .iter()
+        .position(|c| c.text == "Sahara")
+        .expect("Sahara");
+    let pin: Vec<Rect> = candidates[i].boxes.clone();
+    let set: Vec<&str> = place(&candidates, &pin, rule)
+        .iter()
+        .map(|&i| candidates[i].text.as_str())
+        .collect();
+    assert!(!set.contains(&"Sahara"), "{set:?}");
+}
+
+/// `labels` as candidates in pixels: a box 7 pixels a letter wide and 14
+/// tall, centred on the anchor, as a window's font sets a name.
+fn boxed(labels: &[leviculum_map::labels::ViewLabel]) -> Vec<leviculum_map::labels::Candidate> {
+    use leviculum_map::labels::{Candidate, Rect};
+    let sub = i64::from(leviculum_mapfill::SUBPIXEL);
+    labels
+        .iter()
+        .map(|l| {
+            let (x, y) = ((l.anchor.0 / sub) as i32, (l.anchor.1 / sub) as i32);
+            let half = 7 * l.text.chars().count() as i32 / 2;
+            Candidate {
+                kind: l.kind,
+                rank: l.rank,
+                text: l.text.clone(),
+                at: l.at,
+                boxes: vec![Rect {
+                    x0: x - half,
+                    y0: y - 7,
+                    x1: x + half,
+                    y1: y + 7,
+                }],
+            }
+        })
+        .collect()
+}
+
+/// A country's name is served before a city's (1712, the decision
+/// `labels::LabelKind::priority` documents): over the world, where only
+/// the world table brings countries, a country is the larger fact, and a
+/// city that stands on its label point gives way. At z2 over Europe,
+/// in boxes of 7 pixels a letter, Paris stands on France's label: France
+/// is set and Paris is not. Italy is not asserted: its label point lies
+/// 49 pixels from France's at z3 and closer at z2, nearer than half
+/// their names' widths, so one of the two gives way at any order. The
+/// pure case: one box, a country and a city.
+#[test]
+fn a_country_is_placed_before_a_city_that_covers_it() {
+    use leviculum_map::labels::{place, Candidate, LabelKind, Rect, Rule};
+    let rule = Rule {
+        margin: 3,
+        block: (0, 0),
+        repeat: 300,
+    };
+    let b = Rect {
+        x0: 0,
+        y0: 0,
+        x1: 40,
+        y1: 14,
+    };
+    let one = |kind, text: &str, rank| Candidate {
+        kind,
+        rank,
+        text: text.into(),
+        at: (0, 0),
+        boxes: vec![b],
+    };
+    // The city first in the list and of the higher rank: neither decides.
+    let both = [
+        one(LabelKind::City, "Paris", 7),
+        one(LabelKind::Country, "Frankreich", 0),
+    ];
+    assert_eq!(place(&both, &[], rule), [1]);
+    // Behind the places a country still comes before a sea.
+    let sea = [
+        one(LabelKind::Sea, "Nordsee", 7),
+        one(LabelKind::Country, "Frankreich", 0),
+    ];
+    assert_eq!(place(&sea, &[], rule), [1]);
+    // The world at z2 over Europe, through the same rule.
+    let view = Viewport::new(project(LatLon::from_degrees(50.0, 10.0)), 2, 480, 320);
+    let mut out = Vec::new();
+    outline::names(outline::NAMES_50M, &view, &mut out);
+    let candidates = boxed(&out);
+    let placed: Vec<&str> = place(&candidates, &[], rule)
+        .iter()
+        .map(|&i| candidates[i].text.as_str())
+        .collect();
+    for c in ["Deutschland", "Frankreich", "Spanien"] {
+        assert!(placed.contains(&c), "{c} not placed: {placed:?}");
+    }
+    // Paris is in the table at z2 and in the view, and gives way.
+    assert!(out.iter().any(|l| l.text == "Paris"), "{out:?}");
+    assert!(!placed.contains(&"Paris"), "{placed:?}");
+}
+
+/// A name table of `points` (kind, x, y at 18 bits, text), each with its
+/// own string and no alternate, in the bake's format (`LWN1`).
+fn name_table(points: &[(u8, u32, u32, &str)]) -> Vec<u8> {
+    fn uv(out: &mut Vec<u8>, mut v: u32) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    let mut t = b"LWN1".to_vec();
+    t.push(18);
+    uv(&mut t, points.len() as u32);
+    let mut at = 0u32;
+    t.extend_from_slice(&at.to_le_bytes());
+    for p in points {
+        at += p.3.len() as u32;
+        t.extend_from_slice(&at.to_le_bytes());
+    }
+    for p in points {
+        t.extend_from_slice(p.3.as_bytes());
+    }
+    uv(&mut t, points.len() as u32);
+    for (i, &(kind, x, y, _)) in points.iter().enumerate() {
+        t.extend_from_slice(&[kind, 0, 0, 0]);
+        uv(&mut t, x);
+        uv(&mut t, y);
+        uv(&mut t, i as u32);
+        uv(&mut t, 0);
+    }
+    t
 }
 
 /// The 1:50m land boundary lines: every line decodes inside its box, the

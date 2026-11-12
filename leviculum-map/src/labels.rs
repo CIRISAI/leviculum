@@ -61,9 +61,9 @@ pub enum LabelKind {
     Suburb,
     Neighbourhood,
     /// A country's name, over the world outline where no region covers
-    /// the view (1683). Declared before [`LabelKind::Water`], so it is
-    /// neither a place, a line nor a road, and [`place`] serves it after
-    /// the place names and before the waters.
+    /// the view (1683). Declared after the places and before
+    /// [`LabelKind::Water`], so it is neither a place, a line nor a road;
+    /// [`place`] serves it first of all kinds ([`LabelKind::priority`]).
     Country,
     /// A sea, a gulf, a bay: [`LabelKind::Water`] names a lake's area,
     /// this the ocean's.
@@ -93,13 +93,13 @@ pub enum LabelKind {
 impl LabelKind {
     /// Every kind, in the order [`place`] serves them.
     pub const ALL: [LabelKind; 17] = [
+        LabelKind::Country,
         LabelKind::City,
         LabelKind::Town,
         LabelKind::District,
         LabelKind::Village,
         LabelKind::Suburb,
         LabelKind::Neighbourhood,
-        LabelKind::Country,
         LabelKind::Sea,
         LabelKind::Range,
         LabelKind::Desert,
@@ -157,10 +157,21 @@ impl LabelKind {
     }
 
     /// The order [`place`] serves labels in, lowest first: pins come before
-    /// all of them, then places by class, then waters and parks, then
-    /// rivers, then streets, major roads first.
+    /// all of them, then countries, then places by class, then waters and
+    /// parks, then rivers, then streets, major roads first.
+    ///
+    /// A country before a city (1712), at every zoom: only the world table
+    /// brings countries, so this orders the world view alone, z0 to the
+    /// outline's deepest, and there a country is the larger fact. A city
+    /// first would let a capital that stands on its country's label point
+    /// take it (at z2 Paris took France's and Moscow Russia's in 1683's
+    /// goldens) and leave the countries of the view unnamed. A region's
+    /// own names carry no country and keep their order.
     pub fn priority(self) -> u8 {
-        self as u8
+        match self {
+            LabelKind::Country => 0,
+            other => other as u8 + 1,
+        }
     }
 }
 

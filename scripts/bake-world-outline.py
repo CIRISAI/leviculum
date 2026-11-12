@@ -19,9 +19,12 @@ points a world view sets: populated places from the full file (it carries
 the German names), country labels, the names of marine areas, mountain
 ranges and deserts, and the elevation points (peaks), each from its own
 source file, told apart by its name. A name is a point at the world
-coordinate above, a kind, a rank, the shallowest zoom that shows it, the
-local name and, where it differs, the German one (the locale the tables
-are baked for, as the region fixtures are cut for German).
+coordinate above, a kind, a rank, the shallowest zoom that shows it (a
+country's `MIN_LABEL` floored, a place's `MIN_ZOOM` rounded), the local
+name and, where it differs, the German one (the locale the tables are
+baked for, as the region fixtures are cut for German). The local name is
+the name in the language of the feature's country (`LANGUAGE`), else the
+source's `NAME`, which is English or international.
 
 A point is the Web Mercator world coordinate of leviculum-map's
 mercator.rs shifted right by 32 - BITS: with BITS = 18, 262,144 steps
@@ -51,7 +54,8 @@ Output, "uv" an unsigned LEB128 varint:
     bytes   the strings, UTF-8, sorted by their bytes, each once
     uv point count
     per name: u8 kind  u8 rank  u8 min zoom  u8 0 (reserved)
-              uv x  uv y  uv string  uv alternate + 1 (0 for none)
+              uv x  uv y  uv local string
+              uv German string + 1 (0 where it is the local one)
 
 The kinds are those of leviculum-map's label format (`LabelKind`): 1 city,
 2 town, 4 village, 7 country, 8 sea, 9 mountain range or peak, 10 desert.
@@ -276,15 +280,65 @@ def anchor_of(props):
     return biggest[1], biggest[2]
 
 
+# The language a country's own names are written in, where Natural
+# Earth carries a name field of it and the country has one language its
+# places are named in (1712). Natural Earth has no endonym field: `NAME`
+# is the English or the international name, and `NAMEPAR`, the one field
+# that sometimes holds a local form, as often holds an old name (Bombay,
+# Madras) or an English one (Copenhagen beside København). So a place's
+# local name is its name in its country's language, and a feature of a
+# country not listed here, or with no name in that language, keeps `NAME`.
+LANGUAGE = {
+    "de": ("DEU", "AUT", "LIE"),
+    "fr": ("FRA", "MCO"),
+    "it": ("ITA", "SMR", "VAT"),
+    "es": (
+        "ESP", "MEX", "ARG", "CHL", "COL", "PER", "VEN", "ECU", "URY", "CUB",
+        "DOM", "GTM", "HND", "SLV", "NIC", "CRI", "PAN", "BOL", "PRY",
+    ),
+    "pt": ("PRT", "BRA", "AGO", "MOZ", "GNB", "STP"),
+    "nl": ("NLD", "SUR"),
+    "pl": ("POL",),
+    "sv": ("SWE",),
+    "hu": ("HUN",),
+    "el": ("GRC",),
+    "ru": ("RUS",),
+    "uk": ("UKR",),
+    "tr": ("TUR",),
+    "ja": ("JPN",),
+    "ko": ("KOR", "PRK"),
+    "zh": ("CHN",),
+    "zht": ("TWN",),
+    "vi": ("VNM",),
+    "id": ("IDN",),
+    "he": ("ISR",),
+    "fa": ("IRN",),
+    "ur": ("PAK",),
+    "bn": ("BGD",),
+    "ar": (
+        "SAU", "EGY", "IRQ", "SYR", "JOR", "LBY", "YEM", "OMN", "ARE", "QAT",
+        "KWT", "BHR", "SDN", "LBN", "DZA", "TUN", "MAR", "MRT",
+    ),
+}
+LANGUAGE_OF = {a3: lang for lang, a3s in LANGUAGE.items() for a3 in a3s}
+
+
 def name_of(props):
-    """(local name, German name) of a source feature, either may be None."""
-    for local, german in (
-        ("NAME", "NAME_DE"),
-        ("name", "name_de"),
-    ):
-        if props.get(local):
-            de = props.get(german)
-            return props[local], de if de and de != props[local] else None
+    """(local name, German name) of a source feature, either may be None:
+    the local name in the language of the feature's country ([`LANGUAGE`]),
+    else the source's `NAME`; the German one where it differs from it."""
+    for upper in (True, False):
+        key = "NAME" if upper else "name"
+        name = props.get(key)
+        if not name:
+            continue
+        lang = LANGUAGE_OF.get(props.get("ADM0_A3"))
+        local = name
+        if lang:
+            field = f"{key}_{lang.upper() if upper else lang}"
+            local = props.get(field) or name
+        de = props.get(f"{key}_DE" if upper else f"{key}_de") or name
+        return local, de if de != local else None
     return None, None
 
 
@@ -311,8 +365,20 @@ def places(props):
     return kind, clamp_zoom(props.get("MIN_ZOOM", 10)), rank_of(props, "LABELRANK")
 
 
+def floor_zoom(v):
+    """A source's fractional label zoom floored to the zoom that first
+    shows it, a `u8` the world view can show."""
+    try:
+        return max(0, min(MAX_ZOOM, math.floor(float(v))))
+    except (TypeError, ValueError):
+        return MAX_ZOOM
+
+
 def countries(props):
-    return COUNTRY, clamp_zoom(props.get("MIN_ZOOM", 0)), rank_of(props, "LABELRANK")
+    # `MIN_ZOOM` is 0 for every country in the source; `MIN_LABEL` is the
+    # zoom its name first belongs on (1712: Malta, Barbados and Cabo Verde
+    # stood at z2 where Germany and France did not).
+    return COUNTRY, floor_zoom(props.get("MIN_LABEL", 0)), rank_of(props, "LABELRANK")
 
 
 def marine(props):

@@ -481,6 +481,68 @@ fn the_world_overview_draws_europe_at_z2() {
 /// The picture's pixel rows.
 const HEIGHT_PICTURE: u32 = (PICTURE.height as u32) * (CELL_PX.1 as u32);
 
+/// 1712: the world at z6 on the board, as the board draws it (1683's
+/// z6 golden came from the map core's own world drawer, which the board
+/// never calls). Central Germany at z6 is past the overview's z3 and
+/// inside its overzoom, so the board draws the overview region, strokes
+/// the world outline's borders over it (`outline::bounds`) and sets the
+/// world table's names with the region's. Deutschland is served first,
+/// but its label lies under the overview's words ("Nur Übersicht"), so
+/// the picture names Frankfurt am Main alone. Pinned as a golden; the
+/// border ink is on the picture, and the control: the same view at z12,
+/// past the overzoom, draws no border.
+#[test]
+fn the_world_overview_draws_germany_at_z6() {
+    use embedded_graphics::pixelcolor::IntoStorage;
+    let at = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+        50_000_000, 10_000_000,
+    ));
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 6;
+        state.selected = None;
+        state.centre = at;
+    }
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Overview, "z6");
+    let frame = drawn_on_board(&model);
+    support::check("m9-map-world-z6.png", &frame);
+    let border = map::style().theme.palette().border.into_storage();
+    let top = u32::from(PICTURE.y) * u32::from(CELL_PX.1);
+    let inked = |frame: &Frame| {
+        (top..top + HEIGHT_PICTURE)
+            .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.pixel(x, y) == border)
+            .count()
+    };
+    assert!(inked(&frame) > 50, "{} border pixels", inked(&frame));
+    // The names as the board sets them: on the picture with its bottom
+    // row, the overview's two rows of words taken (`render.rs`). The view
+    // holds no pin.
+    let world = board.of(map::Drawn::Overview).expect("the overview");
+    let painted = map::with_bottom(&view);
+    let rows = (painted.size().1 / u32::from(CELL_PX.1)) as u16;
+    let words = map::overview_rows();
+    let (names, _) = map::names(world, &painted, rows, &words, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(texts, ["Frankfurt am Main"], "{names:?}");
+    // Without the words, Deutschland is served first: its label point
+    // lies on row 2, which the words over the picture take on the board.
+    let (free, _) = map::names(world, &painted, rows, &[], true);
+    assert_eq!(
+        free.first().map(|n| (n.text.as_str(), n.kind, n.row)),
+        Some(("Deutschland", leviculum_map::labels::LabelKind::Country, 2)),
+        "{free:?}"
+    );
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 12;
+    }
+    let (deep, _) = map::view(&model).expect("map");
+    assert_ne!(board.choose(&deep), map::Drawn::Overview, "z12");
+    assert_eq!(inked(&drawn_on_board(&model)), 0, "control: z12");
+}
+
 /// What `model` shows on the board's map: the fixture and the world.
 fn drawn_on_board(model: &UiModel<Field>) -> Frame {
     let mut frame = Frame::new();

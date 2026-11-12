@@ -444,20 +444,35 @@ pub(super) mod tests {
                 });
                 let names = frames.drawn_names();
                 println!("z{zoom} {who}: {names:?}");
-                // A country's name is the table's first, so it is placed
-                // wherever there is room; at z6 on the phone's letters a
-                // place name has grown larger than the country's box.
-                if !(zoom == 6 && scale > 1.0) {
-                    assert!(
-                        names.iter().any(|n| n.kind == LabelKind::Country),
-                        "z{zoom} {who}: no country's name in {names:?}"
-                    );
+                // A country's name is served before every other kind
+                // (1712), so the country under the view's centre is set at
+                // every zoom and on both letter sizes.
+                assert!(
+                    names.iter().any(|n| n.text == "Deutschland"),
+                    "z{zoom} {who}: no Deutschland in {names:?}"
+                );
+                // The countries come at their label zoom (1712): at z2 the
+                // small ones the 1683 golden showed are not there, and
+                // Paris, which stood on France's label then, gives way to
+                // the countries now. Frankreich and Spanien are not
+                // asserted: at z2 their label points lie 18 pixels under
+                // Deutschland's and Italien's, inside a name's 23-pixel box.
+                if zoom == 2 && scale == 1.0 {
+                    for small in ["Malta", "Barbados", "Kap Verde", "Paris"] {
+                        assert!(
+                            names.iter().all(|n| n.text != small),
+                            "z2 {who}: {small} in {names:?}"
+                        );
+                    }
+                    assert!(names.iter().any(|n| n.text == "Italien"), "{names:?}");
                 }
                 // Beyond the countries the table brings the waters and
-                // the ranges, but those are placed after the countries and
-                // the places, and at z6 over central Europe are crowded
-                // out (as they are on the phone's larger letters at z2):
-                // the control for them is the window at z2.
+                // the ranges, served after the countries and the places.
+                // Only the window at z2 has room for one: the phone's z2
+                // sets four countries and nothing else (its letters are
+                // 2.75 times the size in the same 480 by 320), and the z6
+                // view over central Germany holds no sea, and the Alps'
+                // label lies south of it.
                 if zoom == 2 && scale == 1.0 {
                     assert!(
                         names
