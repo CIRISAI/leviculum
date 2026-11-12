@@ -54,6 +54,7 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::f64::consts::{PI, TAU};
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -484,6 +485,22 @@ impl Place<'_> {
         }
     }
 
+    /// Whether the segment from `a` to `b` (table units) crosses the
+    /// curved view's cut, the meridian on the view's far side: a stroked
+    /// line breaks there rather than streaking across the world. Never
+    /// on a flat view, whose copies handle the wrap.
+    fn cut(&self, bits: u32, a: (u32, u32), b: (u32, u32)) -> bool {
+        match self {
+            Place::Flat(_) => false,
+            Place::Curved(blend) => {
+                let shift = 32 - bits;
+                let la = blend.lam_rel(a.0 << shift);
+                let lb = blend.lam_rel(b.0 << shift);
+                libm::fabs(la - lb) > PI
+            }
+        }
+    }
+
     /// Whether a table point is on the view's far side (the globe's far
     /// half): a stroked line breaks there instead of chording along the
     /// limb, and a name is not set there. A filled ring keeps its far
@@ -877,6 +894,8 @@ where
         return Ok(st);
     };
     let mut ring = Vec::new();
+    let mut copies: Vec<Vec<(i64, i64)>> = Vec::new();
+    let mut raw: Vec<(f64, u32)> = Vec::new();
     let mut clipped = Vec::new();
     let mut points: Vec<Point> = Vec::new();
     for k in place.copies(vw) {
@@ -890,26 +909,78 @@ where
                 continue;
             }
             st.rings += 1;
-            ring.clear();
-            ring.extend(r.points().map(|(x, y)| place.map(bits, x, y, k)));
-            clip(&ring, -GUARD, -GUARD, vw + GUARD, vh + GUARD, &mut clipped);
-            if clipped.len() < 3 {
-                continue;
-            }
-            st.vertices += clipped.len() as u32;
-            points.clear();
-            points.extend(clipped.iter().map(|&(x, y)| Point::new(x as i32, y as i32)));
-            match ink {
-                Ink::Colour => {
-                    if filler.ring(&points).is_err() {
-                        filler.clear();
-                        st.overflows += 1;
+            // The ring's screen points: one copy on a flat view. On a
+            // curved one its longitudes are unwrapped so it stays
+            // continuous across the projection's cut (the far side of
+            // the view), and where it overshoots one edge a second copy
+            // shifted a turn gives the other edge its part; Equal Earth
+            // flattens the overshoot onto its edge meridian.
+            copies.clear();
+            match place {
+                Place::Flat(_) => {
+                    ring.clear();
+                    ring.extend(r.points().map(|(x, y)| place.map(bits, x, y, k)));
+                    copies.push(core::mem::take(&mut ring));
+                }
+                Place::Curved(blend) => {
+                    let shift = 32 - bits;
+                    raw.clear();
+                    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                    let mut prev = f64::NAN;
+                    for (x, y) in r.points() {
+                        let mut lam = blend.lam_rel(x << shift);
+                        if prev.is_finite() {
+                            while lam - prev > PI {
+                                lam -= TAU;
+                            }
+                            while prev - lam > PI {
+                                lam += TAU;
+                            }
+                        }
+                        prev = lam;
+                        lo = lo.min(lam);
+                        hi = hi.max(lam);
+                        raw.push((lam, y << shift));
+                    }
+                    let mut turns = [Some(0.0), None, None];
+                    if lo < -PI {
+                        turns[1] = Some(TAU);
+                    }
+                    if hi > PI {
+                        turns[2] = Some(-TAU);
+                    }
+                    for turn in turns.into_iter().flatten() {
+                        copies.push(
+                            raw.iter()
+                                .map(|&(lam, wy)| blend.to_screen_sub_unwrapped(lam + turn, wy))
+                                .collect(),
+                        );
                     }
                 }
-                Ink::Lines(_) => {
-                    points.push(points[0]);
-                    st.stroke += stroke(filler, &points, SUBPIXEL, target, colour)?;
+            }
+            for ring in &copies {
+                clip(ring, -GUARD, -GUARD, vw + GUARD, vh + GUARD, &mut clipped);
+                if clipped.len() < 3 {
+                    continue;
                 }
+                st.vertices += clipped.len() as u32;
+                points.clear();
+                points.extend(clipped.iter().map(|&(x, y)| Point::new(x as i32, y as i32)));
+                match ink {
+                    Ink::Colour => {
+                        if filler.ring(&points).is_err() {
+                            filler.clear();
+                            st.overflows += 1;
+                        }
+                    }
+                    Ink::Lines(_) => {
+                        points.push(points[0]);
+                        st.stroke += stroke(filler, &points, SUBPIXEL, target, colour)?;
+                    }
+                }
+            }
+            if let Some(first) = copies.first_mut() {
+                ring = core::mem::take(first);
             }
         }
         if ink == Ink::Colour && !filler.is_empty() {
@@ -953,7 +1024,16 @@ where
             // Runs of segments the clip keeps joined, stroked one by one.
             points.clear();
             let mut prev: Option<(i64, i64)> = None;
+            let mut prev_raw: Option<(u32, u32)> = None;
             for (x, y) in l.points() {
+                if prev_raw
+                    .replace((x, y))
+                    .is_some_and(|a| place.cut(bits, a, (x, y)))
+                {
+                    // The segment crosses the curved view's cut: the run
+                    // breaks, and this point starts the next one.
+                    prev = None;
+                }
                 if place.hidden(bits, x, y) {
                     prev = None;
                     continue;

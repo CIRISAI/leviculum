@@ -246,14 +246,23 @@ impl Blend {
     /// `(λ, φ)` of a world point, λ relative to the central meridian in
     /// (-π, π].
     fn angles(&self, w: World) -> (f64, f64) {
-        let lon = f64::from(w.x) / WORLD_F * TAU - PI;
+        (self.lam_rel(w.x), gudermann(f64::from(w.y)))
+    }
+
+    /// The longitude of a world x relative to the central meridian,
+    /// wrapped to (-π, π]: the cut of the world projection is the far
+    /// side of the view. A ring that crosses it is unwrapped by the
+    /// drawer and placed through
+    /// [`to_screen_unwrapped`](Self::to_screen_unwrapped).
+    pub fn lam_rel(&self, x: u32) -> f64 {
+        let lon = f64::from(x) / WORLD_F * TAU - PI;
         let mut lam = lon - self.lon0;
         if lam <= -PI {
             lam += TAU;
         } else if lam > PI {
             lam -= TAU;
         }
-        (lam, gudermann(f64::from(w.y)))
+        lam
     }
 
     /// The world projection of `(λ, φ)` with the centre's frame applied:
@@ -317,12 +326,44 @@ impl Blend {
         ((1.0 - t) * bx + t * mx, (1.0 - t) * by + t * my)
     }
 
+    /// [`to_screen`](Self::to_screen) of a point given as its unwrapped
+    /// relative longitude and its world y: `lam` may run past ±π, where a
+    /// ring crossed the projection's cut and the drawer kept it
+    /// continuous. The Mercator term follows the unwrapped longitude, so
+    /// the blend has no wrap jump either; Equal Earth clamps the
+    /// overshoot to its edge meridian (the globe is periodic and needs
+    /// none). For `lam` in (-π, π] this is `to_screen` to float
+    /// precision.
+    pub fn to_screen_unwrapped(&self, lam: f64, wy: u32) -> (f64, f64) {
+        let (cx, cy) = (f64::from(self.width) / 2.0, f64::from(self.height) / 2.0);
+        let mx = cx + lam * (WORLD_F / TAU) / self.unit;
+        let my = cy + (f64::from(wy) - f64::from(self.centre.y)) / self.unit;
+        if self.t >= 1.0 {
+            return (mx, my);
+        }
+        let phi = gudermann(f64::from(wy));
+        let shaped = match self.shape {
+            Shape::EqualEarth => lam.clamp(-PI, PI),
+            Shape::Globe => lam,
+        };
+        let (ex, ey) = self.shape_forward(shaped, phi);
+        let bx = cx + self.sx * (ex - self.ex0);
+        let by = cy - self.sy * (ey - self.ey0);
+        let t = self.t;
+        ((1.0 - t) * bx + t * mx, (1.0 - t) * by + t * my)
+    }
+
     /// [`to_screen`](Self::to_screen) in sub-pixels (sixteenths), the
     /// drawers' unit, clamped to a range every later cast holds.
     pub fn to_screen_sub(&self, w: World) -> (i64, i64) {
         let (x, y) = self.to_screen(w);
-        let sub = |v: f64| libm::round((v * 16.0).clamp(-1e9, 1e9)) as i64;
-        (sub(x), sub(y))
+        (sub_px(x), sub_px(y))
+    }
+
+    /// [`to_screen_unwrapped`](Self::to_screen_unwrapped) in sub-pixels.
+    pub fn to_screen_sub_unwrapped(&self, lam: f64, wy: u32) -> (i64, i64) {
+        let (x, y) = self.to_screen_unwrapped(lam, wy);
+        (sub_px(x), sub_px(y))
     }
 
     /// The world point that lands on `(x, y)` pixels: Newton on the
@@ -368,6 +409,12 @@ impl Blend {
         }
         None
     }
+}
+
+/// Pixels to sub-pixels (sixteenths), clamped to a range every later
+/// cast holds.
+fn sub_px(v: f64) -> i64 {
+    libm::round((v * 16.0).clamp(-1e9, 1e9)) as i64
 }
 
 /// The latitude of a continuous Mercator world y, radians.
