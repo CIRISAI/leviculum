@@ -478,7 +478,12 @@ fn the_blended_world_views_draw_their_goldens() {
             let mut rgb = Vec::with_capacity(fb.len() * 3);
             let frame = Frame::new(&mut fb, w, h).expect("frame");
             frame.rgb888_into(&mut rgb);
-            same_as(&format!("world-blend-{sname}-480x320-{zname}.png"), &rgb, w, h);
+            same_as(
+                &format!("world-blend-{sname}-480x320-{zname}.png"),
+                &rgb,
+                w,
+                h,
+            );
         }
     }
 }
