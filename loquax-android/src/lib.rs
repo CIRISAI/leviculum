@@ -27,6 +27,7 @@ pub mod bitmap;
 pub mod browser;
 pub mod explore;
 pub mod friends;
+pub mod heights;
 pub mod links;
 pub mod mailbox;
 pub mod map;
