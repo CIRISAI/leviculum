@@ -11,6 +11,7 @@ use leviculum_map::draw::{draw_in, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Bounds, Region};
 use leviculum_map::viewport::Viewport;
+use leviculum_map_tool::heights::{cut_heights, DemSource, DirSource, HeightOptions, HttpSource};
 use leviculum_mapcut::cut::{cut, CutOptions, ZoomStats};
 use leviculum_mapcut::http::HttpRange;
 use leviculum_mapcut::pmtiles::{Archive, RangeRead};
@@ -81,6 +82,32 @@ enum Cmd {
         #[arg(long, default_value_t = 15)]
         max_zoom: u8,
     },
+    /// Cut a height pack from Copernicus GLO-30 (1740): z12 tiles of whole
+    /// metres in z9 blocks, the directory piece first.
+    Heights {
+        #[arg(short, long)]
+        output: PathBuf,
+        /// west,south,east,north in degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        bbox: String,
+        /// A directory of GLO-30 cells or an `http(s)://` base laid out as
+        /// the public bucket is.
+        #[arg(long, default_value = leviculum_map_tool::heights::GLO30_HTTP)]
+        source: String,
+        #[arg(long, default_value_t = leviculum_map::elevation::TILE_ZOOM)]
+        tile_zoom: u8,
+        #[arg(long, default_value_t = leviculum_map::elevation::BLOCK_ZOOM)]
+        block_zoom: u8,
+        /// zstd level of the tile frames.
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+        /// Worker threads; the output does not depend on it.
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// Check a height pack whole and time its decode: every stored tile,
+    /// and every derived tile from the block zoom down.
+    HeightsInfo { pack: PathBuf },
     /// Print a region's header and per-zoom sizes, after checking it whole.
     Info { region: PathBuf },
     /// Print the names a region holds at one zoom, a line each.
@@ -121,6 +148,83 @@ fn parse_bbox(s: &str) -> Res<Bounds> {
         east: e7(e),
         north: e7(n),
     })
+}
+
+fn cmd_heights(output: &Path, bbox: &str, source: &str, mut options: HeightOptions) -> Res<()> {
+    let b = parse_bbox(bbox)?;
+    let deg = |v: i32| f64::from(v) / 1e7;
+    options.bbox = [deg(b.west), deg(b.south), deg(b.east), deg(b.north)];
+    let source: Box<dyn DemSource> =
+        if source.starts_with("http://") || source.starts_with("https://") {
+            Box::new(HttpSource::new(source))
+        } else {
+            Box::new(DirSource(PathBuf::from(source)))
+        };
+    let t0 = Instant::now();
+    let mut out = BufWriter::new(File::create(output)?);
+    let s = cut_heights(source.as_ref(), &options, &mut out)?;
+    std::io::Write::flush(&mut out)?;
+    println!(
+        "MAPTOOL heights blocks={} tiles={} bytes={} area_km2={:.0} bytes_per_km2={:.1} cells={} absent={} peak_cells={} largest_fetch={} encode_s={:.1} wall_s={:.1}",
+        s.blocks,
+        s.tiles,
+        s.bytes,
+        s.area_km2,
+        s.bytes as f64 / s.area_km2.max(1.0),
+        s.cells,
+        s.absent,
+        s.peak_cells,
+        s.largest_fetch,
+        s.encode_seconds,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn cmd_heights_info(pack: &Path) -> Res<()> {
+    use leviculum_map::elevation::{split, Block, TileDecoder, TILE_CELLS};
+    let bytes = std::fs::read(pack)?;
+    let (directory, ranges) = split(&bytes).map_err(|e| format!("{e:?}"))?;
+    println!(
+        "MAPTOOL heights-info z{}..z{} blocks={} bytes={} directory_bytes={}",
+        directory.block_zoom(),
+        directory.tile_zoom(),
+        directory.len(),
+        bytes.len(),
+        ranges.first().map_or(0, |r| r.len())
+    );
+    let mut decoder = TileDecoder::new();
+    let mut out = vec![0i16; TILE_CELLS];
+    let mut scratch = vec![0i16; TILE_CELLS];
+    for zoom in (directory.block_zoom()..=directory.tile_zoom()).rev() {
+        let mut tiles = 0u32;
+        let (mut min, mut max) = (i16::MAX, i16::MIN);
+        let t0 = Instant::now();
+        for range in &ranges[1..] {
+            let block = Block::parse(&bytes[range.clone()]).map_err(|e| format!("{e:?}"))?;
+            let per = 1u32 << (zoom - block.block_zoom());
+            let (bx, by) = block.position();
+            for y in by * per..(by + 1) * per {
+                for x in bx * per..(bx + 1) * per {
+                    block
+                        .heights(&mut decoder, zoom, x, y, &mut out, &mut scratch)
+                        .map_err(|e| format!("z{zoom} {x}/{y}: {e:?}"))?;
+                    tiles += 1;
+                    for &h in &out {
+                        min = min.min(h);
+                        max = max.max(h);
+                    }
+                }
+            }
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        println!(
+            "MAPTOOL heights-info zoom={zoom} tiles={tiles} min_m={min} max_m={max} total_ms={:.1} per_tile_ms={:.3}",
+            secs * 1e3,
+            secs * 1e3 / f64::from(tiles.max(1))
+        );
+    }
+    Ok(())
 }
 
 fn print_zoom(label: &str, s: &ZoomStats) {
@@ -501,6 +605,28 @@ fn main() -> Res<()> {
             min_zoom,
             max_zoom,
         } => cmd_extract(&input, &output, &bbox, min_zoom..=max_zoom),
+        Cmd::Heights {
+            output,
+            bbox,
+            source,
+            tile_zoom,
+            block_zoom,
+            level,
+            threads,
+        } => cmd_heights(
+            &output,
+            &bbox,
+            &source,
+            HeightOptions {
+                bbox: [0.0; 4],
+                tile_zoom,
+                block_zoom,
+                level,
+                threads: threads
+                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
+            },
+        ),
+        Cmd::HeightsInfo { pack } => cmd_heights_info(&pack),
         Cmd::Info { region } => cmd_info(&region),
         Cmd::Labels { region, zoom } => cmd_labels(&region, zoom),
         Cmd::Render {

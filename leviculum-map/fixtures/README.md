@@ -106,6 +106,30 @@ databases of it and are under the same licence, not under the AGPL of the
 code around them; each carries this notice inside itself as well. Pictures
 drawn from them are produced works and carry the same attribution.
 
+`erg-chebbi.lmh`: a height pack (1740, `leviculum_map::elevation`) of
+the dunes of Erg Chebbi east of Merzouga, Morocco: one block at z11
+(z11/1001/837) of four z12 tiles, heights 692 to 904 m, 71,537 bytes,
+sha256 `02e9f40a3ca614c07ff0d03a870a2c075ca6ca47a84afa55eb23f67926e27b69`.
+Cut on 2026-11-12 with
+
+```sh
+leviculum-map-tool heights -o erg-chebbi.lmh \
+    --bbox=-3.975,31.12,-3.97,31.125 --block-zoom 11
+```
+
+from the public Copernicus GLO-30 bucket
+(`https://copernicus-dem-30m.s3.amazonaws.com`, cells
+`Copernicus_DSM_COG_10_N31_00_W005_00_DEM` and
+`Copernicus_DSM_COG_10_N31_00_W004_00_DEM`); a second cut gave the same
+bytes. Produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and ©
+Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the
+European Union and ESA; all rights reserved. The organisations in charge
+of the Copernicus programme by law or by delegation do not incur any
+liability for any use of the Copernicus WorldDEM-30. The same two texts
+are inside the file. The tiles are zstd frames written by the C library
+at level 19, so the test that reads them is also the interop check of the
+pure-Rust decoder.
+
 ## The world outline
 
 `../data/ne_50m_land.lwo` is not a test fixture but the table the crate

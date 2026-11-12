@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Cuts a map region file from a Protomaps PMTiles archive, for leviculum-map (#474)"
+description = "Cuts map region files from Protomaps PMTiles archives and height packs from Copernicus GLO-30, for leviculum-map (#474)"
 # A desktop tool run by hand; no package ships it and nothing links it.
 publish = false
 
@@ -26,3 +26,16 @@ clap = { version = "4", features = ["derive"] }
 # per feature and per ring on every worker; on musl's allocator a Hessen cut
 # spent twice as long in the kernel as in user space.
 mimalloc = { version = "0.1", default-features = false }
+# The height cut (1740): GLO-30 cells fetched over HTTP into memory
+# (rustls on ring, as leviculum-mapcut's http), their DEFLATE tiles
+# inflated, and the height tiles compressed as zstd frames at level 19,
+# the encoding the Morocco pilot measured. The reader in leviculum-map is
+# pure Rust (ruzstd); the C library is only on this desktop side.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+flate2 = "1"
+libm = "0.2"
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+# The height cut's tests write synthetic GLO-30 cells into a directory.
+tempfile = "3"

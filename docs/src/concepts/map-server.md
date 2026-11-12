@@ -47,11 +47,11 @@ the front door to a browser may hold them forever; only `index`
 changes, and it is replaced atomically (temp file and rename), so a
 reader never sees a half-written index.
 
-A pack is one logical cut of one data kind: `vectors` today (a region
-file per catalogue entry, the format of
-[Loquax: the map](loquax-map.md) section "Region file"); shading,
-pois-as-their-own-tier and the elevation fine tier get their own
-`kind` strings in the same index without a format change.
+A pack is one logical cut of one data kind: `vectors` (a region file
+per catalogue entry, the format of [Loquax: the map](loquax-map.md)
+section "Region file") and, since order 1740, `elevation` (a height
+file, § "Height packs" below); shading and pois-as-their-own-tier get
+their own `kind` strings in the same index without a format change.
 
 ## The pieces: a prefix split of the region file
 
@@ -238,13 +238,132 @@ a readable region with its zooms complete, the budget stops the
 fetch cleanly, a tampered piece or index or a rollback is refused on
 every transport, and the front door survives its upstream.
 
+## Height packs
+
+Order 1740 (K6a, Lew 2026-11-12: desert relief first, heights shipped
+to the device instead of finished shade pictures). The data half only:
+shading and drawing are order 1741. The byte layout is the module doc
+of `leviculum-map/src/elevation.rs` and is held by
+`leviculum-map/tests/elevation.rs` and `elevation_alloc.rs`; the cut is
+`leviculum-map-tool heights` (`leviculum-map-tool/src/heights.rs`), the
+store side `lnmapd/src/store.rs` (`KIND_ELEVATION`).
+
+**Tile layout.** The heights live at z12 only, 256 x 256 per tile, one
+height per Web Mercator pixel, sampled bilinearly from the source at the
+pixel's centre, north row first. Tiles are grouped in **blocks**: the
+8 x 8 z12 tiles under one z9 tile. A block is one piece. The pack's
+file is a **directory piece** (the zooms, the box the cut was asked
+for, the attribution and the notice, and the block list in piece
+order), then the block pieces. z11, z10 and z9 are not shipped: the
+device derives them from the block, each height the mean of the 2 x 2,
+4 x 4 or 8 x 8 stored heights under it, rounded half up
+(`Block::heights`). The pilot measured why: shipping z12 alone and
+deriving the rest is 0.77 times the bytes of CoMaps' shade tiles for
+the same box, the full z9 to z12 pyramid 1.16 times.
+
+Unlike a region file, a height pack is not a prefix ladder: every
+block piece stands alone and is complete from z9 to z12 over its own
+area, so a device fetches the directory and then the blocks of its
+view in any order. In the index, the directory's zoom byte is 0 (it
+completes no zoom), every block's is 12; the pack's zoom range is
+9..=12 and its bounds are the cut box.
+
+**Encoding.** Whole metres as `i16`. Per tile: the residual of the 2D
+predictor (left + up − up-left; the first row from the left, the first
+column from above), in wrapping 16-bit arithmetic so every `i16` grid
+round-trips; zigzag to `u16`; two byte planes (all high bytes, then all
+low bytes); one zstd frame per tile, level 19, with its content
+checksum. The writer is the C zstd library in the cut tool; the reader
+is `ruzstd`, pure Rust and `no_std`, the same code on the boards, the
+Android facade and the desktop. The committed Erg Chebbi fixture was
+written by the C library and is read by the Rust decoder in the tests,
+so the interop is tested, not assumed.
+
+**Why metres suffice.** The relief of order 1741 normalises the shade
+by local relief, so what matters is the height error against the
+smallest relief the desert shows: Chegaga's linear dunes stand 20 to
+80 m, Erg Chebbi's z12 tiles span 692 to 904 m. The vertical error
+budget, per height:
+
+| source of error | size |
+|---|---|
+| GLO-30 itself, absolute, against the reference (from the cell's own XML, `absolutePositionalAccuracyLE90`, cell N31 W005) | 1.76 m LE90, about 1.07 m as a standard deviation |
+| rounding to whole metres | uniform within ±0.5 m, 0.29 m standard deviation |
+| both together | about 1.11 m standard deviation: the rounding adds 4 % |
+| the derived zooms | a mean of 4 to 64 stored heights, rounded once more: ±0.5 m |
+
+So the rounding error is a quarter of the source's own, and 2.5 % of the
+lowest dune. Its one visible trace: on ground flatter than one metre
+per z12 pixel (about 33 m at 30° N, so slopes under 1.7°) the stored
+surface steps in one-metre terraces; the source's own noise on such
+ground is the same size, and the shading's smallest scale has to blur
+over a few pixels in either case (1741 decides how). Decimetres would
+cost 2.43 times the shade tiles' bytes instead of 1.16 (pilot) for an
+accuracy the source does not have.
+
+**Versioning and refusals.** Both piece kinds carry a magic (`LMHD`,
+`LMHB`), a `u16` version (1) and their header length. A reader refuses
+a version it does not know, rather than guess; a later version that
+changes the encoding gets a new number, and a server that ships it
+keeps the old pack until devices read the new one. Before allocating
+anything a length field sizes, the reader checks that the lengths add
+up to exactly the piece's own length, that the zooms and the tile edge
+are ones it reads, that the tile count is the zooms' square and that
+the block lies on the block zoom's grid; a hostile length is refused
+with nothing allocated (`elevation_alloc.rs` counts the bytes). A tile
+frame is refused when it does not decode to exactly one tile, carries
+no content checksum or a wrong one; the zstd window is capped at one
+tile and the decoder drains one tile's worth of blocks at a time, so a
+frame of endless RLE blocks is refused within a megabyte (measured: the
+uncapped decoder reached 200 MB on the test's frame).
+
+**The cut.** `leviculum-map-tool heights --bbox w,s,e,n -o pack.lmh`
+reads Copernicus GLO-30 from the public bucket (or `--source <dir>`).
+It walks the blocks a row at a time, north to south; for each row it
+fetches the 1° source cells the row needs (with the bilinear's reach
+one source pixel past the row's south and east edges) into memory,
+decodes them, drops the cells the row no longer needs, and writes each
+block as it is done. Nothing touches the disk but the output: the peak
+disk is the pack, the peak memory the cells of one block row (ten
+cells, 631 MB resident, on the pilot box). A missing cell is sea level
+(the bucket has no cells over open sea). The output depends only on
+the source bytes, the box and the zooms; the tests cut twice and with
+one and three threads and compare bytes.
+
+**Attribution.** Taken from the licence that ships beside every cell
+(`INFO/eula_F.pdf`): the attribution is Article 6 (b)'s notice for
+adapted data, "produced using Copernicus WorldDEM-30 © DLR e.V.
+2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under
+COPERNICUS by the European Union and ESA; all rights reserved"; the
+notice names the licence and carries Article 6 (c)'s disclaimer word
+for word. Both are in the directory piece and in the pack's
+attribution piece.
+
+**Measured on the pilot box** (29.3 to 31.5 N, 7.6 to 3.7 W, 2026-11-12,
+this host, release build):
+
+| | |
+|---|---|
+| blocks, tiles | 30 z9 blocks, 1,920 z12 tiles (they reach past the box) |
+| pack | 37,063,251 bytes over 136,583 km² of blocks: 271 bytes per km² |
+| the 1,350 z12 tiles that meet the box | 26,596,337 bytes (the pilot: 26.0 MB) |
+| source | 20 GLO-30 cells fetched into memory (the largest 42.9 MB), none absent |
+| cut | 118 s wall, 49 s user; zstd-19 encode 22 ms per tile (43 s summed) |
+| host decode, z12 | 1.74 ms per tile |
+| host derive, z11 / z10 / z9 | 7.1 / 28 / 111 ms per tile (4, 16, 64 tiles decoded) |
+| working set to decode | 643,016 bytes peak on the heap: three tile buffers (384 KiB) plus the zstd decoder (about 244 KiB), pinned under 684 KiB by `elevation_alloc.rs` |
+
+Not measured yet: the decode in the Android facade and on the M9 (no
+device on the cutting host). What the M9 must hold is the working set
+above, so it reads heights from PSRAM, not internal RAM; the flash cost
+is `ruzstd`'s decoder.
+
 ## What this page does not decide
 
 Deployment (K5 on workorse: nginx in front, the tunnel mechanism,
 systemd units), the Loquax client ladder's move from whole-region
 fetches to pieces (it keeps its probe, thresholds and questions),
-the shading and elevation piece formats (their pyramids get their
-own pages when they are cut), and periculum cells for the served
+the shading itself (order 1741 draws from the height packs above), and periculum cells for the served
 store (the S1 cells of [Loquax: map data over
 Reticulum](loquax-map-over-reticulum.md) apply to this protocol and
 come with the ladder work).

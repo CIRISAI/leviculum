@@ -38,6 +38,8 @@
 //!   Magnetic Model WMM2025, for turning a compass bearing into a true one.
 //! - [`geoid`]: the EGM2008 geoid at 15', so a GNSS ellipsoid height
 //!   becomes a height above sea level.
+//! - [`elevation`]: height pieces, ground heights in metres per z12 tile,
+//!   the coarser zooms averaged on the device (1740).
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
 //!
 //! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
@@ -57,6 +59,7 @@ pub mod choice;
 pub mod countries;
 pub mod declination;
 pub mod draw;
+pub mod elevation;
 pub mod geoid;
 pub mod labels;
 pub mod ladder;
