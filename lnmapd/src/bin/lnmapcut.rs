@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use lnmapd::node::load_or_generate_identity;
-use lnmapd::store::{add_pack, AddOptions, Index, KIND_VECTORS};
+use lnmapd::store::{add_pack, AddOptions, Index, KIND_ELEVATION, KIND_VECTORS};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -47,7 +47,9 @@ struct Args {
     #[arg(long)]
     http_url: Option<String>,
 
-    /// The region file to add (.lmr, version 4 or newer).
+    /// The file to add: a region file (.lmr, version 4 or newer) or a
+    /// height file (`leviculum-map-tool heights`), told apart by their
+    /// magic.
     region: PathBuf,
 }
 
@@ -74,12 +76,14 @@ fn main() -> ExitCode {
                 index.generation
             );
             for (n, piece) in pack.pieces.iter().enumerate() {
-                println!(
-                    "  piece {n}: completes z{}, {} bytes, {}",
-                    piece.zoom,
-                    piece.len,
-                    piece.id()
-                );
+                // A height pack's directory completes no zoom; every
+                // block after it is complete at all its zooms.
+                let what = if pack.kind == KIND_ELEVATION && n == 0 {
+                    "directory".to_owned()
+                } else {
+                    format!("completes z{}", piece.zoom)
+                };
+                println!("  piece {n}: {what}, {} bytes, {}", piece.len, piece.id());
             }
             ExitCode::SUCCESS
         }
@@ -87,6 +91,17 @@ fn main() -> ExitCode {
             eprintln!("lnmapcut: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The pack kind a file's magic names: a height file's directory starts
+/// with `LMHD`, everything else is taken as a region file (whose own
+/// reader then refuses what it is not).
+fn kind_of(file: &[u8]) -> &'static str {
+    if file.starts_with(&leviculum_map::elevation::DIRECTORY_MAGIC) {
+        KIND_ELEVATION
+    } else {
+        KIND_VECTORS
     }
 }
 
@@ -100,7 +115,7 @@ fn run(args: &Args) -> Result<Index, String> {
         &identity,
         &AddOptions {
             id: args.id.clone(),
-            kind: KIND_VECTORS.to_owned(),
+            kind: kind_of(&region).to_owned(),
             http_url: args.http_url.clone(),
         },
     )

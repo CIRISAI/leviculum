@@ -1,7 +1,7 @@
 //! The map store: immutable, content-addressed pieces plus one signed
 //! index (`docs/src/concepts/map-server.md`).
 //!
-//! A pack is one region file (`leviculum-map`'s LMR format, version 4 or
+//! A vectors pack is one region file (`leviculum-map`'s LMR format, version 4 or
 //! newer: the tile index first, the tiles coarse to fine) split at zoom
 //! boundaries into byte-range pieces. The pieces concatenate back to the
 //! exact region file, and every prefix of pieces is a region file still
@@ -10,6 +10,10 @@
 //! when the budget is spent. Each piece is named by the SHA-256 of its
 //! bytes; the index lists the names, so any carrier may hold a piece and
 //! the device still knows whether it is the server's.
+//!
+//! An elevation pack (1740) is a `leviculum_map::elevation` height file:
+//! its directory piece, then one piece per block, every block standing
+//! alone (see [`KIND_ELEVATION`]).
 //!
 //! The index is signed by the server's Reticulum identity — the same
 //! identity that owns the `lev.maps` destination a device pins as
@@ -77,8 +81,11 @@ pub const PIECES_DIR: &str = "pieces";
 pub const APP_NAME: &str = "lev";
 /// The server destination's aspect: the destination is `lev.maps`.
 pub const ASPECT: &str = "maps";
-/// The kind string of vector region packs, today's only kind.
+/// The kind string of vector region packs.
 pub const KIND_VECTORS: &str = "vectors";
+/// The kind string of height packs (1740): a `leviculum_map::elevation`
+/// file, its directory piece first, then one piece per block.
+pub const KIND_ELEVATION: &str = "elevation";
 
 const HEADER_LEN: usize = 48;
 const PACK_FIXED_LEN: usize = 104;
@@ -179,8 +186,8 @@ impl Piece {
 pub struct Pack {
     /// The pack's id, e.g. `berlin` (what a catalogue shows).
     pub id: String,
-    /// The data kind: [`KIND_VECTORS`] today; shading, pois and the
-    /// elevation fine tier get their own kinds without a format change.
+    /// The data kind: [`KIND_VECTORS`] or [`KIND_ELEVATION`]; shading and
+    /// pois get their own kinds without a format change.
     pub kind: String,
     /// The region's zoom range.
     pub min_zoom: u8,
@@ -651,44 +658,30 @@ pub fn write_piece(store: &Path, bytes: &[u8]) -> Result<[u8; 32], StoreError> {
 pub struct AddOptions {
     /// The pack's id in the catalogue.
     pub id: String,
-    /// The data kind; [`KIND_VECTORS`] for a region file.
+    /// The data kind: [`KIND_VECTORS`] for a region file,
+    /// [`KIND_ELEVATION`] for a height file.
     pub kind: String,
     /// The server's HTTP base URL to write into the index; `None` keeps
     /// what the index already names.
     pub http_url: Option<String>,
 }
 
-/// Cut `region` into pieces under `store` and write a fresh signed
-/// index: the pack replaces one with the same id, every other pack is
-/// kept, the generation grows by one, and `identity` signs. Returns the
-/// new index.
-pub fn add_pack(
-    store: &Path,
-    region: &[u8],
-    identity: &Identity,
-    options: &AddOptions,
-) -> Result<Index, StoreError> {
-    let split = split_region(region)?;
+/// A pack's file cut into pieces, with what the index says of it.
+struct Layout {
+    pieces: Vec<SplitPiece>,
+    min_zoom: u8,
+    max_zoom: u8,
+    bounds: [i32; 4],
+    attribution: String,
+}
+
+/// A region file: split at zoom boundaries, a prefix ladder.
+fn region_layout(region: &[u8]) -> Result<Layout, StoreError> {
+    let pieces = split_region(region)?;
     let parsed = Region::from_bytes(region).map_err(|e| StoreError::Region(format!("{e:?}")))?;
     let header = *parsed.header();
-    let attribution_text = format!("{}\n{}\n", parsed.attribution(), parsed.notice());
-
-    let mut pieces = Vec::with_capacity(split.len());
-    for part in &split {
-        let bytes = &region[part.start as usize..part.end as usize];
-        let hash = write_piece(store, bytes)?;
-        pieces.push(Piece {
-            hash,
-            offset: part.start,
-            len: u32::try_from(part.end - part.start).map_err(|_| StoreError::Field("piece"))?,
-            zoom: part.zoom,
-        });
-    }
-    let attribution = write_piece(store, attribution_text.as_bytes())?;
-
-    let pack = Pack {
-        id: options.id.clone(),
-        kind: options.kind.clone(),
+    Ok(Layout {
+        pieces,
         min_zoom: header.min_zoom,
         max_zoom: header.max_zoom,
         bounds: [
@@ -697,10 +690,76 @@ pub fn add_pack(
             header.bounds.east,
             header.bounds.north,
         ],
-        total: region.len() as u64,
-        whole: sha256(region),
+        attribution: format!("{}\n{}\n", parsed.attribution(), parsed.notice()),
+    })
+}
+
+/// A height file: the directory piece (zoom byte 0: it completes no
+/// zoom), then one piece per block, each complete from the block zoom to
+/// the tile zoom over its own area, so its zoom byte is the tile zoom.
+/// The blocks are independent: a device fetches the directory, then the
+/// blocks of its view in any order.
+fn elevation_layout(file: &[u8]) -> Result<Layout, StoreError> {
+    let (directory, ranges) = leviculum_map::elevation::split(file)
+        .map_err(|e| StoreError::Region(format!("height file: {e:?}")))?;
+    let pieces = ranges
+        .iter()
+        .enumerate()
+        .map(|(n, r)| SplitPiece {
+            start: r.start as u64,
+            end: r.end as u64,
+            zoom: if n == 0 { 0 } else { directory.tile_zoom() },
+        })
+        .collect();
+    Ok(Layout {
+        pieces,
+        min_zoom: directory.block_zoom(),
+        max_zoom: directory.tile_zoom(),
+        bounds: directory.bounds(),
+        attribution: format!("{}\n{}\n", directory.attribution(), directory.notice()),
+    })
+}
+
+/// Cut `file` into pieces under `store` and write a fresh signed index:
+/// the pack replaces one with the same id, every other pack is kept, the
+/// generation grows by one, and `identity` signs. Returns the new index.
+/// `options.kind` says how the file splits: [`KIND_ELEVATION`] a height
+/// file, anything else a region file.
+pub fn add_pack(
+    store: &Path,
+    file: &[u8],
+    identity: &Identity,
+    options: &AddOptions,
+) -> Result<Index, StoreError> {
+    let layout = if options.kind == KIND_ELEVATION {
+        elevation_layout(file)?
+    } else {
+        region_layout(file)?
+    };
+
+    let mut pieces = Vec::with_capacity(layout.pieces.len());
+    for part in &layout.pieces {
+        let bytes = &file[part.start as usize..part.end as usize];
+        let hash = write_piece(store, bytes)?;
+        pieces.push(Piece {
+            hash,
+            offset: part.start,
+            len: u32::try_from(part.end - part.start).map_err(|_| StoreError::Field("piece"))?,
+            zoom: part.zoom,
+        });
+    }
+    let attribution = write_piece(store, layout.attribution.as_bytes())?;
+
+    let pack = Pack {
+        id: options.id.clone(),
+        kind: options.kind.clone(),
+        min_zoom: layout.min_zoom,
+        max_zoom: layout.max_zoom,
+        bounds: layout.bounds,
+        total: file.len() as u64,
+        whole: sha256(file),
         attribution,
-        attribution_len: u32::try_from(attribution_text.len())
+        attribution_len: u32::try_from(layout.attribution.len())
             .map_err(|_| StoreError::Field("attribution"))?,
         pieces,
     };
