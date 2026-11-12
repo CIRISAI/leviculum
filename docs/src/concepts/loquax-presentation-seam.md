@@ -19,8 +19,8 @@ Per frame the core hands up three things, and nothing else:
 - **The scene**: widgets, text runs and marks as the node kinds of
   `loquax/src/ui/scene.rs`, plus the selection 1444 adds — scene items,
   never pixels.
-- **The map**: finished RGBA tiles — `TILE` (`loquax/src/tiles.rs:69`),
-  256 px a side, `TILE_BYTES` (`loquax/src/tiles.rs:74`), 256 KiB each —
+- **The map**: finished RGBA tiles — `TILE` (`loquax/src/tiles.rs:70`),
+  256 px a side, `TILE_BYTES` (`loquax/src/tiles.rs:75`), 256 KiB each —
   with the viewport transform (offset and scale, `ExactView`) and the
   ladder's choice of passes (`leviculum-map/src/ladder.rs`).
 - **The overlays**: pins, tracks and placed labels as scene items with

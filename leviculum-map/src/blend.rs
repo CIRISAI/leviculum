@@ -69,8 +69,8 @@ pub const WORLD_ZOOM: f64 = 2.0;
 /// blend.
 pub const MERCATOR_ZOOM: f64 = 5.0;
 
-/// Newton stops when the screen error is below this, in pixels.
-const INVERSE_EPS_PX: f64 = 0.03125;
+/// Newton stops within this of the asked pixel.
+pub const INVERSE_EPS_PX: f64 = 0.03125;
 /// Newton gives up after this many steps.
 const INVERSE_STEPS: u32 = 24;
 

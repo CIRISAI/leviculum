@@ -425,8 +425,9 @@ impl Painter {
     }
 
     /// The blended world mapping of `view` at its own whole zoom, when
-    /// this painter blends world views at all ([`set_world_shape`]
-    /// (Self::set_world_shape)), the blend is not yet Mercator there, and
+    /// this painter blends world views at all
+    /// ([`set_world_shape`](Self::set_world_shape)), the blend is not
+    /// yet Mercator there, and
     /// no region reaches into the view — the view that shows the world
     /// outline alone, so no region tile is ever reprojected.
     pub fn world_blend(&mut self, view: &Viewport) -> Option<Blend> {
