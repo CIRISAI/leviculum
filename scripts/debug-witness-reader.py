@@ -14,7 +14,11 @@ What this process does, and deliberately does not do
 
 It does NOT hold the debug port. It watches the port PATH and attaches only
 after the path has gone away and come back — that is, only after a reset it
-exists to explain.
+exists to explain. "Came back" means the path names a DIFFERENT device than
+at the last look (link inode, resolved node, its inode and device number),
+not merely that it exists: a board that re-enumerates before the witness
+looks again, or vanishes and returns inside one poll, leaves the path
+present at every look and is still the reset.
 
 That is not timidity, it is the only correct behaviour on this rig: periculum
 owns the LNode debug port during a scenario. It opens the port for its own
@@ -168,8 +172,14 @@ class Witness:
             return None
         return fd
 
-    def capture(self):
-        """Attach and log until the window closes or the port dies again."""
+    def capture(self, ident):
+        """Attach and log until the window closes or the port dies again.
+
+        `ident` is the device the caller saw. Returns the identity of the
+        device actually opened, read right after the open, so a replacement
+        that raced the open is not mistaken for the device we read from;
+        `ident` if nothing was opened.
+        """
         waited = 0.0
         holders = self.other_holders()
         while holders and waited < self.args.acquire:
@@ -177,18 +187,19 @@ class Witness:
             time.sleep(self.args.poll)
             waited += self.args.poll
             if not RUNNING:
-                return
+                return ident
             holders = self.other_holders()
         if holders:
             self.note(
                 f"gave up after {waited:.1f}s: pid(s) "
                 f"{','.join(map(str, holders))} own the port"
             )
-            return
+            return ident
 
         fd = self.open_port()
         if fd is None:
-            return
+            return ident
+        attached = self.identity() or ident
         self.note("attached")
         deadline = time.monotonic() + self.args.capture
         # Two queries: the first can be swallowed while the CDC endpoint is
@@ -211,19 +222,19 @@ class Witness:
                     ready, _, _ = select.select([fd], [], [], timeout)
                 except OSError as exc:
                     self.note(f"port lost while attached: {exc}")
-                    return
+                    return attached
                 if not ready:
                     continue
                 try:
                     chunk = os.read(fd, 4096)
                 except OSError as exc:
                     self.note(f"port lost while attached: {exc}")
-                    return
+                    return attached
                 if not chunk:
                     # A pty whose writer went away reports EOF rather than an
                     # error. Same event, same handling: re-arm.
                     self.note("port lost while attached: end of stream")
-                    return
+                    return attached
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
@@ -233,13 +244,72 @@ class Witness:
             if buf:
                 self.said(buf.decode("utf-8", "replace").replace("\r", "").strip())
             self.note("capture window closed")
+            return attached
         finally:
             try:
                 os.close(fd)
             except OSError:
                 pass
 
+    def identity(self):
+        """Which device the port path names right now, or None if none.
+
+        Presence alone cannot tell a return from the port that was there
+        before: a board that re-enumerates faster than this process looks,
+        or vanishes and returns between two polls, leaves the path present at
+        every look. So a look records the link itself (udev recreates the
+        by-id symlink on every enumeration, and a recreated link is a new
+        inode), the node it resolves to, and that node's inode and device
+        number. A pty or a ttyACM that comes back under the same name and
+        number still arrives behind a new link.
+        """
+        port = self.args.port
+        try:
+            link = os.lstat(port)
+            node = os.stat(port)
+        except OSError:
+            return None
+        return (
+            link.st_dev,
+            link.st_ino,
+            os.path.realpath(port),
+            node.st_ino,
+            node.st_rdev,
+        )
+
+    def attend(self, ident):
+        """Capture the device `ident` names, and every device that replaces
+        it before we look again. Returns the identity the port has when we
+        stop: the same device (re-armed) or None (gone).
+
+        A capture that ends with the path naming the device it read from is
+        the old device, dead or idle, and is not attached to again: a handle
+        that just died on a node the kernel has not removed yet would read
+        end of stream at once, and attaching to it again would spin. A
+        capture that ends with the path naming ANOTHER device is a return
+        that happened before we looked (land gate on 8ae14da0), and is
+        captured.
+        """
+        while True:
+            attached = self.capture(ident)
+            now = self.identity()
+            if now is None:
+                return None
+            if now == attached:
+                self.note("re-armed")
+                return now
+            if not RUNNING:
+                return now
+            self.note(
+                "port came back before the witness looked again — this is "
+                "the reset the witness is for"
+            )
+            ident = now
+
     def run(self):
+        # The first look comes before the banner, so a line of the banner in
+        # the file means the witness knows which device the port was.
+        seen = self.identity()
         self.note(
             f"witness armed port={self.args.port} label={self.args.label} "
             f"pid={os.getpid()}"
@@ -248,31 +318,33 @@ class Witness:
             "attaches only after this path disappears and returns; periculum "
             "owns the port during a scenario"
         )
-        present = os.path.exists(self.args.port)
-        if not present:
+        if seen is None:
             self.note("port is not there yet; waiting for it to appear")
         elif self.args.attach_now:
             self.note("attaching now: nobody runs a scenario on this port")
-            self.capture()
-            present = os.path.exists(self.args.port)
-            if present:
-                self.note("re-armed")
+            seen = self.attend(seen)
         gone_at = None
         while RUNNING:
-            now_present = os.path.exists(self.args.port)
-            if now_present and not present:
-                gap = "" if gone_at is None else f" after {time.monotonic() - gone_at:.1f}s"
+            now = self.identity()
+            if now is not None and now != seen:
+                if seen is None:
+                    gap = (
+                        "" if gone_at is None else f" after {time.monotonic() - gone_at:.1f}s"
+                    )
+                else:
+                    # Gone and back between two looks: the path never read
+                    # as absent, but it names another device than before.
+                    gap = " as a new device between two polls"
                 self.note(f"port came back{gap} — this is the reset the witness is for")
-                self.capture()
-                # The port may have gone again during the capture; re-read
-                # rather than assume, so the next transition is not missed.
-                now_present = os.path.exists(self.args.port)
-                if now_present:
-                    self.note("re-armed")
-            elif not now_present and present:
+                # The port may go again during the capture; attend() re-reads
+                # rather than assumes, so the next transition is not missed.
+                seen = self.attend(now)
+                if seen is None:
+                    gone_at = time.monotonic()
+            elif now is None and seen is not None:
                 gone_at = time.monotonic()
                 self.note("port gone")
-            present = now_present
+                seen = None
             if RUNNING:
                 time.sleep(self.args.poll)
         self.note("witness stopped")

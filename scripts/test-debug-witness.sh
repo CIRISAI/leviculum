@@ -178,6 +178,9 @@ Commands on stdin, one per line:
   newpty  fresh pty, symlink <link> at its slave  (the board enumerating)
   say X   the board says X
   drop    close the pty and remove the symlink    (the board vanishing)
+  swap    fresh pty, symlink moved onto it atomically, and only THEN the old
+          pty closed (a reset faster than the reader looks: the path is never
+          absent, and is already back when the reader sees the old one die)
   rx      append whatever the reader wrote to us to <rxlog>
   quit
 """
@@ -188,6 +191,17 @@ import sys
 
 link, rxlog = sys.argv[1], sys.argv[2]
 master = slave = None
+
+
+def relink(fd):
+    """Point <link> at the slave of fd in one rename, never absent."""
+    tmp = link + ".tmp"
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    os.symlink(os.ttyname(fd), tmp)
+    os.rename(tmp, link)
 
 
 def drop():
@@ -215,14 +229,16 @@ while True:
     if cmd == "newpty":
         drop()
         master, slave = pty.openpty()
-        tmp = link + ".tmp"
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        os.symlink(os.ttyname(slave), tmp)
-        os.rename(tmp, link)
+        relink(slave)
         print("ok newpty", flush=True)
+    elif cmd == "swap":
+        old = (master, slave)
+        master, slave = pty.openpty()
+        relink(slave)
+        for fd in old:
+            if fd is not None:
+                os.close(fd)
+        print("ok swap", flush=True)
     elif cmd.startswith("say "):
         os.write(master, cmd[4:].encode() + b"\r\n")
         print("ok say", flush=True)
@@ -372,6 +388,73 @@ send "say [INFO!] standing-reader-chatter"
 awaited "...and records what the board says" "$SLOG" "standing-reader-chatter"
 kill -TERM "$STANDING_PID" 2>/dev/null
 wait "$STANDING_PID"
+
+# --- 4. A reset faster than the reader looks --------------------------------
+#
+# Land gate on 8ae14da0: under load the reader logged "port lost while
+# attached", the fixture re-enumerated, and only then did the reader look at
+# the path. It was already there again, so the reader re-armed on what it took
+# for the old port and never attached to the new one. `swap` makes that order
+# certain instead of load-dependent: the new pty is linked BEFORE the old one
+# dies, so the path is never absent at any look.
+FLOG="$WORK/fast-reset.log"
+PATH="$WORK/bin:$PATH" python3 "$READER" \
+    --port "$PORT" --out "$FLOG" --label "1209:0001/FIXTURE" \
+    --poll 0.1 --capture 20 --acquire 2 --attach-now &
+FAST_PID=$!
+awaited "a standing reader attaches before the fast reset" "$FLOG" "# attached"
+send swap
+awaited "the reader loses the old port in a fast reset" "$FLOG" "port lost while attached"
+awaited_count "...sees the port that is already back as a return" \
+    "$FLOG" "port came back" 1 50
+awaited_count "...and attaches to the new port" "$FLOG" "# attached" 2 50
+send "say [INFO!] after-fast-reset"
+awaited "...and captures what the board says after the fast reset" \
+    "$FLOG" "after-fast-reset" 50
+kill -TERM "$FAST_PID" 2>/dev/null
+wait "$FAST_PID"
+
+# --- 5. Gone and back between two polls -------------------------------------
+#
+# A reader that is not attached looks once per poll. A board that vanishes and
+# re-enumerates inside one poll interval is the same reset, and a look that
+# only asks "is the path there?" answers yes both times. The poll is long here
+# so that drop and newpty land inside one interval.
+PLOG="$WORK/within-poll.log"
+PATH="$WORK/bin:$PATH" python3 "$READER" \
+    --port "$PORT" --out "$PLOG" --label "1209:0001/FIXTURE" \
+    --poll 1.0 --capture 20 --acquire 2 &
+POLL_PID=$!
+awaited "an idle reader has taken its first look" "$PLOG" "attaches only after this path"
+send drop
+send newpty
+awaited "a vanish and return inside one poll still attaches" "$PLOG" "# attached" 50
+send "say [INFO!] after-poll-reset"
+awaited "...and captures what the board says after it" "$PLOG" "after-poll-reset" 50
+kill -TERM "$POLL_PID" 2>/dev/null
+wait "$POLL_PID"
+
+# --- 6. The same device after a capture is not a return --------------------
+#
+# The other side of sections 4 and 5: when a capture ends and the path still
+# names the SAME device, nothing came back. Taking it for a return would
+# re-attach to it at once, and on a handle that just died (a node the kernel
+# has not removed yet) that is a spin. A pty cannot be hung up while its node
+# stays without CAP_SYS_ADMIN (TIOCVHANGUP), so this drives the identical
+# branch through the other way a capture ends: its window closes.
+DLOG="$WORK/same-device.log"
+PATH="$WORK/bin:$PATH" python3 "$READER" \
+    --port "$PORT" --out "$DLOG" --label "1209:0001/FIXTURE" \
+    --poll 0.1 --capture 0.5 --acquire 2 --attach-now &
+DEAD_PID=$!
+awaited "a standing reader attaches with a short window" "$DLOG" "# attached"
+awaited "...its window closes" "$DLOG" "capture window closed"
+awaited "...and it re-arms on the same, still present device" "$DLOG" "re-armed"
+sleep 1.5
+check_eq "...without attaching to it again" "1" "$(grep -cF -- "# attached" "$DLOG")"
+check_absent "...nor taking it for a return" "port came back" "$(cat "$DLOG")"
+kill -TERM "$DEAD_PID" 2>/dev/null
+wait "$DEAD_PID"
 
 send quit
 exec 9>&-
