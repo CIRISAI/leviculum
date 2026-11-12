@@ -33,7 +33,7 @@
 //!   on screen draws again; once complete it is checked whole and lands
 //!   ([`Maps::changed`], by the shell). A load that fails removes its file.
 //! - A load whose name is taken, a region installed before that it
-//!   replaces, writes beside it under [`PART_SUFFIX`] and renames over it
+//!   replaces, writes beside it under `PART_SUFFIX` and renames over it
 //!   once the new file verifies (1727): the old region draws until then,
 //!   and a load that fails leaves it as it was.
 //! - Autoloaded regions are a cache under a cap, named [`AUTO_PREFIX`],

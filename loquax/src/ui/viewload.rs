@@ -26,7 +26,7 @@
 //!   while the view moves only those, come after the cells on screen.
 //! - A region cut under an old layer profile holds nothing (1707); a
 //!   screen over it asks for that region's own box and zooms
-//!   ([`renewals`], 1727), which land under its name and replace it, and
+//!   (`renewals`, 1727), which land under its name and replace it, and
 //!   no cell or screen's box is asked for over it meanwhile.
 //! - A frame that shows the view of the last decision decides nothing
 //!   again: a load that failed for want of internet is tried again by the
