@@ -73,6 +73,20 @@ pub fn hh_mm(local: i64) -> String {
 pub fn labels(view: &Viewport, unix: i64) -> Vec<ViewLabel> {
     let mut out = Vec::new();
     timezones::labels(view, &mut out);
+    clocked(out, unix)
+}
+
+/// [`labels`] over the blended world view (1710): each zone's clock
+/// anchored by the blend, so it sits on its zone's blended ground.
+pub fn labels_view(blend: &leviculum_map::blend::Blend, unix: i64) -> Vec<ViewLabel> {
+    let mut out = Vec::new();
+    timezones::labels_view(blend, &mut out);
+    clocked(out, unix)
+}
+
+/// The zones' labels with each one's text its wall clock at `unix`; a
+/// zone no rules know is left out.
+fn clocked(mut out: Vec<ViewLabel>, unix: i64) -> Vec<ViewLabel> {
     out.retain_mut(|label| match clock(&label.local, unix) {
         Some(time) => {
             label.text = time;

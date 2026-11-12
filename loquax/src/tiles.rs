@@ -53,6 +53,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::vec::Vec;
 
+use leviculum_map::blend::{Blend, Shape};
 use leviculum_map::draw::Ink;
 use leviculum_map::mercator::World;
 use leviculum_map::outline;
@@ -255,6 +256,12 @@ pub struct TileCache {
     shown_from: u64,
     painters: Vec<Painter>,
     workers: usize,
+    /// Blend world views through this projection (1710), `None` for
+    /// Mercator throughout: a frame the blend holds is drawn whole by a
+    /// painter instead of composed from tiles — no square tile of one
+    /// step can show a curved picture. The painters themselves keep
+    /// drawing tiles Mercator-linear.
+    world_shape: Option<Shape>,
     pub stats: Stats,
     /// A frame's buffer handed back ([`recycle`](Self::recycle)), composed
     /// into next.
@@ -282,6 +289,7 @@ impl TileCache {
             shown_from: 0,
             painters: Vec::new(),
             workers,
+            world_shape: None,
             stats: Stats::default(),
             spare: Vec::new(),
             #[cfg(test)]
@@ -298,6 +306,33 @@ impl TileCache {
     /// Draw on `n` threads at most (at least one).
     pub fn set_workers(&mut self, n: usize) {
         self.workers = n.max(1);
+    }
+
+    /// Blend world views through `shape` (1710), or through none.
+    pub fn set_world_shape(&mut self, shape: Option<Shape>) {
+        self.world_shape = shape;
+    }
+
+    /// The blended mapping of `view` when the blend holds there: the
+    /// shape is set, `t` is below one at the view's exact zoom, and no
+    /// region reaches into it (the painter's own check, so the frame and
+    /// the whole-view drawers agree on the condition). The blend carries
+    /// the view's own size; the region check widens to the whole zoom
+    /// below, which only errs towards Mercator.
+    pub fn world_blend(&mut self, view: &ExactView) -> Option<Blend> {
+        let shape = self.world_shape?;
+        let zoom = view.zoom();
+        let (w, h) = view.size();
+        let blend = Blend::new(shape, view.centre, zoom, w, h);
+        if blend.t() >= 1.0 {
+            return None;
+        }
+        if self.painters.is_empty() {
+            self.painters.push(Painter::new(self.maps.clone()));
+        }
+        let floor = view.tile_zoom().min(zoom as u8);
+        let whole = view.at_zoom(floor);
+        self.painters[0].world_only(&whole).then_some(blend)
     }
 
     pub fn workers(&self) -> usize {
@@ -401,6 +436,16 @@ impl TileCache {
         let (w, h) = frame.view.size();
         if rgba.len() != w as usize * h as usize * 4 {
             return None;
+        }
+        // A world view the blend holds (1710) is drawn whole, Equal
+        // Earth or the globe flowing into Mercator: no square tile of
+        // one step can compose the curved picture, and the outline is
+        // cheap enough to draw each frame.
+        if let Some(blend) = self.world_blend(&frame.view) {
+            let smooth = frame.smooth || frame.resmooth;
+            let drawn = self.painters[0].draw_world_rgba(&blend, Ink::Colour, frame.style, smooth);
+            rgba.copy_from_slice(&drawn.rgba);
+            return Some((drawn.attribution, 0));
         }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);

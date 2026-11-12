@@ -419,13 +419,13 @@ fn clip_segment(
 /// Mercator placement, which every golden below the blend keeps pixel
 /// for pixel, or the blended world projection of a world view (1710).
 #[derive(Clone, Copy, Debug)]
-enum Place<'a> {
+pub(crate) enum Place<'a> {
     Flat(&'a Viewport),
     Curved(&'a Blend),
 }
 
 impl Place<'_> {
-    fn size(&self) -> (u32, u32) {
+    pub(crate) fn size(&self) -> (u32, u32) {
         match self {
             Place::Flat(view) => view.size(),
             Place::Curved(blend) => blend.size(),
@@ -434,7 +434,7 @@ impl Place<'_> {
 
     /// The zoom the view draws for, whole, rounded down between steps:
     /// what [`MAX_ZOOM`] and a name's shallowest zoom are checked against.
-    fn zoom(&self) -> u8 {
+    pub(crate) fn zoom(&self) -> u8 {
         match self {
             Place::Flat(view) => view.zoom(),
             Place::Curved(blend) => {
@@ -447,7 +447,7 @@ impl Place<'_> {
     /// The copies of the world the view shows: every one that reaches
     /// into a flat view; a curved view holds the whole world once, its
     /// own wrap in the projection.
-    fn copies(&self, vw: i64) -> core::ops::RangeInclusive<i64> {
+    pub(crate) fn copies(&self, vw: i64) -> core::ops::RangeInclusive<i64> {
         match self {
             Place::Flat(view) => {
                 let (left, _) = view.top_left_sub();
@@ -460,7 +460,7 @@ impl Place<'_> {
 
     /// Where a table point of `bits` lands in view sub-pixels, on copy
     /// `k` of the world.
-    fn map(&self, bits: u32, x: u32, y: u32, k: i64) -> (i64, i64) {
+    pub(crate) fn map(&self, bits: u32, x: u32, y: u32, k: i64) -> (i64, i64) {
         match self {
             Place::Flat(view) => {
                 let (left, top) = view.top_left_sub();
@@ -488,7 +488,7 @@ impl Place<'_> {
     /// half): a stroked line breaks there instead of chording along the
     /// limb, and a name is not set there. A filled ring keeps its far
     /// points — pushed onto the limb they close the ring without area.
-    fn hidden(&self, bits: u32, x: u32, y: u32) -> bool {
+    pub(crate) fn hidden(&self, bits: u32, x: u32, y: u32) -> bool {
         match self {
             Place::Flat(_) => false,
             Place::Curved(blend) => {

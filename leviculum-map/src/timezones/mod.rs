@@ -72,9 +72,10 @@ pub use posix::{Offset, PosixTz};
 #[cfg(feature = "std")]
 pub use system::system_zone_bytes;
 
+use crate::blend::Blend;
 use crate::labels::{LabelKind, ViewLabel, SUBPIXEL};
 use crate::mercator::{project, LatLon};
-use crate::outline::{self, varint, Ring};
+use crate::outline::{self, varint, Place, Ring};
 use crate::viewport::Viewport;
 
 /// The zones' polygons, `LWO2`.
@@ -306,34 +307,38 @@ pub fn zones_in_view(view: &Viewport, out: &mut Vec<u16>) {
 /// places them by the core's one rule with its other names. A zone whose
 /// anchors all lie outside a deep view gets no label there.
 pub fn labels(view: &Viewport, out: &mut Vec<ViewLabel>) {
+    labels_at(Place::Flat(view), out);
+}
+
+/// [`labels`] through the blended world projection (1710): each zone's
+/// anchor by the blend, the world once, a zone on the globe's far side
+/// not set.
+pub fn labels_view(blend: &Blend, out: &mut Vec<ViewLabel>) {
+    labels_at(Place::Curved(blend), out);
+}
+
+fn labels_at(place: Place<'_>, out: &mut Vec<ViewLabel>) {
     let Some(bits) = head(ZONES).map(|(b, _)| b) else {
         return;
     };
-    let up = i32::from(view.zoom()) + 12 - bits as i32;
-    let scale = |v: u32| -> i64 {
-        match up >= 0 {
-            true => i64::from(v) << up,
-            false => i64::from(v) >> -up,
-        }
-    };
-    let (w, h) = view.size();
-    let (left, top) = view.top_left_sub();
+    let (w, h) = place.size();
     let (vw, vh) = (i64::from(w) * SUBPIXEL, i64::from(h) * SUBPIXEL);
-    let world = 1i64 << (12 + u32::from(view.zoom()));
     for rz in ring_zones() {
         let Some(((x, y), min_zoom)) = rz.label else {
             continue;
         };
-        if min_zoom > view.zoom() {
+        if min_zoom > place.zoom() {
             continue;
         }
         let Some(name) = zone_name(rz.zone) else {
             continue;
         };
-        let (sx, sy) = (scale(x), scale(y) - top);
-        for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
-            let ax = sx + k * world - left;
-            if !(0..vw).contains(&ax) || !(0..vh).contains(&sy) {
+        if place.hidden(bits, x, y) {
+            continue;
+        }
+        for k in place.copies(vw) {
+            let (ax, ay) = place.map(bits, x, y, k);
+            if !(0..vw).contains(&ax) || !(0..vh).contains(&ay) {
                 continue;
             }
             out.push(ViewLabel {
@@ -343,7 +348,7 @@ pub fn labels(view: &Viewport, out: &mut Vec<ViewLabel>) {
                 text: String::from(name),
                 local: String::from(name),
                 at: (x, y),
-                anchor: (ax, sy),
+                anchor: (ax, ay),
                 line: Vec::new(),
             });
         }

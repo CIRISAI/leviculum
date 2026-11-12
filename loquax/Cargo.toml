@@ -192,6 +192,11 @@ picture = [
     "dep:leviculum-mapfill",
     "dep:embedded-graphics",
 ]
+# The world view as the orthographic globe instead of Equal Earth (1710):
+# the build switch Lew compares the two candidates behind. Both live in
+# leviculum-map::blend either way; this only flips `picture::world_shape`,
+# the default every frontend takes.
+globe-world = []
 # The map's autoload (`loquax::mapload`, 1089): regions cut from a PMTiles
 # archive read by HTTP range requests, through the cut the map tool runs.
 # Both frontends carry it; the CLI and the core do not.

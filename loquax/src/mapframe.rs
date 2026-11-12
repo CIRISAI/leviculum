@@ -472,10 +472,18 @@ pub struct DrawnName {
 impl Frames {
     /// The frames over `maps`, the cache within [`BUDGET_MB`].
     pub fn new(maps: Maps) -> Self {
+        let mut painter = Painter::new(maps.clone());
+        // The frames draw whole views: their world views blend into
+        // Equal Earth or the globe (1710), in the picture (the cache
+        // draws a blended frame whole) and in the names the painter
+        // anchors; the cache's own tile painters stay Mercator-linear.
+        painter.set_world_shape(Some(crate::picture::world_shape()));
+        let mut tiles = TileCache::new(maps, BUDGET_MB << 20);
+        tiles.set_world_shape(Some(crate::picture::world_shape()));
         Self {
-            painter: Painter::new(maps.clone()),
+            painter,
             type_: Typesetter::new(),
-            tiles: TileCache::new(maps, BUDGET_MB << 20),
+            tiles,
             last_zoom: None,
             names: Vec::new(),
             names_view: None,
@@ -597,7 +605,12 @@ impl Frames {
         // frame up, by two at most, and it covers at least the screen and
         // the margins asked.
         let zooming = ask.moving && self.rested != Some(view.zoom_milli());
-        let shows = match zooming && ask.scaled_while_moving {
+        // A world view the blend holds (1710) is drawn whole at the
+        // exact zoom every frame: pinning it to a step and scaling would
+        // jump `t` at each step change, the hard break the blend is
+        // there to avoid.
+        let curved = self.tiles.world_blend(&view).is_some();
+        let shows = match zooming && ask.scaled_while_moving && !curved {
             true => {
                 let below = u8::try_from(view.zoom_milli() / MILLI).unwrap_or(u8::MAX);
                 tile_zoom = tile_zoom.min(below);
@@ -608,6 +621,8 @@ impl Frames {
         let mut drawn = shows.on_whole_pixel();
         let (fw, fh) = frame_size(ask);
         drawn.resize(fw, fh);
+        // The blend the frame is composed and placed by, when it holds.
+        let wblend = self.tiles.world_blend(&drawn);
         // Scaled up by the frontend, the step's frame shows only its middle,
         // the screen and the margins over the scale (1163): the tiles
         // outside it held are copied, the others not drawn nor owed.
@@ -661,10 +676,22 @@ impl Frames {
         let (scale, theme) = (ask.scale, ask.style.theme);
         let type_ = &mut self.type_;
         let placed = match ask.measure {
-            Some(measure) => screenmap::place_exact(ask.pins, &drawn, ask.selected, scale, measure),
-            None => screenmap::place_exact(ask.pins, &drawn, ask.selected, scale, |t, s| {
-                type_.width(t, s)
-            }),
+            Some(measure) => screenmap::place_exact(
+                ask.pins,
+                &drawn,
+                wblend.as_ref(),
+                ask.selected,
+                scale,
+                measure,
+            ),
+            None => screenmap::place_exact(
+                ask.pins,
+                &drawn,
+                wblend.as_ref(),
+                ask.selected,
+                scale,
+                |t, s| type_.width(t, s),
+            ),
         };
         let now = ask.now_ms;
         // No region here: the radar's blank ground and rings instead of
@@ -689,7 +716,7 @@ impl Frames {
         // under the names, which are then the zones' clocks.
         self.painter.set_time_zones(ask.time_zones);
         if ask.time_zones.is_some() && ask.radar.is_none() {
-            screenmap::draw_time_zones(rgba, w, h, &drawn, scale, theme);
+            screenmap::draw_time_zones(rgba, w, h, &drawn, wblend.as_ref(), scale, theme);
         }
         // Placed anew only where the rung or the view at rest has them;
         // otherwise the names ride along as the sprites they were.
@@ -811,7 +838,10 @@ impl Frames {
                 w,
                 h,
                 ask.tracks,
-                |p| drawn.to_screen(p),
+                |p| match &wblend {
+                    Some(b) => b.to_screen(p),
+                    None => drawn.to_screen(p),
+                },
                 scale,
                 theme,
                 &mut self.type_,
@@ -966,17 +996,28 @@ impl Frames {
         let started = Instant::now();
         let (fw, fh) = exact.size();
         let scale = ask.scale;
+        let blend = self.tiles.world_blend(exact);
         let taken = match ask.pins.is_empty() {
             true => Vec::new(),
             false => {
                 let type_ = &mut self.type_;
                 let pins = match ask.measure {
-                    Some(measure) => {
-                        screenmap::place_exact(ask.pins, exact, ask.selected, scale, measure)
-                    }
-                    None => screenmap::place_exact(ask.pins, exact, ask.selected, scale, |t, s| {
-                        type_.width(t, s)
-                    }),
+                    Some(measure) => screenmap::place_exact(
+                        ask.pins,
+                        exact,
+                        blend.as_ref(),
+                        ask.selected,
+                        scale,
+                        measure,
+                    ),
+                    None => screenmap::place_exact(
+                        ask.pins,
+                        exact,
+                        blend.as_ref(),
+                        ask.selected,
+                        scale,
+                        |t, s| type_.width(t, s),
+                    ),
                 };
                 screenmap::taken(&pins, scale)
             }

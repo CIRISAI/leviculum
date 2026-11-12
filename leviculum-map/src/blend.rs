@@ -235,18 +235,12 @@ impl Blend {
         self.anisotropy
     }
 
-    /// The same mapping drawn one zoom deeper at twice the size, `t`
-    /// kept: what a supersampling drawer (the terminal's 2× source) uses
-    /// so its picture is this view's, only finer.
-    pub fn supersampled(&self) -> Self {
-        Self::with_t(
-            self.shape,
-            self.centre,
-            self.zoom + 1.0,
-            self.width * 2,
-            self.height * 2,
-            self.t,
-        )
+    /// The same mapping at another zoom and size, `t` and centre kept:
+    /// what a supersampling drawer (the terminal's source one zoom
+    /// deeper at twice the grain) uses so its picture is this view's,
+    /// only finer.
+    pub fn resized(&self, zoom: f64, width: u32, height: u32) -> Self {
+        Self::with_t(self.shape, self.centre, zoom, width, height, self.t)
     }
 
     /// `(λ, φ)` of a world point, λ relative to the central meridian in

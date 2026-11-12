@@ -724,6 +724,10 @@ impl Canvas {
     /// Draw `ask`'s view, and encode it under kitty or sixel or as a text
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
+        // The terminal draws whole views, never a cache's square tiles:
+        // its world views blend into Equal Earth or the globe (1710).
+        self.painter
+            .set_world_shape(Some(loquax::picture::world_shape()));
         let started = Instant::now();
         let mut painted = self.paint_view(ask);
         painted.paint_us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
@@ -799,10 +803,19 @@ impl Canvas {
             true => (Viewport::new(view.centre, view.zoom() + 1, fw, fh), 1usize),
             false => (Viewport::new(view.centre, view.zoom(), fw / 2, fh / 2), 2),
         };
+        // The source draws at `fine`'s grain but must keep the asked
+        // view's blend, `t` included (1710): a world view's cells are
+        // the same picture as its pixels, only finer.
+        let blend = self.painter.world_blend(view).map(|b| {
+            let (w, h) = fine.size();
+            b.resized(f64::from(fine.zoom()), w, h)
+        });
         let percent = |p: u32| p / scale as u32;
         let mut draw = |ink: Ink, p: u32| -> (Vec<cells::Rgb>, String) {
             let (w, h) = fine.size();
-            let mut drawn = self.painter.draw(&fine, ink, style, percent(p));
+            let mut drawn = self
+                .painter
+                .draw_with(&fine, blend.as_ref(), ink, style, percent(p));
             let mut flat = Vec::with_capacity(drawn.fb.len() * 3);
             if let Some(f) = Frame::new(&mut drawn.fb, w, h) {
                 f.rgb888_into(&mut flat);

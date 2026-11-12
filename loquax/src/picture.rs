@@ -41,6 +41,7 @@ use std::vec::Vec;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::Point;
 use embedded_graphics::primitives::Rectangle;
+use leviculum_map::blend::{Blend, Shape};
 use leviculum_map::choice::{drawn, view_zooms};
 use leviculum_map::draw::{attach_buildings, draw_in_scaled, draw_tiles, draws_buildings, Ink};
 use leviculum_map::labels::ViewLabel;
@@ -99,6 +100,16 @@ pub const AUTO_PREFIX: &str = "auto-";
 const VIEWED_EVERY: Duration = Duration::from_secs(60);
 
 /// Whether `name` is a region the autoload wrote.
+/// The world projection the product ships (1710): Equal Earth, Lew's
+/// first decision; the orthographic globe behind the `globe-world` build
+/// switch until he has seen both on pictures.
+pub fn world_shape() -> Shape {
+    match cfg!(feature = "globe-world") {
+        true => Shape::Globe,
+        false => Shape::EqualEarth,
+    }
+}
+
 pub fn is_auto(name: &str) -> bool {
     name.starts_with(AUTO_PREFIX)
 }
@@ -311,6 +322,12 @@ pub struct Painter {
     /// their clocks at this instant, in seconds since the epoch, in place
     /// of the names.
     time_zones: Option<i64>,
+    /// Blend world views through this projection (1710), `None` for
+    /// Mercator throughout: the default, which a tile cache's painters
+    /// keep — a square tile of one step must stay Mercator-linear
+    /// whatever its zoom. The whole-view frontends set the shipped
+    /// [`world_shape`].
+    world_shape: Option<Shape>,
 }
 
 /// The filler's storage for one region drawn ([`region_into`]). The filler
@@ -353,6 +370,7 @@ impl Painter {
             viewed: HashMap::new(),
             names_off: false,
             time_zones: None,
+            world_shape: None,
         }
     }
 
@@ -399,6 +417,48 @@ impl Painter {
         self.time_zones = unix;
     }
 
+    /// Blend world views through `shape` (1710), or through none: the
+    /// whole-view frontends pass [`world_shape`]; a painter that draws
+    /// square tiles for a cache never sets one.
+    pub fn set_world_shape(&mut self, shape: Option<Shape>) {
+        self.world_shape = shape;
+    }
+
+    /// The blended world mapping of `view` at its own whole zoom, when
+    /// this painter blends world views at all ([`set_world_shape`]
+    /// (Self::set_world_shape)), the blend is not yet Mercator there, and
+    /// no region reaches into the view — the view that shows the world
+    /// outline alone, so no region tile is ever reprojected.
+    pub fn world_blend(&mut self, view: &Viewport) -> Option<Blend> {
+        let shape = self.world_shape?;
+        self.world_blend_as(shape, view, f64::from(view.zoom()))
+    }
+
+    /// [`world_blend`](Self::world_blend) with the shape and the exact
+    /// zoom given: what a tile cache asks for a frame between the steps.
+    pub fn world_blend_as(&mut self, shape: Shape, view: &Viewport, zoom: f64) -> Option<Blend> {
+        let (w, h) = view.size();
+        let blend = Blend::new(shape, view.centre, zoom, w, h);
+        if blend.t() >= 1.0 {
+            return None;
+        }
+        self.world_only(view).then_some(blend)
+    }
+
+    /// Whether `view` shows the world picture alone: no installed region
+    /// reaches into it at its zoom. The blend holds only there, so no
+    /// region tile is ever reprojected.
+    pub fn world_only(&mut self, view: &Viewport) -> bool {
+        self.refresh();
+        drawn(
+            self.regions
+                .iter()
+                .map(|r| (r.name.as_str(), r.region.header())),
+            view,
+        )
+        .is_empty()
+    }
+
     /// The regions' headers, which say how deep a fit goes, newest first
     /// ([`newest_first`]).
     pub fn headers(&self) -> Vec<Header> {
@@ -421,10 +481,30 @@ impl Painter {
     /// A region whose tile does not read is left out. The directory is read
     /// again first when it changed.
     pub fn draw(&mut self, view: &Viewport, ink: Ink, style: Style, percent: u32) -> Drawn {
+        let blend = self.world_blend(view);
+        self.draw_with(view, blend.as_ref(), ink, style, percent)
+    }
+
+    /// [`draw`](Self::draw) with the blend chosen by the caller (1710):
+    /// the terminal's supersampled source draws one zoom deeper at a
+    /// finer grain but must keep the nominal view's blend, `t` included
+    /// ([`Blend::resized`]); `None` keeps Mercator whatever the
+    /// painter's shape.
+    pub fn draw_with(
+        &mut self,
+        view: &Viewport,
+        blend: Option<&Blend>,
+        ink: Ink,
+        style: Style,
+        percent: u32,
+    ) -> Drawn {
         let (w, h) = view.size();
         let mut fb = vec![0u16; (w as usize) * (h as usize)];
         let (attribution, pending) = match Frame::new(&mut fb, w, h) {
-            Some(mut frame) => self.draw_into(view, ink, style, percent, &mut frame),
+            Some(mut frame) => match blend {
+                Some(b) => self.draw_world_into(b, ink, style, &mut frame),
+                None => self.draw_into(view, ink, style, percent, &mut frame),
+            },
             None => (outline::ATTRIBUTION.to_string(), 0),
         };
         Drawn {
@@ -452,8 +532,12 @@ impl Painter {
         let (w, h) = view.size();
         // Opaque black, as the Rgb565 frame's zeros widen.
         let mut rgba = [0u8, 0, 0, 0xff].repeat((w as usize) * (h as usize));
+        let blend = self.world_blend(view);
         let (attribution, pending) = match RgbaFrame::new(&mut rgba, w, h) {
-            Some(frame) => self.draw_into(view, ink, style, percent, &mut frame.smoothed(smooth)),
+            Some(frame) => match &blend {
+                Some(b) => self.draw_world_into(b, ink, style, &mut frame.smoothed(smooth)),
+                None => self.draw_into(view, ink, style, percent, &mut frame.smoothed(smooth)),
+            },
             None => (outline::ATTRIBUTION.to_string(), 0),
         };
         DrawnRgba {
@@ -461,6 +545,68 @@ impl Painter {
             attribution,
             pending,
         }
+    }
+
+    /// The blended world view drawn into opaque RGBA (1710): what a tile
+    /// cache shows for a frame the blend holds — drawn whole each time,
+    /// since no square tile of one step can compose a curved picture.
+    /// The outline alone (the blend holds only where no region reaches),
+    /// the time zone borders over it when that view is on; `smooth`
+    /// antialiases the coasts and the globe's limb.
+    pub fn draw_world_rgba(
+        &mut self,
+        blend: &Blend,
+        ink: Ink,
+        style: Style,
+        smooth: bool,
+    ) -> DrawnRgba {
+        let (w, h) = blend.size();
+        let mut rgba = [0u8, 0, 0, 0xff].repeat((w as usize) * (h as usize));
+        let (attribution, pending) = match RgbaFrame::new(&mut rgba, w, h) {
+            Some(frame) => self.draw_world_into(blend, ink, style, &mut frame.smoothed(smooth)),
+            None => (outline::ATTRIBUTION.to_string(), 0),
+        };
+        DrawnRgba {
+            rgba,
+            attribution,
+            pending,
+        }
+    }
+
+    /// [`draw_world_rgba`](Self::draw_world_rgba)'s picture into `frame`.
+    fn draw_world_into<D>(
+        &mut self,
+        blend: &Blend,
+        ink: Ink,
+        style: Style,
+        frame: &mut D,
+    ) -> (String, usize)
+    where
+        D: Coverage<Color = Rgb565, Error = core::convert::Infallible>,
+    {
+        self.refresh();
+        let mut attribution = outline::ATTRIBUTION.to_string();
+        let Ok(_) = outline::draw_world_view(&outline::WORLD, blend, ink, style.theme, frame);
+        if self.time_zones.is_some() {
+            let (_, h) = blend.size();
+            self.scratch.heads.resize(h as usize, 0);
+            let mut scratch = Scratch {
+                edges: &mut self.scratch.edges,
+                heads: &mut self.scratch.heads,
+                active: &mut self.scratch.active,
+            };
+            let mut filler = Filler::new(&mut scratch, frame.bounding_box());
+            let Ok(_) = outline::bounds_view(
+                &timezones::BOUNDARIES,
+                blend,
+                Point::zero(),
+                crate::zoneclock::line_colour(style.theme),
+                &mut filler,
+                frame,
+            );
+            attribution = format!("{attribution} · {}", timezones::ATTRIBUTION);
+        }
+        (attribution, 0)
     }
 
     /// [`draw`](Self::draw)'s picture into `frame`: its credit and the
@@ -556,8 +702,20 @@ impl Painter {
         if self.names_off {
             return Vec::new();
         }
+        // The blended world view's names and clocks anchor through the
+        // blend (1710), the same condition as the picture's, so a name
+        // sits on its blended ground.
+        let blend = self.world_blend(view);
         if let Some(unix) = self.time_zones {
-            return crate::zoneclock::labels(view, unix);
+            return match &blend {
+                Some(b) => crate::zoneclock::labels_view(b, unix),
+                None => crate::zoneclock::labels(view, unix),
+            };
+        }
+        if let Some(b) = &blend {
+            let mut out = Vec::new();
+            outline::names_view(outline::NAMES_50M, b, &mut out);
+            return out;
         }
         self.refresh();
         let order = drawn(

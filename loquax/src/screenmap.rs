@@ -16,6 +16,7 @@
 use std::string::String;
 use std::vec::Vec;
 
+use leviculum_map::blend::Blend;
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::Rect as Box2;
 use leviculum_map::pins::{self, Mark, Metrics, Pin};
@@ -223,10 +224,13 @@ pub fn place(
 }
 
 /// [`place`] in a view between two zoom steps (1134): each pin where the
-/// exact scale puts it, the pixel its point lands in.
+/// exact scale puts it, the pixel its point lands in. Under a world view
+/// the blend holds (1710) each pin lands through the blend, on the ground
+/// the frame drew; a pin on the globe's far side is not placed.
 pub fn place_exact(
     pins: &[MapPin],
     view: &ExactView,
+    blend: Option<&Blend>,
     selected: Option<[u8; 16]>,
     scale: f32,
     measure: impl FnMut(&str, f32) -> u32,
@@ -236,7 +240,15 @@ pub fn place_exact(
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            let (x, y) = view.to_screen(p.at);
+            let (x, y) = match blend {
+                Some(b) => {
+                    if !b.facing(p.at) {
+                        return None;
+                    }
+                    b.to_screen(p.at)
+                }
+                None => view.to_screen(p.at),
+            };
             let (x, y) = (x.floor(), y.floor());
             let inside = (0.0..f64::from(w)).contains(&x) && (0.0..f64::from(h)).contains(&y);
             inside.then_some((i, x as u32, y as u32))
@@ -678,6 +690,7 @@ pub fn draw_time_zones(
     w: u32,
     h: u32,
     view: &ExactView,
+    blend: Option<&Blend>,
     scale: f32,
     theme: MapTheme,
 ) {
@@ -694,6 +707,13 @@ pub fn draw_time_zones(
         x: x.checked_shl(shift).unwrap_or(u32::MAX),
         y: y.checked_shl(shift).unwrap_or(u32::MAX),
     };
+    // Under the blend (1710) every point lands through it, on the
+    // blended ground; a border on the globe's far side is not drawn.
+    let at = |p: World| match blend {
+        Some(b) => b.to_screen(p),
+        None => view.to_screen(p),
+    };
+    let facing = |p: World| blend.is_none_or(|b| b.facing(p));
     let world_px = 4_294_967_296.0 / view.unit();
     let (fw, fh) = (f64::from(w), f64::from(h));
     let mut cover = Cover::new(w, h);
@@ -701,15 +721,21 @@ pub fn draw_time_zones(
     let step = 1.5 * f64::from(scale);
     for line in outline::lines(timezones::BORDERS) {
         let [west, north, east, south] = line.bbox;
-        let (x0, y0) = view.to_screen(world((west, north)));
-        let (x1, y1) = view.to_screen(world((east, south)));
-        // A box wrapped round the antimeridian is never passed over.
-        if x0 <= x1 && (x1 < 0.0 || x0 > fw || y1 < 0.0 || y0 > fh) {
+        let (x0, y0) = at(world((west, north)));
+        let (x1, y1) = at(world((east, south)));
+        // A box wrapped round the antimeridian is never passed over; a
+        // blended box's corners do not bound it, so it is never passed
+        // over either.
+        if blend.is_none() && x0 <= x1 && (x1 < 0.0 || x0 > fw || y1 < 0.0 || y0 > fh) {
             continue;
         }
         let mut last: Option<(f64, f64)> = None;
         for p in line.points() {
-            let at = view.to_screen(world(p));
+            if !facing(world(p)) {
+                last = None;
+                continue;
+            }
+            let at = at(world(p));
             let Some(from) = last else {
                 last = Some(at);
                 continue;
