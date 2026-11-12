@@ -76,6 +76,7 @@ async fn the_map_node_serves_the_signed_store_over_the_mesh() {
             id: "grunewald".to_owned(),
             kind: KIND_VECTORS.to_owned(),
             http_url: None,
+            replace: false,
         },
     )
     .expect("add the pack");

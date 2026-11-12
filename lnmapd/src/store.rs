@@ -119,6 +119,18 @@ pub enum StoreError {
     /// The signing identity has no private key.
     #[error("identity cannot sign: {0}")]
     Identity(String),
+    /// A pack of another kind already holds the id; a device that pinned
+    /// it by id would get data of a kind it did not ask for. Only
+    /// [`AddOptions::replace`] lets the new kind take its place.
+    #[error("pack {id} is already a {existing} pack; refusing to replace it with a {new} pack (lnmapcut --replace)")]
+    KindMismatch {
+        /// The pack id.
+        id: String,
+        /// The kind the index holds under the id.
+        existing: String,
+        /// The kind that was to be added.
+        new: String,
+    },
 }
 
 /// Why index or piece verification refused.
@@ -664,6 +676,10 @@ pub struct AddOptions {
     /// The server's HTTP base URL to write into the index; `None` keeps
     /// what the index already names.
     pub http_url: Option<String>,
+    /// Let the pack replace one of another kind under the same id. Off,
+    /// such an add is refused ([`StoreError::KindMismatch`]); a pack of
+    /// the same kind always replaces its predecessor.
+    pub replace: bool,
 }
 
 /// A pack's file cut into pieces, with what the index says of it.
@@ -723,6 +739,8 @@ fn elevation_layout(file: &[u8]) -> Result<Layout, StoreError> {
 /// Cut `file` into pieces under `store` and write a fresh signed index:
 /// the pack replaces one with the same id, every other pack is kept, the
 /// generation grows by one, and `identity` signs. Returns the new index.
+/// A pack of another kind under the same id is refused unless
+/// `options.replace` says otherwise.
 /// `options.kind` says how the file splits: [`KIND_ELEVATION`] a height
 /// file, anything else a region file.
 pub fn add_pack(
@@ -736,6 +754,32 @@ pub fn add_pack(
     } else {
         region_layout(file)?
     };
+
+    // The index that is there, verified against our own key before it
+    // feeds the new one: a corrupt or foreign index is an error, never
+    // silently replaced.
+    let path = index_path(store);
+    let old = match std::fs::read(&path) {
+        Ok(bytes) => {
+            let own = Index::destination_of(&identity.public_key_bytes())
+                .map_err(StoreError::Existing)?;
+            Some(Index::verify(&bytes, &own, None)?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io_err(&path)(e)),
+    };
+
+    // A pack of another kind under the same id is refused before a piece
+    // is written, unless the caller asked to replace it.
+    if let Some(existing) = old.as_ref().and_then(|index| index.pack(&options.id)) {
+        if existing.kind != options.kind && !options.replace {
+            return Err(StoreError::KindMismatch {
+                id: options.id.clone(),
+                existing: existing.kind.clone(),
+                new: options.kind.clone(),
+            });
+        }
+    }
 
     let mut pieces = Vec::with_capacity(layout.pieces.len());
     for part in &layout.pieces {
@@ -762,20 +806,6 @@ pub fn add_pack(
         attribution_len: u32::try_from(layout.attribution.len())
             .map_err(|_| StoreError::Field("attribution"))?,
         pieces,
-    };
-
-    // The index that is there, verified against our own key before it
-    // feeds the new one: a corrupt or foreign index is an error, never
-    // silently replaced.
-    let path = index_path(store);
-    let old = match std::fs::read(&path) {
-        Ok(bytes) => {
-            let own = Index::destination_of(&identity.public_key_bytes())
-                .map_err(StoreError::Existing)?;
-            Some(Index::verify(&bytes, &own, None)?)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(io_err(&path)(e)),
     };
 
     let mut packs: Vec<Pack> = old

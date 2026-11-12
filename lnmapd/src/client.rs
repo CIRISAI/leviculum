@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use crate::store::{verify_piece, Pack, VerifyError};
+use crate::store::{verify_piece, Pack, VerifyError, KIND_VECTORS};
 
 /// Why a prefix fetch stopped with an error.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +41,16 @@ pub enum FetchError {
         offset: u64,
         /// How many bytes are assembled.
         assembled: u64,
+    },
+    /// The pack is not a prefix ladder: only a vectors pack's pieces
+    /// complete zooms in order. A height pack's blocks stand alone and
+    /// are fetched by block, not by prefix.
+    #[error("pack {id} is a {kind} pack, not a prefix ladder of vectors")]
+    NotAPrefixLadder {
+        /// The pack id.
+        id: String,
+        /// Its kind.
+        kind: String,
     },
 }
 
@@ -94,6 +104,10 @@ pub struct Fetched {
 /// `out` must be empty or hold an already-assembled prefix of this same
 /// pack (a resumed fetch): the next piece is the one whose offset is
 /// `out.len()`.
+///
+/// Only a [`KIND_VECTORS`] pack is a prefix ladder whose piece zoom
+/// byte means "deepest zoom complete"; any other kind is refused with
+/// [`FetchError::NotAPrefixLadder`] before a piece is asked for.
 pub fn fetch_prefix<F: PieceFetcher, C: Clock>(
     fetcher: &mut F,
     clock: &C,
@@ -101,6 +115,12 @@ pub fn fetch_prefix<F: PieceFetcher, C: Clock>(
     budget: Duration,
     out: &mut Vec<u8>,
 ) -> Result<Fetched, FetchError> {
+    if pack.kind != KIND_VECTORS {
+        return Err(FetchError::NotAPrefixLadder {
+            id: pack.id.clone(),
+            kind: pack.kind.clone(),
+        });
+    }
     let mut fetched = Fetched {
         pieces: 0,
         complete: false,

@@ -41,6 +41,7 @@ fn build_store(dir: &Path) -> (leviculum_std::DestinationHash, Index, Vec<u8>) {
             id: "grunewald".to_owned(),
             kind: KIND_VECTORS.to_owned(),
             http_url: None,
+            replace: false,
         },
     )
     .expect("add the pack");

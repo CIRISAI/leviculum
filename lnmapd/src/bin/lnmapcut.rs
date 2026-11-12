@@ -47,6 +47,12 @@ struct Args {
     #[arg(long)]
     http_url: Option<String>,
 
+    /// Let the file replace a pack of another kind under the same id
+    /// (a region by heights, or heights by a region). Without it such an
+    /// add is refused and the store is left as it was.
+    #[arg(long)]
+    replace: bool,
+
     /// The file to add: a region file (.lmr, version 4 or newer) or a
     /// height file (`leviculum-map-tool heights`), told apart by their
     /// magic.
@@ -117,6 +123,7 @@ fn run(args: &Args) -> Result<Index, String> {
             id: args.id.clone(),
             kind: kind_of(&region).to_owned(),
             http_url: args.http_url.clone(),
+            replace: args.replace,
         },
     )
     .map_err(|e| e.to_string())

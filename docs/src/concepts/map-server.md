@@ -238,6 +238,15 @@ a readable region with its zooms complete, the budget stops the
 fetch cleanly, a tampered piece or index or a rollback is refused on
 every transport, and the front door survives its upstream.
 
+An id names one pack of one kind. `lnmapcut` refuses to put a height
+file under the id of a vectors pack (or the reverse) and leaves the
+store as it was, since a device that pinned the id would otherwise get
+data of another kind; `--replace` says the swap is meant. The
+prefix planner (`lnmapd::client::fetch_prefix`) takes only vectors
+packs: a height pack's blocks stand alone and are fetched by block,
+so its piece zoom byte is no "deepest zoom complete"
+(`lnmapd/tests/store_elevation.rs`).
+
 ## Height packs
 
 Order 1740 (K6a, Lew 2026-11-12: desert relief first, heights shipped

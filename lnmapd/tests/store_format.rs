@@ -18,6 +18,7 @@ fn options(id: &str) -> AddOptions {
         id: id.to_owned(),
         kind: KIND_VECTORS.to_owned(),
         http_url: Some("http://127.0.0.1:0/maps".to_owned()),
+        replace: false,
     }
 }
 
