@@ -32,6 +32,10 @@
 //!   [`Maps::progress`], at most every [`PROGRESS_EVERY_MS`], so a frame
 //!   on screen draws again; once complete it is checked whole and lands
 //!   ([`Maps::changed`], by the shell). A load that fails removes its file.
+//! - A load whose name is taken, a region installed before that it
+//!   replaces, writes beside it under [`PART_SUFFIX`] and renames over it
+//!   once the new file verifies (1727): the old region draws until then,
+//!   and a load that fails leaves it as it was.
 //! - Autoloaded regions are a cache under a cap, named [`AUTO_PREFIX`],
 //!   evicted least recently viewed first (a painter marks a region viewed
 //!   by its file's modification time). A file without the prefix was placed
@@ -79,6 +83,9 @@ pub const MAX_AWAY: usize = 8;
 /// ([`crate::ui::viewload`]), so an autoloaded one is asked for again
 /// and replaced in place under its own name.
 const PROFILE: u8 = leviculum_map::profile::CUT_2;
+/// The suffix of a region written beside the one it replaces (1727): not
+/// `.lmr`, so no painter opens it and no eviction counts it.
+const PART_SUFFIX: &str = ".part";
 /// What the region's notice names as the program that cut it.
 const BY: &str = "loquax";
 /// The least time between two progress bumps of a region being written
@@ -655,8 +662,16 @@ impl Job {
         let zooms = (*planned.zooms.start(), *planned.zooms.end());
         let name = auto_name(&want.bounds, zooms);
         // Under its own name from the first byte (1291): a painter draws
-        // what has arrived, a version 4 file says what that is.
+        // what has arrived, a version 4 file says what that is. A load
+        // that replaces an installed region writes beside it instead and
+        // takes its place only once the new file verifies (1727), so a
+        // broken link or a failed check never costs the region there.
         let path = self.dir.join(&name);
+        let replaces = path.exists();
+        let written = match replaces {
+            true => self.dir.join(format!("{name}{PART_SUFFIX}")),
+            false => path.clone(),
+        };
         // As wide as the tile painters (1473): one core count for the map.
         let threads = crate::picture::cores();
         let maps = self.maps.clone();
@@ -664,13 +679,15 @@ impl Job {
         let mut progress = |p: Progress| {
             let due =
                 bumped.is_none_or(|at| at.elapsed().as_millis() >= u128::from(PROGRESS_EVERY_MS));
-            if !p.complete && due {
+            // A file written beside the region it replaces is no painter's
+            // until it lands.
+            if !p.complete && due && !replaces {
                 bumped = Some(Instant::now());
                 maps.arrived();
             }
         };
         let write = || -> leviculum_mapcut::Res<Loaded> {
-            let mut out = BufWriter::new(File::create(&path)?);
+            let mut out = BufWriter::new(File::create(&written)?);
             let loaded = cut_planned(
                 &archive,
                 &want,
@@ -682,17 +699,24 @@ impl Job {
             )?;
             let file = out.into_inner().map_err(|e| e.into_error())?;
             file.sync_all()?;
-            let region = Region::open(File::open(&path)?).map_err(|e| format!("{e:?}"))?;
+            let region = Region::open(File::open(&written)?).map_err(|e| format!("{e:?}"))?;
             region
                 .verify()
                 .map_err(|e| format!("the region does not verify: {e:?}"))?;
+            if replaces {
+                std::fs::rename(&written, &path)?;
+            }
             Ok(loaded)
         };
         let loaded = match write() {
             Ok(loaded) => loaded,
             Err(error) => {
-                let _ = std::fs::remove_file(&path);
-                self.maps.changed();
+                let _ = std::fs::remove_file(&written);
+                // A region written in place was drawn as it arrived and is
+                // gone now; one written beside the old was never seen.
+                if !replaces {
+                    self.maps.changed();
+                }
                 return Err(error);
             }
         };
@@ -839,6 +863,101 @@ mod tests {
             "no part file left"
         );
         assert_eq!(maps.headers()[0].bounds, w.bounds);
+    }
+
+    /// Cut the fixture's box of `w` under `profile` into `dir` under the
+    /// name the autoload gives it: a region installed before.
+    fn installed(serve: &Serve, dir: &Path, w: &MapWant, profile: u8) -> PathBuf {
+        let archive =
+            Archive::from_source(HttpRange::new(&serve.url("o.pmtiles"))).expect("archive");
+        let opts = leviculum_mapcut::cut::CutOptions {
+            bounds: w.bounds,
+            zooms: w.zooms.0..=w.zooms.1,
+            profile,
+            attribution: "test".to_string(),
+            notice: "test".to_string(),
+            threads: 1,
+            locale: None,
+            buildings: false,
+            pois: false,
+            round: leviculum_mapcut::cut::ROUND,
+        };
+        let path = dir.join(auto_name(&w.bounds, w.zooms));
+        let file = File::create(&path).expect("create");
+        leviculum_mapcut::cut::cut(&archive, &opts, BufWriter::new(file)).expect("cut");
+        path
+    }
+
+    /// The profile of the region file at `path`.
+    fn profile_of(path: &Path) -> u8 {
+        Region::open(File::open(path).expect("open"))
+            .expect("region")
+            .header()
+            .profile
+    }
+
+    /// A load that replaces an installed region writes beside it and
+    /// takes its place only once the new file verifies (1727, the audit
+    /// of 1707): the link breaking mid-body leaves the old region byte
+    /// for byte, and a later load that succeeds replaces it, no part
+    /// file left.
+    #[test]
+    fn a_load_that_breaks_leaves_the_region_it_was_to_replace() {
+        let serve = Serve::start(vec![("o.pmtiles".into(), FIXTURE.to_vec())]).expect("serve");
+        let w = want(112_615_000);
+        // What a whole load sends, measured on a directory of its own.
+        let measure = tempfile::tempdir().expect("tmp");
+        let mut loader = Loader::new(
+            Maps::new(Some(measure.path().to_path_buf())),
+            Source::Url(serve.url("o.pmtiles")),
+            1 << 30,
+        );
+        loader.ask(w.clone(), 0);
+        assert!(matches!(
+            settle(&mut loader, 0).as_slice(),
+            [Step::Done { .. }]
+        ));
+        let whole = serve.sent();
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = installed(&serve, dir.path(), &w, leviculum_map::profile::CUT_1);
+        let old = std::fs::read(&path).expect("read");
+        assert_eq!(profile_of(&path), leviculum_map::profile::CUT_1);
+        let maps = Maps::new(Some(dir.path().to_path_buf()));
+        let mut loader = Loader::new(maps.clone(), Source::Url(serve.url("o.pmtiles")), 1 << 30);
+        serve.drop_at(Some(serve.sent() + whole / 2));
+        loader.ask(w.clone(), 0);
+        let steps = settle(&mut loader, 0);
+        assert!(
+            matches!(steps.as_slice(), [Step::Failed { .. }]),
+            "{steps:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still there"),
+            old,
+            "byte for byte"
+        );
+        let names = |d: &Path| -> Vec<String> {
+            let mut n: Vec<String> = std::fs::read_dir(d)
+                .expect("dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        };
+        let name = auto_name(&w.bounds, w.zooms);
+        assert_eq!(names(dir.path()), std::slice::from_ref(&name), "no part file left");
+
+        serve.drop_at(None);
+        loader.ask(w.clone(), BACKOFF_FIRST_MS);
+        let steps = settle(&mut loader, BACKOFF_FIRST_MS);
+        let [Step::Done { landed, .. }] = steps.as_slice() else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(landed.name, name);
+        assert_eq!(names(dir.path()), [name], "replaced in place");
+        assert_eq!(profile_of(&path), leviculum_map::profile::CUT_2);
+        assert_ne!(std::fs::read(&path).expect("read"), old);
     }
 
     #[test]

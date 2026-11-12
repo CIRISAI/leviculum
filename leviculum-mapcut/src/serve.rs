@@ -34,6 +34,9 @@ struct Shared {
     /// `None` for no hold (1610).
     hold: Mutex<Option<u64>>,
     released: Condvar,
+    /// The body byte every answer drops its connection at, `None` for
+    /// none (1727): a link that breaks mid-download.
+    drop_at: Mutex<Option<u64>>,
 }
 
 #[derive(Default)]
@@ -62,6 +65,7 @@ impl Serve {
             sent: AtomicU64::new(0),
             hold: Mutex::new(None),
             released: Condvar::new(),
+            drop_at: Mutex::new(None),
         });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -121,6 +125,19 @@ impl Serve {
         self.shared.released.notify_all();
     }
 
+    /// Close every answer's connection once `bytes` body bytes are
+    /// written in all, mid-body, and every later answer's before its
+    /// first body byte; `None` serves whole again (1727): a link that
+    /// breaks part way through a download, for the test that the region
+    /// it was to replace survives.
+    pub fn drop_at(&self, bytes: Option<u64>) {
+        *self
+            .shared
+            .drop_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = bytes;
+    }
+
     /// Lift a [`hold_at`](Self::hold_at).
     pub fn release(&self) {
         *self
@@ -159,7 +176,25 @@ fn send(shared: &Shared, stream: &mut TcpStream, body: &[u8]) -> std::io::Result
     let mut rest = body;
     while !rest.is_empty() {
         let room = held(shared);
-        let take = rest.len().min(CHUNK).min(room);
+        let cut = *shared
+            .drop_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let left = match cut {
+            Some(at) => at.saturating_sub(shared.sent.load(Ordering::SeqCst)),
+            None => u64::MAX,
+        };
+        if left == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the link broke (Serve::drop_at)",
+            ));
+        }
+        let take = rest
+            .len()
+            .min(CHUNK)
+            .min(room)
+            .min(usize::try_from(left).unwrap_or(usize::MAX));
         let (chunk, after) = rest.split_at(take);
         pace(shared, rate, chunk.len());
         stream.write_all(chunk)?;

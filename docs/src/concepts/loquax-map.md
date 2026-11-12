@@ -823,11 +823,12 @@ installed region cut the old way from a new one). The autoload and
 `leviculum-map-tool cut` write profile 2; a region whose header still
 says profile 1 no longer counts as covering the screen
 (`loquax/src/ui/viewload.rs`), so an autoloaded one is asked for again
-when a view shows it and is rewritten under its own name: the file is
-replaced from its first byte and draws what has arrived (1291), so the
-area repaints once, at a download the size of the new region (up to 31 %
-more than the old one on the fixtures' boxes). Offline the load fails
-before the file is touched and the old region keeps drawing. A
+when a view shows it and is rewritten under its own name: the new file
+is written beside the old one and renamed over it once it verifies
+(1727), so the old region draws until then and the area repaints once,
+at a download the size of the new region (up to 31 % more than the old
+one on the fixtures' boxes). A load that fails, offline or on a link that
+breaks mid-download, leaves the old region as it was. A
 hand-placed region is never deleted: it stays and draws, and a fresh
 autoloaded region lands beside it. A region flashed onto the M9 is not
 autoloaded; it draws as it is until it is flashed again.
