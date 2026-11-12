@@ -1404,3 +1404,40 @@ fn the_fixture_archives_measure_their_pois() {
         );
     }
 }
+
+/// A line whose vertices lie far outside the tile (1727, audit of 1707):
+/// the joined-end search walks the cells of every segment's box, which
+/// for a segment of 3·10^8 units each way was 5·10^12 cells, so the cut
+/// never returned. Clipped to the tile and its stated window it returns
+/// at once, and the line stays in the tile.
+#[test]
+fn a_line_reaching_far_past_the_tile_is_cut_at_once() {
+    let far = 300_000_000;
+    let raw = Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            layer(
+                "roads",
+                vec![(
+                    LINESTRING,
+                    "major_road",
+                    line(&[[-far, -far], [2048, 2048], [far, far]]),
+                )],
+            ),
+        ],
+    }
+    .encode_to_vec();
+    let layers = leviculum_map::profile::layers(leviculum_map::profile::CUT_1, 15)
+        .expect("profile 1 at z15");
+    assert!(layers.tolerance > 0, "the held simplification runs");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(cut_tile(&raw, layers).map(|(blob, st)| (blob.is_some(), st)));
+    });
+    let (has_blob, st) = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the cut returns in under one second")
+        .expect("cut");
+    assert!(has_blob);
+    assert_eq!(st.features_out, 2, "the earth and the road: {st:?}");
+}

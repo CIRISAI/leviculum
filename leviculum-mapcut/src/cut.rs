@@ -407,10 +407,27 @@ pub fn footprints(parts: &[Vec<Vec<Pt>>], st: &mut ZoomStats) -> Vec<Vec<Vec<(i1
 struct LineEnds {
     /// Cell (x >> 7, y >> 7) to the distinct line ends in it.
     cells: HashMap<(i32, i32), Vec<Pt>>,
+    /// The window the search looks in, both ends included
+    /// ([`held_window`]).
+    window: (i32, i32),
+}
+
+/// The window the joined-end search looks in (1727), in tile units of an
+/// `extent`-wide tile: the tile and one tile's width all round it, the
+/// range the cut clamps its output to. A line end outside it is no
+/// anchor, and a segment's search stops at its edge, so a source line
+/// running 10^8 units past the tile costs the search no more than one
+/// crossing the window (the audit of 1707 found such a line held the cut
+/// for ever, its segments' boxes 10^12 cells).
+fn held_window(extent: i32) -> (i32, i32) {
+    (-extent, 2 * extent - 1)
 }
 
 impl LineEnds {
-    fn gather(features: &[mvt::SourceFeature], layers: &ZoomLayers) -> Self {
+    fn gather(features: &[mvt::SourceFeature], layers: &ZoomLayers, extent: i32) -> Self {
+        let window = held_window(extent);
+        let inside =
+            |p: Pt| (window.0..=window.1).contains(&p[0]) && (window.0..=window.1).contains(&p[1]);
         let mut ends: Vec<Pt> = Vec::new();
         for f in features {
             if f.kind != Kind::Line || !layers.keeps(f.class) {
@@ -419,8 +436,11 @@ impl LineEnds {
             for part in &f.parts {
                 for line in part {
                     if line.len() >= 2 {
-                        ends.push(line[0]);
-                        ends.push(line[line.len() - 1]);
+                        ends.extend(
+                            [line[0], line[line.len() - 1]]
+                                .into_iter()
+                                .filter(|&p| inside(p)),
+                        );
                     }
                 }
             }
@@ -431,7 +451,7 @@ impl LineEnds {
         for e in ends {
             cells.entry((e[0] >> 7, e[1] >> 7)).or_default().push(e);
         }
-        Self { cells }
+        Self { cells, window }
     }
 
     /// The anchors of `line`: every end of another line that rests on a
@@ -441,9 +461,19 @@ impl LineEnds {
     fn anchors_of(&self, line: &[Pt]) -> Vec<(usize, Pt)> {
         let (first, last) = (line[0], line[line.len() - 1]);
         let mut out = Vec::new();
+        // The segment's box a unit wider each way, clipped to the window:
+        // no anchor lies outside it ([`LineEnds::gather`]).
+        let (lo, hi) = self.window;
+        let clip = |a: i32, b: i32| {
+            let (a, b) = (a.min(b).saturating_sub(1), a.max(b).saturating_add(1));
+            (a.max(lo), b.min(hi))
+        };
         for (i, w) in line.windows(2).enumerate() {
-            let (x0, x1) = (w[0][0].min(w[1][0]) - 1, w[0][0].max(w[1][0]) + 1);
-            let (y0, y1) = (w[0][1].min(w[1][1]) - 1, w[0][1].max(w[1][1]) + 1);
+            let (x0, x1) = clip(w[0][0], w[1][0]);
+            let (y0, y1) = clip(w[0][1], w[1][1]);
+            if x0 > x1 || y0 > y1 {
+                continue;
+            }
             for cy in (y0 >> 7)..=(y1 >> 7) {
                 for cx in (x0 >> 7)..=(x1 >> 7) {
                     for &e in self.cells.get(&(cx, cy)).map_or(&[][..], Vec::as_slice) {
@@ -554,7 +584,7 @@ pub fn cut_tile_full(
     // extent holds every joined line end and keeps the tile-edge strip
     // exact; the region zooms (coarser extent) stay as they were, their
     // own grid dominates there (1707 item 3).
-    let held = (k == 0 && tol > 0).then(|| LineEnds::gather(&decoded.features, &layers));
+    let held = (k == 0 && tol > 0).then(|| LineEnds::gather(&decoded.features, &layers, extent));
     let mut feats: Vec<write::Feature> = Vec::new();
     let mut building_parts: Vec<Vec<Vec<Pt>>> = Vec::new();
     for f in decoded.features {

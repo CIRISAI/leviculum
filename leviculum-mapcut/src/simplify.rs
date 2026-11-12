@@ -8,14 +8,50 @@ pub type Pt = [i32; 2];
 /// Twice the squared distance test: whether `p` lies further than `tol`
 /// from the line through `a` and `b` (from `a` when they coincide).
 fn beyond(p: Pt, a: Pt, b: Pt, tol: i64) -> bool {
-    let (dx, dy) = (i64::from(b[0] - a[0]), i64::from(b[1] - a[1]));
-    let (px, py) = (i64::from(p[0] - a[0]), i64::from(p[1] - a[1]));
-    let len2 = dx * dx + dy * dy;
+    let (dx, dy) = (delta(a[0], b[0]), delta(a[1], b[1]));
+    let (px, py) = (delta(a[0], p[0]), delta(a[1], p[1]));
+    let len2 = (dx * dx + dy * dy).unsigned_abs();
+    let tol2 = u128::from(tol.unsigned_abs()).pow(2);
     if len2 == 0 {
-        return px * px + py * py > tol * tol;
+        return (px * px + py * py).unsigned_abs() > tol2;
     }
-    let cross = i128::from(dx * py - dy * px);
-    cross * cross > i128::from(tol * tol) * i128::from(len2)
+    // cross^2 needs up to 132 bits at the extremes: one that does not fit
+    // is beyond any tolerance.
+    let cross = (dx * py - dy * px).unsigned_abs();
+    cross
+        .checked_mul(cross)
+        .is_none_or(|c2| c2 > tol2.saturating_mul(len2))
+}
+
+/// `to - from`, widened (1727): two `i32` coordinates differ by up to
+/// 2^32, and the product of two such differences needs 66 bits, so every
+/// distance test computes in 128 bits. A source tile is free to hold any
+/// `i32` coordinate.
+fn delta(from: i32, to: i32) -> i128 {
+    i128::from(to) - i128::from(from)
+}
+
+/// The inner vertex of `pts[s..=e]` farthest from the chord `s`-`e`
+/// (from `s` where the chord is a point), the first of equals; `s` when
+/// every inner vertex lies on the chord. Squared distances times the
+/// chord's squared length are compared, exactly, as [`beyond`] tests.
+fn farthest(pts: &[Pt], s: usize, e: usize) -> usize {
+    let (a, b) = (pts[s], pts[e]);
+    let (dx, dy) = (delta(a[0], b[0]), delta(a[1], b[1]));
+    let mut best = (0u128, s);
+    for (i, p) in pts.iter().enumerate().take(e).skip(s + 1) {
+        let (px, py) = (delta(a[0], p[0]), delta(a[1], p[1]));
+        let d = if dx == 0 && dy == 0 {
+            (px * px + py * py).unsigned_abs()
+        } else {
+            let c = (dx * py - dy * px).unsigned_abs();
+            c.saturating_mul(c)
+        };
+        if d > best.0 {
+            best = (d, i);
+        }
+    }
+    best.1
 }
 
 /// Douglas-Peucker over an open line: the end points stay, an inner
@@ -34,21 +70,7 @@ pub fn douglas_peucker(pts: &[Pt], tol: i64) -> Vec<Pt> {
         }
         // The farthest vertex, by the same exact comparison as the test.
         let (a, b) = (pts[s], pts[e]);
-        let (dx, dy) = (i64::from(b[0] - a[0]), i64::from(b[1] - a[1]));
-        let mut best = (0i128, s);
-        for (i, p) in pts.iter().enumerate().take(e).skip(s + 1) {
-            let (px, py) = (i64::from(p[0] - a[0]), i64::from(p[1] - a[1]));
-            let d = if dx == 0 && dy == 0 {
-                i128::from(px * px + py * py)
-            } else {
-                let c = i128::from(dx * py - dy * px);
-                c * c
-            };
-            if d > best.0 {
-                best = (d, i);
-            }
-        }
-        let i = best.1;
+        let i = farthest(pts, s, e);
         if i > s && beyond(pts[i], a, b, tol) {
             keep[i] = true;
             stack.push((s, i));
@@ -70,17 +92,23 @@ pub const HELD_TOL: i64 = 1;
 /// segment's own span by the exact cross-product test, or on one of its
 /// ends, which with integer coordinates means equal to it.
 pub fn near_segment_half(p: Pt, a: Pt, b: Pt) -> bool {
-    let (dx, dy) = (i64::from(b[0] - a[0]), i64::from(b[1] - a[1]));
-    let (px, py) = (i64::from(p[0] - a[0]), i64::from(p[1] - a[1]));
+    let (dx, dy) = (delta(a[0], b[0]), delta(a[1], b[1]));
+    let (px, py) = (delta(a[0], p[0]), delta(a[1], p[1]));
     let len2 = dx * dx + dy * dy;
     let dot = px * dx + py * dy;
     if len2 == 0 || dot < 0 || dot > len2 {
         // The nearest point is a vertex, at least a whole unit away
         // unless it is the same point.
-        return (px == 0 && py == 0) || (p[0] == b[0] && p[1] == b[1]);
+        return p == a || p == b;
     }
-    let cross = i128::from(dx * py - dy * px);
-    cross * cross * 4 <= i128::from(len2)
+    // |cross| / len is the distance; within half a unit when
+    // 4 cross^2 <= len^2. cross^2 needs up to 130 bits at the extremes,
+    // so compare unsigned, saturating: a saturated side is far off.
+    let cross = (dx * py - dy * px).unsigned_abs();
+    cross
+        .checked_mul(cross)
+        .and_then(|c| c.checked_mul(4))
+        .is_some_and(|c| c <= len2.unsigned_abs())
 }
 
 /// [`douglas_peucker`] with vertices held (1707). An `exact[i]` vertex
@@ -110,21 +138,7 @@ pub fn douglas_peucker_held(
         }
         // The farthest own vertex, as [`douglas_peucker`] finds it.
         let (a, b) = (pts[s], pts[e]);
-        let (dx, dy) = (i64::from(b[0] - a[0]), i64::from(b[1] - a[1]));
-        let mut best = (0i128, s);
-        for (i, p) in pts.iter().enumerate().take(e).skip(s + 1) {
-            let (px, py) = (i64::from(p[0] - a[0]), i64::from(p[1] - a[1]));
-            let d = if dx == 0 && dy == 0 {
-                i128::from(px * px + py * py)
-            } else {
-                let c = i128::from(dx * py - dy * px);
-                c * c
-            };
-            if d > best.0 {
-                best = (d, i);
-            }
-        }
-        let i = best.1;
+        let i = farthest(pts, s, e);
         if i > s && beyond(pts[i], a, b, tol) {
             keep[i] = true;
             stack.push((s, i));
