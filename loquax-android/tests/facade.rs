@@ -1089,7 +1089,32 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
             }
         }
         ugly_in(&session);
-        std::thread::sleep(Duration::from_secs(3));
+        // Pull until one brings nothing new: the archive is wholly on
+        // the phone. The first `done` above can end an early stage of
+        // the open pull when the host is saturated (the full workspace
+        // run), and the fixed three-second settle that stood here then
+        // let the wake's pull inherit the rest of the 800-message
+        // fixture: it said 361 where the test expects 1 (2026-11-12).
+        loop {
+            session.request(Request::Pull).expect("a settling pull");
+            let zero = loop {
+                match session.next_event(Duration::from_millis(500)) {
+                    Some(Event::Sync { state, detail, .. }) if state == "done" => {
+                        break detail == "0"
+                    }
+                    Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                        panic!("a settling pull failed: {detail}")
+                    }
+                    _ => assert!(
+                        std::time::Instant::now() < deadline,
+                        "no settling pull ended"
+                    ),
+                }
+            };
+            if zero {
+                break;
+            }
+        }
         while session.next_event(Duration::ZERO).is_some() {}
         session
     })
