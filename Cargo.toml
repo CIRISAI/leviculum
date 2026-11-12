@@ -10,6 +10,9 @@ members = [
     "leviculum-map",
     "leviculum-mapcut",
     "leviculum-map-tool",
+    # The map store: lnmapcut writes signed piece stores, lnmapd serves
+    # them over HTTP and Reticulum (K4, docs/src/concepts/map-server.md).
+    "lnmapd",
     "leviculum-ui",
     "leviculum-ui-ratatui",
     "leviculum-ui-iced",
@@ -58,6 +61,7 @@ default-members = [
     "leviculum-map",
     "leviculum-mapcut",
     "leviculum-map-tool",
+    "lnmapd",
     "leviculum-ui",
     "leviculum-ui-ratatui",
     "lnomad",

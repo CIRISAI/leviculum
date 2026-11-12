@@ -3411,6 +3411,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnmapd"
+version = "0.10.0-dev.10"
+dependencies = [
+ "axum",
+ "clap",
+ "hex",
+ "leviculum-core",
+ "leviculum-map",
+ "leviculum-mapcut",
+ "leviculum-std",
+ "lnomad",
+ "rmpv",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "lnomad"
 version = "0.1.7"
 dependencies = [
