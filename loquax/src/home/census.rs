@@ -33,10 +33,10 @@
 //! bounded by SQLite's own `cache_size`), `answered`, how many engines'
 //! answers the line holds (one under [`ANSWER_WAIT`] passed without them),
 //! and two wake counts since the start (order 1723): `turns`, the daemon
-//! loop's, and `engine_ticks`, the answering engines' ticks summed. An idle mailbox wakes a few times a second;
-//! a loop or a tick deadline that spins shows as a count far above that,
-//! measured in wakes and not in CPU time, so the host's speed does not move
-//! it.
+//! loop's, and `engine_ticks`, the answering engines' ticks summed. An idle
+//! mailbox wakes a few times a second; a loop or a tick deadline that spins
+//! shows as a count far above that, measured in wakes and not in CPU time,
+//! so the host's speed does not move it.
 //!
 //! [`RUN_LOCALS`] maps every `let mut` of the daemon's `run` to the column
 //! that counts it, and a unit test reads `run` out of its source: a table
@@ -362,6 +362,34 @@ mod tests {
         assert!(line.contains(" tracked_n=2 "), "{line}");
         assert!(
             line.ends_with(" answered=2 turns=9 engine_ticks=5"),
+            "{line}"
+        );
+    }
+
+    /// 1732: a census without answers says so and counts no tick; two
+    /// answers are counted, and their ticks sum without wrapping.
+    #[test]
+    fn the_tail_counts_the_answers_and_saturates_the_ticks() {
+        let mut census = MailboxCensus {
+            turns: 3,
+            ..MailboxCensus::default()
+        };
+        let line = census.line();
+        assert!(
+            line.ends_with(" answered=0 turns=3 engine_ticks=0"),
+            "{line}"
+        );
+        census.engine(&crate::outbox::EngineCensus {
+            ticks: u64::MAX,
+            ..Default::default()
+        });
+        census.engine(&crate::outbox::EngineCensus {
+            ticks: 7,
+            ..Default::default()
+        });
+        let line = census.line();
+        assert!(
+            line.ends_with(" answered=2 turns=3 engine_ticks=18446744073709551615"),
             "{line}"
         );
     }
