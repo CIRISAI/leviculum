@@ -180,6 +180,9 @@ skip  leviculum-map blend                   # the blended world projection in-pr
 skip  leviculum-map region                    # reads the committed region, but the subject is the reader and the draw (golden counts)
 skip  leviculum-map timezones                 # the zone lookup, TZif and POSIX readers and the board table; reads host tzdata, takes seconds; subject is the code
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
+skip  leviculum-map elevation               # reads the committed Erg Chebbi height pack, but the subject is the height format and its reader
+skip  leviculum-map elevation_alloc         # the height reader against hostile lengths under a counting allocator; subject is the code
+skip  leviculum-map-tool heights            # the GLO-30 height cut over synthetic cells written to a temp dir; subject is the code
 skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
 skip  leviculum-mapcut geometry               # cuts the fixture and holds joins, buffers and goldens; subject is the code
 skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load
@@ -313,6 +316,7 @@ skip  lnmapd          fetch_budget               # the budgeted prefix fetch ove
 skip  lnmapd          http_serve                 # binds loopback sockets under a tokio runtime; origin and front-door cache
 skip  lnmapd          node_integ                 # tokio runtime, in-process daemon, IPC and the lev.maps node
 skip  lnmapd          lnmapcut_bin               # spawns the lnmapcut binary over a temp store
+skip  lnmapd          store_elevation            # splits the committed Erg Chebbi height pack into a signed store and spawns lnmapcut; subject is the store code
 skip  lnpnd           client_verbose_stderr      # spawns the shipped binary to read its stderr: a process, so not admissible however fast
 skip  lnpnd           control_permission         # binds sockets under a tokio runtime
 skip  lnpnd           event_log_analysis         # spawns the lnpnd binary over a temp-dir log
