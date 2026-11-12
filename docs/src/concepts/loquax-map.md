@@ -631,11 +631,12 @@ from the Protomaps archive, and the committed fixtures stay version 1 to
 The cut (`leviculum-mapcut/src/cut.rs`, `footprints`) takes the
 `buildings` layer of each z15 source tile, the same decode as the tile's
 blob, and keeps every building piece the tile holds, a building across a
-tile edge once in each tile as that tile's piece. Each ring is simplified
-at half a pixel, 8 sub-pixels or about 1.5 m, as profile 1 simplifies
-every other class at z15; buildings are four to six vertices each, so
-coarser tolerances save little (study, section 1). A ring that collapses
-under it goes: a hole on its own, an outer ring with its footprint. A
+tile edge once in each tile as that tile's piece. Since 1707 the rings
+are not simplified at all: footprints are drawn from z16 only, always
+overzoomed, and the old half-pixel tolerance put corners 8 units (1.1 m
+in Frankfurt, 4 px at a z18 view) off the data; exact corners cost the
+Römer box 36 % more section bytes (78,368 to 106,569). A zero-area ring
+still goes: a hole on its own, an outer ring with its footprint. A
 footprint over the M9's capacities would be simplified again at doubled
 tolerance up to four pixels; none is in the two boxes below.
 `leviculum-map-tool cut` cuts buildings by default (`--buildings`), and
@@ -806,6 +807,30 @@ device could not hold whole (4,096 vertices, 1,024 rings, the M9's
 capacities) is simplified again at doubled tolerance up to four pixels,
 long lines are cut into pieces, and parts are packed into as few features
 as fit, so no feature is skipped as an overflow on the device.
+
+**Layer profile 2** (1707) keeps profile 1's tables with one change: the
+deepest zoom of the region — the only tiles a view overzooms — is not
+simplified (tolerance 0, extent 4,096), because overzoom magnifies the
+half pixel past a pixel (4 px at a z18 view of z15 data, 16 px at z20)
+and road ends visibly parted from the ways they join. At the simplified
+zooms the cut now also holds every line end that rests on another line
+in the source to within one unit of it after the cut, and keeps the
+64-unit tile-edge strip on the source line, so the two copies of a line
+in neighbouring tiles' buffers agree instead of drawing doubled
+(`leviculum-mapcut/src/simplify.rs`, `douglas_peucker_held`; the cut
+does this under any profile — the profile byte is what tells an
+installed region cut the old way from a new one). The autoload and
+`leviculum-map-tool cut` write profile 2; a region whose header still
+says profile 1 no longer counts as covering the screen
+(`loquax/src/ui/viewload.rs`), so an autoloaded one is asked for again
+when a view shows it and is rewritten under its own name: the file is
+replaced from its first byte and draws what has arrived (1291), so the
+area repaints once, at a download the size of the new region (up to 31 %
+more than the old one on the fixtures' boxes). Offline the load fails
+before the file is touched and the old region keeps drawing. A
+hand-placed region is never deleted: it stays and draws, and a fresh
+autoloaded region lands beside it. A region flashed onto the M9 is not
+autoloaded; it draws as it is until it is flashed again.
 
 **Projection.** The world coordinate is two `u32`, 2^32 units around the
 world: 9.3 mm at the equator; at z15 a pixel is 512 units (4.78 m at the

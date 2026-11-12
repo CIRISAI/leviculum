@@ -130,7 +130,14 @@ fn held(regions: &[Header], at: World, zoom: u8) -> bool {
     let p = unproject(at);
     regions.iter().any(|h| {
         let b = &h.bounds;
-        !arriving(h)
+        // A region cut under an old profile does not hold the screen
+        // (1707): its deepest zoom was simplified, which every deeper
+        // view magnifies past a pixel. The screen asks for its box
+        // again; an autoloaded region is rewritten under its own name
+        // (`mapload::auto_name`) and draws what has arrived meanwhile
+        // (1291); a hand-placed file stays beside the new autoloaded one.
+        h.profile >= leviculum_map::profile::CUT_2
+            && !arriving(h)
             && h.min_zoom <= zoom
             && h.max_zoom >= zoom
             && (b.west..=b.east).contains(&p.lon_e7)
@@ -397,7 +404,7 @@ mod tests {
             bounds,
             min_zoom: zooms.0,
             max_zoom: zooms.1,
-            profile: 1,
+            profile: leviculum_map::profile::CUT_2,
             attribution: (0, 0),
             notice: (0, 0),
             tiles: 0,
@@ -424,6 +431,20 @@ mod tests {
         let w = wants(&view, &[r], false, None);
         assert_eq!(w.share, 0.0);
         assert!(w.here.is_empty() && w.ahead.is_empty(), "{w:?}");
+    }
+
+    /// 1707: a region cut under the old profile 1 no longer holds the
+    /// screen — its deepest zoom was simplified, which overzoom shows —
+    /// so its box is asked for again and an autoloaded region is
+    /// rewritten under its own name.
+    #[test]
+    fn an_old_profile_region_no_longer_holds_the_screen() {
+        let (mut r, at) = florence();
+        let view = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        assert_eq!(uncovered(&view, &[r]), 0.0);
+        r.profile = leviculum_map::profile::CUT_1;
+        assert_eq!(uncovered(&view, &[r]), 1.0);
+        assert!(!wants(&view, &[r], false, None).here.is_empty());
     }
 
     #[test]
