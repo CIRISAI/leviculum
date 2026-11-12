@@ -877,6 +877,7 @@ dependencies = [
  "libc",
  "md-5",
  "rand_core",
+ "rmp",
  "rmp-serde",
  "rmpv",
  "serde",
