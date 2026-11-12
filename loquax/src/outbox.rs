@@ -228,6 +228,8 @@ pub struct EngineCensus {
     pub unheard: usize,
     /// Events not yet taken by the daemon.
     pub events_queued: usize,
+    /// The engine's ticks since it started (order 1723).
+    pub ticks: u64,
 }
 
 /// What the engine reports back.

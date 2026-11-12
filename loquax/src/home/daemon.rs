@@ -590,7 +590,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         leviculum_std::heap_accounting::configure_sampler_from_env();
     }
 
+    // Every wake of the loop below, for the census (1723).
+    let mut turns: u64 = 0;
     let outcome = loop {
+        turns = turns.saturating_add(1);
         tokio::select! {
             Some(request) = requests.recv() => {
                 // A device is talking: its answers' events are read at once.
@@ -918,6 +921,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             pn_asks: pn_asks.len(),
                             home: census.take(),
                             store: &store,
+                            turns,
                         };
                         let line = held.census();
                         line.log(if dump { "signal" } else { "period" });
@@ -1534,6 +1538,7 @@ struct Held<'a, O> {
     pn_asks: usize,
     home: Option<crate::outbox::EngineCensus>,
     store: &'a Store,
+    turns: u64,
 }
 
 impl<O> Held<'_, O> {
@@ -1563,6 +1568,7 @@ impl<O> Held<'_, O> {
             rss_kb: leviculum_std::census::rss_kb(),
             nodes: 1 + self.groups.len(),
             archive_kb: self.store.archive_bytes().unwrap_or(0) / 1024,
+            turns: self.turns,
             ..Default::default()
         };
         for answer in self

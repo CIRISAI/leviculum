@@ -349,6 +349,10 @@ pub struct Engine {
     /// The recipient whose announce the event being handled repeats, set
     /// for the length of one [`Engine::on_event`].
     replayed: Option<[u8; 16]>,
+    /// Calls of [`Engine::on_tick`] this run (order 1723): an idle engine
+    /// ticks every `POLL_INTERVAL_MS`, so a tick deadline stuck at zero shows
+    /// here as a count far above that pace, whatever the host's speed.
+    ticks: u64,
 }
 
 impl Engine {
@@ -378,6 +382,7 @@ impl Engine {
             says_home: false,
             recipients: BTreeMap::new(),
             replayed: None,
+            ticks: 0,
         }
     }
 
@@ -2043,6 +2048,7 @@ impl Engine {
             recipients: self.recipients.len(),
             unheard: self.unheard.len(),
             events_queued: self.events.len(),
+            ticks: self.ticks,
         }
     }
 
@@ -2054,6 +2060,7 @@ impl Engine {
         core: &mut NodeCore<R, C, S>,
         now_ms: u64,
     ) -> TickOutput {
+        self.ticks = self.ticks.saturating_add(1);
         if matches!(self.state, State::Client(_)) {
             return self.client_tick(core, now_ms);
         }
