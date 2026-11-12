@@ -822,16 +822,27 @@ does this under any profile — the profile byte is what tells an
 installed region cut the old way from a new one). The autoload and
 `leviculum-map-tool cut` write profile 2; a region whose header still
 says profile 1 no longer counts as covering the screen
-(`loquax/src/ui/viewload.rs`), so an autoloaded one is asked for again
-when a view shows it and is rewritten under its own name: the new file
+(`loquax/src/ui/viewload.rs`). A view over it asks for that region's own
+box and zooms, and nothing else over it (1727), so an autoloaded one is
+loaded again under its own name and replaced, never joined by a second
+region over the same ground: the new file
 is written beside the old one and renamed over it once it verifies
 (1727), so the old region draws until then and the area repaints once,
 at a download the size of the new region (up to 31 % more than the old
 one on the fixtures' boxes). A load that fails, offline or on a link that
-breaks mid-download, leaves the old region as it was. A
-hand-placed region is never deleted: it stays and draws, and a fresh
-autoloaded region lands beside it. A region flashed onto the M9 is not
-autoloaded; it draws as it is until it is flashed again.
+breaks mid-download, leaves the old region as it was.
+
+A hand-placed region of profile 1 is never deleted, and the user sees no
+mark on it (decided 2026-11-12, 1727, on the audit of 1707). Online, a
+view over it asks for its box as above, the profile 2 copy lands beside
+it under the autoload's name, and of two regions as deep the newer
+profile is drawn on top (`leviculum_map::choice::drawn`), so the map
+shows the unsimplified deepest zoom with nothing for the user to do.
+Offline, the old region is the best map there is and draws as before. A
+mark would name a layer profile, which says nothing to someone reading a
+map and asks for no action they could take, so it would be noise on the
+screen. A region flashed onto the M9 is not autoloaded; it draws as it
+is until it is flashed again.
 
 **Projection.** The world coordinate is two `u32`, 2^32 units around the
 world: 9.3 mm at the equator; at z15 a pixel is 512 units (4.78 m at the

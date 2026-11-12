@@ -940,6 +940,42 @@ fn every_region_in_a_view_is_drawn_the_deepest_last() {
     );
 }
 
+/// Of two regions of the same box and deepest zoom, the newer layer
+/// profile is drawn on top, whatever the file names (1727): a hand-placed
+/// region cut under profile 1 (`florence.lmr`) and the autoloaded profile
+/// 2 copy the view asked for beside it (`auto-…`, which sorts first by
+/// name) show the copy's unsimplified deepest zoom, not the old one.
+#[test]
+fn the_newer_profile_is_drawn_over_the_same_box() {
+    let header = |profile: u8| Header {
+        bounds: Bounds {
+            west: 86_000_000,
+            south: 500_000_000,
+            east: 87_600_000,
+            north: 502_000_000,
+        },
+        min_zoom: 10,
+        max_zoom: 15,
+        profile,
+        attribution: (0, 0),
+        notice: (0, 0),
+        tiles: 0,
+        index: 0,
+        len: 0,
+        labels: None,
+        buildings: None,
+        pois: None,
+        streamed: false,
+    };
+    let regions = [
+        ("florence.lmr", header(leviculum_map::profile::CUT_1)),
+        ("auto-860000000.lmr", header(leviculum_map::profile::CUT_2)),
+    ];
+    let view = Viewport::new(project(LatLon::from_degrees(50.1, 8.68)), 16, 400, 200);
+    let order = drawn(regions.iter().map(|(n, h)| (*n, h)), &view);
+    assert_eq!(order, [0, 1], "the profile 2 copy last, on top");
+}
+
 /// A tile not arrived yet is stood in for by a coarser one, placed so that
 /// its part over the tile lands where the tile would (1291).
 #[test]
