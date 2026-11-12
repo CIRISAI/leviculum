@@ -2541,8 +2541,16 @@ fn send_through_facade(peer: &str, body: &str, secs: u64) {
             }),
         ))
         .expect("Messages");
-        let bubble = messages.messages.iter().find(|m| m.body == body);
-        if let Some(bubble) = bubble.filter(|b| !b.id.is_empty()) {
+        // While the send settles the list may hold two bubbles for one
+        // body: the optimistic "sending" one, id still empty, and the
+        // home's copy beside it. The home took it when ANY row carries
+        // an id; finding only the first row waited out the transitional
+        // pair under a saturated host (2026-11-12).
+        let bubble = messages
+            .messages
+            .iter()
+            .find(|m| m.body == body && !m.id.is_empty());
+        if let Some(bubble) = bubble {
             assert_ne!(bubble.state, "failed", "{bubble:?}");
             return;
         }
