@@ -85,6 +85,12 @@ registered per path (`register_request_handler`,
   whose automatic bz2 takes the ~35 % measured above in flight.
 - `/probe` — no request data; 4 KiB of fixed bytes, the speed probe.
 
+Superseded in part by [The map server](map-server.md) (K4, 1686):
+the catalogue, the probe and the ladder below stand, but the wire
+asks are now the signed index (`/index`) and content-addressed
+pieces (`/piece`), which add per-piece verification against the
+pinned key and coarse-before-fine inside a time budget.
+
 **How it is found:** by its announce, which every zero-config client
 hears through the shipped TCP entry ([Zero configuration](
 zero-config.md) — `leviculum.network` is the list's first entry). The
