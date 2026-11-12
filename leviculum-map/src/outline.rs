@@ -1160,17 +1160,20 @@ fn dashes(line: &[Point], on: i64, off: i64) -> Vec<Vec<Point>> {
         let mut at = 0i64;
         while at < len {
             let into = phase % period;
-            let left = match into < on {
-                true => on - into,
-                false => period - into,
+            let drawn = into < on;
+            // Where the dash or the gap `into` lies in ends in the pattern:
+            // one subtraction for both, so a gap is stepped over whole.
+            let end = match drawn {
+                true => on,
+                false => period,
             };
-            let take = left.min(len - at);
+            let take = (end - into).min(len - at);
             let a = Point::new(x0 + (dx * at / len) as i32, y0 + (dy * at / len) as i32);
             let b = Point::new(
                 x0 + (dx * (at + take) / len) as i32,
                 y0 + (dy * (at + take) / len) as i32,
             );
-            if into < on {
+            if drawn {
                 match current {
                     Some(ref mut run) => {
                         if run.last() != Some(&a) {
@@ -1187,10 +1190,10 @@ fn dashes(line: &[Point], on: i64, off: i64) -> Vec<Vec<Point>> {
             phase += take;
         }
     }
+    // Every run starts as two points, so none is a lone point.
     if let Some(run) = current.take() {
         out.push(run);
     }
-    out.retain(|r| r.len() > 1);
     out
 }
 
@@ -1306,4 +1309,104 @@ fn read_names(table: &[u8], place: Place<'_>, out: &mut Vec<ViewLabel>) -> Optio
         }
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(x: i32, y: i32) -> Point {
+        Point::new(x, y)
+    }
+
+    /// The pattern on one straight line (1712): `on` drawn, `off` left,
+    /// from the line's first point, each dash a run of its own, the last
+    /// one cut where the line ends.
+    #[test]
+    fn a_dash_is_on_long_and_the_gap_off_long() {
+        assert_eq!(
+            dashes(&[p(0, 0), p(20, 0)], 4, 3),
+            vec![
+                vec![p(0, 0), p(4, 0)],
+                vec![p(7, 0), p(11, 0)],
+                vec![p(14, 0), p(18, 0)],
+            ]
+        );
+        // The pattern's other lengths: 2 on, 5 off.
+        assert_eq!(
+            dashes(&[p(0, 0), p(0, 16)], 2, 5),
+            vec![
+                vec![p(0, 0), p(0, 2)],
+                vec![p(0, 7), p(0, 9)],
+                vec![p(0, 14), p(0, 16)],
+            ]
+        );
+        // A line that ends inside a dash ends the dash there.
+        assert_eq!(
+            dashes(&[p(0, 0), p(9, 0)], 4, 3),
+            vec![vec![p(0, 0), p(4, 0)], vec![p(7, 0), p(9, 0)]]
+        );
+        // A diagonal is measured along itself: 3, 4, 5.
+        assert_eq!(
+            dashes(&[p(0, 0), p(30, 40)], 25, 25),
+            vec![vec![p(0, 0), p(15, 20)]]
+        );
+    }
+
+    /// The pattern carries on across the line's segments: a dash that
+    /// reaches a corner goes round it as one run, and a gap that reaches
+    /// one goes on into the next segment.
+    #[test]
+    fn the_pattern_carries_across_the_segments() {
+        // 2 along x, then down: the first dash turns the corner.
+        assert_eq!(
+            dashes(&[p(0, 0), p(2, 0), p(2, 10)], 4, 3),
+            vec![vec![p(0, 0), p(2, 0), p(2, 2)], vec![p(2, 5), p(2, 9)]]
+        );
+        // 5 along x: the gap starts on the first segment and ends on the
+        // second, 2 into it.
+        assert_eq!(
+            dashes(&[p(0, 0), p(5, 0), p(5, 10)], 4, 3),
+            vec![
+                vec![p(0, 0), p(4, 0)],
+                vec![p(5, 2), p(5, 6)],
+                vec![p(5, 9), p(5, 10)],
+            ]
+        );
+    }
+
+    /// A segment of no length moves nothing: the same line with a point
+    /// repeated anywhere gives the same dashes, and a line of one point,
+    /// or of one point twice, gives none.
+    #[test]
+    fn a_zero_length_segment_moves_nothing() {
+        let plain = dashes(&[p(0, 0), p(2, 0), p(2, 10)], 4, 3);
+        for line in [
+            [p(0, 0), p(0, 0), p(2, 0), p(2, 10)],
+            [p(0, 0), p(2, 0), p(2, 0), p(2, 10)],
+            [p(0, 0), p(2, 0), p(2, 10), p(2, 10)],
+        ] {
+            assert_eq!(dashes(&line, 4, 3), plain, "{line:?}");
+        }
+        assert!(dashes(&[p(3, 3)], 4, 3).is_empty());
+        assert!(dashes(&[p(3, 3), p(3, 3)], 4, 3).is_empty());
+        assert!(dashes(&[], 4, 3).is_empty());
+    }
+
+    /// No pattern at all, a period of nothing, draws the line whole.
+    #[test]
+    fn no_period_draws_the_line_whole() {
+        let line = [p(0, 0), p(5, 0), p(5, 5)];
+        assert_eq!(dashes(&line, 0, 0), vec![line.to_vec()]);
+    }
+
+    /// The integer square root under the dashes' lengths.
+    #[test]
+    fn isqrt_rounds_down() {
+        let got: Vec<u64> = [0, 1, 2, 3, 4, 8, 9, 10, 24, 25, 26, 1 << 40]
+            .iter()
+            .map(|&v| isqrt(v))
+            .collect();
+        assert_eq!(got, [0, 1, 1, 1, 2, 2, 3, 3, 4, 5, 5, 1 << 20]);
+    }
 }
