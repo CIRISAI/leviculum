@@ -1028,7 +1028,7 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1677`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1679`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:363`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
@@ -1220,7 +1220,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6862`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6857`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board

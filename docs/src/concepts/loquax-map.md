@@ -32,10 +32,10 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:193`; a group's copy books its position under
 the writer, not the group, only where a group the reader joined itself
-lists that writer, `copy_writer`, `loquax/src/ui.rs:6741`, else under
+lists that writer, `copy_writer`, `loquax/src/ui.rs:6742`, else under
 the source that signed it; a collector's
 stream row only where the reader chose that collector, and none can be
-chosen yet, `Writers`, `loquax/src/ui.rs:6782`), the screen model keeps
+chosen yet, `Writers`, `loquax/src/ui.rs:6774`), the screen model keeps
 each peer's latest and hands every one to the store (`take_telemetry`,
 `loquax/src/ui.rs:6686`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:3798`) and the positions in a table of

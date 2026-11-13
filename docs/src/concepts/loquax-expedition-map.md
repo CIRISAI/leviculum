@@ -661,7 +661,7 @@ Additions (decided):
      (1687), but only where the copy's source is a group that vouches for
      that writer: one the reader joined itself, by its own Join from any
      of its devices or because it made the group, whose membership lists
-     the writer, not as left (`copy_writer`, `loquax/src/ui.rs:6741`, the
+     the writer, not as left (`copy_writer`, `loquax/src/ui.rs:6742`, the
      audits of 1757 and 1787), and whose `lev` map is the group's own
      word (`Lev::from_fields_of`, 1482). The rule is one function in
      LXMF, `Lev::reading_writer`, which the node helper's telemetry
