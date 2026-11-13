@@ -2951,6 +2951,24 @@ nrf-reproducible:
     bash scripts/check-nrf-reproducible.sh --selftest
     bash scripts/check-nrf-reproducible.sh
 
+# 1801, #232: every visual change rendered, measured and looked at. The
+# phone's map drawn headless through the facade's own call into a Bitmap
+# sized as MapView.java sizes it, for Equal Earth and the globe build: a
+# zoom ladder at fixed centres (Germany, Morocco, the poles, the
+# antimeridian, Berlin and Florence over their fixture regions) and frame
+# sizes (1224x2197, 1080x2400, 1600x2560, 900x560, 2197x1224), five
+# gestures with frame times and heap, and the window's and the terminal's
+# screens at the same sizes; every frame checked by named rules
+# (loquax-android/src/render_walk.rs, docs/src/developer/render-walk.md).
+# Writes OUT/index.html (the contact sheet) and OUT/summary.tsv, default
+# target/render-walk; red on any failed rule. `--quick` is the per-batch
+# walk (70 s warm, measured 2026-11-13), `--selftest` the positive
+# controls (each injected fault red where the clean walk is green, 103 s),
+# `--m9` adds the M9 sim's walks. A measuring tool, never in `guards`.
+[doc('Render map zooms, gestures and screens; check every frame (1801)')]
+render-walk *ARGS:
+    python3 -I scripts/render-walk.py {{ARGS}}
+
 # 1422, #474: the map's frame budget measured (the eye candy study of
 # 2026-11-04, section 4). `REGION` is the Frankfurt region the study cut
 # (LMR3 with names and buildings, sha256 5022565b...a2b7c7a). One MAP_BENCH

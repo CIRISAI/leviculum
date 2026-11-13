@@ -109,6 +109,7 @@
 - [Rust API tutorial](developer/rust-api-tutorial.md)
 - [Rust API specification](developer/rust-api-spec.md)
 - [Embedded integration](developer/embedded.md)
+- [The render walk](developer/render-walk.md)
 - [C API: overview and concepts](c-api/overview.md)
 - [C API: tutorial](c-api/tutorial.md)
 - [C API: how-to](c-api/howto.md)
