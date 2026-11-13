@@ -955,7 +955,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:352`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:6124`).
+  (`loquax/src/ui.rs:6144`).
 
 #### 3. What colour carries and what it must not carry alone
 

@@ -683,7 +683,7 @@ terminal and window get no tab (the second question, answered no for now).
   address field as they are. An announce is kept while the tab is off.
 - **Chat and page hand over.** A NomadNet page link in a chat
   (`<hash>:/page/...`) opens the tab at that page where the host has the
-  tab (`loquax/src/ui.rs:5453`) and is copied for lnomad where not. A
+  tab (`loquax/src/ui.rs:5473`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:456`) when hosted
   (`lnomad/src/app/event.rs:1658`), and Loquax opens that chat for
@@ -835,9 +835,9 @@ as the phone, on by default since 1618.
   the bookmarks and pins to their files. A write and a quit stay the
   core's (`effects_of`).
 - **The keys.** While the tab is in front the core hands keys and the
-  mouse to the browser (`loquax/src/ui.rs:3936`, `loquax/src/ui.rs:3991`),
+  mouse to the browser (`loquax/src/ui.rs:3956`, `loquax/src/ui.rs:4011`),
   so lnomad's whole key table works, its `q` leaves the tab, and the
-  terminal's screen size is the page's (`loquax/src/ui.rs:3989`). `B` and
+  terminal's screen size is the page's (`loquax/src/ui.rs:4009`). `B` and
   the palette's `browse` bring the tab to the front
   (`loquax/src/keys.rs:646`, `browse::open`, `loquax/src/ui/browse.rs:453`);
   with the tab off they say how to switch it on.

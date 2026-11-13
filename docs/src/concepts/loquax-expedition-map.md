@@ -658,10 +658,27 @@ Additions (decided):
      the field loop at lines 1407 to 1426), and its LXMF source is the
      group, so the reader books a plain telemetry field under the writer
      `lev.group_copy` names, not under the group the copy came from
-     (1687), where its group vouches for that writer: a group the reader
-     has joined whose membership lists the writer, not as left
-     (`copy_writer`, `loquax/src/ui.rs:6709`, the audit of 1757). Any
-     other named writer files nothing.
+     (1687), but only where the copy's source is a group that vouches for
+     that writer: one the reader joined itself, by its own Join from any
+     of its devices or because it made the group, whose membership lists
+     the writer, not as left (`copy_writer`, `loquax/src/ui.rs:6741`, the
+     audits of 1757 and 1787). A membership list never joins the reader,
+     an invitation to the sender's own address makes no group, and a copy
+     is judged by the group state from before its own message. A copy
+     whose writer no such group vouches for files no position, and its
+     bubble, its Info and the sender's liveness show none either
+     (`Writers`, `loquax/src/ui.rs:6782`).
+     A copy whose epoch is newer than the membership the reader holds is
+     kept and filed under its writer once that membership comes (the
+     pass of order 1792, 2026-11-13, answering the second audit of 1787:
+     a copy that outruns its list would otherwise lose a member's
+     position for good).
+     A collector's `FIELD_TELEMETRY_STREAM` row names its measurer, a
+     claim of the same kind. It is filed under that measurer only when the
+     deliverer is a collector the reader chose (`UiModel::collectors`).
+     Loquax offers no way to choose one yet, so every row is dropped and
+     named in `tui.log` as `TELEMETRY_ROWS_DROPPED`; how a reader chooses
+     a collector is Lew's to decide.
    - *Home out of reach* (the field): the position announce sealed
      under the group key. Announces travel several hops with no host,
      it is one transmission for all, and only members can read it. The

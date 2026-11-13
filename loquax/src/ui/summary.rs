@@ -139,7 +139,7 @@ impl Summary {
         }
         let mut disorder = false;
         for (index, message) in messages.iter().enumerate().skip(from) {
-            if message.is_report() && super::message_fix(peer, message).is_some() {
+            if message.is_report() && super::peers_own_fix(peer, message).is_some() {
                 if self.reports.len() > super::liveness::CADENCE_GAPS {
                     self.reports.remove(0);
                 }

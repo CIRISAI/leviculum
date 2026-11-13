@@ -11,8 +11,13 @@
 //!   cover; [`read`] files under the source, and only the caller, who
 //!   knows the reader's groups, may file under the claimed writer
 //!   ([`read_as`], [`claimed_writer`]).
-//! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Who measured is the row's
-//!   source hash; the message's source only delivered it (`via`).
+//! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Each row names who
+//!   measured it, and that name is a claim too: anyone can send a stream
+//!   naming anyone. A row is filed under its measurer only where the
+//!   caller says the deliverer is a collector the reader chose
+//!   ([`Rows::Measurers`]); otherwise it is dropped and counted
+//!   ([`Read::dropped_rows`], the audit of 1787). The message's source
+//!   only delivered a row it files (`via`).
 //!
 //! Every reading with a location becomes one [`Fix`]. A blob that does not
 //! decode is [`Unreadable`]: kept raw with its message, and named in
@@ -158,6 +163,20 @@ pub struct Unreadable {
 pub struct Read {
     pub fixes: Vec<Fix>,
     pub unreadable: Vec<Unreadable>,
+    /// The stream rows with a position that were filed under nobody: the
+    /// deliverer is no collector the reader chose ([`Rows::Dropped`]).
+    pub dropped_rows: usize,
+}
+
+/// Whom a `FIELD_TELEMETRY_STREAM` row is filed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rows {
+    /// Under the measurer each row names: the deliverer is a collector
+    /// the reader chose, whose word on who measured counts.
+    Measurers,
+    /// Under nobody: anyone can name anyone in a row, so a stream from a
+    /// deliverer the reader did not choose moves no pin. Only counted.
+    Dropped,
 }
 
 /// Whether the fields carry telemetry at all.
@@ -169,9 +188,10 @@ pub fn has_telemetry(fields: &[Field]) -> bool {
 
 /// The positions in `fields`, from a message whose signed source is
 /// `source`, received at `received_at`: the message's own readings filed
-/// under `source`, whatever writer a `lev.group_copy` names.
+/// under `source`, whatever writer a `lev.group_copy` names, and no
+/// stream row filed at all ([`Rows::Dropped`]).
 pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Read {
-    read_as(source, source, fields, received_at)
+    read_as(source, source, fields, received_at, Rows::Dropped)
 }
 
 /// The writer a group copy names (1687): `lev.group_copy`'s sender. Any
@@ -185,12 +205,15 @@ pub fn claimed_writer(fields: &[Field]) -> Option<leviculum_lxmf::lev::GroupCopy
 
 /// [`read`] with the message's own readings filed under `writer`, which
 /// the caller has established: the source itself, or the member of the
-/// source's group a checked group copy names. `via` stays `source`.
+/// source's group a checked group copy names; and the stream rows as
+/// `rows` says, which the caller has established too. `via` stays
+/// `source`.
 pub fn read_as(
     writer: [u8; 16],
     source: [u8; 16],
     fields: &[Field],
     received_at: Option<i64>,
+    rows: Rows,
 ) -> Read {
     let mut out = Read::default();
     let fix = |peer: [u8; 16], location: Location, telemetry: &[u8]| Fix {
@@ -224,8 +247,8 @@ pub fn read_as(
                 }),
             },
             FIELD_TELEMETRY_STREAM => match decode_stream_field_value(value) {
-                Ok(rows) => {
-                    for (n, row) in rows.iter().enumerate() {
+                Ok(entries) => {
+                    for (n, row) in entries.iter().enumerate() {
                         let Ok(peer) = <[u8; 16]>::try_from(row.source.as_slice()) else {
                             out.unreadable.push(Unreadable {
                                 field: *key,
@@ -235,11 +258,13 @@ pub fn read_as(
                             continue;
                         };
                         match Telemetry::decode(&row.telemetry) {
-                            Ok(telemetry) => {
-                                if let Some(location) = telemetry.location {
+                            Ok(telemetry) => match (telemetry.location, rows) {
+                                (Some(location), Rows::Measurers) => {
                                     out.fixes.push(fix(peer, location, &row.telemetry));
                                 }
-                            }
+                                (Some(_), Rows::Dropped) => out.dropped_rows += 1,
+                                (None, _) => {}
+                            },
                             Err(e) => out.unreadable.push(Unreadable {
                                 field: *key,
                                 detail: format!(
@@ -272,6 +297,17 @@ pub fn unreadable_line(source: &[u8; 16], message_id: &[u8; 32], u: &Unreadable)
         u.field,
         u.len,
         u.detail
+    )
+}
+
+/// `tui.log`'s line for stream rows filed under nobody ([`Rows::Dropped`]):
+/// the source is no collector the reader chose, so who measured them is a
+/// claim nobody vouches for.
+pub fn dropped_rows_line(source: &[u8; 16], message_id: &[u8; 32], rows: usize) -> String {
+    format!(
+        "TELEMETRY_ROWS_DROPPED source={} message={} rows={rows} reason=no-chosen-collector",
+        to_hex(source),
+        to_hex(&message_id[..8]),
     )
 }
 
@@ -786,7 +822,13 @@ mod tests {
             appearance: None,
         });
         let fields = vec![(FIELD_TELEMETRY_STREAM, encode_stream_field_value(&rows))];
-        let read = read(COLLECTOR, &fields, Some(NOW));
+        // From a deliverer the reader did not choose: filed under nobody,
+        // counted (the audit of 1787).
+        let refused = read(COLLECTOR, &fields, Some(NOW));
+        assert!(refused.fixes.is_empty(), "{refused:?}");
+        assert_eq!(refused.dropped_rows, 2);
+        let read = chosen(COLLECTOR, &fields);
+        assert_eq!(read.dropped_rows, 0);
         let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
         assert_eq!(who, vec![(BOB, COLLECTOR), (CAROL, COLLECTOR)]);
         assert_eq!(
@@ -828,7 +870,7 @@ mod tests {
         assert!(read.unreadable.is_empty());
         let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
         assert_eq!(who, [(GROUP, GROUP)], "the signed source, not the claim");
-        let read = read_as(BOB, GROUP, &fields, Some(NOW));
+        let read = read_as(BOB, GROUP, &fields, Some(NOW), Rows::Dropped);
         let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
         assert_eq!(
             who,
@@ -836,6 +878,12 @@ mod tests {
             "the writer measured it; the group delivered the copy"
         );
         assert_eq!(claimed_writer(&[]), None);
+    }
+
+    /// `fields` from `source`, a collector the reader chose: its rows are
+    /// filed under their measurers.
+    fn chosen(source: [u8; 16], fields: &[Field]) -> Read {
+        read_as(source, source, fields, Some(NOW), Rows::Measurers)
     }
 
     fn stream(rows: &[([u8; 16], Location)]) -> Vec<u8> {
@@ -865,9 +913,14 @@ mod tests {
         );
         let line = "◎ position 43.77500 N 11.26100 E (+2 more)";
         let fields = vec![own.clone(), (FIELD_TELEMETRY_STREAM, rows.clone())];
-        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+        assert_eq!(report_line(&chosen(BOB, &fields)), line);
+        assert_eq!(
+            report_line(&read(BOB, &fields, Some(NOW))),
+            "◎ position 43.77500 N 11.26100 E",
+            "rows from a deliverer not chosen are not counted"
+        );
         let fields = vec![(FIELD_TELEMETRY_STREAM, rows), own];
-        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+        assert_eq!(report_line(&chosen(BOB, &fields)), line);
     }
 
     /// Rows alone: none is the sender's, the line names the last row as it
@@ -880,8 +933,12 @@ mod tests {
         ]);
         let fields = vec![(FIELD_TELEMETRY_STREAM, rows)];
         assert_eq!(
-            report_line(&read(COLLECTOR, &fields, Some(NOW))),
+            report_line(&chosen(COLLECTOR, &fields)),
             "◎ position 43.77400 N 11.25800 E (+1 more)"
+        );
+        assert_eq!(
+            report_line(&read(COLLECTOR, &fields, Some(NOW))),
+            "◎ telemetry, no position"
         );
     }
 

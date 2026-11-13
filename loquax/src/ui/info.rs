@@ -88,7 +88,7 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     }
     // A shared position's coordinates and accuracy live here, not in the
     // bubble, which says one sentence (1449 item 5, walk 1 finding 11).
-    if let Some(fix) = super::message_fix(conversation.peer, message) {
+    if let Some(fix) = model.writers().fix(conversation.peer, message) {
         rows.push(InfoRow::new(
             StrId::InfoPlace,
             Text::Raw(crate::telemetry::coordinates(&fix.location)),

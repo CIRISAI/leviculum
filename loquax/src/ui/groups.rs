@@ -605,11 +605,53 @@ impl<B> UiModel<B> {
             .iter()
             .map(|a| self.groups.get(a).cloned())
             .collect();
+        let epoch_before = self.groups.get(&peer).map(|g| g.epoch);
         self.learn_lev(peer, outbound, &lev);
         for (address, was) in touched.into_iter().zip(before) {
             if self.groups.get(&address) != was.as_ref() {
                 self.groups_changed.insert(address);
             }
+        }
+        // A copy that came before the membership of its epoch was filed
+        // under nobody (`copy_writer`); with that membership here it is
+        // judged again (the second audit of 1787, decided in
+        // loquax-expedition-map.md).
+        if let (false, Some(was)) = (outbound, epoch_before) {
+            if self.groups.get(&peer).is_some_and(|g| g.epoch > was) {
+                self.file_early_copies(peer, was);
+            }
+        }
+    }
+
+    /// File the positions of `group`'s copies that name an epoch newer
+    /// than `was`, the epoch the reader knew when they came, under the
+    /// writer the group's membership now vouches for.
+    fn file_early_copies(&mut self, group: [u8; 16], was: u64) {
+        let Some(c) = self.conversations.iter().position(|c| c.peer == group) else {
+            return;
+        };
+        let writers = self.writers();
+        let rows = writers.rows(&group);
+        let mut fixes = Vec::new();
+        for message in &self.conversations[c].messages {
+            let late = !message.outbound
+                && crate::telemetry::claimed_writer(&message.fields)
+                    .is_some_and(|copy| copy.epoch > was);
+            if !late || !crate::telemetry::has_telemetry(&message.fields) {
+                continue;
+            }
+            let Some(writer) = super::copy_writer(writers.groups, group, &message.fields) else {
+                continue;
+            };
+            let received = message.at.map(|at| at.unix_secs);
+            let read = super::read_with(Some(writer), rows, group, &message.fields, received);
+            fixes.extend(read.fixes.into_iter().map(|mut fix| {
+                fix.message = Some(message.activity);
+                fix
+            }));
+        }
+        for fix in fixes {
+            self.take_fix(fix);
         }
     }
 
@@ -618,7 +660,11 @@ impl<B> UiModel<B> {
         if let (Some(status), false) = (&lev.status, outbound) {
             self.learn_status(peer, status);
         }
-        if let Some(invite) = &lev.invite {
+        // An invitation to the sender's own address is no group (the audit
+        // of 1787): a group's address is never its admin's, so it could
+        // only be a stranger making itself a group whose lists and copies
+        // the reader would then believe.
+        if let Some(invite) = lev.invite.as_ref().filter(|invite| invite.group != peer) {
             let group = self
                 .groups
                 .entry(invite.group)
@@ -670,8 +716,13 @@ impl<B> UiModel<B> {
                     // once the message is in ([`UiModel::forget_deleted_groups`]).
                     group.standing = Standing::Ended;
                 } else if let Some(me) = own.and_then(|own| group.member(&own)).cloned() {
-                    group.ours |= me.admin;
-                    group.standing = match (me.left, me.joined) {
+                    // A list says the reader left, never that it is in:
+                    // only the reader's own Join (from any of its devices,
+                    // outbound here) or a group it made joins it (the
+                    // audit of 1787). A list naming the reader as joined
+                    // or as admin of a group it never joined is anyone's
+                    // word, and would let the group vouch for copies.
+                    group.standing = match (me.left, group.ours) {
                         (true, _) => Standing::Left,
                         (false, true) => Standing::Joined,
                         (false, false) => group.standing,
@@ -1724,6 +1775,30 @@ mod tests {
         );
     }
 
+    /// `lev` sent to `to` by another of the reader's devices, as the home's
+    /// archive hands it on: outbound, so it says what the reader did (its
+    /// Join, or its own invitation as the group's admin).
+    fn synced(model: &mut UiModel<Line>, to: [u8; 16], id: u8, lev: Lev) {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::HomeSent {
+                message_id: [id; 32],
+                destination: to,
+                sent_at: 0,
+                body: Vec::new(),
+                fields: lev_fields(lev),
+            }),
+        );
+    }
+
+    /// The reader's Join, an empty message with the groups mark.
+    fn join() -> Lev {
+        Lev {
+            capabilities: Some(CAP_GROUPS),
+            ..Lev::default()
+        }
+    }
+
     fn invite(admin_name: &str) -> Lev {
         Lev {
             capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -2221,7 +2296,7 @@ mod tests {
     #[test]
     fn the_admin_adds_members_in_three_taps_and_one_per_friend() {
         let mut model = reader(&[ANNA, BOB, LEW]);
-        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        synced(&mut model, LEW, 1, invite("Me"));
         arrive(
             &mut model,
             GROUP,
@@ -2471,6 +2546,7 @@ mod tests {
     fn a_restart_lists_every_group_from_the_store_without_its_messages() {
         let mut first = reader(&[LEW]);
         arrive(&mut first, LEW, 1, "invite", invite("Lew"));
+        synced(&mut first, GROUP, 0xf1, join());
         arrive(
             &mut first,
             GROUP,
@@ -2528,6 +2604,7 @@ mod tests {
     fn a_restart_learns_the_groups_from_the_messages() {
         let mut first = reader(&[LEW]);
         arrive(&mut first, LEW, 1, "invite", invite("Lew"));
+        synced(&mut first, GROUP, 0xf1, join());
         arrive(&mut first, GROUP, 2, "", members(1, &[(ME, "Me", 4)]));
         let restored: Vec<_> = first
             .conversations
@@ -2873,7 +2950,16 @@ mod tests {
     /// joined, with Anna and Bob in it, its chat open.
     fn in_familie(admin: bool) -> UiModel<Line> {
         let mut model = reader(&[LEW]);
-        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        // A member is invited and joins; the admin made it, and its own
+        // invitation comes back from the archive (a list alone joins
+        // nobody, the audit of 1787).
+        match admin {
+            true => synced(&mut model, LEW, 1, invite("Me")),
+            false => {
+                arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+                synced(&mut model, GROUP, 0xf1, join());
+            }
+        }
         let me = if admin { 2 | 4 } else { 4 };
         let lew = if admin { 4 } else { 2 | 4 };
         arrive(

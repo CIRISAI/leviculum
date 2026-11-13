@@ -87,6 +87,9 @@ pub struct Draw<'a> {
     pub names: Option<&'a crate::names::Names>,
     /// The bubbles' bytes under way (1662); none draws no bar.
     pub transfers: Option<&'a super::transfer::Transfers>,
+    /// The writer rule (the audits of 1757 and 1787): whose position a
+    /// bubble's line names, and none for a claim nobody vouches for.
+    pub writers: super::Writers<'a>,
 }
 
 /// The cells of a bubble's progress bar (1662).
@@ -542,7 +545,7 @@ fn block(
             // The scene's one sentence (1449 item 5, walk 1 finding 11):
             // `Live position` while the newest report is alive, else when
             // the fix was taken; the coordinates are the Info's.
-            match super::message_fix(peer, message) {
+            match draw.writers.fix(peer, message) {
                 Some(fix) => {
                     let now = draw.now.map(|now| now.unix_secs);
                     let alive = conversation.newest_fix_report() == Some(index)
@@ -555,7 +558,7 @@ fn block(
                 }
                 None => {
                     let received = message.at.map(|at| at.unix_secs);
-                    telemetry::report_line(&telemetry::read(peer, &message.fields, received))
+                    telemetry::report_line(&draw.writers.read(peer, &message.fields, received))
                 }
             }
         }
@@ -577,7 +580,7 @@ fn block(
     };
     // A text that came with a position says so under it, in a report's
     // words: `Enter` on it opens the map there.
-    let body = match (message.is_report(), super::message_fix(peer, message)) {
+    let body = match (message.is_report(), draw.writers.fix(peer, message)) {
         (false, Some(fix)) => format!(
             "{body}\n{} {}",
             telemetry::REPORT_MARK,

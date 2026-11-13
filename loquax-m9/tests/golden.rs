@@ -824,6 +824,14 @@ fn group_model() -> UiModel<Field> {
         ..Lev::default()
     };
     arrive(&mut model, LEW, 1, "invite", invite);
+    // The reader's Join: a membership list alone joins nobody (the audit
+    // of 1787).
+    update(
+        &mut model,
+        UiEvent::Group(loquax::ui::groups::Verb::Join {
+            group: loquax::ui::intent::Target::Peer(GROUP),
+        }),
+    );
     let joined = MEMBER_JOINED;
     let list = [
         (LEW, "Lew", MEMBER_ADMIN | joined),

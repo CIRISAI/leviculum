@@ -2523,8 +2523,6 @@ async fn map_session(graphics: &str, script: &str) -> (String, String) {
 
 /// The map session's peers and region, `script` played with `--graphics`.
 async fn map_session_of(name: &str, script: &str, graphics: &str) -> (String, String) {
-    use leviculum_lxmf::msgpack::Number;
-    use leviculum_lxmf::telemetry::{encode_stream_field_value, StreamEntry};
     let install = |home: &Path| {
         let maps = home.join("maps");
         std::fs::create_dir_all(&maps).expect("maps dir");
@@ -2536,25 +2534,37 @@ async fn map_session_of(name: &str, script: &str, graphics: &str) -> (String, St
             maps.join("firenze.lmr"),
         )
         .expect("install the fixture region");
-    };
-    let messages = |ours: [u8; 16]| {
-        let row = |source: [u8; 16], telemetry: Vec<u8>| StreamEntry {
-            source: source.to_vec(),
-            timestamp: Number::Int(TELEMETRY_NOW),
-            telemetry,
-            appearance: None,
+        // Carol's fix and our own, kept from before the session. Until the
+        // audit of 1787 they came as stream rows in the peer's message,
+        // which Loquax now files under nobody: the peer is no collector
+        // the reader chose, and one of the rows named the reader itself.
+        let ours = delivery_address(&fixed_identity(0x11)).expect("our address");
+        let theirs = delivery_address(&fixed_identity(0x22)).expect("their address");
+        let kept = |peer: [u8; 16], telemetry: leviculum_lxmf::telemetry::Telemetry| {
+            loquax::ui::history::StoreWrite::Position(loquax::telemetry::Fix {
+                peer,
+                via: theirs,
+                message: None,
+                received_at: Some(TELEMETRY_NOW),
+                location: telemetry.location.expect("a location"),
+                telemetry: telemetry.encode(),
+                source: loquax::telemetry::Source::Telemetry,
+            })
         };
-        let stream = encode_stream_field_value(&[
-            row(CAROL, located(180, 43_776_000, 11_266_000).encode()),
-            row(ours, located(1, 43_774_000, 11_258_000).encode()),
-        ]);
-        let own = vec![
-            (
-                leviculum_lxmf::constants::FIELD_TELEMETRY,
-                located(4, 43_775_000, 11_261_000).encode_field_value(),
-            ),
-            (leviculum_lxmf::constants::FIELD_TELEMETRY_STREAM, stream),
-        ];
+        let mut store =
+            loquax::store::Store::open(&home.join(loquax::store::STORE_FILE), ours).expect("store");
+        store
+            .write(&[
+                kept(CAROL, located(180, 43_776_000, 11_266_000)),
+                kept(ours, located(1, 43_774_000, 11_258_000)),
+            ])
+            .expect("keep the fixes");
+    };
+    let messages = |_ours: [u8; 16]| {
+        let own = vec![(
+            leviculum_lxmf::constants::FIELD_TELEMETRY,
+            located(4, 43_775_000, 11_261_000).encode_field_value(),
+        )];
         vec![("", own)]
     };
     let flag = format!("--graphics={graphics}");
