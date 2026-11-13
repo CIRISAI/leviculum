@@ -525,6 +525,24 @@ impl Place<'_> {
         }
     }
 
+    /// Whether a table point is behind the globe's horizon, and where it
+    /// lands on copy `k`: [`hidden`](Self::hidden) and
+    /// [`map`](Self::map) from one evaluation on the globe (1762), which
+    /// a stroked line asks of every point.
+    fn seen(&self, bits: u32, x: u32, y: u32, k: i64) -> (bool, (i64, i64)) {
+        match self {
+            Place::Curved(blend) if blend.is_globe() => {
+                let shift = 32 - bits;
+                let (facing, at) = blend.globe_seen(Mercator {
+                    x: x << shift,
+                    y: y << shift,
+                });
+                (!facing, at)
+            }
+            _ => (self.hidden(bits, x, y), self.map(bits, x, y, k)),
+        }
+    }
+
     /// Whether a name of `kind` belongs on the view (1762). A flat view
     /// takes every kind its zoom shows. A blended world view, globe or
     /// Equal Earth, names what a world map names: the countries and the
@@ -1043,7 +1061,7 @@ where
     let mut ring = Vec::new();
     let mut copies: Vec<Vec<(i64, i64)>> = Vec::new();
     let mut raw: Vec<(f64, u32)> = Vec::new();
-    let mut angles: Vec<(f64, f64)> = Vec::new();
+    let mut worlds: Vec<Mercator> = Vec::new();
     let mut clipped = Vec::new();
     let mut points: Vec<Point> = Vec::new();
     for k in place.copies(vw) {
@@ -1073,26 +1091,16 @@ where
                 Place::Curved(blend) if blend.is_globe() => {
                     // The globe (1762): on the sphere, cut at the
                     // horizon, the limb closing what the far side took.
-                    // Longitudes unwrapped along the ring; the globe is
-                    // periodic, so no second copy, which would cancel
-                    // the first under the even-odd fill.
+                    // No second copy a turn over: the globe is periodic,
+                    // and a copy on the first would cancel it under the
+                    // even-odd fill.
                     let shift = 32 - bits;
-                    angles.clear();
-                    let mut prev = f64::NAN;
-                    for (x, y) in r.points() {
-                        let mut lam = blend.lam_rel(x << shift);
-                        if prev.is_finite() {
-                            while lam - prev > PI {
-                                lam -= TAU;
-                            }
-                            while prev - lam > PI {
-                                lam += TAU;
-                            }
-                        }
-                        prev = lam;
-                        angles.push((lam, crate::blend::ring_latitude(y << shift)));
-                    }
-                    blend.globe_ring(&angles, &mut copies);
+                    worlds.clear();
+                    worlds.extend(r.points().map(|(x, y)| Mercator {
+                        x: x << shift,
+                        y: y << shift,
+                    }));
+                    blend.globe_ring(&worlds, &mut copies);
                 }
                 Place::Curved(blend) => {
                     let shift = 32 - bits;
@@ -1211,7 +1219,7 @@ where
             let mut prev: Option<(i64, i64)> = None;
             let mut prev_raw: Option<((u32, u32), bool)> = None;
             for (x, y) in l.points() {
-                let hid = place.hidden(bits, x, y);
+                let (hid, here) = place.seen(bits, x, y, k);
                 let before = prev_raw.replace(((x, y), hid));
                 let mut leaving = None;
                 if before.is_some_and(|(a, _)| place.cut(bits, a, (x, y))) {
@@ -1234,7 +1242,7 @@ where
                         prev = None;
                         continue;
                     }
-                    (None, false) => place.map(bits, x, y, k),
+                    (None, false) => here,
                 };
                 let Some(a) = prev.replace(p) else {
                     continue;

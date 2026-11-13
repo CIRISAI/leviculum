@@ -297,6 +297,32 @@ A 1024×768 world view on the reference host draws in 11.3 ms linear,
 blended frame redrawn whole every zoom frame holds 40 fps on the
 desktop; the phone runs the same code through the facade.
 
+Turning the globe (1762), the phone's frame path on the host
+(`cargo run --release -p loquax-android --example globe_fps
+--features loquax/globe-world`, 1224×2100 at density 2.75, a drag of
+40 px a frame, 60 frames a row, median and 95th percentile; the host
+under a load of 5 to 9 on four cores, so the rows are comparisons,
+not budgets): before 1762 the rows were 20 to 38 ms at the median,
+after it 11 to 20 ms, and the whole run's user instructions fell from
+95.6 G to 58.6 G (`perf stat`, the same 390 frames). The work removed:
+a ring wholly behind the horizon is culled by a bound on its box
+before a point is projected; each point is evaluated once (one `exp`
+for its latitude's sine and cosine, one sine and cosine for its
+longitude, the Mercator term from the world y without the Gudermann
+round trip; a stroked line asks visibility and place in that one
+evaluation); and a turning frame carries no margin. The 95th
+percentile is still 19 to 23 ms at the world on the host, above half
+of a 60 Hz frame; what remains is the fill (7 %), the frame copy
+(6 %), decoding the tables' deltas every frame (5 %) and the points
+themselves (5 %).
+
+A drag at globe zooms turns the sphere about its centre
+(`Blend::turned`, `mapframe::drag`): the centre moves along the great
+circle the drag points, by the drag's length over the radius, north
+up, stopping at Mercator's edge instead of going over a pole. The hold
+no longer pins a globe view to the equator, which it did on any screen
+taller than Mercator's world, so on the phone in portrait.
+
 ## 3. Elevation
 
 **Two tiers (decided).**

@@ -540,48 +540,101 @@ impl Blend {
         best < 0.0
     }
 
-    /// One ring of the globe, its points `(λ, φ)` (relative longitude,
-    /// latitude; radians), cut at the horizon (1762): the part behind it
-    /// is dropped, and where the ring leaves and comes back the limb
-    /// closes it, the arc going the ring's own way round. Rings for an
-    /// even-odd fill come out, in sub-pixels: the ring itself, or nothing
-    /// when it is wholly behind, or the near part and, where the arcs
-    /// alone close the outside instead of the inside, the whole limb as a
-    /// second ring. In the handover the ring goes over the visible pole
-    /// where it crosses the far meridian ([`seam`](Self::seam)), as the
-    /// limb does, so land and sea agree there.
-    pub fn globe_ring(&self, ring: &[(f64, f64)], out: &mut Vec<Vec<(i64, i64)>>) {
+    /// A point of the globe from its world coordinates (1762), every
+    /// quantity a ring needs at once: its relative longitude in (-π, π],
+    /// its view-frame vector ([`frame`](Self::frame)'s) and its blended
+    /// place in sub-pixels. One `exp` for the latitude's sine and cosine
+    /// (Mercator's y is `tanh` and `sech` of its own argument, no
+    /// Gudermann round trip), one sine and cosine for the longitude, and
+    /// the Mercator term straight from the world y. `pole` puts a point on
+    /// Mercator's edge row at the pole ([`ring_latitude`]).
+    fn globe_point(&self, w: World, pole: bool) -> GlobePoint {
+        let lam = self.lam_rel(w.x);
+        let n = PI * (1.0 - 2.0 * f64::from(w.y) / WORLD_F);
+        let e = libm::exp(n);
+        let (sp, cp) = match pole {
+            true if n > EDGE_N => (1.0, 0.0),
+            true if n < -EDGE_N => (-1.0, 0.0),
+            _ => {
+                let (ep, en) = (e, 1.0 / e);
+                ((ep - en) / (ep + en), 2.0 / (ep + en))
+            }
+        };
+        let (sl, cl) = (libm::sin(lam), libm::cos(lam));
+        let v = [
+            cp * sl,
+            self.cos0 * sp - self.sin0 * cp * cl,
+            self.sin0 * sp + self.cos0 * cp * cl,
+        ];
+        let (cx, cy) = (f64::from(self.width) / 2.0, f64::from(self.height) / 2.0);
+        let mx = cx + lam * (WORLD_F / TAU) / self.unit;
+        let my = cy + (f64::from(w.y) - f64::from(self.centre.y)) / self.unit;
+        let (x, y) = match self.t >= 1.0 {
+            true => (mx, my),
+            false => {
+                let (bx, by) = (cx + self.sx * v[0], cy - self.sy * v[1]);
+                let t = self.t;
+                ((1.0 - t) * bx + t * mx, (1.0 - t) * by + t * my)
+            }
+        };
+        GlobePoint {
+            lam,
+            wy: f64::from(w.y),
+            v,
+            at: (sub_px(x), sub_px(y)),
+        }
+    }
+
+    /// Whether `w` faces the eye and where it lands in sub-pixels, from
+    /// one evaluation ([`globe_point`](Self::globe_point)): what a stroked
+    /// line on the globe asks of every point (1762).
+    pub fn globe_seen(&self, w: World) -> (bool, (i64, i64)) {
+        let p = self.globe_point(w, false);
+        (p.v[2] >= 0.0, p.at)
+    }
+
+    /// One ring of the globe, its points in world coordinates, cut at the
+    /// horizon (1762): the part behind it is dropped, and where the ring
+    /// leaves and comes back the limb closes it, the arc going the ring's
+    /// own way round. Rings for an even-odd fill come out, in sub-pixels:
+    /// the ring itself, or nothing when it is wholly behind, or the near
+    /// part and, where the arcs alone close the outside instead of the
+    /// inside, the whole limb as a second ring. Mercator's edge rows are
+    /// the poles ([`ring_latitude`]). In the handover the ring goes over
+    /// the visible pole where it crosses the far meridian
+    /// ([`seam`](Self::seam)), as the limb does, so land and sea agree
+    /// there.
+    pub fn globe_ring(&self, ring: &[World], out: &mut Vec<Vec<(i64, i64)>>) {
         out.clear();
         let n = ring.len();
         if n < 3 {
             return;
         }
-        let v: Vec<[f64; 3]> = ring.iter().map(|&(l, p)| self.frame(l, p)).collect();
+        let pts: Vec<GlobePoint> = ring.iter().map(|&w| self.globe_point(w, true)).collect();
         let mut path: Vec<(i64, i64)> = Vec::new();
         let mut last: Option<([f64; 3], f64)> = None;
-        let Some(start) = v.iter().position(|p| p[2] < 0.0) else {
+        let Some(start) = pts.iter().position(|p| p.v[2] < 0.0) else {
             // Wholly in front; the closing step, too, may cross the seam.
-            for (i, &(l, p)) in ring.iter().enumerate() {
-                self.put(&mut path, &mut last, v[i], wrap(l), p);
+            for p in pts.iter().chain(pts.first()) {
+                self.put(&mut path, &mut last, p.v, p.lam, p.at);
             }
-            let (l0, p0) = ring[0];
-            self.put(&mut path, &mut last, v[0], wrap(l0), p0);
             path.pop();
             out.push(path);
             return;
         };
-        if v.iter().all(|p| p[2] < 0.0) {
+        if pts.iter().all(|p| p.v[2] < 0.0) {
             return;
         }
         // The ring's own sense on the screen (x right, y down, as east and
-        // south): every projection here keeps it. The longitudes are
-        // unwrapped along the ring for the area.
+        // Mercator's y): every projection here keeps it. The longitudes
+        // are unwrapped along the ring for the area.
         let mut area = 0.0;
-        let mut prev = ring[0].0;
+        let mut prev = pts[0].lam;
         for i in 0..n {
-            let (la, pa) = (prev, ring[i].1);
-            let (lb, pb) = (unwrap_near(ring[(i + 1) % n].0, prev), ring[(i + 1) % n].1);
-            area += la * -pb - lb * -pa;
+            let (la, ya) = (prev, pts[i].wy);
+            let next = &pts[(i + 1) % n];
+            let lb = unwrap_near(next.lam, prev);
+            area += la * next.wy - lb * ya;
             prev = lb;
         }
         let sense = if area < 0.0 { -1.0 } else { 1.0 };
@@ -591,11 +644,12 @@ impl Blend {
         for k in 0..n {
             let i = (start + k) % n;
             let j = (i + 1) % n;
-            let (za, zb) = (v[i][2], v[j][2]);
+            let (za, zb) = (pts[i].v[2], pts[j].v[2]);
             if (za < 0.0) != (zb < 0.0) {
+                let (u, w) = (pts[i].v, pts[j].v);
                 let f = za / (za - zb);
-                let x = v[i][0] + (v[j][0] - v[i][0]) * f;
-                let y = v[i][1] + (v[j][1] - v[i][1]) * f;
+                let x = u[0] + (w[0] - u[0]) * f;
+                let y = u[1] + (w[1] - u[1]) * f;
                 let r = libm::hypot(x, y).max(1e-12);
                 let c = [x / r, y / r, 0.0];
                 let alpha = libm::atan2(-c[1], c[0]);
@@ -612,13 +666,14 @@ impl Blend {
                     }
                     last = None;
                 }
-                self.put(&mut path, &mut last, c, lam, phi);
+                self.put(&mut path, &mut last, c, lam, self.sub(lam, phi));
                 if za >= 0.0 {
                     open = Some(alpha);
                 }
             }
             if zb >= 0.0 {
-                self.put(&mut path, &mut last, v[j], wrap(ring[j].0), ring[j].1);
+                let p = &pts[j];
+                self.put(&mut path, &mut last, p.v, p.lam, p.at);
             }
         }
         // The last exit closes onto the first entry.
@@ -652,22 +707,27 @@ impl Blend {
         }
     }
 
-    /// Push the near point `v` (`(λ, φ)`, λ in (-π, π]) onto `path`; in
-    /// the handover, when the step from the point before crosses the far
-    /// meridian, over the visible pole first.
+    /// Push the near point `v` (relative longitude `lam` in (-π, π],
+    /// placed at `at`) onto `path`; in the handover, when the step from the
+    /// point before crosses the far meridian, over the visible pole first.
     fn put(
         &self,
         path: &mut Vec<(i64, i64)>,
         last: &mut Option<([f64; 3], f64)>,
         v: [f64; 3],
         lam: f64,
-        phi: f64,
+        at: (i64, i64),
     ) {
         if let (Some((_, pole)), Some((u, l))) = (self.seam(), *last) {
             if libm::fabs(lam - l) > PI {
                 // Where the step meets the far meridian: x = 0 in the
-                // frame.
-                let f = u[0] / (u[0] - v[0]);
+                // frame. Two points at the pole itself (a ring closing
+                // along Mercator's edge row) have x = 0 both: the step is
+                // at the pole.
+                let f = match libm::fabs(u[0] - v[0]) > 1e-15 {
+                    true => u[0] / (u[0] - v[0]),
+                    false => 0.5,
+                };
                 let c = [
                     u[0] + (v[0] - u[0]) * f,
                     u[1] + (v[1] - u[1]) * f,
@@ -682,7 +742,7 @@ impl Blend {
                 path.push(self.sub(-side, phc));
             }
         }
-        path.push(self.sub(lam, phi));
+        path.push(at);
         *last = Some((v, lam));
     }
 
@@ -789,16 +849,6 @@ impl Blend {
     }
 }
 
-/// `lam` brought into (-π, π].
-fn wrap(lam: f64) -> f64 {
-    let w = lam - libm::round(lam / TAU) * TAU;
-    if w <= -PI {
-        w + TAU
-    } else {
-        w
-    }
-}
-
 /// The longitude `lam` a whole number of turns over, within half a turn
 /// of `near`: continuous along a path.
 fn unwrap_near(lam: f64, near: f64) -> f64 {
@@ -844,6 +894,21 @@ pub fn ring_latitude(wy: u32) -> f64 {
 
 /// A latitude past this is on Mercator's edge row: 85.04°.
 const EDGE_LAT: f64 = 1.484_229_6;
+/// [`EDGE_LAT`] as Mercator's own argument, `asinh(tan 85.04°)`.
+const EDGE_N: f64 = 3.139_362_178_641_324;
+
+/// A ring point of the globe, evaluated once ([`Blend::globe_point`]).
+#[derive(Clone, Copy, Debug)]
+struct GlobePoint {
+    /// Relative longitude in (-π, π].
+    lam: f64,
+    /// Mercator's world y, south positive: the ring's sense is read in it.
+    wy: f64,
+    /// The view-frame vector; `v[2] < 0` is behind the horizon.
+    v: [f64; 3],
+    /// The blended place, sub-pixels.
+    at: (i64, i64),
+}
 
 /// The latitude of a continuous Mercator world y, radians.
 fn gudermann(y: f64) -> f64 {
