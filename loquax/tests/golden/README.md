@@ -215,6 +215,9 @@ minutes ago, the frame drawn from `../../../leviculum-map/fixtures/firenze.lmr`
 view centred on her pin and, since 1430, her card at the map's bottom
 (avatar, name, "live · 5 min ago", Chat, Navigate, Share mine); the map
 takes the whole pane right of the rail, no column of peers beside it.
+The rail and the bottom bar keep their own ground, icons and pill: the
+picture is cut to its pane (the audit of 1757; from 1430 until then the
+picture's margin painted over both).
 Drawn by `gui::tests::two_pins_with_one_selected_are_the_windows_map_golden`,
 900 x 560, light, pixel for pixel. OpenStreetMap data as above.
 

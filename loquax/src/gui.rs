@@ -3311,8 +3311,14 @@ impl App {
             true => self.locations_list(),
             false => Space::new().into(),
         };
+        // The picture is no stack's first child: a stack draws its first
+        // child on the layer below it and every later one on a layer of
+        // its own, cut to the pane (`Container::clip`), and the software
+        // renderer clips an image only to its layer. On the layer below,
+        // the picture's margin past the pane (an eighth of it) painted
+        // over the rail beside it (the audit of 1757).
         let map = container(
-            stack![picture, canvas, empty, card, locations, menu]
+            stack![Space::new(), picture, canvas, empty, card, locations, menu]
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
@@ -7286,6 +7292,33 @@ mod tests {
         assert_eq!(card.status, "live · 5 min ago");
         assert!(card.actions());
         map::tests::same_as("gui-map-pins.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// The map's picture stays in its pane: the rail beside it is the
+    /// rail it was before the frame came, its ground, icons and pill (the
+    /// audit of 1757: the picture's margin drew over the rail since 1430
+    /// took the column away).
+    #[test]
+    fn the_maps_picture_leaves_the_rail_as_it_was() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = florence_two("Anna", None, w, h);
+        let rail = |shot: &[u8]| -> Vec<u8> {
+            assert_eq!(shot.len(), (w * h * 3) as usize, "RGB");
+            let edge = leviculum_ui_iced::chrome::RAIL as usize * 3;
+            shot.chunks(w as usize * 3)
+                .flat_map(|row| row[..edge].to_vec())
+                .collect()
+        };
+        let before = rail(&shoot(&app, w, h));
+        let (shown, _) = run(&mut app);
+        assert!(shown.is_some(), "a frame of Florence at rest");
+        let after = rail(&shoot(&app, w, h));
+        let moved = before
+            .chunks(3)
+            .zip(after.chunks(3))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(moved, 0, "rail pixels the map's picture changed");
     }
 
     /// A click on a pin selects it and opens its card, a click on the
