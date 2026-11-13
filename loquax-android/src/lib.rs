@@ -35,6 +35,9 @@ pub mod mailbox;
 pub mod map;
 pub mod offline;
 pub mod pull_line;
+// The render walk's rules (1801), host only: `just render-walk`.
+#[cfg(not(target_os = "android"))]
+pub mod render_walk;
 pub mod rooms;
 pub mod schema;
 /// The scanner's decoder, the one the desktop reads a picture of a code

@@ -289,6 +289,7 @@ skip  loquax-android   m9_join_cells              # the cells of the M9 joining 
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   map_fills                  # the map frame drawn into a Bitmap of the size Java asks, and the world at its smallest, through the facade (1796); subject is the code
 skip  loquax-android   map_heap                   # the live heap of the map facade across zoom-outs to the world and back at 1224 x 2197 (1797), counted by the allocator shim; subject is the code, and it takes about a minute
+skip  loquax-android   render_walk                # the render walk's rules on a Florence frame drawn through the facade into a Java-sized Bitmap (1801); subject is the code
 skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
 skip  loquax-android   profile                    # the profile's words through the facade in Java's bytes, and its golden (1443); subject is the code
 skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link
