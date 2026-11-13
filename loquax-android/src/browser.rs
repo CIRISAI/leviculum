@@ -12,15 +12,32 @@ use leviculum_ui::color::Ink;
 use leviculum_ui::keymap::ScrollCmd;
 use leviculum_ui::scene::Lead;
 use leviculum_ui::style::RStyle;
-use lnomad::app::scene::{NodeId, Row, Run, Sheet};
-use lnomad::app::Focus;
+use lnomad::app::scene::{ChipId, NodeId, Row, Run, Sheet};
+use lnomad::app::{FieldKind, Focus};
 use lnomad::Intent;
 use loquax::ui::browse::BrowseEvent;
 use loquax::ui::scene::{LayoutClass, TabId};
 use loquax::ui::strings::Lang;
 use loquax::ui::{UiEvent, UiModel};
 
-use crate::schema::{self, BrowseAction, BrowseLine, BrowseRow, BrowseRun, BrowseScreen};
+use crate::schema::{
+    self, BrowseAction, BrowseField, BrowseLine, BrowseRow, BrowseRun, BrowseScreen,
+};
+
+/// The lines the phone takes whole (1650): its view scrolls them natively,
+/// as every list on a phone scrolls, and a page this long or shorter has
+/// no arrows. A longer page comes as a window this tall around the
+/// reader's line, with the arrows. Measured on the facade
+/// (`a_long_page_crosses_in_time`, 2026-11-11, host): a 2000-line page
+/// with a link and bold on every line is 537 KB of MessagePack, 13.7 ms
+/// to build and encode in a debug build and 11.1 ms for `MsgPack.java`
+/// to read on a cold JVM (5.1 ms warm); under the 50 ms budget, so the
+/// cap stays at twice that page.
+pub const WHOLE_PAGE: usize = 4000;
+
+/// The key the terminal's bar shows while the session identifies
+/// (lnomad's `IDENTIFY_GLYPH`), before the identity chip's words.
+const KEY: &str = "\u{1F511}";
 
 /// The Browse tab as Java draws it, in `lang`. Closed, it says so and
 /// carries nothing else.
@@ -68,7 +85,14 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
             .map(|d| d.iter().map(|b| format!("{b:02x}")).collect())
             .unwrap_or_default(),
         address_hint: scene.address.hint.resolve(lang),
-        chips: scene.state.iter().map(|c| c.text.resolve(lang)).collect(),
+        chips: scene
+            .state
+            .iter()
+            .map(|c| match c.id {
+                NodeId::Chip(ChipId::Identity) => format!("{KEY} {}", c.text.resolve(lang)),
+                _ => c.text.resolve(lang),
+            })
+            .collect(),
         status: scene
             .status
             .as_ref()
@@ -89,6 +113,8 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
                 runs: line.runs.iter().map(run).collect(),
             })
             .collect(),
+        at: u32::try_from(model.browse.model.scroll).unwrap_or(u32::MAX),
+        fields: fields(&model.browse.model),
         first: u32::try_from(scene.page.first).unwrap_or(u32::MAX),
         total: u32::try_from(scene.page.total).unwrap_or(u32::MAX),
         focus: match scene.page.focus {
@@ -106,6 +132,46 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
         // The session's to fill, once.
         ..BrowseScreen::default()
     }
+}
+
+/// The page's form fields as the platform's editor needs them (1650): the
+/// laid-out field and what the reader made of it so far.
+fn fields(browser: &lnomad::app::Model) -> Vec<BrowseField> {
+    browser
+        .field_defs
+        .iter()
+        .map(|def| {
+            let edit = def
+                .index
+                .checked_sub(1)
+                .and_then(|i| browser.field_state.get(i));
+            let kind = edit.map_or(def.kind, |e| e.kind);
+            let (value, checked) = match (kind, edit) {
+                (FieldKind::Text, Some(e)) => (
+                    leviculum_ui::input::InputBuffer::value(&e.input).to_string(),
+                    false,
+                ),
+                (_, Some(e)) => (e.value.clone(), e.checked),
+                (_, None) => (def.value.clone(), def.checked),
+            };
+            BrowseField {
+                node: NodeId::Field(def.index).resource(),
+                kind: match kind {
+                    FieldKind::Text => "text",
+                    FieldKind::Checkbox => "checkbox",
+                    FieldKind::Radio => "radio",
+                }
+                .to_string(),
+                masked: def.masked,
+                value,
+                label: match def.label.trim() {
+                    "" => def.name.clone(),
+                    label => label.to_string(),
+                },
+                checked,
+            }
+        })
+        .collect()
 }
 
 /// Whether a page's lines say anything: a run with more than blanks.
@@ -237,6 +303,11 @@ pub fn event(
             }),
             other => Err(format!("{} is no field", other.resource())),
         },
+        "at" => text
+            .trim()
+            .parse::<usize>()
+            .map(|line| UiEvent::Browse(BrowseEvent::Reading(line)))
+            .map_err(|_| format!("no line {text:?}")),
         "scroll" => intent(Intent::Scroll(match text {
             "up" => ScrollCmd::LineUp,
             "down" => ScrollCmd::LineDown,

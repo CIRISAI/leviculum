@@ -438,7 +438,9 @@ fn block(node: &BubbleNode, look: &Look, cols: usize, selected: bool) -> (usize,
             },
         ));
     }
-    if let Some(photo) = &node.photo {
+    // A picture sent as a file (1662) is its file's line here: the M9
+    // draws no thumbnail.
+    if let Some(photo) = node.photo.as_ref().filter(|p| p.file.is_none()) {
         texts.push((
             format!("[#] {}", photo.words.resolve(lang)),
             RStyle::default(),

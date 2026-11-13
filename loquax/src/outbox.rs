@@ -174,6 +174,10 @@ pub enum Command {
     /// [`crate::home::KIND_HUB`]); reported as [`OutboxEvent::HubAnnounced`],
     /// as a hub the client heard itself would be.
     HomeHub { hub: crate::ui::hubs::HeardHub },
+    /// On a client: the rooms a hub named when the home asked it (1643,
+    /// [`crate::home::hub_rooms`]), pulled with the hub's entry; reported
+    /// as [`OutboxEvent::HubRooms`].
+    HomeHubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -188,11 +192,13 @@ pub enum Command {
         at: i64,
     },
     /// On a client: the reader's word on a peer one of the home's devices
-    /// set, pulled from the archive (1146); reported as
+    /// set, pulled from the archive (1146), and when the home took it, unix
+    /// seconds on the home's clock (1640); reported as
     /// [`OutboxEvent::HomePeerState`].
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
 }
 
@@ -291,7 +297,12 @@ pub enum OutboxEvent {
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
+    /// How far a tracked message's resource has gone, in thousandths, as
+    /// the router's outbound entry says (1662): emitted when it moved, at
+    /// most once a hook. A message small enough for a packet has none.
+    Progress { message_id: [u8; 32], permille: u16 },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).
     /// `last` is the last state seen for it, when there was one, and
@@ -426,6 +437,16 @@ pub enum OutboxEvent {
     PageAnnounced {
         node: lnomad::discovery::DiscoveredNode,
     },
+    /// An LXMF delivery destination announced a name (1643), heard by this
+    /// node, timed and with the hops of the hearing. A home keeps it for its
+    /// devices ([`crate::home::pages::NameRow`]), so a device of an external
+    /// mailbox names peers it never heard itself; everyone else names the
+    /// peer by [`OutboxEvent::Announced`], which the same announce raises.
+    NameHeard { row: crate::home::pages::NameRow },
+    /// On a client: the rooms a hub named when its home asked it (1643,
+    /// [`Command::HomeHubRooms`]). The server sheet lists them until the
+    /// device's own question answers.
+    HubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

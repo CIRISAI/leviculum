@@ -157,8 +157,10 @@ pub mod listing;
 pub mod liveness;
 pub mod mailbox_page;
 pub mod map;
+pub mod owed;
 pub mod pager;
 pub mod photos;
+pub mod pin_card;
 pub mod profile;
 pub mod radar;
 pub mod reactions;
@@ -176,6 +178,7 @@ pub mod state;
 pub mod strings;
 pub mod summary;
 pub mod tracks;
+pub mod transfer;
 pub mod verbs;
 pub mod viewload;
 pub mod voice;
@@ -1344,29 +1347,11 @@ pub struct UiModel<B> {
     /// The petnames this device set that the home node has not taken
     /// yet, the newest of each peer (1635, [`UiModel::take_petnames`]):
     /// kept in the store until the home takes them, and the reader's word
-    /// on the peer over any entry a pull brings meanwhile.
-    pub(crate) owed_petnames: BTreeMap<[u8; 16], Option<String>>,
-    /// A hand of [`UiModel::take_petnames`] is under way: the next waits
-    /// for its [`UiEvent::PetnamesHanded`], so the home takes a peer's
-    /// petnames in the order they were set.
-    petnames_in_flight: bool,
-    /// [`Self::owed_petnames`] changed since the store last kept it.
-    owed_petnames_changed: bool,
-    /// The petnames the home took from this device until the next pull
-    /// ends, each with this device's clock when the home's answer came
-    /// (1635): a pull under way when the home took it may still bring an
-    /// older entry, which the home's stamp tells apart from a newer word.
-    taken_petnames: BTreeMap<[u8; 16], (Option<String>, i64)>,
-    /// Peer states for the home node, in the order they were set
-    /// ([`UiModel::take_peer_states`]).
-    peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
-    /// This device's peer states the home has not echoed back yet (1614):
-    /// a pulled state for one of these peers is the home's older word,
-    /// pulled before ours reached it, and is not taken; the echo of ours
-    /// settles it. So the state shown does not depend on whether a pull or
-    /// the hand-off arrives first. Petnames have their own, kept across a
-    /// restart (1635, [`Self::owed_petnames`]).
-    owed_peer_states: BTreeMap<[u8; 16], crate::home::wire::PeerState>,
+    /// on the peer over any entry a pull brings meanwhile ([`owed`]).
+    pub(crate) owed_petnames: owed::Owed<Option<String>>,
+    /// The peer states this device set that the home node has not taken
+    /// yet, by the same rules (1640, [`UiModel::take_peer_states`]).
+    pub(crate) owed_peer_states: owed::Owed<crate::home::wire::PeerState>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -1462,6 +1447,17 @@ pub struct UiModel<B> {
     /// for one the shell measured. Memory only; a bubble without one
     /// draws its stream's packet sizes.
     pub voice_tracks: BTreeMap<([u8; 16], u64), recording::LevelTrack>,
+    /// The photos and files under way, a bubble each (1662): how far a
+    /// sending message's resource has gone ([`transfer::Transfers`]).
+    pub transfers: transfer::Transfers,
+    /// Conversations whose bubble's transfer moved in this fold (1662):
+    /// the note bumps their revision so every target draws it again, and
+    /// nothing is written, as a transfer is not kept.
+    transfer_poked: BTreeSet<[u8; 16]>,
+    /// What this device saved of deleted messages, owed to the shell
+    /// ([`UiEffect::ForgetSaved`], 1662): a conversation and a message's
+    /// key, or no key for the whole conversation.
+    saved_gone: Vec<([u8; 16], Option<u64>)>,
     /// The running position shares (1273).
     pub shares: share::Shares,
     /// The groups the reader is in, was invited to or left (1307), learned
@@ -1651,12 +1647,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             history: false,
             list_apart: false,
             marks: Vec::new(),
-            owed_petnames: BTreeMap::new(),
-            petnames_in_flight: false,
-            owed_petnames_changed: false,
-            taken_petnames: BTreeMap::new(),
-            peer_states: Vec::new(),
-            owed_peer_states: BTreeMap::new(),
+            owed_petnames: owed::Owed::default(),
+            owed_peer_states: owed::Owed::default(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -1690,6 +1682,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             bar: compose::Bar::default(),
             recording: recording::Recording::default(),
             voice_tracks: BTreeMap::new(),
+            transfers: transfer::Transfers::default(),
+            transfer_poked: BTreeSet::new(),
+            saved_gone: Vec::new(),
             shares: share::Shares::default(),
             groups: groups::Groups::new(),
             group_draft: None,
@@ -2020,6 +2015,45 @@ impl<B> UiModel<B> {
         self.mark_out(crate::home::wire::MarkFlag::Read, ids);
     }
 
+    /// Conversation `index` was read up to the message `key` (its
+    /// activity), a reply from the notification (1506): the unread that
+    /// came after it stay unread, the rest are read as [`Self::read_out`]
+    /// reads them, here and, on a client of a home node, on the home's
+    /// other devices.
+    pub(crate) fn read_up_to(&mut self, index: usize, key: u64) {
+        let Some(conversation) = self.conversations.get_mut(index) else {
+            return;
+        };
+        let unread = conversation.unread;
+        if unread == 0 {
+            return;
+        }
+        let newest = conversation.received_by_arrival(true);
+        let later = newest
+            .iter()
+            .take(unread)
+            .filter(|&&m| conversation.messages[m].activity > key)
+            .count();
+        if later == 0 {
+            self.read_out(index);
+            return;
+        }
+        let ids: Vec<[u8; 32]> = newest
+            .iter()
+            .take(unread)
+            .filter(|&&m| conversation.messages[m].activity <= key)
+            .filter_map(|&m| conversation.messages[m].id)
+            .collect();
+        conversation.unread = later;
+        if let Some(listing) = conversation.listing.as_mut() {
+            listing.unread_rows = listing.unread_rows.min(later as u32);
+        }
+        self.changed_peers.insert(conversation.peer);
+        if self.home_client && !ids.is_empty() {
+            self.mark_out(crate::home::wire::MarkFlag::Read, ids);
+        }
+    }
+
     /// Queue marks for the home node, split to the most one carries.
     pub(crate) fn mark_out(&mut self, flag: crate::home::wire::MarkFlag, ids: Vec<[u8; 32]>) {
         for chunk in ids.chunks(crate::home::wire::MARK_IDS_MAX) {
@@ -2087,9 +2121,11 @@ impl<B> UiModel<B> {
         let changed = core::mem::take(&mut self.changed);
         let peers = core::mem::take(&mut self.changed_peers);
         let groups = core::mem::take(&mut self.groups_changed);
+        let transferred = core::mem::take(&mut self.transfer_poked);
         let poked = |peer: &[u8; 16]| {
             peers.contains(peer)
                 || groups.contains(peer)
+                || transferred.contains(peer)
                 || changed
                     .range((*peer, 0)..=(*peer, u64::MAX))
                     .next()
@@ -2102,7 +2138,13 @@ impl<B> UiModel<B> {
         indices.clear();
         if scoped {
             // The scope's conversations, each found once.
-            named.extend(peers.iter().chain(groups.iter()).chain(self.made.iter()));
+            named.extend(
+                peers
+                    .iter()
+                    .chain(groups.iter())
+                    .chain(transferred.iter())
+                    .chain(self.made.iter()),
+            );
             let mut last = None;
             for (peer, _) in changed.iter() {
                 if last != Some(*peer) {
@@ -2372,7 +2414,8 @@ impl<B> UiModel<B> {
                 .map(|m| chat::Mark::of(chat::shown(m.delivery, self))),
             read_at: last.filter(|m| m.outbound).and_then(|m| {
                 match chat::shown(m.delivery, self) {
-                    Some(DeliveryState::Read { at }) => Some(at),
+                    // 0 is a read at no known time (1506).
+                    Some(DeliveryState::Read { at }) if at > 0 => Some(at),
                     _ => None,
                 }
             }),
@@ -2924,6 +2967,7 @@ impl<B> UiModel<B> {
             tracks: Some(&self.voice_tracks),
             lang: self.lang,
             names: Some(&self.names),
+            transfers: Some(&self.transfers),
         }
     }
 
@@ -3092,6 +3136,17 @@ pub enum UiEvent {
     SendUnproven(String),
     /// The oldest running send moved onto this leg.
     SendLeg(Leg),
+    /// The oldest running send's resource moved this share of its parts,
+    /// in thousandths (1662): a client's `/send` to its mailbox. The bubble
+    /// says it, at most every [`transfer::EVERY_MS`].
+    SendProgress(u16),
+    /// How far the bubble `key` of `peer`'s conversation has gone, as the
+    /// runner that moves its bytes measured it (1662).
+    Transfer {
+        peer: [u8; 16],
+        key: u64,
+        transfer: transfer::Transfer,
+    },
     /// The fetch finished: how many messages were new, or why it failed.
     FetchDone(Result<usize, String>),
     /// The propagation node `node` answered [`UiEffect::AskPn`] (1409):
@@ -3142,6 +3197,15 @@ pub enum UiEvent {
     Reply {
         peer: [u8; 16],
         target: [u8; 32],
+        body: String,
+    },
+    /// A reply typed into the notification of `peer`'s messages (1506):
+    /// `key` is the newest message the notification showed (its
+    /// [`Message::activity`]); every message up to it is read, its receipt
+    /// rides on `body` ([`receipts`]).
+    NoticeReply {
+        peer: [u8; 16],
+        key: u64,
         body: String,
     },
     /// Send a copy of the message `key` (its [`Message::activity`]) of
@@ -3225,6 +3289,11 @@ pub enum UiEvent {
     /// The profile (1443), opened or closed: [`intent::Intent::Profile`],
     /// and Back from it.
     Profile { open: bool },
+    /// A message's Info (1457), the window's bubble menu: the message
+    /// `key` of `peer`'s chat in the detail view the terminal opens with
+    /// `details`, or `None` to close it. The window draws it from
+    /// [`info::MessageInfo`] as the phone does.
+    Info(Option<([u8; 16], u64)>),
     /// What the shell knows of the reader for the profile, anew.
     ProfileFacts(Box<profile::ProfileFacts>),
     /// What the mailbox said of itself (1642, `/about`), or that it is too
@@ -3361,6 +3430,11 @@ pub enum UiEvent {
     PetnamesHanded {
         taken: Vec<([u8; 16], Option<String>)>,
     },
+    /// A hand of [`UiModel::take_peer_states`] ended (1640): the peer
+    /// states the home node took. Those still owed go with the next hand.
+    PeerStatesHanded {
+        taken: Vec<([u8; 16], crate::home::wire::PeerState)>,
+    },
     /// A tab of the bar was chosen (1337): the Browse tab comes to the
     /// front, or leaves it for the chats or the map.
     Tab(scene::TabId),
@@ -3443,6 +3517,11 @@ pub enum UiEffect {
     /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
     /// core does itself ([`browse::effects_of`]).
     Browse(lnomad::Effect),
+    /// Ask the mailbox for its list of pages, servers and names (`/pages`,
+    /// 1579) now: the Explore tab opened (1644). The host runs one ask at
+    /// a time and drops this one while another runs; a host without a
+    /// mailbox never sees it ([`explore::MailboxList::link`]).
+    AskPages,
     /// What the Rooms ask of their hub link (1379, `crate::rooms_link`).
     Rooms(rooms::RoomAsk),
     /// Make the contacts file say this about its peer, its other lines kept
@@ -3499,6 +3578,13 @@ pub enum UiEffect {
         key: u64,
         index: usize,
     },
+    /// Remove what this device saved of the message `key` of `peer`'s
+    /// conversation, or of the whole conversation for no key (1662): the
+    /// files [`UiEffect::OpenFile`] saved under the app's storage and the
+    /// photo [`UiEffect::ShowPhoto`] wrote for the viewer. The message was
+    /// deleted here, by the reader or by another device of the home. A
+    /// copy the reader exported elsewhere is theirs and stays.
+    ForgetSaved { peer: [u8; 16], key: Option<u64> },
     /// Play the voice message `key` of `peer`'s conversation (1222): the
     /// phone's player, the desktop's WAV file in the system's player. Its
     /// bytes are in the message's fields ([`voice::voice_parts`]).
@@ -3750,6 +3836,12 @@ fn step<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
     model.folding = true;
     let mut effects = fold(model, event);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
+    effects.extend(
+        model
+            .saved_gone
+            .drain(..)
+            .map(|(peer, key)| UiEffect::ForgetSaved { peer, key }),
+    );
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
     model.settle();
@@ -4006,6 +4098,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::Profile { open } => model.show_profile(open),
+        UiEvent::Info(at) => model.show_info(at),
         UiEvent::ProfileFacts(facts) => {
             model.profile = *facts;
             Vec::new()
@@ -4060,6 +4153,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.petnames_handed(taken);
             Vec::new()
         }
+        UiEvent::PeerStatesHanded { taken } => {
+            model.peer_states_handed(taken);
+            Vec::new()
+        }
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -4097,6 +4194,20 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::SendUnproven(detail) => on_send_unproven(model, detail),
+        UiEvent::SendProgress(permille) => {
+            if let Some(&(c, m)) = model.sending.front() {
+                transfer_sent(model, c, m, permille);
+            }
+            Vec::new()
+        }
+        UiEvent::Transfer {
+            peer,
+            key,
+            transfer,
+        } => {
+            model.transfer(peer, key, transfer);
+            Vec::new()
+        }
         UiEvent::SendLeg(leg) => {
             let (tick, now) = (model.tick, model.now);
             if let Some(&(c, m)) = model.sending.front() {
@@ -4152,6 +4263,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             content,
         } => model.react(peer, target, &content),
         UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
+        UiEvent::NoticeReply { peer, key, body } => model.notice_reply(peer, key, body),
         UiEvent::Forward { from, key, to } => model.forward(from, key, to),
         UiEvent::SendAgain { peer, key } => model.send_again(peer, key),
         UiEvent::Delete { peer, keys } => {
@@ -4189,9 +4301,10 @@ pub fn position_fields(location: leviculum_lxmf::telemetry::Location) -> Vec<Fie
 /// messages, and the first failure in a row, not every retry's.
 fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
     model.fetching = false;
-    // A pull ended: the next began after every petname the home took so
-    // far, and brings nothing older than them (1635).
-    model.taken_petnames.clear();
+    // A pull ended: the next began after every petname and peer state the
+    // home took so far, and brings nothing older than them (1635, 1640).
+    model.owed_petnames.fetch_done();
+    model.owed_peer_states.fetch_done();
     model.fetches_done += 1;
     let now = model.elapsed_ms;
     let failures = model.sync.as_mut().map_or(1, |sync| {
@@ -6143,6 +6256,43 @@ fn gives_up(state: DeliveryState) -> bool {
     matches!(state, DeliveryState::Rejected | DeliveryState::Failed)
 }
 
+/// `destination` announced `name`, heard by this device or, for a device
+/// of a mailbox, by the mailbox: its archive's name entries and its
+/// `/pages` name rows (1643, [`crate::home::pages::NameRow`]) come here
+/// as an announce would.
+///
+/// Our own announce, echoed back, names nobody else: a name in it is the
+/// reader's own, which the mailbox announces and its archive hands every
+/// device (1449 item 2, walk 1 finding 8). It names the avatar and the
+/// profile, never a conversation; an echo without a name (a phone's node
+/// announces none) keeps the one heard.
+pub(crate) fn name_announced<B: InputBuffer>(
+    model: &mut UiModel<B>,
+    destination: [u8; 16],
+    name: Option<&str>,
+) {
+    if model.address == Some(destination) {
+        if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+            model.names.heard(destination, Some(name));
+        }
+        return;
+    }
+    // Said once, in the conversation, where the reader has one with the
+    // peer: a peer nobody wrote to has nothing to compare with.
+    if let Heard::Changed { was, now } = model.names.heard(destination, name) {
+        if let Some(conversation) = model
+            .conversations
+            .iter_mut()
+            .find(|c| c.peer == destination)
+        {
+            conversation.notes.push(Note {
+                before: conversation.messages.len(),
+                text: format!("was {was}, now announces {now}"),
+            });
+        }
+    }
+}
+
 fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
     match event {
         OutboxEvent::Ready { address } => {
@@ -6190,6 +6340,10 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
                 }
             }
         }
+        OutboxEvent::Progress {
+            message_id,
+            permille,
+        } => transfer_of_id(model, message_id, permille),
         OutboxEvent::State { message_id, state } => {
             if state == MessageState::Delivered {
                 // A proof says more than the node can.
@@ -6224,9 +6378,11 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             petname,
             at,
         } => return model.home_petname(destination, petname, at),
-        OutboxEvent::HomePeerState { destination, state } => {
-            return model.home_peer_state(destination, state)
-        }
+        OutboxEvent::HomePeerState {
+            destination,
+            state,
+            at,
+        } => return model.home_peer_state(destination, state, at),
         OutboxEvent::HomeMarked { mark } => match mark.flag {
             crate::home::wire::MarkFlag::Read => model.read_marks(&mark.ids),
             crate::home::wire::MarkFlag::Deleted => {
@@ -6254,41 +6410,17 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             location,
             name,
         } => model.mesh_position(identity, location, name.as_deref(), 0),
+        OutboxEvent::HubRooms { hub, rooms } => {
+            model.rooms.mailbox_named.insert(hub, rooms);
+        }
         OutboxEvent::HubAnnounced { hub } => {
             explore::owe_hub(model, &hub);
             model.rooms.heard.hear(hub);
             settings::settle_suggestion(&mut model.rooms);
         }
-        // Our own announce, echoed back, names nobody else: a name in it
-        // is the reader's own, which the mailbox announces and its archive
-        // hands every device (1449 item 2, walk 1 finding 8). It names the
-        // avatar and the profile, never a conversation; an echo without a
-        // name (a phone's node announces none) keeps the one heard.
         OutboxEvent::Announced {
             destination, name, ..
-        } if model.address == Some(destination) => {
-            if let Some(name) = name.as_deref().filter(|n| !n.trim().is_empty()) {
-                model.names.heard(destination, Some(name));
-            }
-        }
-        OutboxEvent::Announced {
-            destination, name, ..
-        } => {
-            // Said once, in the conversation, where the reader has one with
-            // the peer: a peer nobody wrote to has nothing to compare with.
-            if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
-                if let Some(conversation) = model
-                    .conversations
-                    .iter_mut()
-                    .find(|c| c.peer == destination)
-                {
-                    conversation.notes.push(Note {
-                        before: conversation.messages.len(),
-                        text: format!("was {was}, now announces {now}"),
-                    });
-                }
-            }
-        }
+        } => name_announced(model, destination, name.as_deref()),
         OutboxEvent::Propagated { message_id, source } => {
             return model.arrived_here(source, message_id);
         }
@@ -6902,6 +7034,23 @@ impl<B> UiModel<B> {
 impl<B> UiModel<B> {
     /// Message `message` of conversation `conversation`, to change: the
     /// store will learn of it.
+    /// Bubble `key` of `peer`'s conversation has its bytes `transfer` far
+    /// (1662), taken at most every [`transfer::EVERY_MS`].
+    fn transfer(&mut self, peer: [u8; 16], key: u64, transfer: transfer::Transfer) {
+        if self.transfers.set(peer, key, transfer, self.elapsed_ms) {
+            self.transfer_poked.insert(peer);
+        }
+    }
+
+    /// Bubble `key`'s bytes stopped going, however it ended (1662).
+    fn transfer_over(&mut self, peer: [u8; 16], key: u64) {
+        let rev = self.transfers.rev();
+        self.transfers.end(&peer, key);
+        if self.transfers.rev() != rev {
+            self.transfer_poked.insert(peer);
+        }
+    }
+
     fn message_mut(
         &mut self,
         conversation: usize,
@@ -6912,6 +7061,58 @@ impl<B> UiModel<B> {
             .get_mut(conversation)?
             .messages
             .get_mut(message)
+    }
+}
+
+/// The bytes a message's transfer counts (1662): its photo's, files'
+/// and voice's on the wire, or its body's when it carries none.
+fn transfer_bytes(message: &Message) -> u64 {
+    let media = photos::photo_of(&message.fields).map_or(0, |p| p.bytes as usize)
+        + files::files_of(&message.fields)
+            .iter()
+            .map(|f| f.bytes)
+            .sum::<usize>()
+        + voice::voice_of(&message.fields).map_or(0, |v| v.bytes);
+    match media {
+        0 => message.size as u64,
+        bytes => bytes as u64,
+    }
+}
+
+/// Message `m` of conversation `c`, ours and still sending, moved
+/// `permille` thousandths of its resource (1662).
+fn transfer_sent<B>(model: &mut UiModel<B>, c: usize, m: usize, permille: u16) {
+    let Some(conversation) = model.conversations.get(c) else {
+        return;
+    };
+    let Some(message) = conversation.messages.get(m) else {
+        return;
+    };
+    if !message.outbound {
+        return;
+    }
+    let transfer = transfer::Transfer::sending(permille, transfer_bytes(message));
+    let (peer, key) = (conversation.peer, message.activity);
+    model.transfer(peer, key, transfer);
+}
+
+/// [`OutboxEvent::Progress`]: the ours with the router's id `id` moved
+/// `permille` thousandths of its resource (1662).
+fn transfer_of_id<B>(model: &mut UiModel<B>, id: [u8; 32], permille: u16) {
+    let ops = &model.ops;
+    let mut found = None;
+    for (c, conversation) in model.conversations.iter_mut().enumerate() {
+        let ours = conversation
+            .with_id(&id, ops)
+            .into_iter()
+            .find(|&m| conversation.messages.get(m).is_some_and(|m| m.outbound));
+        if let Some(m) = ours {
+            found = Some((c, m));
+            break;
+        }
+    }
+    if let Some((c, m)) = found {
+        transfer_sent(model, c, m, permille);
     }
 }
 
@@ -7144,6 +7345,14 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
                 vec![UiEffect::Notice(format!("group: {detail}"))]
             }
         };
+    }
+    // The runner is done with its bytes, whatever came of them (1662).
+    if let Some((peer, key)) = model
+        .conversations
+        .get(c)
+        .and_then(|conversation| Some((conversation.peer, conversation.messages.get(m)?.activity)))
+    {
+        model.transfer_over(peer, key);
     }
     if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
@@ -10398,6 +10607,82 @@ pub(crate) mod tests {
             .inspect(|mark| assert_eq!(mark.flag, MarkFlag::Read))
             .flat_map(|mark| mark.ids.iter().copied())
             .collect()
+    }
+
+    /// A start reads nothing where the list is a screen of its own (1564,
+    /// the rule of 1529 and 1546): the phone and the M9 come up on the
+    /// list, its first row under the cursor, and that row's unread stay
+    /// unread until the reader opens it, through the start's own selection
+    /// (`restore`) and through the page the selection asks (the first
+    /// fill). Before, both read it: a restart took the badge off a chat
+    /// nobody had looked at, and told the home it was read. The control:
+    /// where the list stands beside the chat, the start shows the chat and
+    /// reads it, as before.
+    #[test]
+    fn a_start_on_the_list_reads_nothing_until_the_chat_is_opened() {
+        let theirs = |key: u64| stored(key, false, "ungelesen", None);
+        for apart in [true, false] {
+            // Restored whole: the start's selection is the only reader.
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = apart;
+            let mut whole = restored(PEER, vec![theirs(1), theirs(2), theirs(3)], 0);
+            whole.unread = 2;
+            model.restore(vec![whole]);
+            let marks = read_ids(&model.take_marks());
+            match apart {
+                true => {
+                    assert_eq!(model.conversations[0].unread, 2, "apart, restored");
+                    assert!(marks.is_empty(), "apart, restored: {marks:?}");
+                }
+                false => {
+                    assert_eq!(model.conversations[0].unread, 0, "beside, restored");
+                    assert_eq!(marks.len(), 2, "beside, restored");
+                }
+            }
+
+            // Restored from its row (1490): the selection asks the newest
+            // page, and the page's first fill is the reader.
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = apart;
+            let mut lazy = restored(PEER, Vec::new(), 3);
+            lazy.unread = 2;
+            lazy.listing = Some(listing::Listing {
+                moved: Some(3),
+                line: String::from("ungelesen"),
+                unread_rows: 2,
+                ..listing::Listing::default()
+            });
+            model.restore(vec![lazy]);
+            let _ = model.take_marks();
+            assert_eq!(model.selected, 0);
+            let _ = update(
+                &mut model,
+                UiEvent::Earlier {
+                    peer: PEER,
+                    messages: vec![theirs(1), theirs(2), theirs(3)],
+                    earlier: 0,
+                },
+            );
+            let marks = read_ids(&model.take_marks());
+            match apart {
+                true => {
+                    assert_eq!(model.conversations[0].unread, 2, "apart, paged");
+                    assert!(marks.is_empty(), "apart, paged: {marks:?}");
+                    // Opened, it is read, the two newest and only those.
+                    let _ = update(&mut model, UiEvent::Open { peer: PEER });
+                    assert_eq!(model.conversations[0].unread, 0, "apart, opened");
+                    assert_eq!(
+                        read_ids(&model.take_marks()),
+                        vec![[3u8; 32], [2u8; 32]],
+                        "apart, opened"
+                    );
+                }
+                // Beside the chat the start read it before the page came.
+                false => assert_eq!(model.conversations[0].unread, 0, "beside, paged"),
+            }
+        }
     }
 
     /// A new device's first pull marks nothing read (1429): a device that
@@ -14754,6 +15039,67 @@ pub(crate) mod tests {
         model
     }
 
+    /// A name far wider than its box (1430): forty letters in a list
+    /// entry whose name has twelve cells are cut to twelve with an
+    /// ellipsis, and the row stays its width, never past the column's
+    /// edge. The control: a short name is whole.
+    #[test]
+    fn a_long_name_in_a_twelve_cell_box_is_clipped() {
+        let long = "Annabella Theodora Maximiliane Hohenberg";
+        assert_eq!(long.chars().count(), 40);
+        for (name, cut) in [(long, true), ("bob", false)] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            model.names.remember(PEER, name);
+            // The bar's margin, the twelve cells of the name, one blank
+            // before the (empty) time, the margin.
+            let width = 15;
+            let rows = layout::list(&model, width, 6);
+            // After the selection's bar in the first cell.
+            let top: String = rows[0].cells.iter().skip(1).map(|c| c.ch).collect();
+            assert_eq!(rows[0].cells.len(), width, "{top:?}");
+            let shown = top.trim();
+            match cut {
+                true => {
+                    assert!(shown.ends_with('…'), "{top:?}");
+                    assert_eq!(leviculum_ui::text::fit_width(shown), 12, "{top:?}");
+                    assert!(long.starts_with(shown.trim_end_matches('…')), "{top:?}");
+                }
+                false => assert_eq!(shown, "bob", "{top:?}"),
+            }
+        }
+    }
+
+    /// The map's cards (1430): every pin as the window's card says it,
+    /// the peers with their distance from our own position after the
+    /// status, ours without a distance and without actions; the locations
+    /// list leaves us out and puts the newest fix first.
+    #[test]
+    fn the_cards_say_status_and_distance_and_the_list_is_newest_first() {
+        let model = mapped();
+        let cards = pin_card::cards(&model);
+        assert_eq!(cards.len(), 3);
+        let card = |name: &str| {
+            cards
+                .iter()
+                .find(|c| c.name.starts_with(name))
+                .unwrap_or_else(|| panic!("{name} in {cards:?}"))
+        };
+        let (bob, alice, us) = (card("bob"), card("Alice"), card("you"));
+        assert_eq!(bob.distance.as_deref(), Some("270 m"));
+        assert_eq!(alice.distance.as_deref(), Some("680 m"));
+        assert!(bob.status.ends_with(" · 270 m"), "{}", bob.status);
+        assert!(bob.status.contains("4 min"), "{}", bob.status);
+        assert!(alice.status.contains("3 h"), "{}", alice.status);
+        assert!(bob.actions() && alice.actions());
+        assert!(us.own && !us.actions() && us.distance.is_none());
+        let list: Vec<&str> = pin_card::locations(&cards)
+            .into_iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert!(list[0].starts_with("bob") && list[1].starts_with("Alice"));
+    }
+
     /// The shell's own fix is our pin where it is newer than the one we
     /// shared (1375): a board's GNSS shows it before it shared anything,
     /// and the older one does not move it back. The map's picture is the
@@ -16158,43 +16504,31 @@ pub(crate) mod tests {
             [UiEffect::Contact(Contact { blocked: true, .. })]
         ));
         let unpinned = crate::home::wire::PeerState::default();
-        assert_eq!(
-            model.take_peer_states(),
-            [
-                (PEER, unpinned),
-                (
-                    PEER,
-                    crate::home::wire::PeerState {
-                        blocked: true,
-                        ..unpinned
-                    }
-                )
-            ]
-        );
-        // The home's echo of the last one first (1614): until then a pulled
-        // state is the home's older word.
+        // The newest of the peer is what is owed (1640).
         let blocked = crate::home::wire::PeerState {
             blocked: true,
             ..unpinned
         };
-        assert!(update(
+        assert_eq!(model.take_peer_states(), [(PEER, blocked)]);
+        update(
             &mut model,
-            UiEvent::Engine(OutboxEvent::HomePeerState {
-                destination: PEER,
-                state: blocked,
-            }),
-        )
-        .is_empty());
+            UiEvent::PeerStatesHanded {
+                taken: vec![(PEER, blocked)],
+            },
+        );
+        assert!(model.take_peer_states().is_empty(), "the home took it");
         let pulled = crate::home::wire::PeerState {
             pinned: true,
             archived: true,
             ..unpinned
         };
+        // Taken by the home after this device's word (1640).
         let effects = update(
             &mut model,
             UiEvent::Engine(OutboxEvent::HomePeerState {
                 destination: PEER,
                 state: pulled,
+                at: 1,
             }),
         );
         assert!(matches!(
@@ -16208,9 +16542,115 @@ pub(crate) mod tests {
             UiEvent::Engine(OutboxEvent::HomePeerState {
                 destination: PEER,
                 state: pulled,
+                at: 1,
             })
         )
         .is_empty());
+    }
+
+    /// 1640, as 1635 for a petname: a peer state this device set and the
+    /// home node has not taken yet is the reader's newest word on the
+    /// peer. A pin the reader loosened, pulled again from an older entry
+    /// before the home took the loosening, changes nothing; after a
+    /// restart the loosening is handed again and still stands over the
+    /// pull. Once the home took it, an entry it stamped before the answer
+    /// changes nothing until the pull ends, one stamped after it does.
+    #[test]
+    fn a_peer_state_owed_to_the_home_outlives_an_older_pulled_one() {
+        use crate::home::wire::PeerState;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, "hi");
+        model.home_client = true;
+        let pinned = PeerState {
+            pinned: true,
+            ..PeerState::default()
+        };
+        let loose = PeerState::default();
+        let pin = |on: bool| UiEvent::PeerState {
+            peer: PEER,
+            state: PeerState {
+                pinned: on,
+                ..PeerState::default()
+            },
+        };
+        let pulled_at = |state: PeerState, at: i64| {
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state,
+                at,
+            })
+        };
+        let pulled = |state: PeerState| pulled_at(state, 0);
+        let handed = |taken: &[PeerState]| UiEvent::PeerStatesHanded {
+            taken: taken.iter().map(|state| (PEER, *state)).collect(),
+        };
+        let owed = |writes: Vec<StoreWrite>| {
+            writes
+                .into_iter()
+                .filter_map(|write| match write {
+                    StoreWrite::OwedPeerStates(owed) => Some(owed),
+                    _ => None,
+                })
+                .next_back()
+        };
+        update(&mut model, pin(true));
+        assert_eq!(model.take_peer_states(), [(PEER, pinned)]);
+        // One hand at a time: the loosening waits for the first.
+        update(&mut model, pin(false));
+        assert!(model.take_peer_states().is_empty(), "a hand is under way");
+        // The home's intake died: nothing taken.
+        update(&mut model, handed(&[]));
+        assert!(update(&mut model, pulled(pinned)).is_empty());
+        assert_eq!(model.peer_state(&PEER), loose, "the pin came back");
+        let kept = owed(model.take_writes()).expect("the owed kept");
+        assert_eq!(kept, BTreeMap::from([(PEER, loose)]));
+
+        // A restart: the owed handed first, and over the first pull.
+        let mut again = UiModel::<Field>::new(&[PEER]);
+        receive(&mut again, PEER, 1, "hi");
+        again.home_client = true;
+        again.restore_owed_peer_states(kept);
+        assert_eq!(again.take_peer_states(), [(PEER, loose)]);
+        update(&mut again, handed(&[]));
+        assert_eq!(again.take_peer_states(), [(PEER, loose)]);
+        update(&mut again, pulled(pinned));
+        assert_eq!(again.peer_state(&PEER), loose, "the pin came back");
+        // The home's echo settles it, and a later word of another device
+        // is the reader's here.
+        update(&mut again, pulled(loose));
+        assert_eq!(owed(again.take_writes()), Some(BTreeMap::new()));
+        update(&mut again, handed(&[loose]));
+        assert!(again.take_peer_states().is_empty());
+        update(&mut again, pulled(pinned));
+        assert_eq!(again.peer_state(&PEER), pinned);
+
+        // Taken: a pull under way when the home took the loosening may
+        // still bring the older pin; stamped before the answer, it changes
+        // nothing, stamped after it, it does; once a pull ended the next
+        // brings nothing older.
+        let mut taken = UiModel::<Field>::new(&[PEER]);
+        receive(&mut taken, PEER, 1, "hi");
+        taken.home_client = true;
+        update(&mut taken, pin(true));
+        update(&mut taken, pin(false));
+        assert_eq!(taken.take_peer_states(), [(PEER, loose)]);
+        update(&mut taken, handed(&[loose]));
+        assert!(update(&mut taken, pulled_at(pinned, 0)).is_empty());
+        assert_eq!(taken.peer_state(&PEER), loose);
+        update(&mut taken, pulled_at(pinned, 1));
+        assert_eq!(taken.peer_state(&PEER), pinned);
+        update(&mut taken, pin(false));
+        assert_eq!(taken.take_peer_states(), [(PEER, loose)]);
+        update(&mut taken, handed(&[loose]));
+        update(&mut taken, UiEvent::FetchDone(Ok(0)));
+        update(&mut taken, pulled_at(pinned, 0));
+        assert_eq!(taken.peer_state(&PEER), pinned);
+
+        // Off a home node nothing is owed.
+        let mut alone = UiModel::<Field>::new(&[PEER]);
+        receive(&mut alone, PEER, 1, "hi");
+        update(&mut alone, pin(true));
+        assert!(owed(alone.take_writes()).is_none());
     }
 
     /// 1139: on a client of a home node a rename goes to the home node as
@@ -16450,8 +16890,9 @@ pub(crate) mod tests {
         assert_eq!(labels(true), expected);
     }
 
-    /// 1614: as a petname, a peer state the reader set is not undone by a
-    /// pull of the home's older one; its echo settles it.
+    /// 1614, 1640: as a petname, a peer state the reader set is not undone
+    /// by a pull of the home's older one; its echo settles it, and what it
+    /// owed with it.
     #[test]
     fn a_pull_older_than_the_readers_own_peer_state_does_not_bring_it_back() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -16465,6 +16906,7 @@ pub(crate) mod tests {
             UiEvent::Engine(OutboxEvent::HomePeerState {
                 destination: PEER,
                 state,
+                at: 0,
             })
         };
         palette(&mut model, "pin");
@@ -16477,7 +16919,8 @@ pub(crate) mod tests {
         update(&mut model, pulled(pinned));
         update(&mut model, pulled(muted));
         assert_eq!(model.peer_state(&PEER), muted);
-        assert_eq!(model.take_peer_states(), [(PEER, pinned)]);
+        // The echo settled the debt (1640): nothing is owed to hand.
+        assert!(model.take_peer_states().is_empty(), "the echo settled it");
     }
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
@@ -17050,6 +17493,283 @@ pub(crate) mod tests {
                 key: photo_key
             }]
         );
+    }
+
+    /// 1662: a deleted message's saved copies go with it. Deleting it,
+    /// another device of the home deleting it, sending a failed one again
+    /// and deleting the conversation each ask the shell to forget what it
+    /// saved ([`UiEffect::ForgetSaved`]); a message still being sent is
+    /// kept, and so is what it saved.
+    #[test]
+    fn a_deleted_message_asks_the_shell_to_forget_what_it_saved() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let received = |n: u8| OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [n; 32],
+            source: PEER,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("a.txt", vec![n]),
+            verified: true,
+        };
+        for n in 1..=3 {
+            engine(&mut model, received(n));
+        }
+        let key = |model: &UiModel<Field>, n: u8| {
+            model.conversations[0]
+                .messages
+                .iter()
+                .find(|m| m.id == Some([n; 32]))
+                .map(|m| m.activity)
+                .expect("the message")
+        };
+        let forgets = |effects: &[UiEffect]| -> Vec<Option<u64>> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    UiEffect::ForgetSaved { peer, key } if *peer == PEER => Some(*key),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = key(&model, 1);
+        let effects = update(
+            &mut model,
+            UiEvent::Delete {
+                peer: PEER,
+                keys: vec![first],
+            },
+        );
+        assert_eq!(forgets(&effects), vec![Some(first)]);
+        let second = key(&model, 2);
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::HomeMarked {
+                mark: crate::home::wire::Mark {
+                    flag: crate::home::wire::MarkFlag::Deleted,
+                    ids: vec![[2; 32]],
+                },
+            }),
+        );
+        assert_eq!(forgets(&effects), vec![Some(second)]);
+        // One being sent is kept, its copies too.
+        update(
+            &mut model,
+            UiEvent::SendFile {
+                peer: PEER,
+                name: "b.txt".into(),
+                data: vec![9],
+            },
+        );
+        let sending = model.conversations[0].messages.last().map(|m| m.activity);
+        let effects = update(
+            &mut model,
+            UiEvent::Delete {
+                peer: PEER,
+                keys: sending.into_iter().collect(),
+            },
+        );
+        assert_eq!(forgets(&effects), Vec::<Option<u64>>::new());
+        let effects = update(
+            &mut model,
+            UiEvent::DeleteConversation {
+                peer: PEER,
+                everywhere: false,
+            },
+        );
+        assert_eq!(forgets(&effects), vec![None]);
+        assert!(model.conversations.iter().all(|c| c.peer != PEER));
+    }
+
+    /// 1662: a picture sent as a file is the bubble's picture, told by
+    /// its bytes: the scene's photo node names the file, a tap shows it
+    /// whole, a screen reader says the file; the terminal, which draws no
+    /// thumbnail, draws the file's line alone.
+    #[test]
+    fn a_picture_sent_as_a_file_is_the_bubbles_picture_and_the_terminals_file() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                sent_at: 0,
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: files::file_fields("scan.dat", png.to_vec()),
+                verified: true,
+            },
+        );
+        let chat = scene::chat(&model, 0);
+        let node = chat
+            .groups
+            .iter()
+            .flat_map(|g| g.bubbles.iter())
+            .next()
+            .expect("the bubble");
+        let photo = node.photo.as_ref().expect("its picture");
+        assert_eq!((photo.format.as_str(), photo.file), ("png", Some(0)));
+        assert_eq!(node.files.len(), 1, "the file's line stays");
+        assert_eq!(
+            node.a11y.label.resolve(strings::Lang::En),
+            "File scan.dat, 12 B"
+        );
+        let key = node.bubble.key;
+        assert_eq!(
+            update(&mut model, UiEvent::ViewPhoto { peer: PEER, key }),
+            vec![UiEffect::ShowPhoto { peer: PEER, key }]
+        );
+        let rows: Vec<String> = view(&model).messages.iter().map(text_of).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("▤ scan.dat · 12 B")),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("▣")), "{rows:#?}");
+    }
+
+    /// 1662: a file's progress reaches its bubble. The engine's word
+    /// for the router's outbound entry (a link's resource) and a client's
+    /// `/send` (the running send) both move the bar and its words, at most
+    /// once a quarter second of the model's clock, the last always; the
+    /// bar goes when the message is sent. A fetch says its bytes.
+    #[test]
+    fn a_files_progress_is_in_its_bubble_while_it_goes() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::SendFile {
+                peer: PEER,
+                name: "Protokoll.pdf".into(),
+                data: vec![7; 300_000],
+            },
+        );
+        let rows = |model: &UiModel<Field>| -> Vec<String> {
+            view(model).messages.iter().map(text_of).collect()
+        };
+        let line =
+            |model: &UiModel<Field>| rows(model).into_iter().find(|r| r.contains("sending ·"));
+        let scene_words = |model: &UiModel<Field>| {
+            scene::chat(model, 0)
+                .groups
+                .iter()
+                .flat_map(|g| g.bubbles.iter())
+                .find_map(|b| {
+                    b.progress
+                        .as_ref()
+                        .map(|p| (p.percent, p.words.resolve(strings::Lang::De)))
+                })
+        };
+        assert_eq!(line(&model), None, "nothing goes yet");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, UiEvent::Elapsed(1_000));
+        engine(
+            &mut model,
+            OutboxEvent::Progress {
+                message_id: ID,
+                permille: 430,
+            },
+        );
+        let at_43 = line(&model).expect("the bar");
+        assert!(at_43.contains("▰▰▰▰▰▱▱▱▱▱ sending · 43 %"), "{at_43}");
+        assert_eq!(
+            scene_words(&model),
+            Some((43, "wird gesendet · 43 %".to_string()))
+        );
+        // Under the file's line, above nothing else.
+        let all = rows(&model);
+        let file = all
+            .iter()
+            .position(|r| r.contains("▤ Protokoll.pdf"))
+            .expect("file");
+        let bar = all
+            .iter()
+            .position(|r| r.contains("sending ·"))
+            .expect("bar");
+        assert_eq!(bar, file + 1, "{all:#?}");
+        // A second word in the same quarter second waits.
+        engine(
+            &mut model,
+            OutboxEvent::Progress {
+                message_id: ID,
+                permille: 500,
+            },
+        );
+        assert!(line(&model).is_some_and(|l| l.contains("43 %")));
+        // A client's upload names the running send.
+        update(&mut model, UiEvent::Elapsed(1_250));
+        update(&mut model, UiEvent::SendProgress(910));
+        assert!(
+            line(&model).is_some_and(|l| l.contains("91 %")),
+            "{:?}",
+            line(&model)
+        );
+        // The whole always goes through.
+        update(&mut model, UiEvent::SendProgress(1000));
+        assert!(line(&model).is_some_and(|l| l.contains("100 %")));
+        state(&mut model, ID, MessageState::Sent);
+        assert_eq!(line(&model), None, "sent: no bar");
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.transfers.is_empty(), "the runner's end drops it");
+        // A fetch says its bytes of the whole.
+        let key = model.conversations[0].messages[0].activity;
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                sent_at: 0,
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"und das Bild".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+        let theirs = model.conversations[0]
+            .messages
+            .iter()
+            .find(|m| !m.outbound)
+            .map(|m| m.activity)
+            .expect("theirs");
+        assert_ne!(theirs, key);
+        update(&mut model, UiEvent::Elapsed(2_000));
+        update(
+            &mut model,
+            UiEvent::Transfer {
+                peer: PEER,
+                key: theirs,
+                transfer: transfer::Transfer {
+                    way: transfer::Way::Fetching,
+                    done: 1_200_000,
+                    total: 3_000_000,
+                },
+            },
+        );
+        assert!(
+            rows(&model)
+                .iter()
+                .any(|r| r.contains("▰▰▰▰▱▱▱▱▱▱ fetching · 1.2 MB of 3.0 MB")),
+            "{:#?}",
+            rows(&model)
+        );
+        model.ascii = true;
+        assert!(rows(&model)
+            .iter()
+            .any(|r| r.contains("[####------] fetching")));
     }
 
     /// A received file in the terminal (1221): its name, made safe, and

@@ -131,6 +131,20 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "noticeReply",
+            java_map(&[
+                ("t", Java::Str("noticereply")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("body", Java::Str("bin gleich da")),
+            ]),
+            Request::NoticeReply {
+                peer: s(PEER),
+                key: KEY,
+                body: s("bin gleich da"),
+            },
+        ),
+        (
             "forward",
             java_map(&[
                 ("t", Java::Str("forward")),

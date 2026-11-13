@@ -39,11 +39,15 @@ final class RoomsPane {
     interface Host {
         /** The tab gave way to the chats. */
         void left();
+
+        /** The bar's title: "Räume auf EuskalReticulum" with no room open (1659). */
+        void title(String words);
     }
 
     private final Activity screen;
     private final Host host;
     private final TextView status;
+    private final TextView retry;
     private final LinearLayout list;
     private final LinearLayout head;
     private final AvatarView face;
@@ -70,6 +74,20 @@ final class RoomsPane {
         status.setPadding(dp(16), dp(8), dp(16), dp(8));
         status.setTag("rooms_status");
         column.addView(status);
+        // "Connect" or "Try again" under it, while the link is neither up
+        // nor coming (1652).
+        retry = new TextView(activity);
+        retry.setTextColor(activity.getColor(R.color.accent));
+        retry.setTypeface(null, Typeface.BOLD);
+        retry.setPadding(dp(16), dp(4), dp(16), dp(12));
+        retry.setTag("rooms_retry");
+        retry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                verb("retry", "", 0);
+            }
+        });
+        column.addView(retry);
 
         // The open room's bar, a chat's: back, the avatar, the name over
         // the people (a tap shows them), the menu.
@@ -253,6 +271,9 @@ final class RoomsPane {
         });
     }
 
+    /** A redraw for the seconds of "Connecting…" is pending (1652). */
+    private boolean ticking;
+
     /** What the tab showed last (1464): Back decides by it. */
     private Map<String, Object> last;
 
@@ -291,9 +312,30 @@ final class RoomsPane {
             host.left();
             return;
         }
+        String bar = Core.str(shown, "title");
+        if (!bar.isEmpty()) {
+            host.title(bar);
+        }
         String said = Core.str(shown, "status");
         status.setText(said);
         status.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
+        String again = Core.str(shown, "retry");
+        retry.setText(again);
+        retry.setVisibility(again.isEmpty() ? View.GONE : View.VISIBLE);
+        // While it connects the library counts the seconds (1652): ask it
+        // again in a second, one tick at a time.
+        if (!said.isEmpty() && again.isEmpty() && !ticking) {
+            ticking = true;
+            status.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    ticking = false;
+                    if (!screen.isDestroyed()) {
+                        draw();
+                    }
+                }
+            }, 1000);
+        }
         input.setHint(Core.str(shown, "placeholder"));
         String room = Core.str(shown, "room");
         boolean open = !room.isEmpty();
@@ -308,6 +350,28 @@ final class RoomsPane {
             List<Map<String, Object>> rows = Core.list(shown, "rows");
             for (int i = 0; i < rows.size(); i++) {
                 list.addView(row(rows.get(i), i));
+            }
+            // The rooms the hub names (1652): a tap joins one.
+            String title = Core.str(shown, "listed_title");
+            if (!title.isEmpty()) {
+                // The bar says it already (1659): no second line of it.
+                if (!title.equals(bar)) {
+                    list.addView(heading(title));
+                }
+                List<?> named = (List<?>) shown.get("listed");
+                if (named != null) {
+                    for (int i = 0; i < named.size(); i++) {
+                        list.addView(listed(String.valueOf(named.get(i)), i));
+                    }
+                }
+                String note = Core.str(shown, "listed_note");
+                if (!note.isEmpty()) {
+                    list.addView(note(note));
+                }
+            }
+            String other = Core.str(shown, "other");
+            if (!other.isEmpty()) {
+                list.addView(heading(other));
             }
             return;
         }
@@ -368,6 +432,44 @@ final class RoomsPane {
             @Override
             public void onClick(View v) {
                 verb("show", "", index);
+            }
+        });
+        return line;
+    }
+
+    /** A heading over the hub's rooms, or over the field: the library's words. */
+    private View heading(String text) {
+        TextView view = new TextView(screen);
+        view.setText(text);
+        view.setTextSize(14);
+        view.setTypeface(null, Typeface.BOLD);
+        view.setTextColor(screen.getColor(R.color.text_secondary));
+        view.setPadding(dp(16), dp(16), dp(16), dp(4));
+        return view;
+    }
+
+    /** A room the hub names (1652): its avatar and name; a tap joins it and opens it. */
+    private View listed(final String name, int index) {
+        LinearLayout line = new LinearLayout(screen);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+        line.setPadding(dp(16), dp(10), dp(16), dp(10));
+        line.setTag("rooms_listed_" + index);
+        line.setBackgroundResource(android.R.drawable.list_selector_background);
+        AvatarView avatar = new AvatarView(screen, null);
+        String initial = name.replaceFirst("^#", "");
+        avatar.show(name, Core.map("initials",
+                initial.isEmpty() ? "" : initial.substring(0, 1).toUpperCase()));
+        line.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        TextView words = new TextView(screen);
+        words.setText(name);
+        words.setTextSize(17);
+        words.setTextColor(screen.getColor(R.color.text));
+        words.setPadding(dp(16), 0, dp(8), 0);
+        line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        line.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                verb("join", name, 0);
             }
         });
         return line;

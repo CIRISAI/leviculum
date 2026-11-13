@@ -85,6 +85,29 @@ pub struct Draw<'a> {
     /// The reader's names, for a relayed post's writer (1482); none draws
     /// a relay's posts as they came.
     pub names: Option<&'a crate::names::Names>,
+    /// The bubbles' bytes under way (1662); none draws no bar.
+    pub transfers: Option<&'a super::transfer::Transfers>,
+}
+
+/// The cells of a bubble's progress bar (1662).
+pub const PROGRESS_CELLS: usize = 10;
+
+/// `percent` of `cells` filled: `▰▰▰▰▱▱▱▱▱▱`, `[####------]` in ASCII.
+pub fn progress_bar(percent: u8, cells: usize, ascii: bool) -> String {
+    let filled = (usize::from(percent.min(100)) * cells)
+        .div_ceil(100)
+        .min(cells);
+    let (on, off) = match ascii {
+        true => ('#', '-'),
+        false => ('▰', '▱'),
+    };
+    let bar: String = core::iter::repeat_n(on, filled)
+        .chain(core::iter::repeat_n(off, cells - filled))
+        .collect();
+    match ascii {
+        true => alloc::format!("[{bar}]"),
+        false => bar,
+    }
 }
 
 /// A style drawn in a token's colours.
@@ -605,6 +628,23 @@ fn block(
             let n = super::voice::BARS.min(cap).max(1);
             media.push(waveform(&levels, n, false, draw.ascii));
         }
+    }
+    // Its bytes under way (1662), a bar and its words under the media:
+    // ours while it still sends, one being fetched until it is whole.
+    let sending = |state: Option<leviculum_ui::delivery::DeliveryState>| {
+        let shown = state.map(|s| super::shown_delivery(s, draw.home_client, draw.receipts));
+        super::chat::Mark::of(shown) == super::chat::Mark::Sending
+    };
+    if let Some(transfer) = draw
+        .transfers
+        .and_then(|transfers| transfers.of(&peer, message.activity))
+        .filter(|_| !message.outbound || sending(message.delivery))
+    {
+        media.push(format!(
+            "{} {}",
+            progress_bar(transfer.percent(), PROGRESS_CELLS, draw.ascii),
+            transfer.words().resolve(draw.lang)
+        ));
     }
     if !body.trim().is_empty() {
         media.push(body);

@@ -547,6 +547,84 @@ fn a_restart_lists_what_was_heard_and_holds_the_suggestion() {
     );
 }
 
+/// Walk 8 of 1653, 41: no server said "empfohlen", where walk 5 had it on
+/// ValleiRug. A restart holds the suggestion it kept (1632); a held hub
+/// the store no longer lists, or one not heard yet this session, must not
+/// take the mark with it. Through the facade, on the same store: the held
+/// hub never kept and another named shipped hub kept, the restart marks
+/// the kept one; nothing kept at all, no mark, and the first named shipped
+/// hub heard this session takes it, the held one too when it comes back.
+/// The control: a hub in force marks none.
+#[test]
+fn a_restart_with_a_held_hub_not_heard_yet_still_suggests_one() {
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let shipped = loquax::ui::hubs::shipped();
+    let (held, other) = (&shipped[0], &shipped[1]);
+    // The held hub was never kept; another was.
+    let home = tempfile::tempdir().expect("app dir");
+    {
+        let (mut store, mut model) = started(home.path(), me);
+        hub_heard(&mut model, other, 3, 600);
+        let owed = loquax::ui::explore::take_heard(&mut model);
+        loquax::heard::keep(&mut store, home.path(), owed).expect("kept");
+    }
+    loquax::config::save_hash(home.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut model) = started(home.path(), me);
+    tap(&mut model, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&model)).1.as_deref(),
+        Some(other.name.as_str()),
+        "the kept hub takes the mark: {:?}",
+        servers(&screen(&model))
+    );
+    // The held one heard again this session: the mark stays where it is.
+    hub_heard(&mut model, held, 1, 10);
+    assert_eq!(
+        servers(&screen(&model)).1.as_deref(),
+        Some(other.name.as_str())
+    );
+    // Nothing kept, the held hub in the config: no mark until a named
+    // shipped hub is heard, then that one.
+    let bare = tempfile::tempdir().expect("app dir");
+    loquax::config::save_hash(bare.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut cold) = started(bare.path(), me);
+    tap(&mut cold, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&cold)).1,
+        None,
+        "nothing heard, nothing suggested"
+    );
+    hub_heard(&mut cold, other, 4, 30);
+    assert_eq!(
+        servers(&screen(&cold)).1.as_deref(),
+        Some(other.name.as_str()),
+        "the first heard takes it"
+    );
+    // The held hub first, after the restart: it is the one.
+    let again = tempfile::tempdir().expect("app dir");
+    loquax::config::save_hash(again.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut back) = started(again.path(), me);
+    hub_heard(&mut back, held, 6, 30);
+    hub_heard(&mut back, other, 1, 20);
+    tap(&mut back, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&back)).1.as_deref(),
+        Some(held.name.as_str())
+    );
+    // The control: a hub in force, no mark on any.
+    loquax::config::save_hash(again.path(), "rooms_hub", Some(other.hash)).expect("in force");
+    let (_store, mut chosen) = started(again.path(), me);
+    let config = loquax::config::load(again.path()).expect("config");
+    chosen.rooms.hub = config.rooms_hub;
+    hub_heard(&mut chosen, held, 6, 30);
+    tap(&mut chosen, "tab", "", "", 0);
+    assert_eq!(servers(&screen(&chosen)).1, None, "a hub in force: no mark");
+}
+
 /// Walk 4 of 1632, new 14: the browser's "Orte" sheet on the phone said
 /// "Gefundene Knoten" and rows like "RNS Search · 3e5f19fd… · 110
 /// Sprünge". Through the facade: the heading says what the rows are, a
@@ -682,4 +760,90 @@ fn the_places_sheet_scrolls_alone_and_stays_what_is_shown() {
     let closed = page(&model, "Orte again");
     assert_eq!(closed.sheet, "", "the second tap closes it");
     assert_eq!(closed.first, first);
+}
+
+/// The phone's answer for the tab as Java decodes it, against
+/// `golden/<name>`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+fn check(name: &str, shown: &ExploreScreen) {
+    let mut got = serde_json::to_string_pretty(shown).expect("json");
+    got.push('\n');
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "{name} moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}
+
+fn clock(model: &mut UiModel<session::Line>, unix_secs: i64) {
+    update(
+        model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs,
+            offset_secs: 0,
+        }),
+    );
+}
+
+fn mailbox(model: &mut UiModel<session::Line>, up: bool) {
+    update(
+        model,
+        UiEvent::Explore(loquax::ui::explore::ExploreEvent::Mailbox(up)),
+    );
+}
+
+/// 1644: opening the tab through the facade asks the mailbox once, a
+/// second open within the minute does not; the line on top of the answer
+/// Java reads says how old the list is in its three states, and a page
+/// silent for seven days is not in it while one at six days and 23 hours
+/// is. Goldens: `explore-as-of-old.json` (up, three hours old) and
+/// `explore-as-of-down.json` (down, as of yesterday 14:20).
+#[test]
+fn the_tab_asks_the_mailbox_once_and_says_how_old_its_list_is() {
+    let (_home, mut model) = phone();
+    heard(&mut model, 0x66, Some("Funkstille"), 7 * 86_400);
+    heard(&mut model, 0x77, Some("Knapp"), 7 * 86_400 - 3_600);
+    let asks = |effects: &[UiEffect]| {
+        effects
+            .iter()
+            .filter(|e| matches!(e, UiEffect::AskPages))
+            .count()
+    };
+    // The session says the link before the tab opens.
+    mailbox(&mut model, true);
+    assert_eq!(asks(&tap(&mut model, "tab", "", "", 0)), 1, "opened");
+    tap(&mut model, "chats", "", "", 0);
+    update(&mut model, UiEvent::Elapsed(40_000));
+    assert_eq!(asks(&tap(&mut model, "tab", "", "", 0)), 0, "30 s later");
+    let shown = screen(&model);
+    assert!(!labels(&shown).contains(&"Funkstille".to_string()));
+    assert!(labels(&shown).contains(&"Knapp".to_string()), "control");
+    // Fresh: no line. The answer comes at 14:20.
+    let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+    clock(&mut model, answered);
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Home(loquax::home::pages::Delta {
+            stamp: 1,
+            more: false,
+            rows: Vec::new(),
+        })),
+    );
+    assert_eq!(screen(&model).as_of, "", "fresh");
+    // Three hours on, the link up.
+    clock(&mut model, answered + 3 * 3_600);
+    let shown = screen(&model);
+    assert_eq!(shown.as_of, "Stand: vor 3 Std.");
+    check("explore-as-of-old.json", &shown);
+    // The next day, the link down.
+    mailbox(&mut model, false);
+    clock(&mut model, answered + 86_400);
+    let shown = screen(&model);
+    assert_eq!(shown.as_of, "Nicht verbunden · Stand von gestern 14:20");
+    check("explore-as-of-down.json", &shown);
 }

@@ -51,13 +51,6 @@ pub const SERVER_FILE: &str = "home-server";
 /// How long a join, a send or a mark may take; a pull gets twice this.
 pub const BUDGET: Duration = Duration::from_secs(60);
 
-/// How long a stop waits for the peer states still on their
-/// way to the home node (1614). Each is a link and one request, well under
-/// a second on a reachable home node; a home node out of reach does not
-/// hold the app's end longer than this, and what did not arrive is given
-/// up as a send past its budget is.
-const HAND_OFF_GRACE: Duration = Duration::from_secs(10);
-
 /// How old the mailbox's word on itself may be before the mailbox page
 /// asks again (1642): a minute, so a device's "last there" moves while the
 /// page is watched, and a page opened ten times asks once.
@@ -211,10 +204,6 @@ struct Inner {
     attached: Attached,
     fanout: Fanout,
     client: HomeClient,
-    /// The peer states the reader set, on their way to the
-    /// home node in order (1614); [`Session::stop`] waits for them.
-    /// `None` once the stop took it.
-    hand_offs: Option<runner::HandOffs>,
     home: PathBuf,
     offset: i32,
     /// The phone's language: the scene's words are said in it (1217).
@@ -274,8 +263,12 @@ struct Inner {
     /// none before the first, and when that look was.
     link: Option<bool>,
     link_looked: Option<u64>,
-    /// When the link last changed, and when it was last seen up, unix
-    /// seconds (1642): the mailbox page's "since" and "last contact".
+    /// When the watching link to the mailbox last changed, and when it was
+    /// last seen up, unix seconds (1642): the mailbox page's "since" and
+    /// "last contact". The watching link, not the TCP interface (1647,
+    /// walk 6, finding 37: the page counted "connected for" through a
+    /// mailbox restart, which the TCP connection to the lnsd in front of
+    /// it never saw). `None` before the link said anything.
     link_since: Option<i64>,
     last_contact: Option<i64>,
     /// What the mailbox said of itself (1642, `/about`), and whether an
@@ -1007,7 +1000,7 @@ impl Session {
         use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
         let rendezvous = self.rendezvous();
         let relayed = rendezvous.iter().any(|(_, up)| *up);
-        let (link, heard, since, last_contact, entry, told, device) = {
+        let (link, watching, heard, since, last_contact, entry, told, device) = {
             let inner = self.lock();
             // The mailbox announces this identity under the name it keeps
             // (1447): what the profile calls it, never the server the
@@ -1025,6 +1018,7 @@ impl Session {
             let told = lock_about(&inner.about).told.clone();
             (
                 inner.link,
+                inner.link_since.map(|_| inner.watching),
                 heard,
                 inner.link_since,
                 inner.last_contact,
@@ -1060,7 +1054,7 @@ impl Session {
             devices,
             told,
             reach: Reach {
-                up: link,
+                up: watching,
                 since,
                 last_contact,
                 entry,
@@ -1550,6 +1544,7 @@ impl Session {
                 target,
                 body: Some(body),
             } => UiEvent::Reply { peer, target, body },
+            Intent::NoticeReply { peer, key, body } => UiEvent::NoticeReply { peer, key, body },
             Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
             Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
             // Scaled and stripped off the lock: a 12 MP picture takes a
@@ -2251,7 +2246,6 @@ impl Session {
         let Some(runtime) = runtime else {
             return;
         };
-        let hand_offs;
         {
             let mut inner = self.lock();
             // A draft typing has not paused on yet is kept all the same
@@ -2259,7 +2253,6 @@ impl Session {
             inner.model.flush_drafts();
             inner.persist();
             inner.gone = true;
-            hand_offs = inner.hand_offs.take();
             let _ = inner.events.send(Event::Stopped {
                 v: VERSION,
                 detail: String::new(),
@@ -2282,11 +2275,6 @@ impl Session {
         // and its store are let go of in order.
         let here = self.here().take();
         let finish = move || {
-            // The reader's last words on peers reach the home node before
-            // its node closes (1614).
-            if let Some(lane) = hand_offs {
-                runtime.block_on(lane.finish(HAND_OFF_GRACE));
-            }
             if let Some(mut here) = here {
                 runtime.block_on(here.stop());
             }
@@ -2379,6 +2367,12 @@ impl Inner {
         // The petnames the home had not taken when the session ended
         // (1635): handed again, and the reader's word over the first pull.
         model.restore_owed_petnames(store.owed_petnames().map_err(|error| error.to_string())?);
+        // The peer states likewise (1640).
+        model.restore_owed_peer_states(
+            store
+                .owed_peer_states()
+                .map_err(|error| error.to_string())?,
+        );
         // A share runs on across a restart (1273); one whose time ran out
         // meanwhile ends at the next clock with its end report.
         model.restore_shares(store.shares().map_err(|error| error.to_string())?);
@@ -2396,14 +2390,12 @@ impl Inner {
                 .unwrap_or(Some(loquax::sync::DEFAULT_BOUND_MS)),
         ));
         let (finished_tx, finished_rx) = channel();
-        let hand_offs = Some(runner::HandOffs::new(&runtime, client.clone(), BUDGET));
         Ok(Self {
             model,
             store,
             attached,
             fanout: Fanout::default(),
             client,
-            hand_offs,
             home: home.to_path_buf(),
             offset,
             lang,
@@ -2646,6 +2638,14 @@ impl Inner {
         self.watched(elapsed);
         // The bar under the list's top bar (1448, walk finding 14).
         self.dirty |= self.offline.look(self.watching, elapsed);
+        // Explore says how old the mailbox's list is (1644), on the same
+        // word as the bar: a start's moment without a link says nothing.
+        let up = !self.offline.offline();
+        if self.model.explore.mailbox.link != Some(up) {
+            self.apply(UiEvent::Explore(
+                loquax::ui::explore::ExploreEvent::Mailbox(up),
+            ));
+        }
         // Applied, not quiet: a running share sends from the clock (1273).
         self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -2718,6 +2718,18 @@ impl Inner {
                 WatchEvent::Watching(up) => {
                     // The list's status dot (1199) shows it: a `changed`.
                     self.dirty |= self.watching != up;
+                    // The mailbox page's "connected for" (1647): from
+                    // the watching link's change, and the mailbox asked
+                    // again for its word on each new link, which may be
+                    // to a mailbox that restarted.
+                    if self.watching != up || self.link_since.is_none() {
+                        let wall = wall_now(self.offset).unix_secs;
+                        self.link_since = Some(wall);
+                        if up {
+                            self.last_contact = Some(wall);
+                            self.ask_about(0);
+                        }
+                    }
                     self.watching = up;
                 }
                 WatchEvent::Wake(newest) => {
@@ -2763,13 +2775,11 @@ impl Inner {
         if up && self.link == Some(false) {
             self.ask_for_home_path();
         }
-        let wall = wall_now(self.offset).unix_secs;
-        if up {
-            self.last_contact = Some(wall);
+        if self.watching {
+            self.last_contact = Some(wall_now(self.offset).unix_secs);
         }
         if self.link != Some(up) {
             self.link = Some(up);
-            self.link_since = Some(wall);
             let _ = self.events.send(Event::Link { v: VERSION, up });
             // The mailbox's own word, once per connection (1642).
             if up {
@@ -2805,11 +2815,14 @@ impl Inner {
             let told = match loquax::home::client::about(&node, &public_key, &device, BUDGET).await
             {
                 Ok(about) => {
-                    tracing::info!(
-                        "HOME about host={:?} version={} devices={}",
-                        about.host,
-                        about.version,
-                        about.devices.len()
+                    // The commits stay here, never on the page (1647), in
+                    // a line logcat carries (1669, walk 12, finding 67).
+                    loquax::events::home_about(
+                        &about.host,
+                        &about.version,
+                        loquax::VERSION,
+                        about.started,
+                        about.devices.len(),
                     );
                     Some(Told::Told(about))
                 }
@@ -2971,6 +2984,8 @@ impl Inner {
                 UiEffect::Store(read) => answers.push(self.read(read)),
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                // Explore opened (1644): the mailbox's list asked again.
+                UiEffect::AskPages => self.ask_pages(),
                 UiEffect::Browse(effect) => self.browse_owed.push(effect),
                 // The Rooms (1384): the hub link does it; what the hub says
                 // comes back on the pump.
@@ -3002,6 +3017,18 @@ impl Inner {
                 // A setting changed on a page (1233): the config in the
                 // app's directory, which the next start reads; the
                 // screens draw the marks again.
+                // A deleted message's saved files go with it (1662):
+                // `Query::SaveFile` wrote them under the app's files, the
+                // provider lends them from there. What the reader shared
+                // or saved elsewhere is not under the app and stays.
+                UiEffect::ForgetSaved { peer, key } => {
+                    if let Err(error) = loquax::file_save::forget(&self.home, peer, key) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("not removed: {error}"),
+                        });
+                    }
+                }
                 // The public rooms' hub the Advanced page chose (1577).
                 UiEffect::RememberHash { key, hash } => {
                     if let Err(error) = loquax::config::save_hash(&self.home, key, hash) {
@@ -3131,13 +3158,17 @@ impl Inner {
                 BUDGET,
             ));
         }
-        // The peer states on their lane, in order, which the stop waits
-        // for (1614).
+        // The peer states owed to the home (1640), as the petnames.
         let states = self.model.take_peer_states();
-        if let Some(lane) = &self.hand_offs {
-            if !states.is_empty() {
-                lane.hand(runner::HandOff::PeerStates(states));
-            }
+        if !states.is_empty() {
+            let client = self.client.clone();
+            let done = self.finished_tx.clone();
+            let wake = Arc::clone(&self.wake);
+            self.runtime.spawn(async move {
+                let event = runner::hand_peer_states(client, states, BUDGET).await;
+                let _ = done.send(Finished::Event(event));
+                wake.notify_one();
+            });
         }
         let marks = self.model.take_marks();
         if marks.is_empty() {
@@ -3230,10 +3261,25 @@ impl Inner {
                 let client = self.client.clone();
                 let done = self.finished_tx.clone();
                 let wake = Arc::clone(&self.wake);
+                let (told, woken) = (self.finished_tx.clone(), Arc::clone(&self.wake));
                 self.runtime.spawn(async move {
-                    let event =
-                        runner::send_home(&mut tap, &client, to, body, fields, BUDGET, SETTLE)
-                            .await;
+                    // How far the upload went (1662): the bubble's bar,
+                    // folded on the next turn.
+                    let mut progress = move |event: UiEvent| {
+                        let _ = told.send(Finished::Event(event));
+                        woken.notify_one();
+                    };
+                    let event = runner::send_home(
+                        &mut tap,
+                        &client,
+                        to,
+                        body,
+                        fields,
+                        BUDGET,
+                        SETTLE,
+                        &mut progress,
+                    )
+                    .await;
                     let _ = done.send(Finished::Send(event));
                     wake.notify_one();
                 });
@@ -3326,12 +3372,14 @@ impl Inner {
         let stamp = self.model.browse.shared.stamp;
         let done = self.finished_tx.clone();
         let wake = Arc::clone(&self.wake);
+        tracing::info!("HOME pages asked since={stamp}");
         self.pages_asking = Some(self.runtime.spawn(async move {
             if let Some(event) = runner::home_pages(client, pending, stamp, BUDGET).await {
                 let _ = done.send(Finished::Event(event));
                 wake.notify_one();
             }
         }));
+        loquax::ui::explore::pages_asked(&mut self.model);
     }
 
     /// The two lists into [`Inner::scene`] (1464), and the digest of the
@@ -3377,13 +3425,9 @@ impl Inner {
             None => self.cached_rows(order),
         };
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
-            // The own avatar (1452 rule 4): the own name, the names' word
-            // for us else the profile's from the mailbox; never the hash.
-            let named = self
-                .model
-                .names
-                .shown(&own)
-                .or(Some(self.model.profile.name.as_str()).filter(|name| !name.is_empty()));
+            // The own avatar (1452 rule 4): the core's one chain for the
+            // own name (1647); never the hash.
+            let named = loquax::ui::profile::own_name(&self.model);
             (loquax::address::to_hex(&own), chat::initials(named, &own))
         });
         schema::Conversations {
@@ -3534,6 +3578,7 @@ impl Inner {
                 .unwrap_or_default(),
             group_invited: group
                 .is_some_and(|g| g.standing == loquax::ui::groups::Standing::Invited),
+            notice_key: self.model.notice_key(&row.peer).map(schema::wire_key),
         }
     }
 
@@ -3740,7 +3785,7 @@ impl Inner {
             .messages
             .iter()
             .find(|m| m.activity == key)
-            .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+            .and_then(|m| loquax::ui::photos::picture_bytes(&m.fields))
             .map(<[u8]>::to_vec)
     }
 
@@ -3951,6 +3996,12 @@ impl Inner {
 pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
     let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
     let mut model = UiModel::<Line>::new(&[]);
+    // The phone scrolls the browser's page natively (1650): the scene
+    // carries it whole, up to the cap.
+    model.browse.model.window = Some(crate::browser::WHOLE_PAGE);
+    // And sideways (1667, walk 11, finding 60): a line of text art wider
+    // than the phone comes whole, its view scrolls across it.
+    model.browse.model.sideways = true;
     model.names.contacts = contacts;
     for (peer, name) in store.names().map_err(|error| error.to_string())? {
         model.names.remember(peer, &name);
@@ -4059,7 +4110,7 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                     .messages
                     .iter()
                     .find(|m| m.activity == node.bubble.key)
-                    .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+                    .and_then(|m| loquax::ui::photos::picture_bytes(&m.fields))
                     .and_then(loquax::photo::dimensions)
                     .unwrap_or((0, 0));
                 (
@@ -4107,6 +4158,10 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
             // app draws no text row under a photo without words.
             row.body = node.text.unwrap_or_default();
             row.files = files;
+            if let Some(progress) = &node.progress {
+                row.progress_words = progress.words.resolve(lang);
+                row.progress_percent = u32::from(progress.percent);
+            }
             if let Some(voice) = &node.voice {
                 row.voice_mode = u32::from(voice.mode);
                 row.voice_ms = voice.duration_ms;
@@ -4118,7 +4173,7 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
             }
             if let Some((format, bytes, (w, h), words)) = photo {
                 row.photo = format;
-                row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+                row.photo_bytes = bytes;
                 row.photo_w = w;
                 row.photo_h = h;
                 row.photo_words = words;
@@ -4223,6 +4278,8 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         photo_h: 0,
         photo_words: String::new(),
         files: Vec::new(),
+        progress_words: String::new(),
+        progress_percent: 0,
         voice_mode: 0,
         voice_ms: 0,
         voice_duration: String::new(),
@@ -4388,6 +4445,11 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             to: Target::Peer(parse_peer(&peer)?),
             target: parse_id(&target)?,
             body: Some(body),
+        },
+        R::NoticeReply { peer, key, body } => Intent::NoticeReply {
+            peer: parse_peer(&peer)?,
+            key: schema::model_key(key),
+            body,
         },
         R::Forward { peer, key, to } => Intent::Forward {
             from: parse_peer(&peer)?,
@@ -5331,7 +5393,7 @@ mod tests {
         // No name on this phone: the room shows none (1629, walk 3 new 9).
         assert_eq!(
             choice.note,
-            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+            "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen."
         );
         model.profile.name = "Lew".into();
         let named = rooms_hub_choice(&model, Lang::De, String::new());

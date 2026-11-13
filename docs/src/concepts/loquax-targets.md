@@ -10,7 +10,7 @@ page is the measured state of that rule, feature by feature (1341).
 
 Each row is a user-facing feature of the phone build, found by walking the
 Android facade's `Request` and `Query` enums
-(`loquax-android/src/schema.rs:268`, `loquax-android/src/schema.rs:726`),
+(`loquax-android/src/schema.rs:268`, `loquax-android/src/schema.rs:738`),
 the bridge methods Java calls (`Core.java`), the activities that call them,
 and the scene's node kinds (`loquax/src/ui/scene.rs`). For every target a
 cell names the place that does it, `file:line`, or says MISSING. A MISSING
@@ -154,8 +154,12 @@ a pasted address, never a hash's letters, and filters the hubs too; a new
 order is applied at most once a second and never while a finger is on the
 list; the reader's word for a hub is "server", and a tap on one opens its
 sheet (how far, the rooms it named, one button that makes it the public
-rooms' server) and changes nothing. A hub used there links nothing; the
-first room joined links (the privacy sentence of 1577). The tab never
+rooms' server) and changes nothing. Since 1652 a hub used there links at
+once (the privacy sentence of 1577 with it), sends `/list` after its
+WELCOME and shows the rooms it names as rows a tap joins, the typed name
+below them; its state says "Not connected yet", "Connecting…" with the
+seconds after five, or "The server does not answer" with "Try again".
+The tab never
 disappears; with nothing to list each section says so in one sentence.
 With `browse_tab` off Explore lists the pages and says they cannot be
 opened. The M9 has no third button: what it
@@ -169,28 +173,28 @@ a channel layer on top of propagation nodes is not to be built again.
 ## What 1341 brought, and how
 
 - **Pictures and files in the window.** The window sets the core's
-  `Abilities::picker` (`loquax/src/gui.rs:329`), so the scene gives it the plus and
+  `Abilities::picker` (`loquax/src/gui.rs:343`), so the scene gives it the plus and
   the attachment sheet with Gallery and File, which the window draws over
-  the bar (`loquax/src/gui/chat.rs:2222`). A row asks the XDG desktop portal's
+  the bar (`loquax/src/gui/chat.rs:2557`). A row asks the XDG desktop portal's
   `FileChooser.OpenFile` over the session bus (`loquax/src/desktop.rs:158`), the
   dialog the desktop draws for every program. The crate is zbus, already
   in the lock through the window's theme reader (leviculum-ui-iced, mundy);
   neither `rfd` nor another dialog crate is in the tree, and zbus needs no
   GTK. The shell sends the pick as the phone sends its picker's
-  (`loquax/src/shell.rs:998`): a picture scaled at the reader's photo size, a file
+  (`loquax/src/shell.rs:1006`): a picture scaled at the reader's photo size, a file
   whole up to what a receiver takes. Saving a received file is the
   existing save under the home's `files/` and the system's handler
-  (`loquax/src/shell.rs:470`), the same in both desktop targets.
+  (`loquax/src/shell.rs:479`), the same in both desktop targets.
 - **Voice** was already on both desktop targets: recording through the
   system's recorder (`pw-record`, `parecord`, `arecord`, `mic.rs`),
-  playback as a WAV file for the system's player (`loquax/src/shell.rs:489`). No
+  playback as a WAV file for the system's player (`loquax/src/shell.rs:498`). No
   audio crate was added.
 - **QR without a camera.** The phone's decoder (rqrr) moved from
   `loquax-android` into `loquax::scan`, and `scan::image_codes` reads a
   PNG, JPEG, WebP or GIF of a code (`loquax/src/scan.rs:39`). The window's new
   conversation offers "Read a code from a picture"; pasting a code's text
   already worked in both desktop targets.
-- **Notifications** follow the phone's rule (`LoquaxService.java:331`):
+- **Notifications** follow the phone's rule (`LoquaxService.java:339`):
   a grown unread count, not muted, not at the first look, not while the
   screen is in front (`desktop.rs`, `Notices`). The window posts through
   `org.freedesktop.Notifications` while it lacks the focus; the terminal,
@@ -228,7 +232,7 @@ alike over the node each already has; the desktop shell drains the
 browser's effects (`loquax/src/browsing.rs:142`) as the phone's session
 does. The window draws the tab with lnomad's window view
 (`lnomad/src/gui.rs:681`), pictures included, and the terminal with
-lnomad's terminal view (`loquax/src/tui.rs:1707`); neither has a renderer
+lnomad's terminal view (`loquax/src/tui.rs:1714`); neither has a renderer
 of its own. The switch is the phone's, `browse_tab`, on by default on
 all three since 1618 (off until then). Details in
 `lnomad-everywhere.md`, "The tab on the desktop".

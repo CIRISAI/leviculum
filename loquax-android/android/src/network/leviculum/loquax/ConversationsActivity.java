@@ -301,6 +301,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                         explore();
                     }
                 }
+
+                @Override
+                public void title(String words) {
+                    if (onRooms) {
+                        title.setText(words);
+                    }
+                }
             });
         }
         findViewById(R.id.pane_chats).setVisibility(View.GONE);
@@ -418,6 +425,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
      * the browser, a hub it picks the rooms; both come back here.
      */
     private void explore() {
+        // Back from what Explore opened keeps its list as it stood (1659,
+        // walk 10, 50); the tab's button shows it anew.
+        boolean returning = onBrowse || onRooms;
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
         }
@@ -467,7 +477,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         boolean wide = getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
         findViewById(R.id.bar).setVisibility(wide ? View.GONE : View.VISIBLE);
-        explorePane.show();
+        if (returning) {
+            explorePane.returned();
+        } else {
+            explorePane.show();
+        }
     }
 
     /** Explore's list gives way to what it opened; the model keeps it open beneath. */
@@ -922,7 +936,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         @Override
         public void doFrame(long frameTimeNanos) {
             refreshOwed = false;
-            refresh(ask());
+            // Drawn again only when the answer moved (1455), here too
+            // (1667, walk 11, finding 64: every engine change redrew the
+            // list, and each redraw woke its scrollbar, 508 frames in three
+            // idle minutes with nothing on screen moving but that strip).
+            Map<String, Object> answer = ask();
+            if (!Quiet.same(shownAnswer, answer)) {
+                refresh(answer);
+            }
             if (panesOwed) {
                 panesOwed = false;
                 if (onRooms) {

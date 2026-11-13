@@ -34,8 +34,16 @@
 # into PSRAM at boot. A board flashed with an older table says
 # `regions=none/no-entry` and shows the image's regions alone.
 #
+# The WLAN the board joins (1479, `leviculum_core::wifi_credentials`)
+# takes the last sector of what was nvs, 0xE000: nothing on the board
+# reads nvs (esp-radio keeps no NVS), and every other offset stays where
+# boards already flashed hold their stores. `lnflash --wifi` writes it; a
+# board flashed with an older table says `wifi=none/no-entry` and keeps
+# its WiFi radio off.
+#
 # Name,         Type, SubType,   Offset,   Size,     Flags
-nvs,            data, nvs,       0x9000,   0x6000,
+nvs,            data, nvs,       0x9000,   0x5000,
+wifi,           data, undefined, 0xe000,   0x1000,
 phy_init,       data, phy,       0xf000,   0x1000,
 factory,        app,  factory,   0x10000,  0x800000,
 identity,       data, undefined, 0x810000, 0x1000,

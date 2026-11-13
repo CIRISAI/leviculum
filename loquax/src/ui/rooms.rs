@@ -78,13 +78,37 @@ pub enum RoomAsk {
 /// next opening shows it at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Named {
-    /// The question is on its way.
-    Asking,
+    /// The question is on its way, asked at `since` (unix seconds, the
+    /// model's clock; `None` before the clock came). The sheet waits
+    /// [`ASK_PATIENCE_SECS`] before it says the server does not answer.
+    Asking { since: Option<i64> },
     /// The rooms its notices named, maybe none.
     Rooms(Vec<String>),
     /// It gave no WELCOME (no path, no link, no answer).
     NoAnswer,
 }
+
+/// How long a server's sheet asks, and the rooms screen connects, before
+/// either says the server does not answer and offers to try again (1653,
+/// walk 8, 42: the sentence stood 90 s, the question's whole budget, and
+/// the reader waited without end). One patience for both since 1659 (walk
+/// 10, 53: the sheet gave up at 20 s, the screen at 30 s, and Minuteman
+/// answered after 45 s). The question itself runs on to its budget; an
+/// answer that comes later still fills the sheet, and a welcome that
+/// comes later still opens the screen.
+pub const ASK_PATIENCE_SECS: i64 = 45;
+
+/// From this second on the sheet and the rooms screen say the server is
+/// slow, with the seconds (1659, walk 10, 53), until [`ASK_PATIENCE_SECS`].
+pub const SLOW_SECS: i64 = 20;
+
+/// The most a server's question (Explore's sheet, [`RoomAsk::Peek`]) may
+/// take, path, link and HELLOs: the question's own budget, which ends it
+/// with an answer or with none (`crate::rooms_link`). The sheet waits as
+/// long as the question is alive (1669, walk 12, finding 68: Nordic's
+/// list came after 83.5 s, the sheet had given up at 45 s), and a little
+/// past it only should its end never be told.
+pub const PEEK_BUDGET_SECS: i64 = 90;
 
 /// The settings' hub row (1577): what a press on one of its lines asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +256,17 @@ pub struct Rooms {
     pub queued: Vec<RoomAsk>,
     /// What each hub named when its sheet asked (1621).
     pub named: alloc::collections::BTreeMap<[u8; 16], Named>,
+    /// What each hub named when the mailbox asked it (1643,
+    /// `crate::home::hub_rooms`), pulled with the hub: the sheet lists it
+    /// at once, until this device's own question answers ([`Self::named`]
+    /// with rooms), which is the fresher copy.
+    pub mailbox_named: alloc::collections::BTreeMap<[u8; 16], Vec<String>>,
+    /// The chosen hub's answer to `/list` after its WELCOME (1652): `None`
+    /// until it came, then the rooms it names, maybe none.
+    pub listed: Option<Vec<String>>,
+    /// When the link was asked for, in seconds since the epoch, while it
+    /// is coming up: "Connecting… 12 s" after the first five (1652).
+    pub linking_since: Option<i64>,
 }
 
 impl Default for Rooms {
@@ -252,6 +287,9 @@ impl Default for Rooms {
             hub_page: 0,
             queued: Vec::new(),
             named: alloc::collections::BTreeMap::new(),
+            mailbox_named: alloc::collections::BTreeMap::new(),
+            listed: None,
+            linking_since: None,
         }
     }
 }
@@ -358,12 +396,24 @@ pub enum RoomsEvent {
         hub: [u8; 16],
         rooms: Option<Vec<String>>,
     },
+    /// The chosen hub's answer to `/list` after its WELCOME (1652), merged
+    /// with what its greeting named; empty when it names none, said an
+    /// ERROR, or said nothing in time.
+    Listed {
+        rooms: Vec<String>,
+    },
+    /// A tap on one of the rooms the hub names (1652): joined as the hub
+    /// spells it, and opened once the hub says we are in.
+    Join(String),
+    /// "Try again" or "Connect" under the link's state (1652).
+    Retry,
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
-/// Opening them links nothing (1578, the privacy sentence of 1577): the
-/// hub learns of the reader on the first join, which links
-/// ([`submit`]), or when rooms joined before are open again.
+/// Since 1652 the hub was chosen by the reader, told then that their name
+/// is visible ([`link`], 1577's sentence), so opening the Rooms links to
+/// it and asks for its rooms: a tab that waits for a typed room name was
+/// the "Connecting…" that never connected.
 pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
     match tab {
         TabId::Rooms if model.rooms.enabled => {
@@ -375,10 +425,7 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
             {
                 room.unread = 0;
             }
-            match model.rooms.rooms.is_empty() {
-                true => Vec::new(),
-                false => link(model),
-            }
+            link(model)
         }
         TabId::Rooms => Vec::new(),
         TabId::Chats | TabId::Map | TabId::Browse | TabId::Explore => {
@@ -388,22 +435,27 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
     }
 }
 
-/// Link to the hub unless linked or linking.
+/// Link to the hub unless linked or linking; a link coming longer than
+/// [`ASK_PATIENCE_SECS`] is asked for again (1659, the "Try again" the
+/// screen offers then).
 fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let Some(hub) = model.rooms.hub else {
         return Vec::new();
     };
+    let again = overdue(&model.rooms, model.now);
     match model.rooms.state {
-        HubState::Linking | HubState::Ready => Vec::new(),
-        HubState::Off | HubState::Down(_) => {
+        HubState::Linking if !again => Vec::new(),
+        HubState::Ready => Vec::new(),
+        HubState::Linking | HubState::Off | HubState::Down(_) => {
             model.rooms.state = HubState::Linking;
+            model.rooms.linking_since = model.now.map(|now| now.unix_secs);
             let mut effects = Vec::new();
             // Before the first link to a hub, once (1577): the hub learns
             // the reader's identity when the link identifies, and the
             // rooms show their name.
             if model.rooms.told != Some(hub) {
                 model.rooms.told = Some(hub);
-                let text = Text::key(name_notice(model)).resolve(model.lang);
+                let text = name_notice(model).resolve(model.lang);
                 model.toast(ToastKind::Info, text);
                 effects.push(UiEffect::RememberHash {
                     key: "rooms_told",
@@ -424,11 +476,42 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// new 9: "your name is visible" beside a profile with no name): the
 /// name where there is one; without one the hub link goes without a nick
 /// and a room shows the writer with no name ([`line_node`]).
-pub(super) fn name_notice<B>(model: &UiModel<B>) -> StrId {
-    match model.profile.name.trim().is_empty() {
-        true => StrId::RoomsNoName,
-        false => StrId::RoomsNameVisible,
+///
+/// Walk 11, finding 62 (1667): "you have no name here" beside a profile
+/// the mailbox page calls "lew" read as if the profile had none. The
+/// notice says it is this server that has no name for the reader, and
+/// names the profile's where the mailbox or the reader's own announce
+/// carries one.
+pub(super) fn name_notice<B>(model: &UiModel<B>) -> Text {
+    if !model.profile.name.trim().is_empty() {
+        return Text::key(StrId::RoomsNameVisible);
     }
+    match profile_name_elsewhere(model) {
+        Some(name) => Text::Key(StrId::RoomsNoNameProfile, Vec::from([Arg::Str(name)])),
+        None => Text::key(StrId::RoomsNoName),
+    }
+}
+
+/// The reader's name as the mailbox says it, else as the reader's own
+/// announce carries it: the words the mailbox page shows for "Name".
+fn profile_name_elsewhere<B>(model: &UiModel<B>) -> Option<String> {
+    let told = match &model.profile.told {
+        super::mailbox_page::Told::Told(about) => Some(about.name.trim()),
+        _ => None,
+    };
+    let away = match &model.profile.mailbox {
+        super::profile::Mailbox::Away { name, .. } => name.as_deref().map(str::trim),
+        _ => None,
+    };
+    let announced = model
+        .address
+        .and_then(|own| model.names.announced(&own))
+        .map(str::trim);
+    [told, away, announced]
+        .into_iter()
+        .flatten()
+        .find(|n| !n.is_empty())
+        .map(String::from)
 }
 
 pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffect> {
@@ -476,6 +559,9 @@ pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffe
     };
     let said = said.resolve(model.lang);
     model.toast(ToastKind::Info, said);
+    // Choosing a server connects to it (1652): path, link, HELLO, WELCOME,
+    // then its rooms. The privacy sentence comes with it, once a hub.
+    effects.extend(link(model));
     effects
 }
 
@@ -536,9 +622,16 @@ fn fold_event<B: InputBuffer + Default>(
 ) -> Vec<UiEffect> {
     let rooms = &mut model.rooms;
     match event {
-        RoomsEvent::Linking => rooms.state = HubState::Linking,
+        RoomsEvent::Linking => {
+            if rooms.state != HubState::Linking {
+                rooms.linking_since = model.now.map(|now| now.unix_secs);
+            }
+            rooms.state = HubState::Linking;
+        }
         RoomsEvent::Welcomed { name, body_limit } => {
             rooms.state = HubState::Ready;
+            rooms.linking_since = None;
+            rooms.listed = None;
             if let Some(hub) = rooms.hub {
                 rooms.heard.answered(&hub, true);
             }
@@ -635,12 +728,15 @@ fn fold_event<B: InputBuffer + Default>(
         }
         RoomsEvent::Down(why) => {
             rooms.state = HubState::Down(why);
+            rooms.linking_since = None;
             // A hub heard but not answering stays listed, marked (1599).
             if let (Some(hub), Down::NoAnswer | Down::NoPath) = (rooms.hub, why) {
                 rooms.heard.answered(&hub, false);
             }
             let text = down(why).resolve(model.lang);
-            if why != Down::Left {
+            // The rooms screen in front says it in its state line; a toast
+            // as well stood doubled under it (1659, walk 10, 55).
+            if why != Down::Left && !rooms.open {
                 model.toast(ToastKind::Error, text);
             }
         }
@@ -672,6 +768,16 @@ fn fold_event<B: InputBuffer + Default>(
             };
             rooms.named.insert(hub, named);
         }
+        RoomsEvent::Listed { rooms: listed } => {
+            if let Some(hub) = rooms.hub {
+                rooms.named.insert(hub, Named::Rooms(listed.clone()));
+            }
+            rooms.listed = Some(listed);
+        }
+        RoomsEvent::Join(room) => {
+            return ask(model, RoomAsk::Join { room, key: None });
+        }
+        RoomsEvent::Retry => return link(model),
     }
     Vec::new()
 }
@@ -736,10 +842,24 @@ fn leave<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 fn submit<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let input = model.rooms.input.trim().to_string();
     if input.is_empty() {
-        return Vec::new();
+        // The terminal's Enter on an empty field: the "Connect" or "Try
+        // again" under the link's state (1652).
+        return match model.rooms.state {
+            HubState::Off | HubState::Down(_) if model.rooms.room().is_none() => link(model),
+            _ => Vec::new(),
+        };
     }
     let open = model.rooms.room().map(|r| r.name.clone());
-    let ask = if let Some(rest) = input.strip_prefix("/join ") {
+    // A room the hub names, typed as it is listed (1652): the terminal's
+    // tap on its row, a space in its name or not.
+    let listed = match &open {
+        None => listed(&model.rooms)
+            .and_then(|l| l.rooms.into_iter().find(|r| r.eq_ignore_ascii_case(&input))),
+        Some(_) => None,
+    };
+    let ask = if let Some(room) = listed {
+        Some(RoomAsk::Join { room, key: None })
+    } else if let Some(rest) = input.strip_prefix("/join ") {
         let mut words = rest.split_whitespace();
         words.next().map(|room| RoomAsk::Join {
             room: room.to_string(),
@@ -842,6 +962,10 @@ pub fn down(why: Down) -> Text {
 /// the open one, drawn as a chat, and the compose field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomsNode {
+    /// The screen's title (1659, walk 10, 52): "Rooms on EuskalReticulum"
+    /// with no room open, "Rooms" without a server or with a room open,
+    /// whose header names it.
+    pub title: Text,
     /// How the link stands while it is not up ("Connecting…", why it is
     /// down); none while it is: a working link says nothing.
     pub status: Option<Text>,
@@ -855,7 +979,31 @@ pub struct RoomsNode {
     /// What stands where the open room would, with none open: how to
     /// join one.
     pub empty: Option<Text>,
+    /// The verb under the state while the link is not up and not coming
+    /// (1652): "Connect" before the first link, "Try again" after a
+    /// failure; a tap is [`RoomsEvent::Retry`].
+    pub retry: Option<Text>,
+    /// The rooms the hub names, with no room open (1652).
+    pub listed: Option<ListedNode>,
 }
+
+/// The rooms a hub names (1652), over the typed-name field: a tap joins
+/// one ([`RoomsEvent::Join`]) and opens it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedNode {
+    /// "Rooms on ShadowLink".
+    pub title: Text,
+    /// The rooms it names that we are not in, as the hub spells them.
+    pub rooms: Vec<String>,
+    /// While it is asked, or when it names none.
+    pub note: Option<Text>,
+    /// Over the typed-name field, below the rooms: "Join another room";
+    /// none when the hub names none and the field is the way in.
+    pub other: Option<Text>,
+}
+
+/// How many seconds of "Connecting…" go by before they are counted.
+pub const LINKING_QUIET_SECS: i64 = 5;
 
 /// A room in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,9 +1097,15 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
     let rooms = &model.rooms;
     let status = match rooms.state {
         _ if rooms.hub.is_none() => Some(Text::key(StrId::RoomsNoHub)),
-        HubState::Off | HubState::Linking => Some(Text::key(StrId::RoomsLinking)),
         HubState::Ready => None,
-        HubState::Down(why) => Some(down(why)),
+        _ => link_words(model),
+    };
+    let retry = match rooms.state {
+        _ if rooms.hub.is_none() => None,
+        HubState::Off | HubState::Down(Down::Left) => Some(Text::key(StrId::RoomsConnect)),
+        HubState::Down(_) => Some(Text::key(StrId::RoomsRetry)),
+        HubState::Linking if overdue(rooms, model.now) => Some(Text::key(StrId::RoomsRetry)),
+        HubState::Linking | HubState::Ready => None,
     };
     let rows = rooms
         .rooms
@@ -967,21 +1121,135 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
         .collect();
     let offset = model.now.map_or(0, |now| now.offset_secs);
     let open = rooms.room().map(|room| view(room, rooms.people, offset));
+    let listed = match open {
+        None => listed(rooms),
+        Some(_) => None,
+    };
     let (placeholder, empty) = match &open {
         Some(_) => (Text::key(StrId::ComposeHint), None),
+        // Under the hub's rooms the field is the way to another (1652).
+        None if listed.as_ref().is_some_and(|l| l.other.is_some()) => {
+            (Text::key(StrId::RoomsJoinHint), None)
+        }
         None => (
             Text::key(StrId::RoomsJoinHint),
             Some(Text::key(StrId::RoomsHowToJoin)),
         ),
     };
+    let title = match (&open, rooms.hub) {
+        (None, Some(_)) => on_hub(rooms),
+        _ => Text::key(StrId::TabRooms),
+    };
     RoomsNode {
+        title,
         status,
         rows,
         open,
         input: rooms.input.clone(),
         placeholder,
         empty,
+        retry,
+        listed,
     }
+}
+
+/// "Connecting…", with its seconds once there were more than
+/// [`LINKING_QUIET_SECS`] of them (1652).
+/// How the link to the hub in force stands, in the rooms screen's words
+/// (1652): "Not connected yet.", "Connecting… N s", "Connected", or why it
+/// is down; `None` without a hub. The settings' row of the hub in force
+/// says it too (1655, walk 9, 49).
+pub fn link_words<B>(model: &UiModel<B>) -> Option<Text> {
+    let rooms = &model.rooms;
+    rooms.hub?;
+    Some(match rooms.state {
+        // "Never asked" is not "connecting" (1652).
+        HubState::Off => Text::key(StrId::RoomsNotLinked),
+        HubState::Linking => linking(rooms.linking_since, model.now),
+        HubState::Ready => Text::key(StrId::RoomsLinked),
+        HubState::Down(why) => down(why),
+    })
+}
+
+fn linking(since: Option<i64>, now: Option<WallTime>) -> Text {
+    let waited = match (since, now) {
+        (Some(since), Some(now)) => now.unix_secs - since,
+        _ => 0,
+    };
+    match waited {
+        // The patience of the sheet (1659, walk 10, 53): the link may still
+        // come, and its welcome still opens the screen.
+        w if w >= ASK_PATIENCE_SECS => Text::key(StrId::RoomsNoAnswer),
+        w if w >= SLOW_SECS => Text::Key(StrId::RoomsSlowFor, Vec::from([Arg::Int(w)])),
+        w if w >= LINKING_QUIET_SECS => Text::Key(StrId::RoomsLinkingFor, Vec::from([Arg::Int(w)])),
+        _ => Text::key(StrId::RoomsLinking),
+    }
+}
+
+/// The link has been coming for [`ASK_PATIENCE_SECS`] (1659): the screen
+/// says the server does not answer and offers to try again.
+fn overdue(rooms: &Rooms, now: Option<WallTime>) -> bool {
+    match (rooms.state, rooms.linking_since, now) {
+        (HubState::Linking, Some(since), Some(now)) => now.unix_secs - since >= ASK_PATIENCE_SECS,
+        _ => false,
+    }
+}
+
+/// The rooms the chosen hub names that we are not in (1652): its `/list`
+/// answer once it came; before it this run's sheet answer, merged with
+/// what the mailbox's question found (1643) and the shipped list. Since
+/// 1659 (walk 10, 52) they stand whatever the link does: a silent server's
+/// screen said only "The server does not answer." under a bare "Rooms",
+/// and a newcomer had to guess a name the store knew. A tap on one joins
+/// it once the server answers ([`ask`] queues it and links). The title
+/// names the server even when nothing is known of its rooms.
+fn listed(rooms: &Rooms) -> Option<ListedNode> {
+    let hub = rooms.hub?;
+    // The link's own answer is the fresh one and stands alone; before it,
+    // all that is known of the server.
+    let known: Vec<String> = match &rooms.listed {
+        Some(listed) => listed.clone(),
+        None => {
+            let named = match rooms.named.get(&hub) {
+                Some(Named::Rooms(named)) => named.clone(),
+                _ => Vec::new(),
+            };
+            let mailbox = rooms.mailbox_named.get(&hub).cloned().unwrap_or_default();
+            let shipped = super::hubs::named(&hub)
+                .map(|h| h.rooms)
+                .unwrap_or_default();
+            super::hubs::rooms_merged(&super::hubs::rooms_merged(&named, &mailbox), &shipped)
+        }
+    };
+    let bare = |name: &str| name.trim_start_matches('#').to_lowercase();
+    let names: Vec<String> = known
+        .into_iter()
+        .filter(|name| !rooms.rooms.iter().any(|r| bare(&r.name) == bare(name)))
+        .collect();
+    let note = match (names.is_empty(), &rooms.listed) {
+        (false, _) => None,
+        // Nothing known while the link is not up: the state says why.
+        (true, _) if rooms.state != HubState::Ready => None,
+        (true, None) => Some(Text::key(StrId::RoomsAsking)),
+        (true, Some(all)) if all.is_empty() => Some(Text::key(StrId::RoomsNoneNamed)),
+        // We are in every room it names: the joined rows say it.
+        (true, Some(_)) => None,
+    };
+    Some(ListedNode {
+        title: on_hub(rooms),
+        other: (!names.is_empty()).then(|| Text::key(StrId::RoomsOther)),
+        rooms: names,
+        note,
+    })
+}
+
+/// "Rooms on EuskalReticulum": the screen's title with no room open, and
+/// the heading over the rooms the server names (1659, walk 10, 52).
+fn on_hub(rooms: &Rooms) -> Text {
+    Text::Key(
+        StrId::RoomsOnHub,
+        Vec::from([Arg::Text(alloc::boxed::Box::new(hub_label(rooms)))]),
+    )
 }
 
 /// The open room as a chat.
@@ -1098,6 +1366,7 @@ impl RoomsNode {
     /// The surface as JSON for golden files, its texts unresolved.
     pub fn to_json(&self) -> Value {
         json!({
+            "title": self.title.to_json(),
             "status": self.status.as_ref().map(Text::to_json),
             "rows": self.rows.iter().map(|r| json!({
                 "name": r.name,
@@ -1128,6 +1397,13 @@ impl RoomsNode {
             "input": self.input,
             "placeholder": self.placeholder.to_json(),
             "empty": self.empty.as_ref().map(Text::to_json),
+            "retry": self.retry.as_ref().map(Text::to_json),
+            "listed": self.listed.as_ref().map(|l| json!({
+                "title": l.title.to_json(),
+                "rooms": l.rooms,
+                "note": l.note.as_ref().map(Text::to_json),
+                "other": l.other.as_ref().map(Text::to_json),
+            })),
         })
     }
 }
@@ -1172,11 +1448,11 @@ mod tests {
         model
     }
 
-    /// 1577: the settings choose a shipped hub: the tab appears, the
-    /// config keeps it, nothing links yet. Opening the rooms links nothing
-    /// either (1578); the first join tells the reader, before the link,
-    /// that their name is visible, and the config keeps that it was said.
-    /// The hub's welcome sends the join that asked for the link.
+    /// 1577, since 1652: the settings choose a shipped hub: the tab
+    /// appears, the config keeps it, and the choice links at once, telling
+    /// the reader first that their name is visible, which the config keeps
+    /// was said. Opening the tab while it links asks nothing more; a join
+    /// meanwhile waits for the hub's welcome, which sends it.
     #[test]
     fn a_hub_chosen_shows_the_tab_and_the_first_link_says_the_name_is_seen() {
         let community = crate::ui::hubs::shipped()
@@ -1191,28 +1467,31 @@ mod tests {
         let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(community)));
         assert_eq!(
             effects,
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some(community)
-            }],
-            "kept, and no link before the tab is opened"
-        );
-        assert!(model.rooms.enabled, "the tab appears at once");
-        assert_eq!(hub_label(&model.rooms), Text::Raw("RNS Community".into()));
-        let effects = update(&mut model, UiEvent::Tab(TabId::Rooms));
-        assert_eq!(effects, [], "opening the rooms links nothing (1578)");
-        assert_eq!(model.rooms.told, None, "nothing told yet");
-        let effects = say(&mut model, "#lab");
-        assert_eq!(
-            effects,
             [
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some(community)
+                },
                 UiEffect::RememberHash {
                     key: "rooms_told",
                     hash: Some(community)
                 },
                 UiEffect::Rooms(RoomAsk::Open { hub: community })
-            ]
+            ],
+            "kept, told, and linked at once (1652)"
         );
+        assert!(model.rooms.enabled, "the tab appears at once");
+        assert_eq!(model.rooms.state, HubState::Linking);
+        assert_eq!(hub_label(&model.rooms), Text::Raw("RNS Community".into()));
+        let told = model.current_toast().map(|t| t.text.clone());
+        assert_eq!(
+            told.as_deref(),
+            Some("Your name is visible to everyone in the room."),
+            "said with the link"
+        );
+        let effects = update(&mut model, UiEvent::Tab(TabId::Rooms));
+        assert_eq!(effects, [], "linking already");
+        assert!(say(&mut model, "#lab").is_empty(), "the join waits");
         assert!(model.rooms.input.is_empty(), "the join waits for the hub");
         let welcomed = rooms(
             &mut model,
@@ -1227,7 +1506,7 @@ mod tests {
                 room: "#lab".into(),
                 key: None
             })],
-            "the join that asked for the link"
+            "the join that waited"
         );
         rooms(
             &mut model,
@@ -1235,12 +1514,6 @@ mod tests {
                 room: "#lab".into(),
                 nick: None,
             },
-        );
-        let told = model.current_toast().map(|t| t.text.clone());
-        assert_eq!(
-            told.as_deref(),
-            Some("Your name is visible to everyone in the room."),
-            "said before the link"
         );
         rooms(
             &mut model,
@@ -1271,7 +1544,8 @@ mod tests {
                 body_limit: 350,
             },
         );
-        // Another hub: the link closes, the old rooms go.
+        // Another hub: the link closes, the old rooms go, the new one
+        // links, told once more: it is another hub that learns the name.
         let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(HUB)));
         assert_eq!(
             effects,
@@ -1280,24 +1554,33 @@ mod tests {
                 UiEffect::RememberHash {
                     key: "rooms_hub",
                     hash: Some(HUB)
-                }
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(HUB)
+                },
+                UiEffect::Rooms(RoomAsk::Open { hub: HUB })
             ]
         );
         assert!(model.rooms.rooms.is_empty() && !model.rooms.open);
-        assert_eq!(model.rooms.state, HubState::Off);
+        assert_eq!(model.rooms.state, HubState::Linking);
         assert_eq!(
             hub_label(&model.rooms),
             Text::key(StrId::RoomsHubOwn),
             "no hash"
         );
-        // None: the tab goes, the key comes out.
+        // None: the link it was making closes, the tab goes, the key
+        // comes out.
         let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::None));
         assert_eq!(
             effects,
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: None
-            }]
+            [
+                UiEffect::Rooms(RoomAsk::Close),
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: None
+                }
+            ]
         );
         assert!(!model.rooms.enabled);
         assert_eq!(hub_label(&model.rooms), Text::key(StrId::RoomsHubNone));
@@ -1333,10 +1616,17 @@ mod tests {
         );
         assert_eq!(
             effects,
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some(HUB)
-            }]
+            [
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some(HUB)
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(HUB)
+                },
+                UiEffect::Rooms(RoomAsk::Open { hub: HUB })
+            ]
         );
         assert!(rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(HUB))).is_empty());
     }
@@ -1360,10 +1650,10 @@ mod tests {
         rooms(model, RoomsEvent::Submit)
     }
 
-    /// 1578: opening the rooms links nothing; the first join links, once,
-    /// and a second join while it links waits with the first. Rooms
-    /// joined before link again when they are opened, and a link that
-    /// came back joins again what it was in.
+    /// 1578, since 1652: opening the rooms of a chosen hub links, once;
+    /// a join while it links waits, and a second waits with the first.
+    /// Rooms joined before link again when they are opened, and a link
+    /// that came back joins again what it was in.
     #[test]
     fn the_first_join_links_once_and_a_link_that_came_back_joins_again() {
         let mut model = UiModel::<Buffer>::new(&[]);
@@ -1374,16 +1664,17 @@ mod tests {
         model.rooms.hub = Some(HUB);
         // Told before (1577): the join links and says nothing more.
         model.rooms.told = Some(HUB);
-        assert!(
-            update(&mut model, UiEvent::Tab(TabId::Rooms)).is_empty(),
-            "opening links nothing"
-        );
-        assert_eq!(model.rooms.state, HubState::Off);
         assert_eq!(
-            say(&mut model, "#lab"),
-            vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+            update(&mut model, UiEvent::Tab(TabId::Rooms)),
+            vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })],
+            "opening links (1652)"
         );
         assert_eq!(model.rooms.state, HubState::Linking);
+        assert!(say(&mut model, "#lab").is_empty(), "linking already");
+        assert!(
+            update(&mut model, UiEvent::Tab(TabId::Rooms)).is_empty(),
+            "opened again while it links: once"
+        );
         assert!(say(&mut model, "#garden").is_empty(), "linking already");
         assert_eq!(model.rooms.queued.len(), 2, "both joins wait");
         let welcomed = rooms(
@@ -1493,12 +1784,13 @@ mod tests {
         early.rooms.enabled = true;
         early.rooms.hub = Some(HUB);
         early.rooms.told = Some(HUB);
-        update(&mut early, UiEvent::Tab(TabId::Rooms));
-        assert!(say(&mut early, "/part #lab").is_empty());
         assert_eq!(
-            say(&mut early, "#lab"),
+            update(&mut early, UiEvent::Tab(TabId::Rooms)),
             vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
         );
+        assert!(say(&mut early, "/part #lab").is_empty());
+        assert!(say(&mut early, "#lab").is_empty(), "the join waits");
+        assert_eq!(early.rooms.queued.len(), 1);
     }
 
     #[test]
@@ -1719,5 +2011,248 @@ mod tests {
                 room: "#lab".into()
             })]
         );
+    }
+
+    /// 1652: the words tell the state. Never asked is "not connected yet"
+    /// with "Connect"; linking is "Connecting…", its seconds counted after
+    /// five; a hub that did not answer says so in plain words and a tap on
+    /// "Try again" links again.
+    #[test]
+    fn the_state_words_tell_the_truth_and_a_failure_can_be_retried() {
+        use crate::ui::strings::Lang;
+        let at = |secs| {
+            Some(WallTime {
+                unix_secs: secs,
+                offset_secs: 0,
+            })
+        };
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(HUB);
+        model.rooms.told = Some(HUB);
+        model.now = at(1_000);
+        let shown = node(&model);
+        assert_eq!(
+            shown.status.map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Noch nicht verbunden.")
+        );
+        assert_eq!(shown.retry, Some(Text::key(StrId::RoomsConnect)));
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Retry),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        let status = |model: &UiModel<Buffer>| node(model).status.map(|t| t.resolve(Lang::De));
+        assert_eq!(status(&model).as_deref(), Some("Verbinde…"));
+        model.now = at(1_004);
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("Verbinde…"),
+            "quiet for five"
+        );
+        model.now = at(1_012);
+        assert_eq!(status(&model).as_deref(), Some("Verbinde… 12 s"));
+        assert_eq!(node(&model).retry, None);
+        assert!(rooms(&mut model, RoomsEvent::Retry).is_empty(), "once");
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
+        assert_eq!(node(&model).retry, Some(Text::key(StrId::RoomsRetry)));
+        // Down, nothing known of its rooms: the title only, no note; the
+        // state line says why (1659).
+        let listed = node(&model).listed.expect("the title while it is down");
+        assert!(listed.rooms.is_empty() && listed.note.is_none());
+        model.now = at(2_000);
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Retry),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        assert_eq!(status(&model).as_deref(), Some("Verbinde…"), "counted anew");
+    }
+
+    /// 1652: a hub that names no rooms says so, and the typed-name field
+    /// stays the way in, with its sentence.
+    #[test]
+    fn a_hub_naming_no_rooms_says_so_and_keeps_the_field() {
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(HUB);
+        update(&mut model, UiEvent::Tab(TabId::Rooms));
+        rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: Some("ShadowLink".into()),
+                body_limit: 350,
+            },
+        );
+        rooms(&mut model, RoomsEvent::Listed { rooms: Vec::new() });
+        let shown = node(&model);
+        let listed = shown.listed.expect("the list's place");
+        assert!(listed.rooms.is_empty());
+        assert_eq!(
+            listed
+                .note
+                .map(|t| t.resolve(crate::ui::strings::Lang::De))
+                .as_deref(),
+            Some("Dieser Server nennt keine öffentlichen Räume.")
+        );
+        assert_eq!(listed.other, None);
+        assert_eq!(shown.empty, Some(Text::key(StrId::RoomsHowToJoin)));
+        assert_eq!(
+            model.rooms.named.get(&HUB),
+            Some(&Named::Rooms(Vec::new())),
+            "the sheet knows it too"
+        );
+        // A join by name still goes.
+        assert_eq!(
+            say(&mut model, "#lab"),
+            [UiEffect::Rooms(RoomAsk::Join {
+                room: "#lab".into(),
+                key: None
+            })]
+        );
+    }
+
+    /// 1659, walk 10, 52: the chosen server's rooms screen while the
+    /// server is silent (EuskalReticulum answered nothing all evening):
+    /// the title names it, and the rooms known for it (the mailbox's
+    /// question, 1643; this run's sheet, 1621) stand as rows a tap joins,
+    /// with the state line above. The control: a server nothing is known
+    /// of keeps the typed-name sentence.
+    #[test]
+    fn a_chosen_hub_with_stored_rooms_and_a_dead_link_lists_them() {
+        use crate::ui::strings::Lang;
+        let euskal = crate::address::parse("14d0b712d769a243e700209f6c6f5af4").expect("hash");
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(euskal);
+        model.rooms.told = Some(euskal);
+        model
+            .rooms
+            .mailbox_named
+            .insert(euskal, vec!["general".to_string()]);
+        update(&mut model, UiEvent::Tab(TabId::Rooms));
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        let shown = node(&model);
+        let listed = shown.listed.expect("the known rooms, the link down");
+        assert_eq!(
+            shown.title.resolve(Lang::De),
+            "Räume auf EuskalReticulum",
+            "the screen's title names the server"
+        );
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf EuskalReticulum");
+        assert_eq!(listed.rooms, ["general"]);
+        assert_eq!(
+            shown.status.map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Server antwortet nicht."),
+            "the state above them"
+        );
+        assert_eq!(shown.empty, None, "no guessing a name");
+        // A tap joins it once the server answers: it links again now.
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Join("general".into())),
+            [UiEffect::Rooms(RoomAsk::Open { hub: euskal })]
+        );
+        assert_eq!(
+            model.rooms.queued,
+            [RoomAsk::Join {
+                room: "general".into(),
+                key: None
+            }]
+        );
+        // This run's sheet answer counts too, merged with the mailbox's.
+        model
+            .rooms
+            .named
+            .insert(euskal, Named::Rooms(vec!["#lab".to_string()]));
+        let listed = node(&model).listed.expect("the sheet's rooms");
+        assert_eq!(listed.rooms, ["#lab", "general"]);
+        // The control: nothing known, the field's sentence stays, the
+        // title still names the server.
+        model.rooms.named.clear();
+        model.rooms.mailbox_named.clear();
+        let shown = node(&model);
+        let listed = shown.listed.expect("the title stays");
+        assert!(listed.rooms.is_empty());
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf EuskalReticulum");
+        assert_eq!(shown.empty, Some(Text::key(StrId::RoomsHowToJoin)));
+    }
+
+    /// 1659, walk 10, 53: the rooms screen keeps the sheet's patience.
+    /// "Connecting… N s" to 19 s, "The server is answering slowly… N s"
+    /// from 20 s, at 45 s "The server does not answer." with "Try again"
+    /// (the screen gave up at 30 s, Minuteman answered after 45 s); the
+    /// tap links anew. A welcome that comes after 45 s still opens the
+    /// screen. The state is said once: no toast while the screen shows it
+    /// (55: it stood doubled), a toast while the screen is behind.
+    #[test]
+    fn the_rooms_screen_waits_forty_five_seconds_and_a_late_welcome_still_counts() {
+        use crate::ui::strings::Lang;
+        let at = |secs| {
+            Some(WallTime {
+                unix_secs: secs,
+                offset_secs: 0,
+            })
+        };
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(HUB);
+        model.rooms.told = Some(HUB);
+        model.now = at(1_000);
+        assert_eq!(
+            update(&mut model, UiEvent::Tab(TabId::Rooms)),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        let status = |model: &UiModel<Buffer>| node(model).status.map(|t| t.resolve(Lang::De));
+        model.now = at(1_019);
+        assert_eq!(status(&model).as_deref(), Some("Verbinde… 19 s"));
+        model.now = at(1_020);
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("Server antwortet langsam… 20 s")
+        );
+        assert_eq!(node(&model).retry, None, "slow is no failure");
+        model.now = at(1_044);
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("Server antwortet langsam… 44 s")
+        );
+        assert!(
+            rooms(&mut model, RoomsEvent::Retry).is_empty(),
+            "nothing to retry yet"
+        );
+        model.now = at(1_045);
+        assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
+        assert_eq!(node(&model).retry, Some(Text::key(StrId::RoomsRetry)));
+        // The late welcome, before any retry: the screen is up.
+        rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: None,
+                body_limit: 350,
+            },
+        );
+        assert_eq!(model.rooms.state, HubState::Ready);
+        assert_eq!(status(&model), None);
+        // Again, the retry this time: it links anew, counted from zero.
+        rooms(&mut model, RoomsEvent::Down(Down::Lost));
+        rooms(&mut model, RoomsEvent::Retry);
+        model.now = at(1_100);
+        assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Retry),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        assert_eq!(status(&model).as_deref(), Some("Verbinde…"), "counted anew");
+        // Said once: the screen in front has no toast for it ...
+        model.toasts.clear();
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        assert!(
+            model.toasts.is_empty(),
+            "the state line says it: {:?}",
+            model.toasts
+        );
+        // ... the screen behind has.
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        assert_eq!(model.toasts.len(), 1);
     }
 }

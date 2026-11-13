@@ -45,8 +45,6 @@
     <string name="friends_older">Älter als ein Tag</string>
     <string name="friends_none">Noch niemand teilt eine Position mit dir. Sobald es jemand tut, erscheint die Person hier.</string>
     <string name="friends_no_match">Niemand mit diesem Namen.</string>
-    <string name="card_chat">Chat</string>
-    <string name="card_navigate">Navigieren</string>
     <string name="card_ago">vor %1$s</string>
     <string name="stop_service">Dienst beenden</string>
     <string name="emoji_more">Mehr Emoji</string>
@@ -235,7 +233,6 @@
     <string name="location_finding">Suche deine Position…</string>
     <string name="location_none">Das Handy weiß noch nicht, wo du bist. Versuch es draußen noch einmal.</string>
     <string name="share_position">Meine Position teilen</string>
-    <string name="card_share">Meine teilen</string>
     <string name="share_with">Deine Position teilen mit</string>
     <string name="share_nobody">Fang zuerst einen Chat an und teile deine Position dort.</string>
     <string name="shared_to">Deine Position ging an %1$s</string>

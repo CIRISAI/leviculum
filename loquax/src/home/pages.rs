@@ -15,10 +15,20 @@
 //! travels as a set does, and a device that was off when it happened still
 //! learns it.
 //!
+//! The home also keeps the name of every LXMF delivery announce it hears
+//! (1643, [`NameRow`]): address, name, first and last seen by the home's
+//! clock, and hops. A device of an external mailbox hears no mesh of its
+//! own, so this table is where its chats, contacts and new-conversation
+//! list find the names of peers nobody wrote to yet. The archive's name
+//! entries stay for the peers the user has a relation to, where every
+//! entry is a wake; these rows wake nobody and ride in the same `/pages`
+//! delta.
+//!
 //! ```text
 //! /pages    [since: uint, (page: uint)]   -> [status, stamp: uint, more: bool, [row, ...]]
 //!   row:    [0, dest: bin16, name: str, first: int, last: int, hops: uint, count: uint]
 //!         | [1, url: str, title: str, at: int, deleted: bool]
+//!         | [2, address: bin16, name: str, first: int, last: int, hops: uint]
 //! /bookmark [url: str, title: str, at: int, deleted: bool] -> [status]
 //! ```
 //!
@@ -56,6 +66,18 @@ pub const BOOKMARKS_CAP: usize = 1024;
 /// announce; that alone sends nothing.
 pub const PAGE_REFRESH_SECS: i64 = 3600;
 
+/// The most name rows the home keeps per identity (1643). Past it the row
+/// heard longest ago goes (`last_seen` oldest first), never the one just
+/// heard. 4096 rows at about 50 bytes are 200 KiB in the store; a busy
+/// mesh of 2026 announces a few hundred LXMF addresses.
+pub const NAMES_CAP: usize = 4096;
+
+/// How long a peer heard again with the same name and hops goes before its
+/// name row takes a new stamp with the later `last_seen` (1643), as
+/// [`PAGE_REFRESH_SECS`]: an LXMF client announces every few minutes, and
+/// a device needs its last seen to the hour, not each announce.
+pub const NAME_REFRESH_SECS: i64 = 3600;
+
 /// The most bytes one `/pages` answer takes when the device asked no
 /// bound: a full list of 2000 rows is about four answers, each one
 /// resource over TCP or BLE, and the home never builds the whole list in
@@ -67,6 +89,7 @@ const HOPS_UNKNOWN: u64 = u32::MAX as u64;
 
 const ROW_PAGE: u64 = 0;
 const ROW_BOOKMARK: u64 = 1;
+const ROW_NAME: u64 = 2;
 
 /// One node the home heard announcing its pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,11 +112,29 @@ pub struct BookmarkRow {
     pub deleted: bool,
 }
 
+/// The name of one LXMF delivery destination the home heard announcing
+/// (1643).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameRow {
+    /// The `lxmf.delivery` destination.
+    pub address: [u8; 16],
+    /// The name its announce carried, as it came; a device sanitises it as
+    /// it does an announce's.
+    pub name: String,
+    /// When the home first and last heard it, unix seconds, the home's
+    /// clock.
+    pub first_seen: u64,
+    pub last_seen: u64,
+    /// Its hops when last heard; `None` when unknown.
+    pub hops: Option<u32>,
+}
+
 /// One row of a `/pages` answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
     Page(PageRow),
     Bookmark(BookmarkRow),
+    Name(NameRow),
 }
 
 /// A row with the home's stamp of its last change.
@@ -117,7 +158,7 @@ impl Delta {
     pub fn nodes(&self) -> impl Iterator<Item = &DiscoveredNode> {
         self.rows.iter().filter_map(|row| match row {
             Row::Page(page) => Some(&page.node),
-            Row::Bookmark(_) => None,
+            Row::Bookmark(_) | Row::Name(_) => None,
         })
     }
 
@@ -125,7 +166,15 @@ impl Delta {
     pub fn bookmarks(&self) -> impl Iterator<Item = &BookmarkRow> {
         self.rows.iter().filter_map(|row| match row {
             Row::Bookmark(bookmark) => Some(bookmark),
-            Row::Page(_) => None,
+            Row::Page(_) | Row::Name(_) => None,
+        })
+    }
+
+    /// The name rows (1643).
+    pub fn names(&self) -> impl Iterator<Item = &NameRow> {
+        self.rows.iter().filter_map(|row| match row {
+            Row::Name(name) => Some(name),
+            Row::Page(_) | Row::Bookmark(_) => None,
         })
     }
 }
@@ -171,6 +220,32 @@ pub fn heard(kept: Option<&PageRow>, heard: &DiscoveredNode) -> Heard {
             hops,
         },
         count: kept.count.saturating_add(1),
+    })
+}
+
+/// The rule for a peer heard announcing `heard` (its `first_seen` and
+/// `last_seen` the hearing's time) against the name row the home `kept`
+/// (1643): the row to stamp when it is new, says another name or other
+/// hops, or comes [`NAME_REFRESH_SECS`] after the kept hearing; `None`
+/// when it says nothing new. Unknown hops never clear known ones.
+pub fn name_heard(kept: Option<&NameRow>, heard: &NameRow) -> Option<NameRow> {
+    let Some(kept) = kept else {
+        return Some(heard.clone());
+    };
+    let hops = heard.hops.or(kept.hops);
+    let refreshed = heard.last_seen
+        >= kept
+            .last_seen
+            .saturating_add(NAME_REFRESH_SECS.unsigned_abs());
+    if heard.name == kept.name && hops == kept.hops && !refreshed {
+        return None;
+    }
+    Some(NameRow {
+        address: heard.address,
+        name: heard.name.clone(),
+        first_seen: kept.first_seen.min(heard.first_seen),
+        last_seen: kept.last_seen.max(heard.last_seen),
+        hops,
     })
 }
 
@@ -233,6 +308,15 @@ fn row_out(out: &mut Vec<u8>, row: &Row) {
             msgpack::array(out, 5);
             msgpack::uint(out, ROW_BOOKMARK);
             bookmark_out(out, bookmark);
+        }
+        Row::Name(name) => {
+            msgpack::array(out, 6);
+            msgpack::uint(out, ROW_NAME);
+            msgpack::bin(out, &name.address);
+            msgpack::string(out, &name.name);
+            msgpack::int(out, i64::try_from(name.first_seen).unwrap_or(i64::MAX));
+            msgpack::int(out, i64::try_from(name.last_seen).unwrap_or(i64::MAX));
+            msgpack::uint(out, name.hops.map_or(HOPS_UNKNOWN, u64::from));
         }
     }
 }
@@ -344,6 +428,24 @@ pub fn read_pages_answer(data: &[u8]) -> Result<Result<Delta, Status>, Malformed
             ROW_BOOKMARK if len >= 5 => {
                 rows.push(Row::Bookmark(read_bookmark_fields(data, &mut p)?));
                 taken = 5;
+            }
+            ROW_NAME if len >= 6 => {
+                let address = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?)
+                    .map_err(|_| Malformed)?;
+                let name = String::from(msgpack::read_str(data, &mut p)?);
+                let first_seen = u64::try_from(msgpack::read_int(data, &mut p)?).unwrap_or(0);
+                let last_seen = u64::try_from(msgpack::read_int(data, &mut p)?).unwrap_or(0);
+                let hops = u32::try_from(msgpack::read_uint(data, &mut p)?)
+                    .ok()
+                    .filter(|h| u64::from(*h) != HOPS_UNKNOWN);
+                taken = 6;
+                rows.push(Row::Name(NameRow {
+                    address,
+                    name,
+                    first_seen,
+                    last_seen,
+                    hops,
+                }));
             }
             _ => {}
         }
@@ -608,6 +710,69 @@ mod tests {
         ));
     }
 
+    /// 1643: a client from before the name rows reads an answer that
+    /// carries them as one without: the page and bookmark rows, the stamp
+    /// and `more`, each name row passed by as a kind it does not know.
+    /// The reader here is the 1579 reader's rule, kind by kind: a row whose
+    /// kind it does not match is skipped whole.
+    #[test]
+    fn an_old_client_passes_the_name_rows_by() {
+        let delta = Delta {
+            stamp: 9,
+            more: false,
+            rows: vec![
+                Row::Name(name_row(1, "Alpha", 100, Some(2))),
+                Row::Page(PageRow {
+                    node: node(2, Some("Page"), 100, Some(1)),
+                    count: 1,
+                }),
+                Row::Name(name_row(3, "Gamma", 100, None)),
+            ],
+        };
+        let bytes = pages_answer(&delta);
+        // The old reader: the same loop with the name arm taken out.
+        let mut p = 0;
+        msgpack::array_len(&bytes, &mut p).expect("head");
+        msgpack::read_uint(&bytes, &mut p).expect("status");
+        msgpack::read_uint(&bytes, &mut p).expect("stamp");
+        msgpack::read_bool(&bytes, &mut p).expect("more");
+        let count = msgpack::array_len(&bytes, &mut p).expect("rows");
+        let mut kept = Vec::new();
+        for _ in 0..count {
+            let len = msgpack::array_len(&bytes, &mut p).expect("row");
+            let kind = msgpack::read_uint(&bytes, &mut p).expect("kind");
+            kept.push(kind);
+            for _ in 1..len {
+                msgpack::skip(&bytes, &mut p).expect("field");
+            }
+        }
+        assert_eq!(p, bytes.len(), "every row passed whole");
+        assert_eq!(kept, [ROW_NAME, ROW_PAGE, ROW_NAME]);
+    }
+
+    /// A peer heard again within the hour with the same name and hops says
+    /// nothing; a new name, new hops or a hearing an hour on stamps; an
+    /// unknown hops keeps the known one.
+    #[test]
+    fn a_name_heard_again_stamps_only_when_it_says_something_new() {
+        let first = name_heard(None, &name_row(1, "Alpha", 1000, Some(2))).expect("new");
+        assert_eq!(
+            name_heard(Some(&first), &name_row(1, "Alpha", 1500, Some(2))),
+            None
+        );
+        assert_eq!(
+            name_heard(Some(&first), &name_row(1, "Alpha", 1500, None)),
+            None,
+            "unknown hops say nothing new"
+        );
+        let renamed = name_heard(Some(&first), &name_row(1, "Beta", 1500, None)).expect("renamed");
+        assert_eq!(renamed.name, "Beta");
+        assert_eq!((renamed.first_seen, renamed.last_seen), (1000, 1500));
+        assert_eq!(renamed.hops, Some(2));
+        assert!(name_heard(Some(&first), &name_row(1, "Alpha", 1000 + 3600, Some(2))).is_some());
+        assert!(name_heard(Some(&first), &name_row(1, "Alpha", 1001, Some(3))).is_some());
+    }
+
     /// The newer stamp wins; on a tie the tombstone, then the larger
     /// title; the same row again changes nothing.
     #[test]
@@ -637,8 +802,18 @@ mod tests {
         ));
     }
 
-    /// Request and answer round trip, both row kinds, an unknown hops and
-    /// an empty name; a row of an unknown kind is passed by.
+    fn name_row(byte: u8, name: &str, at: u64, hops: Option<u32>) -> NameRow {
+        NameRow {
+            address: [byte; 16],
+            name: name.into(),
+            first_seen: at,
+            last_seen: at,
+            hops,
+        }
+    }
+
+    /// Request and answer round trip, the three row kinds, an unknown hops
+    /// and an empty name; a row of an unknown kind is passed by.
     #[test]
     fn a_pages_answer_round_trips_and_passes_an_unknown_row_by() {
         assert_eq!(read_pages_request(&pages_request(7, None)), Ok((7, None)));
@@ -660,6 +835,8 @@ mod tests {
                 }),
                 Row::Bookmark(mark("03:/page/index.mu", "Gamma home", 5, false)),
                 Row::Bookmark(mark("04:/page/x.mu", "", 6, true)),
+                Row::Name(name_row(5, "Delta", 300, Some(1))),
+                Row::Name(name_row(6, "", 400, None)),
             ],
         };
         let bytes = pages_answer(&delta);
@@ -677,7 +854,10 @@ mod tests {
         for row in &delta.rows {
             row_out(&mut later, row);
         }
-        assert_eq!(read_pages_answer(&later), Ok(Ok(delta)));
+        assert_eq!(read_pages_answer(&later), Ok(Ok(delta.clone())));
+        assert_eq!(delta.names().count(), 2);
+        assert_eq!(delta.nodes().count(), 2);
+        assert_eq!(delta.bookmarks().count(), 2);
         assert_eq!(
             read_pages_answer(&wire::status_answer(Status::NotAdmitted)),
             Ok(Err(Status::NotAdmitted))

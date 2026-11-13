@@ -29,6 +29,8 @@ pub mod explore;
 pub mod friends;
 pub mod heights;
 pub mod links;
+#[cfg(target_os = "android")]
+pub mod logcat;
 pub mod mailbox;
 pub mod map;
 pub mod offline;
@@ -74,6 +76,9 @@ pub(crate) fn current() -> Option<Arc<Session>> {
 /// on every rotation, the session does not. One that ended by itself (its
 /// engine died) is stopped and replaced, never handed out again.
 pub fn start(request: &[u8]) -> Vec<u8> {
+    // The structured events to logcat, before the session emits any (1655).
+    #[cfg(target_os = "android")]
+    logcat::install();
     let started = match schema::decode::<schema::Start>(request) {
         Err(error) => Started {
             v: VERSION,

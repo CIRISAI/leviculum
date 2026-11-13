@@ -80,6 +80,147 @@ pub struct Explore {
     pub owed: HeardOwed,
     /// The suggestion as the host last kept it.
     pub held_kept: Option<[u8; 16]>,
+    /// The mailbox's list as this device has it (1644).
+    pub mailbox: MailboxList,
+}
+
+/// The mailbox's list of pages and servers as this device last had it
+/// (1644, step 4 of the mailbox-first plan): whether the link to the
+/// mailbox is up, when the device last asked `/pages` and when the last
+/// answer came. Opening the tab asks once more ([`UiEffect::AskPages`]),
+/// never twice within [`ASK_EVERY_MS`]; the line on top says how old the
+/// list is once the link is down or the answer older than
+/// [`AS_OF_AFTER_SECS`] ([`as_of`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MailboxList {
+    /// The link to the mailbox: up, down, or `None` on a device that has
+    /// told of none (no mailbox, or not told yet), which neither asks on
+    /// opening nor says an age.
+    pub link: Option<bool>,
+    /// When the last `/pages` ask began, on the model's monotonic clock:
+    /// the one after a pull ([`pages_asked`]) or the tab's.
+    pub asked_ms: Option<u64>,
+    /// When the last answer came, unix seconds. In memory only, as the
+    /// stamp is: a start asks for the whole list anyway.
+    pub answered: Option<i64>,
+}
+
+/// The least time between two `/pages` asks the tab's opening starts
+/// (1644): one a minute at most.
+pub const ASK_EVERY_MS: u64 = 60_000;
+
+/// From this age of the last answer on, the line on top says it (1644):
+/// "As of 3 h ago". Below it, nothing.
+pub const AS_OF_AFTER_SECS: i64 = 3_600;
+
+/// A page or a server not announced for this long is not listed (1644,
+/// Lew took the plan's recommendation: seven days, a default and not a
+/// setting). Its row stays in the store and the registry; the next
+/// announce lists it again. A bookmark stays listed, as does the server
+/// in use and the ones Loquax ships.
+pub const HIDDEN_AFTER_SECS: u64 = 7 * 86_400;
+
+/// Whether a thing last announced at `last_seen` (unix seconds, 0 for
+/// never) is too old to list at `now`.
+pub fn aged_out(now: u64, last_seen: u64) -> bool {
+    last_seen != 0 && now.saturating_sub(last_seen) >= HIDDEN_AFTER_SECS
+}
+
+/// A host began a `/pages` ask (the one after a pull, 1579): the tab's
+/// opening waits [`ASK_EVERY_MS`] from here.
+pub fn pages_asked<B>(model: &mut UiModel<B>) {
+    model.explore.mailbox.asked_ms = Some(model.elapsed_ms);
+}
+
+/// The mailbox's `/pages` answer came (1644): the list is as of now.
+pub(crate) fn pages_answered<B>(model: &mut UiModel<B>) {
+    let (now_secs, _) = now(model);
+    model.explore.mailbox.answered = Some(i64::try_from(now_secs).unwrap_or(i64::MAX));
+}
+
+/// Opening the tab asks the mailbox (1644): only a device that has one,
+/// and never within [`ASK_EVERY_MS`] of the last ask. The ask is marked
+/// begun here; the host runs it one at a time.
+///
+/// Every opening logs `EXPLORE_OPEN` with whether it asked and why not
+/// (1667, walk 11, finding 63).
+fn ask_on_opening<B>(model: &mut UiModel<B>) -> Option<UiEffect> {
+    let list = &model.explore.mailbox;
+    if list.link.is_none() {
+        crate::events::explore_open(false, "no_mailbox", None);
+        return None;
+    }
+    let since = list.asked_ms.map(|at| model.elapsed_ms.saturating_sub(at));
+    if list
+        .asked_ms
+        .is_some_and(|at| model.elapsed_ms < at.saturating_add(ASK_EVERY_MS))
+    {
+        crate::events::explore_open(false, "recent", since);
+        return None;
+    }
+    crate::events::explore_open(true, "asked", since);
+    pages_asked(model);
+    Some(UiEffect::AskPages)
+}
+
+/// The line on top of the tab (1644): how old the list is, in the
+/// catalogue's words. The link down: "Not connected", with "as of
+/// yesterday 14:20" once an answer came; the link up and the answer older
+/// than [`AS_OF_AFTER_SECS`]: "As of 3 h ago"; fresh, or a device without
+/// a mailbox: nothing.
+pub fn as_of<B>(model: &UiModel<B>) -> Option<Text> {
+    let list = &model.explore.mailbox;
+    let (now_secs, offset) = now(model);
+    let now_secs = i64::try_from(now_secs).unwrap_or(i64::MAX);
+    match (list.link?, list.answered) {
+        (false, None) => Some(Text::key(StrId::MailboxDown)),
+        (false, Some(at)) => Some(Text::Key(
+            StrId::ExploreDownAsOf,
+            Vec::from([Arg::Text(alloc::boxed::Box::new(as_of_when(
+                at, now_secs, offset,
+            )))]),
+        )),
+        (true, Some(at)) if now_secs.saturating_sub(at) > AS_OF_AFTER_SECS => Some(Text::Key(
+            StrId::ExploreAsOf,
+            Vec::from([Arg::Text(alloc::boxed::Box::new(super::scene::ago(
+                now_secs.saturating_sub(at),
+            )))]),
+        )),
+        (true, _) => None,
+    }
+}
+
+/// "as of yesterday 14:20": the answer's day and time of day, as a
+/// shared position's sentence says them ([`super::scene::position_words`]).
+fn as_of_when(at: i64, now: i64, offset: i32) -> Text {
+    use crate::when::WallTime;
+    let at = WallTime {
+        unix_secs: at,
+        offset_secs: offset,
+    };
+    let now = WallTime {
+        unix_secs: now,
+        offset_secs: offset,
+    };
+    let clock = Arg::Str(at.hh_mm());
+    match now.day() - at.day() {
+        ..=0 => Text::Key(StrId::ExploreAsOfToday, Vec::from([clock])),
+        1 => Text::Key(StrId::ExploreAsOfYesterday, Vec::from([clock])),
+        2..=6 => Text::Key(
+            StrId::ExploreAsOfWeekday,
+            Vec::from([
+                Arg::Text(alloc::boxed::Box::new(super::scene::weekday(&at))),
+                clock,
+            ]),
+        ),
+        _ => Text::Key(
+            StrId::ExploreAsOfDate,
+            Vec::from([
+                Arg::Text(alloc::boxed::Box::new(super::scene::list_time(&at, &now))),
+                clock,
+            ]),
+        ),
+    }
 }
 
 /// What a device heard since its host last wrote it to the store (1632,
@@ -149,7 +290,7 @@ pub fn restore_heard<B>(
         model.rooms.heard.hear(hub);
     }
     model.rooms.heard.hold(held);
-    super::settings::settle_suggestion(&mut model.rooms);
+    super::settings::settle_suggestion_said(&mut model.rooms);
     model.explore.held_kept = model.rooms.heard.held();
 }
 
@@ -183,17 +324,27 @@ pub enum ExploreEvent {
     /// A hub's row: its sheet opens. Nothing is chosen and nothing linked
     /// (1618).
     Hub([u8; 16]),
+    /// "Open rooms" (1655, walk 9, 45): the rooms screen of the server in
+    /// use, its list, its state and the field for another room, joining
+    /// nothing; it connects when it is not connected.
+    OpenRooms,
     /// The sheet's button: this hub is the public rooms' hub from now on,
-    /// and its rooms show. Nothing is linked until a room is joined.
+    /// linked at once (1652), and its rooms show as it lists them.
     UseHub([u8; 16]),
     /// One of the rooms the sheet lists: the hub is used, and the room
-    /// joined, which links.
+    /// joined as the hub spells it once it welcomed us.
     JoinRoom([u8; 16], String),
+    /// The sheet's "try again" (1653): the server is asked again for its
+    /// rooms.
+    AskAgain([u8; 16]),
     /// The sheet closes.
     CloseSheet,
     /// A finger came down on the list (`true`) or lifted (1618): while it
     /// is down no new order is applied.
     Touch(bool),
+    /// The host's word on the link to its mailbox (1644): up or down. A
+    /// host without a mailbox never says it.
+    Mailbox(bool),
 }
 
 /// A page's row as the tab draws it.
@@ -253,6 +404,8 @@ pub struct PagesNode {
     pub empty: Option<Text>,
     /// Opening a page is off on this device: the one sentence that says so.
     pub off: Option<Text>,
+    /// How old the mailbox's list is, on top of the tab (1644, [`as_of`]).
+    pub as_of: Option<Text>,
 }
 
 /// The rooms' section (1621, walk 2: "Public rooms" held servers and no
@@ -266,8 +419,15 @@ pub struct RoomsSection {
     pub joined: Vec<RoomRow>,
     /// Where the terminal's cursor is among them.
     pub joined_cursor: Option<usize>,
-    /// "You are in no room. Pick a server below." while there is none.
+    /// "You are in no room. Pick a server below." while there is none,
+    /// "You are in no room on `<server>`." while one is in use (1655, walk
+    /// 9, 45: the first sentence stood above the server's tick).
     pub joined_empty: Option<Text>,
+    /// "Open rooms" while a server is in use (1655, walk 9, 45): its
+    /// rooms screen, without joining anything.
+    pub open_rooms: Option<Text>,
+    /// The terminal's cursor is on it.
+    pub open_cursor: bool,
     /// "Servers".
     pub servers_title: Text,
     /// The servers Loquax ships, the reader's own and those heard on the
@@ -299,8 +459,18 @@ pub struct HubSheet {
     /// The one sentence about them: asking, no answer, or that it named
     /// none (only once it answered and named none, walk 2).
     pub rooms_note: Option<Text>,
+    /// "Try again" once the server gave no answer, or the question
+    /// outlived [`super::rooms::PEEK_BUDGET_SECS`] untold (1653, 1669).
+    pub retry: Option<Text>,
+    /// The question is out and the sentence may still turn: a frontend
+    /// that draws on answers only draws again within a second.
+    pub asking: bool,
+    /// "Open rooms" on the sheet of the server in use (1655, walk 9, 45:
+    /// it had no way to its rooms screen but joining a room).
+    pub open_rooms: Option<Text>,
     pub close: Text,
-    /// The terminal's cursor: 0 the button, then the rooms.
+    /// The terminal's cursor: 0 the button ("Open rooms" on the server in
+    /// use), then the rooms.
     pub cursor: usize,
 }
 
@@ -319,6 +489,8 @@ pub enum Pick {
     Address,
     Page([u8; 16]),
     Room(usize),
+    /// "Open rooms" (1655).
+    OpenRooms,
     Hub([u8; 16]),
 }
 
@@ -467,12 +639,21 @@ fn heading(page: &Known, az: bool, now_secs: u64, offset: i32) -> StrId {
     }
 }
 
+/// The pages the tab may list (1644): every one [`known`] but those not
+/// announced for [`HIDDEN_AFTER_SECS`]; a bookmark always.
+fn listable<B>(model: &UiModel<B>) -> Vec<Known> {
+    let (now_secs, _) = now(model);
+    let mut pages = known(&model.browse.model);
+    pages.retain(|k| k.bookmark.is_some() || !aged_out(now_secs, k.last_seen));
+    pages
+}
+
 /// Every page the device knows in the order the model would apply now,
 /// each under its heading.
 fn fresh<B>(model: &UiModel<B>) -> Vec<(Known, StrId)> {
     let (now_secs, offset) = now(model);
     let az = model.explore.az;
-    ordered(known(&model.browse.model), az)
+    ordered(listable(model), az)
         .into_iter()
         .map(|k| {
             let h = heading(&k, az, now_secs, offset);
@@ -629,6 +810,9 @@ pub fn picks<B>(model: &UiModel<B>) -> Vec<Pick> {
     }
     out.extend(listed(model).into_iter().map(|(k, _)| Pick::Page(k.dest)));
     out.extend((0..model.rooms.rooms.len()).map(Pick::Room));
+    if model.rooms.hub.is_some() {
+        out.push(Pick::OpenRooms);
+    }
     out.extend(hub_list(model).iter().map(|h| Pick::Hub(h.hash)));
     out
 }
@@ -653,28 +837,48 @@ fn far(hops: Option<u8>) -> Option<Text> {
     }
 }
 
-/// The servers the section lists, in one list (1621): the first
-/// [`super::settings::HUB_PAGE`] shipped ones in the settings' order
-/// (heard first, then the closest), the one in force always among them,
-/// and the reader's own; then the ones heard on the mesh and not shipped.
-/// The settings list every shipped hub; Explore is a list to pick from,
-/// not the whole catalogue.
+/// The servers the section lists, in one list (1621): every server
+/// heard, shipped or not, last seen first, so a server once heard never
+/// leaves the list (1655, walk 9, 44: the list showed only the first
+/// [`super::settings::HUB_PAGE`] shipped ones, and twenty heard after
+/// Whatcom pushed it out); then the shipped ones never heard, in the
+/// file's order, as many as make [`super::settings::HUB_PAGE`] shipped
+/// rows, all of them under a search (Explore is a list to pick from, the
+/// search reaches the whole catalogue); the one in force and the
+/// reader's own always among them.
 fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
     let offered = super::settings::offered_hubs(&model.rooms);
-    let (shipped, heard): (Vec<_>, Vec<_>) = offered.into_iter().partition(|o| o.shipped);
+    let searching = !model.explore.query.trim().is_empty();
     let chosen = model.rooms.hub;
-    let mut hubs: Vec<_> = shipped
+    // A server not announced for a week (1644) counts as not heard: a
+    // shipped one stands among the shipped, any other is not listed, the
+    // one in use always is.
+    let (now_secs, _) = now(model);
+    let stale = |o: &super::settings::Offered| {
+        o.heard
+            && o.last
+                .is_some_and(|last| aged_out(now_secs, u64::try_from(last).unwrap_or(0)))
+    };
+    let hidden = |o: &super::settings::Offered| stale(o) && !o.shipped && Some(o.hash) != chosen;
+    let heard_shipped = offered
         .iter()
-        .take(super::settings::HUB_PAGE)
-        .cloned()
-        .collect();
-    if let Some(hub) = shipped.into_iter().find(|o| Some(o.hash) == chosen) {
-        if !hubs.iter().any(|o| o.hash == hub.hash) {
+        .filter(|o| o.heard && !stale(o) && o.shipped)
+        .count();
+    let mut unheard = super::settings::HUB_PAGE.saturating_sub(heard_shipped);
+    let mut hubs: Vec<super::settings::Offered> = Vec::new();
+    for hub in offered {
+        if hidden(&hub) {
+            continue;
+        }
+        if (hub.heard && !stale(&hub)) || searching || Some(hub.hash) == chosen {
+            hubs.push(hub);
+        } else if hub.shipped && unheard > 0 {
+            unheard -= 1;
             hubs.push(hub);
         }
     }
-    if let Some(own) = model.rooms.hub {
-        if !hubs.iter().chain(heard.iter()).any(|o| o.hash == own) {
+    if let Some(own) = chosen {
+        if !hubs.iter().any(|o| o.hash == own) {
             hubs.push(super::settings::Offered {
                 hash: own,
                 name: None,
@@ -692,7 +896,6 @@ fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
         let name = hub_name(model, o).resolve(model.lang);
         matches_name(Some(&name), &o.hash, &query)
     };
-    hubs.extend(heard);
     // The suggested one first, the rest in their order (1632, walk 4 new
     // 17: it stood fourth, and a newcomer looks for it on top).
     if let Some(first) = suggested(model) {
@@ -711,7 +914,7 @@ fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
             }
         }
     }
-    hubs.retain(|o| keep(o));
+    hubs.retain(|o| keep(o) && !hidden(o));
     hubs
 }
 
@@ -781,42 +984,99 @@ fn sheet_hub<B>(model: &UiModel<B>, hash: [u8; 16]) -> super::settings::Offered 
 }
 
 /// The rooms the hub named (1621): what its notices named when its
-/// sheet asked, then what the shipped list recorded, each once.
+/// sheet asked, or until that answer came what it named when the mailbox
+/// asked (1643), then what the shipped list recorded, each once: a
+/// `#word` and the bare word are one room, spelt as the answer spells it
+/// (1655, walk 9, 46: Minuteman's "lobby" and the list's "#lobby" were two
+/// rows; [`super::hubs::rooms_merged`], the rooms screen's rule since 1652).
 fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
-    let mut out: Vec<String> = match rooms.named.get(hash) {
-        Some(Named::Rooms(named)) => named.clone(),
-        _ => Vec::new(),
+    let answered: &[String] = match (rooms.named.get(hash), rooms.mailbox_named.get(hash)) {
+        (Some(Named::Rooms(named)), _) => named,
+        (_, Some(mailbox)) => mailbox,
+        _ => &[],
     };
-    for room in super::hubs::named(hash)
+    let shipped = super::hubs::named(hash)
         .map(|h| h.rooms)
-        .unwrap_or_default()
-    {
-        if !out.contains(&room) {
-            out.push(room);
-        }
-    }
-    out
+        .unwrap_or_default();
+    super::hubs::rooms_merged(answered, &shipped)
 }
 
 /// The sentence under the sheet's rooms (1621): asking while the question
-/// is out, the hub's silence, or that it named none, only once it
-/// answered and none is known.
-fn rooms_note(rooms: &super::rooms::Rooms, hash: &[u8; 16], listed: bool) -> Option<Text> {
+/// is out, with its seconds from the fifth on as the rooms screen counts
+/// its connecting (1655, walk 9, 47: a slow server's sheet said the same
+/// sentence for 60 to 90 s); the hub's silence; or that it named none,
+/// only once it answered and none is known. Silence and an empty answer
+/// read apart, in the rooms screen's words (1652).
+fn rooms_note(
+    rooms: &super::rooms::Rooms,
+    hash: &[u8; 16],
+    listed: bool,
+    now: Option<i64>,
+) -> Option<Text> {
     match rooms.named.get(hash) {
-        Some(Named::Asking) => Some(Text::key(StrId::ExploreServerAsking)),
-        Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::ExploreServerNoAnswer)),
-        Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::ExploreServerNoRooms)),
+        Some(Named::Asking { since }) if overdue(*since, now) => {
+            Some(Text::key(StrId::RoomsNoAnswer))
+        }
+        Some(Named::Asking { since }) => Some(match (*since, now) {
+            // Slow from 20 s, as the rooms screen says it (1659, walk 10,
+            // 53), and still waiting for the rooms (1669, walk 12, 68).
+            (Some(since), Some(now)) if now - since >= super::rooms::SLOW_SECS => Text::Key(
+                StrId::ExploreServerSlowFor,
+                Vec::from([Arg::Int(now - since)]),
+            ),
+            (Some(since), Some(now)) if now - since >= super::rooms::LINKING_QUIET_SECS => {
+                Text::Key(
+                    StrId::ExploreServerAskingFor,
+                    Vec::from([Arg::Int(now - since)]),
+                )
+            }
+            _ => Text::key(StrId::ExploreServerAsking),
+        }),
+        Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::RoomsNoAnswer)),
+        Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::RoomsNoneNamed)),
         _ => None,
     }
 }
 
-/// The sheet's rows in the terminal cursor's order: the button (while
-/// the hub is not in force), then the rooms.
+/// How long past the question's own budget the sheet still waits for its
+/// end to be told, should it never be (the task gone with its node).
+const PEEK_GRACE_SECS: i64 = 10;
+
+/// The question asked at `since` outlived its own budget by `now` (1653;
+/// 1669, walk 12, finding 68: until then the sheet waits, since the
+/// question's end, answer or none, is what tells it).
+fn overdue(since: Option<i64>, now: Option<i64>) -> bool {
+    match (since, now) {
+        (Some(since), Some(now)) => now - since >= super::rooms::PEEK_BUDGET_SECS + PEEK_GRACE_SECS,
+        _ => false,
+    }
+}
+
+/// Whether the sheet offers to ask again: the server gave no answer, or
+/// none in time (1653).
+fn retry(rooms: &super::rooms::Rooms, hash: &[u8; 16], now: Option<i64>) -> bool {
+    match rooms.named.get(hash) {
+        Some(Named::NoAnswer) => true,
+        Some(Named::Asking { since }) => overdue(*since, now),
+        _ => false,
+    }
+}
+
+/// Ask the server of the sheet for its rooms (1621), stamped with the
+/// model's clock (1653).
+fn ask<B>(model: &mut UiModel<B>, hash: [u8; 16]) -> Vec<UiEffect> {
+    let since = model.now.map(|now| now.unix_secs);
+    model.rooms.named.insert(hash, Named::Asking { since });
+    Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
+}
+
+/// The sheet's rows in the terminal cursor's order: the button ("Open
+/// rooms" on the hub in force, 1655), then the rooms.
 pub fn sheet_picks<B>(model: &UiModel<B>) -> usize {
     let Some(hash) = model.explore.sheet else {
         return 0;
     };
-    usize::from(model.rooms.hub != Some(hash)) + sheet_rooms(&model.rooms, &hash).len()
+    1 + sheet_rooms(&model.rooms, &hash).len()
 }
 
 /// The open sheet as the frontends draw it.
@@ -826,6 +1086,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
     let chosen = model.rooms.hub == Some(hash);
     let rooms = sheet_rooms(&model.rooms, &hash);
     let (now_secs, _) = now(model);
+    let clock = model.now.map(|now| now.unix_secs);
     Some(HubSheet {
         hash,
         name: hub_name(model, &hub),
@@ -841,9 +1102,12 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
             true => StrId::ExploreServerInUse,
             false => StrId::ExploreServerUse,
         }),
-        notice: Text::key(super::rooms::name_notice(model)),
+        notice: super::rooms::name_notice(model),
         rooms_title: Text::key(StrId::ExploreServerRooms),
-        rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty()),
+        rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty(), clock),
+        retry: retry(&model.rooms, &hash, clock).then(|| Text::key(StrId::RoomsRetry)),
+        asking: matches!(model.rooms.named.get(&hash), Some(Named::Asking { .. })),
+        open_rooms: chosen.then(|| Text::key(StrId::ExploreOpenRooms)),
         rooms,
         close: Text::key(StrId::ExploreServerClose),
         cursor: model
@@ -859,7 +1123,7 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
     let picks = picks(model);
     let cursor = picks.get(explore.cursor.min(picks.len().saturating_sub(1)));
     let (now_secs, _) = now(model);
-    let all = known(&model.browse.model);
+    let all = listable(model);
     let any = !all.is_empty();
     let looks = looks(&all);
     let pages = listed(model);
@@ -906,6 +1170,7 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         groups,
         empty,
         off: (!model.browse.enabled).then(|| Text::key(StrId::ExplorePagesOff)),
+        as_of: as_of(model),
     };
     let rooms_node = super::rooms::node(model);
     let suggest = suggested(model);
@@ -947,10 +1212,18 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         pages,
         rooms: RoomsSection {
             title: Text::key(StrId::ExploreRooms),
-            joined_empty: rooms_node
-                .rows
-                .is_empty()
-                .then(|| Text::key(StrId::ExploreNoJoined)),
+            joined_empty: rooms_node.rows.is_empty().then(|| match model.rooms.hub {
+                // The server in use by name (1655, walk 9, 45).
+                Some(_) => Text::Key(
+                    StrId::ExploreNoJoinedOn,
+                    Vec::from([Arg::Text(alloc::boxed::Box::new(super::rooms::hub_label(
+                        &model.rooms,
+                    )))]),
+                ),
+                None => Text::key(StrId::ExploreNoJoined),
+            }),
+            open_rooms: model.rooms.hub.map(|_| Text::key(StrId::ExploreOpenRooms)),
+            open_cursor: cursor == Some(&Pick::OpenRooms),
             joined: rooms_node.rows,
             joined_cursor,
             servers_title: Text::key(StrId::ExploreServers),
@@ -972,6 +1245,7 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
             model.explore.cursor = 0;
             model.explore.held = false;
             settle(model, true);
+            return ask_on_opening(model).into_iter().collect();
         }
         TabId::Browse | TabId::Rooms => model.explore.open = true,
         TabId::Chats | TabId::Map => model.explore.open = false,
@@ -985,6 +1259,10 @@ pub(super) fn fold<B: InputBuffer + Default>(
     event: ExploreEvent,
 ) -> Vec<UiEffect> {
     match event {
+        ExploreEvent::Mailbox(up) => {
+            model.explore.mailbox.link = Some(up);
+            Vec::new()
+        }
         ExploreEvent::Typed(text) => {
             if model.explore.query != text {
                 model.explore.query = text;
@@ -1034,13 +1312,29 @@ pub(super) fn fold<B: InputBuffer + Default>(
             model.explore.sheet_cursor = 0;
             // The sheet asks the server what it names (1621), once a run:
             // a known answer shows at once, a silence is asked again.
+            // An overdue question is asked again too (1653).
+            let clock = model.now.map(|now| now.unix_secs);
             match model.rooms.named.get(&hash) {
-                Some(Named::Asking | Named::Rooms(_)) => Vec::new(),
-                None | Some(Named::NoAnswer) => {
-                    model.rooms.named.insert(hash, Named::Asking);
-                    Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
-                }
+                Some(Named::Asking { since }) if !overdue(*since, clock) => Vec::new(),
+                Some(Named::Rooms(_)) => Vec::new(),
+                None | Some(Named::NoAnswer | Named::Asking { .. }) => ask(model, hash),
             }
+        }
+        ExploreEvent::AskAgain(hash) => {
+            if model.explore.sheet != Some(hash) {
+                return Vec::new();
+            }
+            ask(model, hash)
+        }
+        ExploreEvent::OpenRooms => {
+            if model.rooms.hub.is_none() {
+                return Vec::new();
+            }
+            model.explore.sheet = None;
+            show_rooms(model);
+            let mut effects = super::rooms::fold(model, RoomsEvent::Show(None));
+            effects.extend(super::rooms::fold(model, RoomsEvent::Retry));
+            effects
         }
         ExploreEvent::UseHub(hash) => {
             model.explore.sheet = None;
@@ -1054,11 +1348,9 @@ pub(super) fn fold<B: InputBuffer + Default>(
             let mut effects = super::rooms::choose(model, HubChoice::Hub(hash));
             show_rooms(model);
             effects.extend(super::rooms::fold(model, RoomsEvent::Show(None)));
-            effects.extend(super::rooms::fold(
-                model,
-                RoomsEvent::Typed(format!("/join {room}")),
-            ));
-            effects.extend(super::rooms::fold(model, RoomsEvent::Submit));
+            // Joined by its name, not typed as `/join name`: a name the hub
+            // spells with a space would be read as a room and a key (1652).
+            effects.extend(super::rooms::fold(model, RoomsEvent::Join(room)));
             effects
         }
         ExploreEvent::CloseSheet => {
@@ -1075,7 +1367,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
     }
 }
 
-/// A hub's rooms in front, from the tab: no link yet.
+/// A hub's rooms in front, from the tab; the choice linked (1652).
 fn show_rooms<B>(model: &mut UiModel<B>) {
     model.explore.open = true;
     model.browse.open = false;
@@ -1128,8 +1420,10 @@ fn bookmark<B: InputBuffer + Default>(model: &mut UiModel<B>, dest: [u8; 16]) ->
 /// window have their own field and say [`ExploreEvent::Typed`]): letters
 /// go to the search field, `Backspace` takes one back, `Up` and `Down`
 /// move the cursor over the rows, `Enter` opens the row under it, `Alt-b`
-/// bookmarks a page's row, `Alt-s` turns the order, `Esc` clears the
-/// field and, empty, leaves the tab for the chats, as `Ctrl-g` does.
+/// bookmarks a page's row, `Alt-s` turns the order, `Alt-1`, `Alt-2` and
+/// `Alt-3` put the cursor on the pages, the rooms and the servers (1659,
+/// walk 10, 54: the phone's jump chips), `Esc` clears the field and,
+/// empty, leaves the tab for the chats, as `Ctrl-g` does.
 pub(super) fn key<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     key: leviculum_ui::input::KeyEvent,
@@ -1141,14 +1435,17 @@ pub(super) fn key<B: InputBuffer + Default>(
     // the rooms, Enter takes the one under the cursor, Esc closes it.
     if let Some(hash) = model.explore.sheet {
         let rows = sheet_picks(model);
-        let button = usize::from(model.rooms.hub != Some(hash));
+        let button = 1;
         let at = model.explore.sheet_cursor.min(rows.saturating_sub(1));
         match key.code {
             KeyCode::Up => model.explore.sheet_cursor = at.saturating_sub(1),
             KeyCode::Down if rows > 0 => model.explore.sheet_cursor = (at + 1).min(rows - 1),
             KeyCode::Enter if rows > 0 => {
                 if at < button {
-                    return fold(model, ExploreEvent::UseHub(hash));
+                    return match model.rooms.hub == Some(hash) {
+                        true => fold(model, ExploreEvent::OpenRooms),
+                        false => fold(model, ExploreEvent::UseHub(hash)),
+                    };
                 }
                 if let Some(room) = sheet_rooms(&model.rooms, &hash)
                     .into_iter()
@@ -1178,6 +1475,11 @@ pub(super) fn key<B: InputBuffer + Default>(
                 return fold(model, ExploreEvent::Bookmark(dest));
             }
         }
+        KeyCode::Char(c @ '1'..='3') if alt => {
+            if let Some(at) = section_start(&picks, c) {
+                model.explore.cursor = at;
+            }
+        }
         KeyCode::Char(c) if !ctrl && !alt => {
             model.explore.query.push(c);
             model.explore.cursor = 0;
@@ -1197,6 +1499,7 @@ pub(super) fn key<B: InputBuffer + Default>(
                 Some(Pick::Address) => fold(model, ExploreEvent::OpenAddress),
                 Some(Pick::Page(dest)) => fold(model, ExploreEvent::OpenPage(dest)),
                 Some(Pick::Room(i)) => fold(model, ExploreEvent::OpenRoom(i)),
+                Some(Pick::OpenRooms) => fold(model, ExploreEvent::OpenRooms),
                 Some(Pick::Hub(hash)) => fold(model, ExploreEvent::Hub(hash)),
                 None => Vec::new(),
             };
@@ -1210,6 +1513,20 @@ pub(super) fn key<B: InputBuffer + Default>(
         _ => {}
     }
     Vec::new()
+}
+
+/// The first pick of a section (1659, walk 10, 54): `'1'` the pages (the
+/// list's top), `'2'` the rooms (a room, "Open rooms", else the first
+/// server under the section), `'3'` the servers; `None` when the section
+/// has none.
+fn section_start(picks: &[Pick], section: char) -> Option<usize> {
+    match section {
+        '1' => (!picks.is_empty()).then_some(0),
+        '2' => picks
+            .iter()
+            .position(|p| matches!(p, Pick::Room(_) | Pick::OpenRooms | Pick::Hub(_))),
+        _ => picks.iter().position(|p| matches!(p, Pick::Hub(_))),
+    }
 }
 
 fn page_json(row: &PageRow) -> Value {
@@ -1254,6 +1571,7 @@ impl ExploreNode {
                 })).collect::<Vec<_>>(),
                 "empty": p.empty.as_ref().map(Text::to_json),
                 "off": p.off.as_ref().map(Text::to_json),
+                "as_of": p.as_of.as_ref().map(Text::to_json),
             },
             "rooms": {
                 "title": r.title.to_json(),
@@ -1264,6 +1582,7 @@ impl ExploreNode {
                 })).collect::<Vec<_>>(),
                 "joined_cursor": r.joined_cursor,
                 "joined_empty": r.joined_empty.as_ref().map(Text::to_json),
+                "open_rooms": r.open_rooms.as_ref().map(Text::to_json),
                 "servers_title": r.servers_title.to_json(),
                 "hubs": r.hubs.iter().map(hub_json).collect::<Vec<_>>(),
                 "servers_empty": r.servers_empty.as_ref().map(Text::to_json),
@@ -1279,6 +1598,7 @@ impl ExploreNode {
                 "rooms_title": s.rooms_title.to_json(),
                 "rooms": s.rooms,
                 "rooms_note": s.rooms_note.as_ref().map(Text::to_json),
+                "open_rooms": s.open_rooms.as_ref().map(Text::to_json),
                 "close": s.close.to_json(),
                 "cursor": s.cursor,
             })),
@@ -1312,7 +1632,8 @@ mod tests {
     }
 
     /// A phone with the browser, its clock at [`NOW`] in UTC, three nodes
-    /// heard: one an hour ago, one three days ago, one a month ago.
+    /// heard: one an hour ago, one three days ago, one six days ago (a
+    /// month ago until 1644, which lists no page silent for a week).
     fn phone() -> UiModel<Buffer> {
         let mut model = UiModel::<Buffer>::new(&[]);
         model.browse.enabled = true;
@@ -1323,7 +1644,7 @@ mod tests {
         for n in [
             heard(0x11, Some("Zebra Hof"), 3_600, Some(2)),
             heard(0x22, Some("Alpha Relay"), 3 * 86_400, Some(1)),
-            heard(0x33, None, 30 * 86_400, None),
+            heard(0x33, None, 6 * 86_400, None),
         ] {
             update(
                 &mut model,
@@ -1365,13 +1686,11 @@ mod tests {
         update(&mut model, UiEvent::Tab(TabId::Explore));
         let shown = node(&model);
         assert_eq!(labels(&shown), ["Zebra Hof", "Alpha Relay", "Unnamed page"]);
+        // "Older" holds no page that is not bookmarked since 1644: a page
+        // silent for a week is not listed ([`HIDDEN_AFTER_SECS`]).
         assert_eq!(
             headings(&shown),
-            [
-                StrId::ExploreToday,
-                StrId::ExploreThisWeek,
-                StrId::ExploreOlder
-            ]
+            [StrId::ExploreToday, StrId::ExploreThisWeek]
         );
         let first = &shown.pages.groups[0].rows[0];
         assert_eq!(
@@ -1626,11 +1945,12 @@ mod tests {
 
     /// A hub's row opens its sheet, which asks the server for its rooms
     /// over a question of its own (1621) and chooses nothing; the button
-    /// chooses it and links nothing; the first join links (the privacy
-    /// sentence of 1577) and the room joins on the hub's welcome. Heard
-    /// hubs are listed with the shipped ones under "Servers".
+    /// chooses it and, since 1652, links at once (the privacy sentence of
+    /// 1577 comes with it): "Connecting…", then the rooms the hub lists,
+    /// one tap from a room. Heard hubs are listed with the shipped ones
+    /// under "Servers".
     #[test]
-    fn a_hub_is_picked_without_a_link_and_the_first_join_links() {
+    fn a_hub_picked_links_and_its_listed_room_is_one_tap_away() {
         let mut model = phone();
         let hub = [0x99; 16];
         update(
@@ -1672,22 +1992,73 @@ mod tests {
         assert_eq!(sheet.button, Text::key(StrId::ExploreServerUse));
         let effects = explore(&mut model, ExploreEvent::UseHub(hub));
         assert!(node(&model).sheet.is_none());
+        // Picking links at once (1652): no typed room name needed.
         assert!(
-            effects
-                .iter()
-                .all(|e| !matches!(e, UiEffect::Rooms(RoomAsk::Open { .. }))),
-            "no link on picking: {effects:?}"
+            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub })),
+            "picking links: {effects:?}"
         );
-        assert_eq!(model.rooms.state, HubState::Off);
+        assert_eq!(model.rooms.state, HubState::Linking);
         let scene = model.scene(LayoutClass::Compact);
         assert_eq!(scene.screen, ScreenId::Rooms);
         assert_eq!(scene.tabs.expect("tabs").active, TabId::Explore);
-        update(&mut model, UiEvent::Rooms(RoomsEvent::Typed("#lab".into())));
-        let effects = update(&mut model, UiEvent::Rooms(RoomsEvent::Submit));
-        assert!(
-            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub })),
-            "the first join links: {effects:?}"
+        // The words tell the state: connecting, not "not connected".
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.status, Some(Text::key(StrId::RoomsLinking)));
+        assert_eq!(rooms.retry, None, "nothing to retry while it links");
+        // Before the welcome the title names the server, and nothing is
+        // known of its rooms yet (1659: the list stands whatever the link).
+        let listed = rooms.listed.expect("the title before the welcome");
+        assert!(listed.rooms.is_empty() && listed.note.is_none());
+        // The welcome: the hub's rooms are asked; until they come, it says so.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Welcomed {
+                name: Some("Werkstatt".into()),
+                body_limit: 350,
+            }),
         );
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.status, None);
+        let listed = rooms.listed.expect("the list's place");
+        assert_eq!(listed.note, Some(Text::key(StrId::RoomsAsking)));
+        // Its answer: rows to tap, the typed-name field below them.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Listed {
+                rooms: vec!["general chat".into(), "lobby".into()],
+            }),
+        );
+        let rooms = crate::ui::rooms::node(&model);
+        let listed = rooms.listed.expect("the hub's rooms");
+        assert_eq!(listed.rooms, ["general chat", "lobby"]);
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf Werkstatt");
+        assert_eq!(listed.other, Some(Text::key(StrId::RoomsOther)));
+        assert_eq!(rooms.empty, None, "the field moved under the list");
+        // A tap joins as the hub spells it, and the room opens.
+        let effects = update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Join("general chat".into())),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Rooms(RoomAsk::Join {
+                room: "general chat".into(),
+                key: None
+            })]
+        );
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Joined {
+                room: "general chat".into(),
+                nick: None,
+            }),
+        );
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.open.expect("the room opened").name, "general chat");
+        // Back to the list: the joined room is a row, no longer offered.
+        update(&mut model, UiEvent::Rooms(RoomsEvent::Show(None)));
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.listed.expect("the rest").rooms, ["lobby"]);
         // Esc on the rooms' list goes back to Explore, which opened them.
         update(
             &mut model,
@@ -1852,6 +2223,141 @@ mod tests {
         // The control: the order without the hold is the fresh one.
         let fresh: Vec<[u8; 16]> = fresh(&model).into_iter().map(|(k, _)| k.dest).collect();
         assert_eq!(order(&model), fresh);
+    }
+
+    /// A server heard once stays in the list (1655, walk 9, 44: Whatcom
+    /// stood first at 17:03 and was gone at 17:11, while servers heard
+    /// five hours before stayed). Twenty other shipped servers heard over
+    /// the next ten minutes pushed it past the ten shipped ones the list
+    /// showed; the heard ones that are not shipped were never cut.
+    #[test]
+    fn a_server_heard_stays_listed_while_twenty_others_are_heard_after_it() {
+        let shipped = crate::ui::hubs::shipped();
+        assert!(shipped.len() > 22, "the shipped list holds 68");
+        let mut model = phone();
+        let hear = |model: &mut UiModel<Buffer>, hub: &crate::ui::hubs::Hub, at: i64| {
+            update(
+                model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(3),
+                    first: at,
+                    last: at,
+                    answered: None,
+                })),
+            );
+        };
+        // Another server heard before holds "suggested", which stands
+        // first whatever was heard after it; the one watched is not it.
+        let t0 = NOW - 600;
+        hear(&mut model, &shipped[0], t0 - 60);
+        let first = &shipped[1];
+        hear(&mut model, first, t0);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let listed = |model: &UiModel<Buffer>, hash: [u8; 16]| {
+            node(model).rooms.hubs.iter().any(|h| h.hash == hash)
+        };
+        assert!(listed(&model, first.hash), "listed when heard");
+        assert_eq!(suggested(&model), Some(shipped[0].hash));
+        for (i, hub) in shipped[2..22].iter().enumerate() {
+            hear(
+                &mut model,
+                hub,
+                t0 + 30 * (i64::try_from(i).unwrap_or(0) + 1),
+            );
+        }
+        assert!(
+            listed(&model, first.hash),
+            "still listed ten minutes and twenty servers later"
+        );
+        // Every one of the 22 heard is listed.
+        for hub in &shipped[..22] {
+            assert!(listed(&model, hub.hash), "{}", hub.name);
+        }
+    }
+
+    /// 1659, walk 10, 55: the settings and Explore list the servers in one
+    /// order, the one in use first; the rest by last seen.
+    #[test]
+    fn the_server_in_use_stands_first_in_explore_and_in_the_settings() {
+        let shipped = crate::ui::hubs::shipped();
+        let mut model = phone();
+        for (i, hub) in shipped[..5].iter().enumerate() {
+            update(
+                &mut model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(3),
+                    first: NOW - 600,
+                    last: NOW - 600 + 60 * i64::try_from(i).unwrap_or(0),
+                    answered: None,
+                })),
+            );
+        }
+        let chosen = shipped[1].hash;
+        model.rooms.hub = Some(chosen);
+        model.rooms.enabled = true;
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let explore: Vec<[u8; 16]> = node(&model).rooms.hubs.iter().map(|h| h.hash).collect();
+        let settings: Vec<[u8; 16]> = crate::ui::settings::offered_hubs(&model.rooms)
+            .iter()
+            .map(|o| o.hash)
+            .collect();
+        assert_eq!(explore[0], chosen, "Explore: the one in use first");
+        assert_eq!(settings[0], chosen, "settings: the one in use first");
+        assert_eq!(explore[..5], settings[..5], "one order");
+        // The rest by last seen: the one heard last next.
+        assert_eq!(explore[1], shipped[4].hash);
+    }
+
+    /// 1659, walk 10, 54: the terminal's jumps, as the phone's chips:
+    /// `Alt-2` puts the cursor on "Open rooms" under the pages, `Alt-3` on
+    /// the first server, `Alt-1` back on top.
+    #[test]
+    fn the_terminal_jumps_to_the_rooms_and_the_servers() {
+        use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+        let mut model = phone();
+        let hub = crate::ui::hubs::shipped()[0].hash;
+        model.rooms.hub = Some(hub);
+        model.rooms.enabled = true;
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let alt = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        let picks = picks(&model);
+        update(&mut model, alt('2'));
+        assert_eq!(picks[model.explore.cursor], Pick::OpenRooms);
+        update(&mut model, alt('3'));
+        assert!(matches!(picks[model.explore.cursor], Pick::Hub(_)));
+        assert_eq!(picks[model.explore.cursor - 1], Pick::OpenRooms);
+        update(&mut model, alt('1'));
+        assert_eq!(model.explore.cursor, 0);
+    }
+
+    /// The search reaches every server Loquax offers (1655, walk 9, 44:
+    /// "Colorado" and "Salon" found nothing while both stood in the
+    /// shipped list, past the ten the list shows).
+    #[test]
+    fn the_search_finds_a_shipped_server_never_heard() {
+        let shipped = crate::ui::hubs::shipped();
+        let Some(colorado) = shipped.iter().find(|h| h.name == "Colorado Mesh") else {
+            panic!("Colorado Mesh is shipped");
+        };
+        let at = shipped.iter().position(|h| h.hash == colorado.hash);
+        assert!(
+            at.is_some_and(|at| at >= crate::ui::settings::HUB_PAGE),
+            "past the first page: {at:?}"
+        );
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Typed("Colorado".into()));
+        let shown = node(&model);
+        assert!(
+            shown.rooms.hubs.iter().any(|h| h.hash == colorado.hash),
+            "{:?}",
+            shown.rooms.servers_empty
+        );
+        assert_eq!(shown.rooms.servers_empty, None);
     }
 
     /// Searching filters the servers too (1618), by their names.
@@ -2130,7 +2636,19 @@ mod tests {
         assert_eq!(notice(&model), Text::key(StrId::RoomsNoName));
         assert_eq!(
             StrId::RoomsNoName.text(Lang::De),
-            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+            "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen."
+        );
+        // Walk 11, finding 62: where the mailbox names the profile, the
+        // notice says that name beside "no name on this server".
+        model.profile.mailbox = crate::ui::profile::Mailbox::Away {
+            name: Some("lew".into()),
+            rung: None,
+            word: None,
+        };
+        assert_eq!(
+            notice(&model).resolve(Lang::De),
+            "Auf diesem Server hast du noch keinen Namen (dein Profil heißt lew): \
+             Im Raum erscheinst du ohne Namen."
         );
         model.profile.name = "Lew".into();
         assert_eq!(notice(&model), Text::key(StrId::RoomsNameVisible));
@@ -2179,9 +2697,15 @@ mod tests {
                 rooms: Some(Vec::new()),
             }),
         );
+        // In the rooms screen's words (1655, walk 9, 47), apart from a
+        // silence.
         assert_eq!(
             node(&model).sheet.expect("the sheet").rooms_note,
-            Some(Text::key(StrId::ExploreServerNoRooms))
+            Some(Text::key(StrId::RoomsNoneNamed))
+        );
+        assert_eq!(
+            StrId::RoomsNoneNamed.text(Lang::De),
+            "Dieser Server nennt keine öffentlichen Räume."
         );
         // One that never welcomed: said so, and the next opening asks again.
         let silent = [0x97; 16];
@@ -2195,13 +2719,299 @@ mod tests {
         );
         assert_eq!(
             node(&model).sheet.expect("the sheet").rooms_note,
-            Some(Text::key(StrId::ExploreServerNoAnswer))
+            Some(Text::key(StrId::RoomsNoAnswer))
         );
         explore(&mut model, ExploreEvent::CloseSheet);
         assert_eq!(
             explore(&mut model, ExploreEvent::Hub(silent)),
             [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
         );
+    }
+
+    /// The server in use has a way to its rooms screen (1655, walk 9, 45:
+    /// "You are in no room. Pick a server below." stood above
+    /// "EuskalReticulum ✓", and its sheet had no way there but joining).
+    /// The sentence names it; "Open rooms" on the section and on its
+    /// sheet opens the rooms screen and connects, joining nothing.
+    #[test]
+    fn the_server_in_use_opens_its_rooms_without_a_join() {
+        let Some(euskal) = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name == "EuskalReticulum")
+        else {
+            panic!("EuskalReticulum is shipped");
+        };
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        // Before a server is in use: the old sentence, no button.
+        let shown = node(&model);
+        assert_eq!(
+            shown.rooms.joined_empty,
+            Some(Text::key(StrId::ExploreNoJoined))
+        );
+        assert_eq!(shown.rooms.open_rooms, None);
+        assert!(!picks(&model).contains(&Pick::OpenRooms));
+        // In use, as a start reads it from the config: nothing linked yet.
+        model.rooms.hub = Some(euskal.hash);
+        model.rooms.enabled = true;
+        let shown = node(&model);
+        assert_eq!(
+            shown
+                .rooms
+                .joined_empty
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Du bist in keinem Raum auf EuskalReticulum.")
+        );
+        assert_eq!(
+            shown
+                .rooms
+                .open_rooms
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Räume öffnen")
+        );
+        // Its sheet says so too, and the cursor's first row is it.
+        explore(&mut model, ExploreEvent::Hub(euskal.hash));
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert!(sheet.chosen);
+        assert_eq!(sheet.open_rooms, Some(Text::key(StrId::ExploreOpenRooms)));
+        // Another server's sheet has none.
+        explore(&mut model, ExploreEvent::Hub([0x77; 16]));
+        assert_eq!(node(&model).sheet.expect("the sheet").open_rooms, None);
+        explore(&mut model, ExploreEvent::CloseSheet);
+        // The tap: the rooms screen in front, the link asked, no join.
+        let effects = explore(&mut model, ExploreEvent::OpenRooms);
+        assert!(
+            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub: euskal.hash })),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, UiEffect::Rooms(RoomAsk::Join { .. }))),
+            "{effects:?}"
+        );
+        assert!(model.rooms.open && model.explore.open && !model.browse.open);
+        assert_eq!(model.rooms.state, HubState::Linking);
+        assert_eq!(model.explore.sheet, None);
+        // The terminal's Enter on the sheet's first row is the same verb.
+        let mut terminal = phone();
+        terminal.rooms.hub = Some(euskal.hash);
+        terminal.rooms.enabled = true;
+        update(&mut terminal, UiEvent::Tab(TabId::Explore));
+        explore(&mut terminal, ExploreEvent::Hub(euskal.hash));
+        key(
+            &mut terminal,
+            leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Enter,
+                leviculum_ui::input::KeyModifiers::NONE,
+            ),
+        );
+        assert!(
+            terminal.rooms.open,
+            "Enter on the first row opened the rooms"
+        );
+        // Without a server in use the verb does nothing.
+        let mut none = phone();
+        assert!(explore(&mut none, ExploreEvent::OpenRooms).is_empty());
+        assert!(!none.rooms.open);
+    }
+
+    /// One room is one row on the sheet (1655, walk 9, 46: Minuteman
+    /// listed "lobby" and "#lobby"). Its answer says "lobby", the shipped
+    /// list "#lobby"; the answer's spelling wins, as on the rooms screen
+    /// (1652). The mailbox's rooms merge alike.
+    #[test]
+    fn a_room_the_answer_and_the_shipped_list_spell_apart_is_one_row() {
+        let Some(minuteman) = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name == "Minuteman")
+        else {
+            panic!("Minuteman is shipped");
+        };
+        assert_eq!(minuteman.rooms, ["#lobby"], "the shipped spelling");
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Hub(minuteman.hash));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: minuteman.hash,
+                rooms: Some(vec!["lobby".into(), "Radio".into()]),
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["lobby", "Radio"]);
+        assert_eq!(sheet_picks(&model), 3, "the button and two rooms");
+        // Before any answer, the mailbox's spelling against the shipped one.
+        let mut fresh = phone();
+        fresh
+            .rooms
+            .mailbox_named
+            .insert(minuteman.hash, vec!["lobby".into()]);
+        update(&mut fresh, UiEvent::Tab(TabId::Explore));
+        explore(&mut fresh, ExploreEvent::Hub(minuteman.hash));
+        assert_eq!(node(&fresh).sheet.expect("the sheet").rooms, ["lobby"]);
+    }
+
+    /// 1643: the rooms the mailbox's question named, pulled with the hub,
+    /// are on the sheet the moment it opens, before any link of this
+    /// device's; its own answer then replaces them as the fresher copy.
+    /// Control: a hub the mailbox named nothing for opens empty.
+    #[test]
+    fn the_mailboxs_rooms_are_on_the_sheet_before_any_link() {
+        let mut model = phone();
+        let hub = [0x98; 16];
+        update(
+            &mut model,
+            UiEvent::Engine(crate::outbox::OutboxEvent::HubRooms {
+                hub,
+                rooms: vec!["#lobby".into(), "#radio".into()],
+            }),
+        );
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let asked = explore(&mut model, ExploreEvent::Hub(hub));
+        assert_eq!(asked, [UiEffect::Rooms(RoomAsk::Peek { hub })]);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["#lobby", "#radio"], "before any answer");
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub,
+                rooms: Some(vec!["#lobby".into()]),
+            }),
+        );
+        assert_eq!(node(&model).sheet.expect("the sheet").rooms, ["#lobby"]);
+        explore(&mut model, ExploreEvent::CloseSheet);
+        let other = [0x99; 16];
+        explore(&mut model, ExploreEvent::Hub(other));
+        assert!(node(&model).sheet.expect("the sheet").rooms.is_empty());
+    }
+
+    /// Walk 8 of 1653, 42: a server's sheet said "Frage den Server nach
+    /// seinen Räumen…" for 90 s, the question's whole budget, with nothing
+    /// changing. It counts the seconds from the fifth, says from 20 s that
+    /// the server is slow and that it still waits for its rooms (1659,
+    /// walk 10, 53; 1669, walk 12, 68), and keeps waiting as long as the
+    /// question is alive: Nordic's list came after 83.5 s while the sheet
+    /// had said "does not answer" at 45 s. The question's end without an
+    /// answer says the server's silence and offers to ask again; a sheet
+    /// never told the end gives up just past the question's budget. The
+    /// retry asks again and a late answer still fills the sheet.
+    #[test]
+    fn a_slow_server_is_waited_for_as_long_as_the_question_lives() {
+        let mut model = phone();
+        let hub = [0x98; 16];
+        let at = |model: &mut UiModel<Buffer>, secs: i64| {
+            update(
+                model,
+                UiEvent::Clock(crate::when::WallTime {
+                    unix_secs: secs,
+                    offset_secs: 0,
+                }),
+            );
+        };
+        at(&mut model, 1_000_000);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert_eq!(
+            explore(&mut model, ExploreEvent::Hub(hub)),
+            [UiEffect::Rooms(RoomAsk::Peek { hub })]
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert!(sheet.asking);
+        assert_eq!(sheet.retry, None);
+        at(&mut model, 1_000_004);
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking)),
+            "4 s"
+        );
+        at(&mut model, 1_000_005);
+        let note = node(&model).sheet.expect("the sheet").rooms_note;
+        assert_eq!(
+            note.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Frage den Server nach seinen Räumen… 5 s"),
+            "5 s"
+        );
+        at(&mut model, 1_000_019);
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").rooms_note,
+            Some(Text::Key(StrId::ExploreServerAskingFor, vec![Arg::Int(19)])),
+            "19 s"
+        );
+        at(&mut model, 1_000_020);
+        let note = node(&model).sheet.expect("the sheet").rooms_note;
+        assert_eq!(
+            note.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Der Server antwortet langsam. Warte weiter auf seine Räume… 20 s"),
+            "20 s: slow, and what it waits for"
+        );
+        // Past the old patience of 45 s and up to the question's budget,
+        // the sheet still waits, no retry.
+        for secs in [45, 83, 99] {
+            at(&mut model, 1_000_000 + secs);
+            let sheet = node(&model).sheet.expect("the sheet");
+            assert_eq!(
+                sheet.rooms_note,
+                Some(Text::Key(StrId::ExploreServerSlowFor, vec![Arg::Int(secs)])),
+                "{secs} s"
+            );
+            assert_eq!(sheet.retry, None, "{secs} s");
+            assert!(sheet.asking, "{secs} s");
+        }
+        // Never told its end, the sheet gives up just past the budget.
+        at(&mut model, 1_000_100);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::RoomsNoAnswer)),
+            "100 s"
+        );
+        assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
+        // The retry asks again, and the sentence asks again.
+        assert_eq!(
+            explore(&mut model, ExploreEvent::AskAgain(hub)),
+            [UiEffect::Rooms(RoomAsk::Peek { hub })]
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking))
+        );
+        assert_eq!(sheet.retry, None);
+        // A retry for a sheet not open asks nothing.
+        assert!(explore(&mut model, ExploreEvent::AskAgain([0x99; 16])).is_empty());
+        // The late answer fills it, no retry.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub,
+                rooms: Some(vec!["lobby".into()]),
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["lobby"]);
+        assert_eq!(
+            (sheet.rooms_note, sheet.retry, sheet.asking),
+            (None, None, false)
+        );
+        // A question that ended without an answer says so at once and
+        // offers the retry, whatever the clock.
+        let silent = [0x9a; 16];
+        explore(&mut model, ExploreEvent::Hub(silent));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: silent,
+                rooms: None,
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms_note, Some(Text::key(StrId::RoomsNoAnswer)));
+        assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
     }
 
     fn page_text(model: &UiModel<Buffer>) -> String {
@@ -2529,5 +3339,212 @@ mod tests {
             .find(|h| h.hash == hash)
             .expect("the row");
         assert_eq!(row.name.resolve(Lang::De), "Server ohne Namen");
+    }
+
+    fn asks(effects: &[UiEffect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, UiEffect::AskPages))
+            .count()
+    }
+
+    fn open_at(model: &mut UiModel<Buffer>, ms: u64) -> usize {
+        update(model, UiEvent::Elapsed(ms));
+        update(model, UiEvent::Tab(TabId::Chats));
+        asks(&update(model, UiEvent::Tab(TabId::Explore)))
+    }
+
+    /// 1644 item 1: opening Explore asks the mailbox once, in addition to
+    /// the ask after a pull, never twice within a minute; a device without
+    /// a mailbox never asks.
+    #[test]
+    fn opening_explore_asks_the_mailbox_and_two_opens_within_a_minute_ask_once() {
+        let mut model = phone();
+        assert_eq!(open_at(&mut model, 1_000), 0, "no mailbox, no ask");
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(open_at(&mut model, 10_000), 1, "opened: one ask");
+        assert_eq!(
+            open_at(&mut model, 10_000 + ASK_EVERY_MS - 1),
+            0,
+            "opened again within the minute"
+        );
+        assert_eq!(open_at(&mut model, 10_000 + ASK_EVERY_MS), 1, "a minute on");
+        // The ask after a pull counts too: the tab waits a minute from it.
+        update(&mut model, UiEvent::Elapsed(200_000));
+        pages_asked(&mut model);
+        assert_eq!(open_at(&mut model, 230_000), 0);
+        assert_eq!(open_at(&mut model, 260_000), 1);
+        // The link down asks all the same: the host's ask finds out.
+        explore(&mut model, ExploreEvent::Mailbox(false));
+        assert_eq!(open_at(&mut model, 400_000), 1);
+        // Other tabs ask nothing.
+        assert_eq!(asks(&update(&mut model, UiEvent::Tab(TabId::Browse))), 0);
+    }
+
+    fn at(model: &mut UiModel<Buffer>, unix_secs: i64) {
+        model.now = Some(WallTime {
+            unix_secs,
+            offset_secs: 0,
+        });
+    }
+
+    fn answer(model: &mut UiModel<Buffer>) {
+        update(
+            model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(
+                crate::home::pages::Delta {
+                    stamp: 1,
+                    more: false,
+                    rows: Vec::new(),
+                },
+            )),
+        );
+    }
+
+    fn line(model: &UiModel<Buffer>, lang: Lang) -> Option<String> {
+        let shown = node(model).pages.as_of;
+        assert_eq!(shown, as_of(model));
+        shown.map(|t| t.resolve(lang))
+    }
+
+    /// 1644 item 2: the line on top says how old the mailbox's list is:
+    /// nothing while fresh, "Stand: vor 3 Std." once the last answer is
+    /// older than an hour, "Nicht verbunden · Stand von gestern 14:20"
+    /// while the link is down; a device without a mailbox says nothing.
+    #[test]
+    fn the_line_on_top_says_how_old_the_mailboxs_list_is() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert_eq!(line(&model, Lang::De), None, "no mailbox");
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(line(&model, Lang::De), None, "up, no answer yet");
+        // The answer comes at 14:20 of NOW's day.
+        let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+        at(&mut model, answered);
+        answer(&mut model);
+        assert_eq!(model.explore.mailbox.answered, Some(answered));
+        // State one: fresh.
+        assert_eq!(line(&model, Lang::De), None, "fresh");
+        at(&mut model, answered + AS_OF_AFTER_SECS);
+        assert_eq!(line(&model, Lang::De), None, "an hour old is fresh");
+        // State two: up, the answer older than an hour.
+        at(&mut model, answered + AS_OF_AFTER_SECS + 1);
+        assert_eq!(line(&model, Lang::De).as_deref(), Some("Stand: vor 1 Std."));
+        at(&mut model, answered + 3 * 3_600);
+        assert_eq!(line(&model, Lang::De).as_deref(), Some("Stand: vor 3 Std."));
+        assert_eq!(line(&model, Lang::En).as_deref(), Some("As of 3 h ago"));
+        // State three: the link down, said with the answer's day and time.
+        explore(&mut model, ExploreEvent::Mailbox(false));
+        assert_eq!(
+            line(&model, Lang::De).as_deref(),
+            Some("Nicht verbunden · Stand von heute 14:20")
+        );
+        at(&mut model, answered + 86_400);
+        assert_eq!(
+            line(&model, Lang::De).as_deref(),
+            Some("Nicht verbunden · Stand von gestern 14:20")
+        );
+        assert_eq!(
+            line(&model, Lang::En).as_deref(),
+            Some("Not connected · as of yesterday 14:20")
+        );
+        // A fresh answer and the link up: nothing again.
+        answer(&mut model);
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(line(&model, Lang::De), None);
+        // Down before any answer: only that it is not connected.
+        let mut fresh = phone();
+        explore(&mut fresh, ExploreEvent::Mailbox(false));
+        assert_eq!(line(&fresh, Lang::De).as_deref(), Some("Nicht verbunden"));
+    }
+
+    fn hear_hub(model: &mut UiModel<Buffer>, hash: [u8; 16], name: &str, last: i64) {
+        update(
+            model,
+            UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                hash,
+                name: Some(name.into()),
+                hops: Some(2),
+                first: last,
+                last,
+                answered: None,
+            })),
+        );
+    }
+
+    fn listed_hub(model: &UiModel<Buffer>, hash: [u8; 16]) -> bool {
+        node(model).rooms.hubs.iter().any(|h| h.hash == hash)
+    }
+
+    /// 1644 item 3: a page or a server not announced for seven days is not
+    /// listed; the control, six days and 23 hours, is. The row stays, and
+    /// the next announce lists it again. A bookmark and the server in use
+    /// stay listed whatever their age.
+    #[test]
+    fn a_page_or_server_silent_for_seven_days_is_not_listed_and_six_days_23_hours_is() {
+        const WEEK: i64 = 7 * 86_400;
+        let mut model = phone();
+        for n in [
+            heard(0x66, Some("Funkstille"), WEEK, None),
+            heard(0x77, Some("Knapp"), WEEK - 3_600, None),
+            heard(0x88, Some("Gemerkt"), 30 * 86_400, None),
+        ] {
+            update(
+                &mut model,
+                UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(n)),
+            );
+        }
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: format!("{}:/page/index.mu", "88".repeat(16)),
+            title: "Gemerkt".into(),
+        });
+        let silent = [0xa1; 16];
+        let close = [0xa2; 16];
+        let in_use = [0xa3; 16];
+        hear_hub(&mut model, silent, "Stiller Server", NOW - WEEK);
+        hear_hub(&mut model, close, "Knapper Server", NOW - WEEK + 3_600);
+        hear_hub(&mut model, in_use, "Mein Server", NOW - 30 * 86_400);
+        model.rooms.hub = Some(in_use);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let shown = labels(&node(&model));
+        assert!(!shown.iter().any(|l| l == "Funkstille"), "{shown:?}");
+        assert!(shown.iter().any(|l| l == "Knapp"), "control: {shown:?}");
+        assert!(
+            shown.iter().any(|l| l == "Gemerkt"),
+            "a bookmark: {shown:?}"
+        );
+        assert!(!listed_hub(&model, silent));
+        assert!(listed_hub(&model, close), "control");
+        assert!(listed_hub(&model, in_use), "the server in use");
+        // A search does not reach them either.
+        explore(&mut model, ExploreEvent::Typed("Stille".into()));
+        assert!(labels(&node(&model)).is_empty());
+        assert!(!listed_hub(&model, silent));
+        explore(&mut model, ExploreEvent::Typed(String::new()));
+        // The rows are kept: the registry and the servers heard hold them.
+        assert!(model
+            .browse
+            .model
+            .node_registry
+            .nodes()
+            .iter()
+            .any(|n| n.dest_hash == [0x66; 16]));
+        assert!(crate::ui::settings::offered_hubs(&model.rooms)
+            .iter()
+            .any(|o| o.hash == silent));
+        // The next announce lists them again.
+        update(
+            &mut model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(heard(
+                0x66,
+                Some("Funkstille"),
+                60,
+                None,
+            ))),
+        );
+        hear_hub(&mut model, silent, "Stiller Server", NOW - 60);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert!(labels(&node(&model)).iter().any(|l| l == "Funkstille"));
+        assert!(listed_hub(&model, silent));
     }
 }

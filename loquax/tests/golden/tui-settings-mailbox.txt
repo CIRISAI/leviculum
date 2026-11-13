@@ -6,23 +6,23 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                                                    │
 │ ┌ Mailbox ─────────────────────────────────────────────────────────────────┐ │
 │ │Which mailbox                                                             │ │
 │ │Name: Lew Palm                                                            │ │
 │ │Address: 5a3e910c7742d81b6f03a4e258c92d80                                 │ │
+│ │This is your address too: the mailbox and you are one identity.           │ │
 │ │Runs on: miauhaus                                                         │ │
-│ │Version: 0.9.7 (5f0c2e1)                                                  │ │
+│ │Version: 0.9.7                                                            │ │
 │ │                                                                          │ │
 │ │Connection                                                                │ │
-│ │Connected for 12 min                                                      │ │
+│ │This device connected for 12 min                                          │ │
 │ │Last contact: now                                                         │ │
-│ │Connection over leviculum.network, port 4343, shielded                    │ │
-│ │Shielded: this device hears only what is meant for it.                    │ │
+│ │Connection to miauhaus, shielded (the phone hears only its mailbox)       │ │
 │ │                                                                          │ │
 │ │Devices of this mailbox                                                   │ │
 │ │Fairphone: this device                                                    │ │
 │ │M9: last there 2 h ago                                                    │ │
+│ │Laptop: never connected yet                                               │ │
 │ │A device is added or removed on the mailbox itself.                       │ │
 │ │c  Show my code                                                           │ │
 │ │                                                                          │ │

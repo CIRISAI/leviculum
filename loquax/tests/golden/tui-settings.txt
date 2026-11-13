@@ -2,7 +2,7 @@
 │N│1  Profile                                                                │ │
 │:│   Name, address, QR code                                                 │ │
 │o│2  Mailbox                                                                │ │
-│c│   Where it lives                                                         │ │
+│c│   Which mailbox, connection, devices                                     │ │
 │ │3  Appearance                                                             │ │
 │ │   Light or dark, the map                                                 │ │
 │ │4  Chats                                                                  │ │

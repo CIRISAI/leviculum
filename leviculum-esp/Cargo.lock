@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "libm",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -185,6 +205,15 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -1256,6 +1285,9 @@ name = "leviculum-esp"
 version = "0.1.6"
 dependencies = [
  "critical-section",
+ "embassy-time",
+ "embassy-time-driver",
+ "embedded-hal 1.0.0",
  "embedded-hal-async",
  "esp-bootloader-esp-idf",
  "esp-hal",
@@ -1265,6 +1297,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-gnss-init",
  "leviculum-log-line",
+ "leviculum-lr11xx",
  "leviculum-map",
  "leviculum-serial-mux",
  "leviculum-ui",
@@ -1281,6 +1314,17 @@ version = "0.1.0"
 [[package]]
 name = "leviculum-log-line"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-lr11xx"
+version = "0.1.1"
+dependencies = [
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "leviculum-core",
+ "leviculum-rx-arming",
+]
 
 [[package]]
 name = "leviculum-lxmf"
@@ -1316,6 +1360,10 @@ version = "0.10.0-dev.10"
 [[package]]
 name = "leviculum-rrc"
 version = "0.10.0-dev.10"
+
+[[package]]
+name = "leviculum-rx-arming"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-serial-mux"
@@ -1370,7 +1418,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lnomad"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "leviculum-core",
  "leviculum-micron",
@@ -1391,9 +1439,11 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "loquax"
 version = "0.1.9"
 dependencies = [
+ "embedded-graphics",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
+ "leviculum-mapfill",
  "leviculum-micron",
  "leviculum-rrc",
  "leviculum-ui",
@@ -1408,12 +1458,14 @@ dependencies = [
 name = "loquax-m9"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "embedded-graphics",
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapfill",
  "leviculum-ui",
  "leviculum-ui-ratatui",
+ "libm",
  "loquax",
  "mousefood",
  "ratatui",
@@ -1483,6 +1535,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser",
 ]
 
 [[package]]
@@ -2034,6 +2095,15 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+dependencies = [
+ "core_maths",
+]
 
 [[package]]
 name = "twox-hash"

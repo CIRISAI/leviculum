@@ -59,8 +59,21 @@ fn millis(duration: Duration) -> u64 {
 pub async fn run_ask(
     node: &ReticulumNode,
     device: &Identity,
+    ask: Ask,
+    page: impl FnMut(wire::Page),
+) -> Result<Outcome, HomeError> {
+    run_ask_watching(node, device, ask, page, &mut |_| {}).await
+}
+
+/// [`run_ask`], telling `progress` how far a request that goes as a
+/// resource has gone, 0.0 to 1.0, every [`WATCH_EVERY`] it moved (1662):
+/// a photo or a file handed to the mailbox shows it in its bubble.
+pub async fn run_ask_watching(
+    node: &ReticulumNode,
+    device: &Identity,
     mut ask: Ask,
     mut page: impl FnMut(wire::Page),
+    progress: &mut (dyn FnMut(f32) + Send),
 ) -> Result<Outcome, HomeError> {
     let start = tokio::time::Instant::now();
     let now = || millis(start.elapsed());
@@ -119,7 +132,7 @@ pub async fn run_ask(
                 let deadline =
                     tokio::time::Instant::now() + Duration::from_millis(ask.left_ms(now()));
                 let answer = match &link {
-                    Some(id) => request(node, id, path, &data, deadline).await,
+                    Some(id) => request_watching(node, id, path, &data, deadline, progress).await,
                     None => Err(HomeError::Transfer("no link".to_string())),
                 };
                 ask.answered(answer.as_deref().map_err(HomeError::clone))
@@ -159,13 +172,26 @@ pub async fn send(
     submission: &wire::Submission,
     budget: Duration,
 ) -> Result<[u8; 32], HomeError> {
+    send_watching(node, public_key, device, submission, budget, &mut |_| {}).await
+}
+
+/// [`send`], telling `progress` how far a submission that goes as a
+/// resource has gone, 0.0 to 1.0 (1662).
+pub async fn send_watching(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    submission: &wire::Submission,
+    budget: Duration,
+    progress: &mut (dyn FnMut(f32) + Send),
+) -> Result<[u8; 32], HomeError> {
     let ask = Ask::new(
         public_key,
         Verb::Send(submission.clone()),
         0,
         millis(budget),
     )?;
-    match run_ask(node, device, ask, |_| {}).await? {
+    match run_ask_watching(node, device, ask, |_| {}, progress).await? {
         Outcome::Sent(id) => Ok(id),
         _ => Err(HomeError::Malformed),
     }
@@ -822,6 +848,40 @@ pub async fn pn_answer(
 }
 
 /// One request on `link` and its answer's bytes.
+/// How often a request under way is asked how far its resource went
+/// (1662): the bubble takes an update at most this often.
+pub const WATCH_EVERY: Duration = Duration::from_millis(250);
+
+/// [`request`], telling `progress` how far the request's resource has
+/// gone each [`WATCH_EVERY`] it moved; a request that goes as one packet
+/// tells nothing.
+async fn request_watching(
+    node: &ReticulumNode,
+    link: &LinkId,
+    path: &str,
+    data: &[u8],
+    deadline: tokio::time::Instant,
+    progress: &mut (dyn FnMut(f32) + Send),
+) -> Result<Vec<u8>, HomeError> {
+    let asked = request(node, link, path, data, deadline);
+    tokio::pin!(asked);
+    let mut tick = tokio::time::interval(WATCH_EVERY);
+    let mut said = None;
+    loop {
+        tokio::select! {
+            answer = &mut asked => return answer,
+            _ = tick.tick() => {
+                if let Some(share) = node.link_outgoing_resource_progress(link) {
+                    if said != Some(share.to_bits()) {
+                        said = Some(share.to_bits());
+                        progress(share);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn request(
     node: &ReticulumNode,
     link: &LinkId,
@@ -1036,7 +1096,11 @@ async fn take_in(
         if entry.kind == super::KIND_PEERSTATE {
             match wire::read_peer_state_entry(&entry.packed) {
                 Ok((destination, state)) => outbox
-                    .submit(Command::HomePeerState { destination, state })
+                    .submit(Command::HomePeerState {
+                        destination,
+                        state,
+                        at: entry.at,
+                    })
                     .map_err(gone)?,
                 Err(_) => tracing::warn!("HOME pull: entry {} is no peer state", entry.seq),
             }
@@ -1056,8 +1120,18 @@ async fn take_in(
         }
         if entry.kind == super::KIND_HUB {
             // A hub the home heard (1599): every device lists it.
-            match wire::read_hub_entry(&entry.packed) {
-                Ok(hub) => outbox.submit(Command::HomeHub { hub }).map_err(gone)?,
+            // Its rooms when the home asked it (1643): the sheet lists
+            // them before this device links to it.
+            match wire::read_hub_entry_rooms(&entry.packed) {
+                Ok((hub, rooms)) => {
+                    let hash = hub.hash;
+                    outbox.submit(Command::HomeHub { hub }).map_err(gone)?;
+                    if let Some(rooms) = rooms {
+                        outbox
+                            .submit(Command::HomeHubRooms { hub: hash, rooms })
+                            .map_err(gone)?;
+                    }
+                }
                 Err(_) => tracing::warn!("HOME pull: entry {} is no hub", entry.seq),
             }
             continue;
@@ -1398,7 +1472,8 @@ mod tests {
                 },
                 Command::HomePeerState {
                     destination: [5; 16],
-                    state: blocked
+                    state: blocked,
+                    at: 0
                 },
                 Command::Fence { token: 9 },
             ]
@@ -1433,6 +1508,47 @@ mod tests {
         assert_eq!(
             *outbox.commands.borrow(),
             [Command::HomeHub { hub }, Command::Fence { token: 4 }]
+        );
+    }
+
+    /// 1643: a hub entry with the rooms the home's question named reaches
+    /// the engine as the hub and its rooms; one without them as the hub
+    /// alone.
+    #[tokio::test]
+    async fn a_hub_entry_with_rooms_reaches_the_engine_with_them() {
+        let hub = crate::ui::hubs::HeardHub {
+            hash: [8; 16],
+            name: Some("Villa".into()),
+            hops: Some(4),
+            first: 100,
+            last: 200,
+            answered: None,
+        };
+        let rooms = vec!["#lab".to_string(), "#treff".to_string()];
+        let pulled = Pulled {
+            entries: vec![
+                entry(
+                    3,
+                    super::super::KIND_HUB,
+                    wire::hub_entry_rooms(&hub, Some(&rooms)),
+                ),
+                entry(4, super::super::KIND_HUB, wire::hub_entry(&hub)),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 4 }]);
+        take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::HomeHub { hub: hub.clone() },
+                Command::HomeHubRooms {
+                    hub: [8; 16],
+                    rooms
+                },
+                Command::HomeHub { hub },
+                Command::Fence { token: 4 },
+            ]
         );
     }
 
@@ -1616,6 +1732,7 @@ mod tests {
     async fn real_home(
         devices: &[[u8; 16]],
         pages: u32,
+        names: u32,
     ) -> (
         std::sync::Arc<ReticulumNode>,
         ReticulumNode,
@@ -1650,6 +1767,20 @@ mod tests {
                     first_seen: 1_800_000_000,
                     last_seen: 1_800_000_000,
                     hops: Some(3),
+                })
+                .expect("heard");
+        }
+        for i in 0..names {
+            let mut address = [0u8; 16];
+            address[..4].copy_from_slice(&i.to_be_bytes());
+            address[15] = 0xaa;
+            store
+                .name_heard(&super::super::pages::NameRow {
+                    address,
+                    name: alloc::format!("Stranger {i}"),
+                    first_seen: 1_800_000_000,
+                    last_seen: 1_800_000_000,
+                    hops: Some(2),
                 })
                 .expect("heard");
         }
@@ -1750,7 +1881,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn about_names_the_devices_over_a_link_and_refuses_a_stranger() {
         let phone_device = Identity::generate(&mut rand_core::OsRng);
-        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0).await;
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0, 0).await;
         let budget = Duration::from_secs(60);
         let told = about(&phone, &key, &phone_device, budget)
             .await
@@ -1777,7 +1908,7 @@ mod tests {
         let laptop = Identity::generate(&mut rand_core::OsRng);
         let phone_device = Identity::generate(&mut rand_core::OsRng);
         let (_home, phone, key, _dirs) =
-            real_home(&[*laptop.hash(), *phone_device.hash()], 2000).await;
+            real_home(&[*laptop.hash(), *phone_device.hash()], 2000, 0).await;
         let budget = Duration::from_secs(60);
         let set = BookmarkRow {
             url: "00000001000000000000000000000000:/page/index.mu".into(),
@@ -1819,6 +1950,48 @@ mod tests {
             pages(&phone, &key, &stranger, 0, budget).await,
             Err(HomeError::Refused(Status::NotAdmitted))
         );
+    }
+
+    /// 1643 over a real link: a mailbox that heard 2000 names hands them
+    /// all in one pull (`/pages` page by page until no more follow), and a
+    /// phone that folds the answer names every one of those strangers,
+    /// none of whom it heard itself. The delta's cost on TCP is said in the
+    /// log (`NAMES full`). Control: the next ask after the stamp brings
+    /// nothing.
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_phone_names_the_two_thousand_strangers_its_mailbox_heard_after_one_pull() {
+        let phone_device = Identity::generate(&mut rand_core::OsRng);
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0, 2000).await;
+        let budget = Duration::from_secs(60);
+        let started = std::time::Instant::now();
+        let full = pages(&phone, &key, &phone_device, 0, budget)
+            .await
+            .expect("the full list");
+        let took = started.elapsed();
+        let bytes = super::super::pages::pages_answer(&full).len();
+        eprintln!(
+            "NAMES full rows={} bytes={bytes} took_ms={}",
+            full.rows.len(),
+            took.as_millis()
+        );
+        assert_eq!(full.names().count(), 2000);
+        assert_eq!(full.nodes().count(), 0);
+        let mut model = crate::ui::UiModel::<crate::ui::tests::Field>::new(&[]);
+        let mut stranger = [0u8; 16];
+        stranger[..4].copy_from_slice(&1234u32.to_be_bytes());
+        stranger[15] = 0xaa;
+        assert_eq!(model.names.announced(&stranger), None, "never heard here");
+        crate::ui::update(
+            &mut model,
+            crate::ui::UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(full.clone())),
+        );
+        assert_eq!(model.names.heard_count(), 2000);
+        assert_eq!(model.names.announced(&stranger), Some("Stranger 1234"));
+        let again = pages(&phone, &key, &phone_device, full.stamp, budget)
+            .await
+            .expect("the delta");
+        assert!(again.rows.is_empty(), "nothing new: {again:?}");
     }
 
     /// The message id the fake home gives every `/send` it answers.

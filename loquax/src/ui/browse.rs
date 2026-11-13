@@ -154,6 +154,38 @@ impl Browse {
         Some(text.resolve(lang))
     }
 
+    /// Fold a page that arrived. The fresh copy of the cached page on
+    /// screen keeps the reader's line when its content is the cached one's
+    /// (1650: the phone showed the copy, the reader scrolled, the fresh one
+    /// came and threw them to the top); a page that changed starts at its
+    /// top, as every other arriving page does.
+    pub fn fold_loaded(&mut self, event: AppEvent) -> Vec<Effect> {
+        let model = &self.model;
+        let fresh_copy = model.cached_view
+            && model
+                .pending
+                .as_ref()
+                .is_some_and(|p| model.history.current() == Some(&p.target));
+        let before = fresh_copy.then(|| (model.doc.clone(), model.title.clone(), model.scroll));
+        let effects = self.fold(event);
+        if let Some((doc, title, scroll)) = before {
+            if self.model.doc == doc && self.model.title == title {
+                let viewport = self.model.viewport();
+                self.model.scroll = scroll.min(self.model.max_scroll(viewport));
+            }
+        }
+        effects
+    }
+
+    /// The platform scrolled the page itself (1650, the phone's native
+    /// scroll): `line` is the top line the reader sees now. The browser's
+    /// [`lnomad::app::Model::scroll`] follows, so a fresh copy, a Back to
+    /// this page and the paging arrows start from where the reader is.
+    pub fn read_at(&mut self, line: usize) {
+        let viewport = self.model.viewport();
+        self.model.scroll = line.min(self.model.max_scroll(viewport));
+    }
+
     /// The tab is on this host and in front: the browser has the keys.
     pub fn showing(&self) -> bool {
         self.enabled && self.open
@@ -267,6 +299,8 @@ pub enum BrowseEvent {
     Home(crate::home::pages::Delta),
     /// The page's area in cells, columns by rows.
     Resize { cols: u16, rows: u16 },
+    /// The platform scrolled the page itself to this top line (1650).
+    Reading(usize),
     /// The platform draws in this theme now (the window's light or dark,
     /// 1369): the page is laid out again in its accents, as lnomad's own
     /// toggle does.
@@ -300,6 +334,7 @@ impl BrowseEvent {
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
             BrowseEvent::Home(delta) => return Err(Aside::Home(delta)),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
+            BrowseEvent::Reading(line) => return Err(Aside::Reading(line)),
             BrowseEvent::Address(value) => return Err(Aside::Typed(value)),
             BrowseEvent::Theme(theme) => return Err(Aside::Theme(theme)),
             BrowseEvent::Tick => AppEvent::Tick,
@@ -310,6 +345,7 @@ impl BrowseEvent {
 /// What a [`BrowseEvent`] is when it is no event of the browser's.
 enum Aside {
     Identify([u8; 16], bool),
+    Reading(usize),
     Home(crate::home::pages::Delta),
     Typed(String),
     Theme(leviculum_ui::theme::Theme),
@@ -340,7 +376,12 @@ pub(super) fn fold<B: InputBuffer + Default>(
         super::explore::owe_page(model, node);
     }
     let effects = match event.into_app() {
+        Ok(event @ AppEvent::PageLoaded { .. }) => model.browse.fold_loaded(event),
         Ok(event) => model.browse.fold(event),
+        Err(Aside::Reading(line)) => {
+            model.browse.read_at(line);
+            Vec::new()
+        }
         Err(Aside::Identify(dest, on)) => {
             model.browse.model.note_identify(dest, on);
             Vec::new()
@@ -360,11 +401,17 @@ pub(super) fn fold<B: InputBuffer + Default>(
 
 /// The home's rows into the browser (1579): every node into its list, the
 /// bookmarks by stamp, saved when they changed. The stamp moves to the
-/// answer's.
+/// answer's. Its name rows (1643) name the peers the mailbox heard, as an
+/// announce this device heard would ([`super::name_announced`]): a device
+/// of an external mailbox hears no mesh of its own. A mailbox from before
+/// 1643 sends none, and the names this device heard itself stay.
 fn home_pages<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     delta: crate::home::pages::Delta,
 ) -> Vec<Effect> {
+    for row in delta.names() {
+        super::name_announced(model, row.address, Some(&row.name));
+    }
     let browse = &mut model.browse;
     let mut effects = Vec::new();
     for node in delta.nodes() {
@@ -383,6 +430,7 @@ fn home_pages<B: InputBuffer + Default>(
         effects.push(Effect::SaveBookmarks);
     }
     browse.shared.stamp = delta.stamp;
+    super::explore::pages_answered(model);
     effects
 }
 
@@ -487,6 +535,74 @@ mod tests {
             last_seen: 1_800_000_000,
             hops: Some(2),
         }
+    }
+
+    /// 1643: the mailbox's name rows name strangers this device never
+    /// heard, by the label every list draws a peer with (chats, contacts,
+    /// a new conversation), and a newer name renames the
+    /// peer as an announce would. Control, a mailbox from before 1643: its
+    /// answer carries no name rows, and the name this device heard itself
+    /// stays.
+    #[test]
+    fn the_mailboxs_name_rows_name_strangers_and_an_old_mailbox_leaves_the_own() {
+        use crate::home::pages::{Delta, NameRow, PageRow, Row};
+        const STRANGER: [u8; 16] = [0x3c; 16];
+        const HEARD: [u8; 16] = [0x4d; 16];
+        let row = |address: [u8; 16], name: &str| {
+            Row::Name(NameRow {
+                address,
+                name: name.into(),
+                first_seen: 1_800_000_000,
+                last_seen: 1_800_000_000,
+                hops: Some(3),
+            })
+        };
+        let mut model = phone();
+        let hash_only = model.names.label(&STRANGER, Lang::En);
+        assert!(!hash_only.contains("Kaja"), "{hash_only}");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 4,
+                more: false,
+                rows: vec![row(STRANGER, "Kaja")],
+            })),
+        );
+        assert_eq!(model.names.announced(&STRANGER), Some("Kaja"));
+        assert_eq!(model.names.label(&STRANGER, Lang::En), "Kaja");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 5,
+                more: false,
+                rows: vec![row(STRANGER, "Kaja W.")],
+            })),
+        );
+        assert_eq!(model.names.label(&STRANGER, Lang::En), "Kaja W.");
+        // The old mailbox: pages only. The device's own hearing stays.
+        let mut old = phone();
+        update(
+            &mut old,
+            UiEvent::Engine(crate::outbox::OutboxEvent::Announced {
+                destination: HEARD,
+                name: Some("Heard here".into()),
+                path_response: false,
+            }),
+        );
+        update(
+            &mut old,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 2,
+                more: false,
+                rows: vec![Row::Page(PageRow {
+                    node: node([0x7c; 16], "Relay"),
+                    count: 1,
+                })],
+            })),
+        );
+        assert_eq!(old.names.label(&HEARD, Lang::En), "Heard here");
+        assert_eq!(old.names.announced(&STRANGER), None);
+        assert_eq!(old.names.heard_count(), 1);
     }
 
     /// A phone's model: the host has the tab, a node was announced.
@@ -813,9 +929,9 @@ mod tests {
 
     /// 1337 pass two: what the phone's fetch says back. The identify
     /// word follows the page and sets the bar's flag for its node, and for
-    /// another node only what is known (the control); a failure in the
-    /// catalogue's words is said in the reader's language and ends the
-    /// loading; a download's end is a toast.
+    /// another node only what is known (the control); a failure ends the
+    /// loading and is said on the page in the reader's language (1669); a
+    /// download's end is a toast.
     #[test]
     fn the_fetchs_words_reach_the_browser() {
         let mut model = phone();
@@ -860,10 +976,34 @@ mod tests {
             UiEvent::Browse(BrowseEvent::FailedText(no_path.clone())),
         );
         assert!(model.browse.model.pending.is_none(), "no longer loading");
-        let said = model.browse.model.toast_text.clone().expect("a toast");
-        assert_eq!(said, no_path);
-        let toast = model.browse.model.toast.clone().expect("a toast").text;
-        assert_eq!(toast, no_path.resolve(Lang::De), "said in German");
+        // Said on the page, in German, not in a toast (1669, walk 12,
+        // finding 69), and the page before is one Back away.
+        assert!(model.browse.model.toast.is_none(), "no toast");
+        assert!(
+            page_text(&model).contains("Keine Verbindung zu Marcel's node."),
+            "{}",
+            page_text(&model)
+        );
+        assert_eq!(
+            model
+                .browse
+                .model
+                .history
+                .current()
+                .map(|t| t.path.as_str()),
+            Some("/page/next.mu")
+        );
+        browse(&mut model, BrowseIntent::Back);
+        assert!(page_text(&model).contains("Hallo"), "{}", page_text(&model));
+        assert_eq!(
+            model
+                .browse
+                .model
+                .history
+                .current()
+                .map(|t| t.path.as_str()),
+            Some("/page/index.mu")
+        );
 
         update(
             &mut model,

@@ -35,7 +35,10 @@ pub struct HomeClient {
 /// it, and takes its later states from the archive's entries on each pull.
 /// `settle` is how long the runner waits for that name to reach the
 /// screen: the screen names the oldest running send, so the name has to
-/// arrive before this runner's end does.
+/// arrive before this runner's end does. `progress` hears how far a
+/// submission that goes as a resource has gone (1662), as the event the
+/// screen folds ([`UiEvent::SendProgress`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn send_home(
     tap: &mut impl Outbox,
     client: &HomeClient,
@@ -44,6 +47,7 @@ pub async fn send_home(
     fields: Vec<Field>,
     budget: Duration,
     settle: Duration,
+    progress: &mut (dyn FnMut(UiEvent) + Send),
 ) -> UiEvent {
     let submission = super::wire::Submission {
         client_id: super::client::client_id(),
@@ -52,12 +56,18 @@ pub async fn send_home(
         content: body.into_bytes(),
         fields,
     };
-    let accepted = super::client::send(
+    let mut moved = |share: f32| {
+        progress(UiEvent::SendProgress(
+            crate::ui::transfer::Transfer::permille(share),
+        ))
+    };
+    let accepted = super::client::send_watching(
         &client.node,
         &client.public_key,
         &client.device,
         &submission,
         budget,
+        &mut moved,
     )
     .await;
     let message_id = match accepted {
@@ -448,11 +458,12 @@ pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent>
     use crate::ui::mailbox_page::Told;
     match super::client::about(&client.node, &client.public_key, &client.device, budget).await {
         Ok(about) => {
-            tracing::info!(
-                "HOME about host={:?} version={} devices={}",
-                about.host,
-                about.version,
-                about.devices.len()
+            crate::events::home_about(
+                &about.host,
+                &about.version,
+                crate::VERSION,
+                about.started,
+                about.devices.len(),
             );
             Some(UiEvent::MailboxTold(Box::new(Told::Told(about))))
         }
@@ -467,13 +478,17 @@ pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent>
     }
 }
 
-/// The peer states a fold set, handed to the home node in order (1146), as
-/// petnames are.
+/// The peer states this device owes, handed to the home node in order
+/// (1146, [`crate::ui::UiModel::take_peer_states`]), as petnames are: the
+/// event the model folds names those the home took (1640); one it did not
+/// take is said in the log and stays owed, handed again with the next hand
+/// or after a restart.
 pub async fn hand_peer_states(
     client: HomeClient,
     states: Vec<([u8; 16], super::wire::PeerState)>,
     budget: Duration,
-) {
+) -> UiEvent {
+    let mut taken = Vec::new();
     for (peer, state) in states {
         let outcome = super::client::peer_state(
             &client.node,
@@ -484,113 +499,16 @@ pub async fn hand_peer_states(
             budget,
         )
         .await;
-        let peer = crate::address::to_hex(&peer);
+        let hex = crate::address::to_hex(&peer);
         match outcome {
-            Ok(()) => tracing::info!("HOME peerstate peer={peer}"),
-            Err(error) => tracing::warn!("HOME peerstate peer={peer} not taken: {error}"),
-        }
-    }
-}
-
-/// A peer and the reader's word on it and its conversation.
-pub type PeerStateWord = ([u8; 16], super::wire::PeerState);
-
-/// The reader's words on peers a device owes its home node on the lane,
-/// as a fold set them. Petnames are not among them: a petname is owed
-/// until the home answers that it took it, kept in the device's store
-/// across a restart and handed one hand at a time, whose answer the model
-/// folds ([`hand_petnames`], 1635), which a lane that only ends cannot say.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HandOff {
-    PeerStates(Vec<PeerStateWord>),
-}
-
-/// The hand-offs taken off the lane at once, each peer's newest word only,
-/// in the order of each peer's newest: the home node keeps only a peer's
-/// newest entry, so an older one it would never keep.
-pub fn coalesce(offs: Vec<HandOff>) -> Vec<PeerStateWord> {
-    let mut states = Vec::new();
-    for off in offs {
-        match off {
-            HandOff::PeerStates(more) => states.extend(more),
-        }
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    states.reverse();
-    states.retain(|(peer, _)| seen.insert(*peer));
-    states.reverse();
-    states
-}
-
-/// One lane for a device's peer states to its home node (1614): one task
-/// hands them in the order they were set, so a mute and its taking back
-/// cannot reach the home node the other way round, as two tasks of their
-/// own could; and the frontend's end waits for the lane
-/// ([`HandOffs::finish`]) before it closes the node, so a word the reader
-/// said just before leaving is not dropped with the runtime. A dropped one
-/// left the home node's older word in its archive, and the next start's
-/// pull brought that back over the reader's.
-pub struct HandOffs {
-    tx: tokio::sync::mpsc::UnboundedSender<HandOff>,
-    worker: tokio::task::JoinHandle<()>,
-}
-
-impl HandOffs {
-    /// The lane to `client`'s home node, each request given `budget`.
-    pub fn new(runtime: &tokio::runtime::Handle, client: HomeClient, budget: Duration) -> Self {
-        Self::with(runtime, move |offs| {
-            let client = client.clone();
-            async move {
-                let states = coalesce(offs);
-                if !states.is_empty() {
-                    hand_peer_states(client, states, budget).await;
-                }
+            Ok(()) => {
+                tracing::info!("HOME peerstate peer={hex}");
+                taken.push((peer, state));
             }
-        })
-    }
-
-    /// The lane with its hand-over of a batch given: what waits on the
-    /// lane when one batch ends is the next batch, whole.
-    pub fn with<F, Fut>(runtime: &tokio::runtime::Handle, mut hand: F) -> Self
-    where
-        F: FnMut(Vec<HandOff>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
-    {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HandOff>();
-        let worker = runtime.spawn(async move {
-            while let Some(first) = rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
-                }
-                hand(batch).await;
-            }
-        });
-        Self { tx, worker }
-    }
-
-    /// Queue `off` behind what the lane holds.
-    pub fn hand(&self, off: HandOff) {
-        if self.tx.send(off).is_err() {
-            tracing::warn!("HOME hand-off lane gone; a word on a peer is not handed");
+            Err(error) => tracing::warn!("HOME peerstate peer={hex} not taken: {error}"),
         }
     }
-
-    /// Close the lane and wait up to `grace` for what it holds to reach
-    /// the home node. False when the grace ran out first: the rest is
-    /// given up, as a send's budget gives a send up.
-    pub async fn finish(self, grace: Duration) -> bool {
-        drop(self.tx);
-        let mut worker = self.worker;
-        match tokio::time::timeout(grace, &mut worker).await {
-            Ok(_) => true,
-            Err(_) => {
-                worker.abort();
-                tracing::warn!("HOME hand-offs still running at the end; given up");
-                false
-            }
-        }
-    }
+    UiEvent::PeerStatesHanded { taken }
 }
 
 /// A received message the store already holds, which the screen drops
@@ -645,77 +563,5 @@ pub fn keep_name(store: &mut Store, names: &crate::names::Names, destination: [u
     };
     if let Err(error) = store.save_name(destination, name) {
         crate::events::store_failed(&error.to_string());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::home::wire::PeerState;
-
-    const A: [u8; 16] = [0xa; 16];
-    const B: [u8; 16] = [0xb; 16];
-
-    /// Each peer's newest word stays, in the order of the newest words; an
-    /// older one, which the home node would drop, is not sent.
-    #[test]
-    fn a_batch_hands_each_peers_newest_word_only() {
-        let pinned = PeerState {
-            pinned: true,
-            ..PeerState::default()
-        };
-        let states = coalesce(vec![
-            HandOff::PeerStates(vec![(A, pinned), (B, PeerState::default())]),
-            HandOff::PeerStates(vec![(A, PeerState::default()), (B, pinned)]),
-            HandOff::PeerStates(vec![(A, pinned)]),
-        ]);
-        assert_eq!(states, [(B, pinned), (A, pinned)]);
-    }
-
-    /// 1614: the lane hands its batches one after another, the second
-    /// after the first has ended however long the first takes, and its end
-    /// waits for what it holds: the unpin after the pin reaches the home
-    /// node, and last.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_lane_hands_in_order_and_its_end_waits_for_it() {
-        let handed = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let seen = Arc::clone(&handed);
-        let first = Arc::new(tokio::sync::Notify::new());
-        let held = Arc::clone(&first);
-        let pinned = PeerState {
-            pinned: true,
-            ..PeerState::default()
-        };
-        let lane = HandOffs::with(&tokio::runtime::Handle::current(), move |offs| {
-            let seen = Arc::clone(&seen);
-            let held = Arc::clone(&held);
-            async move {
-                let states = coalesce(offs);
-                if states.iter().any(|(_, state)| state.pinned) {
-                    // The first batch is slow: the unpin is queued meanwhile.
-                    held.notified().await;
-                }
-                seen.lock().expect("the record").extend(states);
-            }
-        });
-        lane.hand(HandOff::PeerStates(vec![(A, pinned)]));
-        tokio::task::yield_now().await;
-        lane.hand(HandOff::PeerStates(vec![(A, PeerState::default())]));
-        first.notify_one();
-        assert!(lane.finish(Duration::from_secs(10)).await);
-        let handed = handed.lock().expect("the record").clone();
-        assert_eq!(
-            handed.last(),
-            Some(&(A, PeerState::default())),
-            "{handed:?}"
-        );
-
-        // Negative: a lane whose hand-over never ends is given up at the
-        // grace, and says so.
-        let stuck = HandOffs::with(&tokio::runtime::Handle::current(), |_| {
-            std::future::pending::<()>()
-        });
-        stuck.hand(HandOff::PeerStates(vec![(A, PeerState::default())]));
-        assert!(!stuck.finish(Duration::from_millis(50)).await);
     }
 }

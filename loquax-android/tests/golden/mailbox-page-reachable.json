@@ -20,6 +20,13 @@
           "note": false
         },
         {
+          "label": "Das ist auch deine Adresse: Postfach und du sind eine Identität.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
           "label": "Läuft auf",
           "value": "miauhaus",
           "copy": null,
@@ -28,7 +35,7 @@
         },
         {
           "label": "Version",
-          "value": "0.9.7 (5f0c2e1)",
+          "value": "0.9.7",
           "copy": null,
           "action": null,
           "note": false
@@ -39,7 +46,7 @@
       "title": "Verbindung",
       "lines": [
         {
-          "label": "Verbunden seit 12 Min.",
+          "label": "Dieses Gerät verbunden seit 12 Min.",
           "value": null,
           "copy": null,
           "action": null,
@@ -53,18 +60,11 @@
           "note": false
         },
         {
-          "label": "Verbindung über leviculum.network, Tor 4343, geschirmt",
+          "label": "Verbindung zu miauhaus, geschirmt (das Handy hört nur sein Postfach)",
           "value": null,
           "copy": null,
           "action": null,
           "note": false
-        },
-        {
-          "label": "Geschirmt: dieses Gerät hört nur, was für es bestimmt ist.",
-          "value": null,
-          "copy": null,
-          "action": null,
-          "note": true
         }
       ]
     },
@@ -81,6 +81,13 @@
         {
           "label": "M9",
           "value": "zuletzt da vor 2 Std.",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Laptop",
+          "value": "noch nie verbunden",
           "copy": null,
           "action": null,
           "note": false

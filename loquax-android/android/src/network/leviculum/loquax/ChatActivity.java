@@ -40,6 +40,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -1733,12 +1734,14 @@ public class ChatActivity extends Activity implements Events.Listener {
     /**
      * A row's files (1221): one line each in its bubble (1268), its name
      * and size in the bubble's ink, said as the library words it; a tap
-     * opens it, a long press shares it. Gone for a row without.
+     * opens it, a long press shares it. Under them the bytes under way
+     * (1662), the library's words and a bar. Gone for a row with neither.
      */
     private void files(LinearLayout box, Map<String, Object> row, boolean ours) {
         box.removeAllViews();
         List<Map<String, Object>> files = Core.list(row, "files");
-        box.setVisibility(files.isEmpty() ? View.GONE : View.VISIBLE);
+        String going = Core.str(row, "progress_words");
+        box.setVisibility(files.isEmpty() && going.isEmpty() ? View.GONE : View.VISIBLE);
         final long key = Core.num(row, "key");
         for (int i = 0; i < files.size(); i++) {
             Map<String, Object> file = files.get(i);
@@ -1768,6 +1771,24 @@ public class ChatActivity extends Activity implements Events.Listener {
                 }
             });
             box.addView(line);
+        }
+        if (!going.isEmpty()) {
+            int ink = getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text);
+            TextView words = new TextView(this);
+            words.setText(going);
+            words.setTextSize(13);
+            words.setTextColor(ink);
+            words.setAlpha(0.8f);
+            words.setPadding(0, dp(2), 0, dp(2));
+            box.addView(words);
+            ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(100);
+            bar.setProgress((int) Core.num(row, "progress_percent"));
+            bar.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(180), dp(4));
+            params.bottomMargin = dp(4);
+            bar.setLayoutParams(params);
+            box.addView(bar);
         }
     }
 

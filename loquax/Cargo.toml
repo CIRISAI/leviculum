@@ -205,7 +205,12 @@ mapload = ["picture", "dep:leviculum-mapcut"]
 # the map's names set in Fira Sans by cosmic-text and swash
 # (`loquax::mapnames`, 1100) and the pins drawn in. The window and the
 # Android app draw through it; the terminal and the CLI do not carry it.
-screenmap = ["picture", "dep:cosmic-text"]
+screenmap = ["picture", "mapnames", "dep:cosmic-text"]
+# The name pass itself (`loquax::mapnames` without its cosmic-text
+# typesetter, 1565): placement by the map core's rule, the masks, the
+# halos and the paint, `no_std` with `alloc`, so the M9 sets its names as
+# the phone does, through its own shaper (`loquax_m9::glyphs`).
+mapnames = ["dep:leviculum-mapfill", "dep:embedded-graphics"]
 tui = [
     "std",
     "history",

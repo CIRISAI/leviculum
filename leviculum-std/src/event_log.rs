@@ -880,6 +880,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // line per change of the entry that carries a phone's or a mailbox's
     // traffic, and the phone's path request for its mailbox on every up.
     EventSchema {
+        name: "HOME_ABOUT",
+        required_keys: &["host", "version", "ours", "started", "devices"],
+    },
+    EventSchema {
         name: "HOME_RENDEZVOUS",
         required_keys: &["host", "port", "state", "entry"],
     },
@@ -915,6 +919,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HOME_ANNOUNCE",
         required_keys: &["home", "iface", "kind"],
     },
+    // A mailbox refused a device's request (1677): every ask of a device
+    // that is not paired, and a join whose token is unknown or expired.
+    // Emitter in `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_REFUSE",
+        required_keys: &["device", "ask", "reason"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],
@@ -926,6 +937,34 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "LNMSG_FETCHED",
         required_keys: &["id", "src", "bytes", "dup"],
+    },
+    EventSchema {
+        name: "ROOMS_LINK",
+        required_keys: &["hub", "state"],
+    },
+    EventSchema {
+        name: "ROOMS_WELCOME",
+        required_keys: &["hub", "version"],
+    },
+    EventSchema {
+        name: "ROOMS_LIST",
+        required_keys: &["hub", "rooms", "via", "answered", "why"],
+    },
+    EventSchema {
+        name: "ROOMS_JOIN",
+        required_keys: &["room", "ok"],
+    },
+    EventSchema {
+        name: "ROOMS_SUGGEST",
+        required_keys: &["hub", "why", "fits"],
+    },
+    EventSchema {
+        name: "BROWSE_FETCH",
+        required_keys: &["dest", "path", "state", "why"],
+    },
+    EventSchema {
+        name: "EXPLORE_OPEN",
+        required_keys: &["ask", "reason", "since_ms"],
     },
     EventSchema {
         name: "LNMSG_SYNC_DONE",
@@ -1931,7 +1970,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5111`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5123`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the
@@ -2304,6 +2343,30 @@ pub fn install_global_subscriber_to_file(default_filter: &str, path: &std::path:
     }
 }
 
+/// The function [`install_line_subscriber`] hands each line to.
+static LINE_HOOK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// The structured lines of the targets starting with `target_prefix`,
+/// each handed to `hook` as it is rendered (1655, walk 9, 48): the phone
+/// has no terminal and no `LEVICULUM_EVENT_LOG`, so its events went
+/// nowhere, and a walk could not read `ROOMS_LINK` or `ROOMS_LIST`. The
+/// phone's hook writes each to logcat. Installs the global subscriber
+/// with the event layer alone, filtered to those targets so another
+/// crate's events cost no rendering; whether it did (a second call, or
+/// another subscriber first, keeps what is there).
+pub fn install_line_subscriber(target_prefix: &'static str, hook: fn(&str)) -> bool {
+    if LINE_HOOK.set(hook).is_err() {
+        return false;
+    }
+    let targets = tracing_subscriber::filter::filter_fn(move |meta: &Metadata<'_>| {
+        meta.target().starts_with(target_prefix)
+    });
+    Registry::default()
+        .with(layer().with_filter(targets))
+        .try_init()
+        .is_ok()
+}
+
 /// The layer registered into the global subscriber chain.  Driven by
 /// the active-handles list above.
 pub struct EventLogLayer {
@@ -2462,6 +2525,12 @@ impl EventLogLayer {
                 sink.write(t_ms, v);
             }
             sink.write(t_ms, line);
+        }
+        if let Some(hook) = LINE_HOOK.get() {
+            for v in &field_violation_lines {
+                hook(v);
+            }
+            hook(line);
         }
     }
 }

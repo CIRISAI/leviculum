@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 61
+TOTAL 63
 
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
@@ -50,10 +50,12 @@ driver::ReticulumNode::interface_stats
 driver::ReticulumNode::is_transport_enabled
 driver::ReticulumNode::known_remote_ratchet
 driver::ReticulumNode::link_destination
+driver::ReticulumNode::link_establishment_timeout_ms
 driver::ReticulumNode::link_is_established
 driver::ReticulumNode::link_keepalive
 driver::ReticulumNode::link_mdu
 driver::ReticulumNode::link_negotiated_mtu
+driver::ReticulumNode::link_outgoing_resource_progress
 driver::ReticulumNode::link_stats
 driver::ReticulumNode::next_hop_link_profile
 driver::ReticulumNode::now_ms

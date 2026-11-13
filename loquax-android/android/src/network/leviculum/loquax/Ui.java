@@ -90,7 +90,10 @@ final class Ui {
             case "mailbox": return context.getString(R.string.state_mailbox);
             case "arrived": return context.getString(R.string.state_arrived);
             case "delivered": return context.getString(R.string.state_delivered);
-            case "read": return context.getString(R.string.state_read, clock(readAt));
+            // 0 is a read at no known time (1506, an import's): "Read".
+            case "read": return readAt > 0
+                    ? context.getString(R.string.state_read, clock(readAt))
+                    : context.getString(R.string.state_read_untimed);
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }

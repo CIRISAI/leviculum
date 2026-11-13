@@ -30,7 +30,8 @@ fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 fields beside id, source, title, body and the verification
 (`loquax/src/engine.rs:520`, `loquax/src/outbox.rs:319`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
-`loquax/src/telemetry.rs:166`), the screen model keeps each peer's latest
+`loquax/src/telemetry.rs:169`; a group's copy books its position under
+the writer, not the group), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
 `loquax/src/ui.rs:6529`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:3659`) and the positions in a table of
@@ -139,6 +140,36 @@ highlighted entry, the phone a glyph of 18 dp in a 48 dp target
 labelled "Position of Anna, 2 min ago". Older fixes show no pin; the
 map still draws them grey. No distance is shown and there is no
 setting.
+
+**The window's map: a card, no column** (1430, Lew 2026-11-04). The
+window takes the phone's model, one interaction model for both. The map
+fills its pane; there is no column of peers beside it (it held one name
+that ran into the map and otherwise stood empty, and its width followed
+its text, so the map flickered while panning). The peers are their pins.
+A click on a pin selects it and opens its card at the map's bottom, a
+fixed 380 x 92 pixels: the avatar with its liveness ring, the name by the
+display rule, the status line in the chat row's words with the distance
+from our own position when there is one (`live · 5 min ago · 300 m`),
+and the phone card's actions Chat, Navigate and Share mine (a node
+nearby that is no contact: "Nearby, not in your contacts" and Add; our
+own pin: no actions). Navigate opens OpenStreetMap's directions to the
+pin in the browser, from our own position when known
+(`ui::pin_card::directions`); the phone hands a `geo:` link to its
+navigation app instead. A click on the empty map deselects and the card
+goes; a drag is no click; the keys step the pins as in the terminal. The
+map menu's first entry, Locations ("Standorte"; devices send positions,
+never "friends"), opens a list over the map's left edge, a fixed 260
+pixels wide: everyone with a position but us, the newest fix first, with
+the age and the distance; a click selects the pin, centres the view on it
+and closes the list, Escape closes it. Fit all stays in the menu. The
+card's and the list's words are `ui::pin_card`'s, built from the model,
+and every word in their boxes is cut with an ellipsis where the box ends
+(the window's font measures it, `gui::map::fit`) and clipped besides.
+The terminal keeps its conversation list beside the map, which a text
+screen needs; its names are cut the same way (`Names::label_in`). The
+phone already worked so. On the M9, when its map gains a card, it takes
+the same `ui::pin_card` words and a fixed box; nothing is built for it in
+1430.
 
 **A text with a position** (1132). Sideband and a stock LXMF client can
 send a body and a telemetry field in one message. Such a message from a

@@ -181,6 +181,11 @@ fn request() -> impl Strategy<Value = Request> {
             target,
             body
         }),
+        (text(), i64s(), text()).prop_map(|(peer, key, body)| Request::NoticeReply {
+            peer,
+            key,
+            body
+        }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
         (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
         (text(), blob()).prop_map(|(peer, data)| Request::Photo { peer, data }),
@@ -369,6 +374,13 @@ fn voice_parts() -> BoxedStrategy<VoiceParts> {
         .boxed()
 }
 
+/// A bubble's voice message and its bytes under way (1662), boxed
+/// together: an eleventh element of the row's tuple overflowed the test
+/// thread's stack in [`the_lists_round_trip`].
+fn media_parts() -> BoxedStrategy<(VoiceParts, (String, u32))> {
+    (voice_parts(), (text(), u32s())).boxed()
+}
+
 /// A bubble's group parts (1307): its writer and an invitation's card,
 /// boxed on their own as [`voice_parts`] is.
 type InviteParts = (String, String, String, String, String, bool);
@@ -415,7 +427,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
             invite_parts(),
             line_parts(),
         ),
-        voice_parts(),
+        media_parts(),
     )
         .prop_map(
             |(
@@ -433,12 +445,15 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                     (note, late, state_words, position_words),
                 ),
                 (
-                    voice_mode,
-                    voice_ms,
-                    voice_duration,
-                    voice_levels,
-                    (voice_playable, voice_playing),
-                    voice_words,
+                    (
+                        voice_mode,
+                        voice_ms,
+                        voice_duration,
+                        voice_levels,
+                        (voice_playable, voice_playing),
+                        voice_words,
+                    ),
+                    (progress_words, progress_percent),
                 ),
             )| MessageRow {
                 id,
@@ -474,6 +489,8 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 photo_h,
                 photo_words,
                 files,
+                progress_words,
+                progress_percent,
                 voice_mode,
                 voice_ms,
                 voice_duration,
@@ -758,6 +775,8 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         any::<bool>(),
         // A group's count and words (1307).
         group_parts(),
+        // A notification's newest key (1506).
+        prop::option::of(i64s()),
     )
         .prop_map(
             |(
@@ -768,6 +787,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (live, ring, pin, pin_label, draft),
                 sharing,
                 (group_members, group_words, _, group_invited, time),
+                notice_key,
             )| ConversationRow {
                 peer,
                 same_name: last.clone(),
@@ -801,6 +821,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 group_members,
                 group_words,
                 group_invited,
+                notice_key,
             },
         )
         .boxed()

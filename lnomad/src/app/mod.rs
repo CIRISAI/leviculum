@@ -42,4 +42,6 @@ pub use input::{
     MouseEventKind,
 };
 pub use intent::Intent;
+/// A form field's kind, for a host that hands fields to its platform (1650).
+pub use leviculum_micron::FieldKind;
 pub use model::*;

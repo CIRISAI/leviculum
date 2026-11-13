@@ -28,22 +28,25 @@ pub struct Flash {
     /// The home whose device the board is; `None` on a board without a
     /// client record, which opens on the pairing.
     pub home: Option<[u8; 16]>,
-    /// The record's large-type flag (1532); kept only with a home, as the
-    /// board keeps it only in its client record.
-    pub large_type: bool,
+    /// The record's type size (1532, 1561), `font::Size::record`'s two
+    /// bits; kept only with a home, as the board keeps it only in its
+    /// client record.
+    pub type_size: u8,
     pub messages: MemFlash,
 }
 
-/// The header byte's bits: a home follows, and its record's type flag.
+/// The header byte's bits: a home follows (bit 0), and its record's type
+/// size (bits 1-2; bit 1 alone was 1532's large flag, the same value).
 const HAS_HOME: u8 = 1;
-const LARGE_TYPE: u8 = 2;
+const TYPE_SHIFT: u8 = 1;
+const TYPE_SIZE: u8 = 0b11 << TYPE_SHIFT;
 
 impl Flash {
     /// A board fresh off the flasher: no record, every sector erased.
     pub fn blank() -> Self {
         Self {
             home: None,
-            large_type: false,
+            type_size: 0,
             messages: MemFlash::new(SECTORS),
         }
     }
@@ -60,7 +63,7 @@ impl Flash {
                 path.display()
             ));
         }
-        let large_type = head[8] & LARGE_TYPE != 0;
+        let type_size = (head[8] & TYPE_SIZE) >> TYPE_SHIFT;
         let home = match head[8] & HAS_HOME {
             0 => None,
             _ => {
@@ -85,7 +88,7 @@ impl Flash {
         }
         Ok(Self {
             home,
-            large_type: large_type && home.is_some(),
+            type_size: if home.is_some() { type_size } else { 0 },
             messages,
         })
     }
@@ -96,7 +99,7 @@ impl Flash {
         out.extend_from_slice(MAGIC);
         match self.home {
             Some(address) => {
-                out.push(HAS_HOME | if self.large_type { LARGE_TYPE } else { 0 });
+                out.push(HAS_HOME | ((self.type_size << TYPE_SHIFT) & TYPE_SIZE));
                 out.extend_from_slice(&address);
             }
             None => {

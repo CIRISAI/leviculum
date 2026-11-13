@@ -19,9 +19,12 @@ What moves, and only this (minor and major are Lew's, never a script's):
     above an installed 0.10.0~dev (scripts/test-deb-stamp.sh compares it);
   * loquax-android's `[package.metadata.android] version-code` grows by
     one, because Android refuses an update whose versionCode did not grow.
-    The Makefile reads it and the versionName from that Cargo.toml.
+    The Makefile reads it from that Cargo.toml and the versionName from
+    loquax's, the version the app shows (1667).
 
-A unit's files are its crate directory. The workspace unit is every crate
+A unit's files are its crate directory, and for loquax-android loquax's
+too: the APK carries loquax and is named by its version, so a loquax
+change is a new APK whose versionCode must grow (1667). The workspace unit is every crate
 whose version is the workspace's, taken from `cargo metadata` rather than
 typed here, so a new crate with `version.workspace = true` joins it without
 an edit to this file. `docs/`, `scripts/`, the Justfile and the root
@@ -81,6 +84,10 @@ OWN_UNITS = [
 
 WORKSPACE = "workspace"
 ANDROID_CODE_UNIT = "loquax-android"
+
+# Directories a unit's version answers for beyond its own: the APK is
+# loquax inside loquax-android, named by loquax's version (1667).
+EXTRA_PATHS = {"loquax-android": ["loquax"]}
 
 
 class Failure(Exception):
@@ -147,12 +154,13 @@ def workspace_unit(root):
     return sorted(dirs)
 
 
-def units(root, own_units):
+def units(root, own_units, extra_paths=EXTRA_PATHS):
     """[(name, manifest path, section, [paths])], the workspace first."""
     table = [(WORKSPACE, "Cargo.toml", "workspace.package", workspace_unit(root))]
     for name, crate_dir in own_units:
         if (root / crate_dir / "Cargo.toml").exists():
-            table.append((name, f"{crate_dir}/Cargo.toml", "package", [crate_dir]))
+            paths = [crate_dir, *extra_paths.get(name, [])]
+            table.append((name, f"{crate_dir}/Cargo.toml", "package", paths))
     return table
 
 
@@ -186,10 +194,10 @@ def changed(root, base, paths):
     return False
 
 
-def survey(root, base, own_units, code_unit=ANDROID_CODE_UNIT):
+def survey(root, base, own_units, code_unit=ANDROID_CODE_UNIT, extra_paths=EXTRA_PATHS):
     """One record per unit: changed, versions at base and HEAD, owed."""
     records = []
-    for name, manifest, section, paths in units(root, own_units):
+    for name, manifest, section, paths in units(root, own_units, extra_paths):
         head_text = (root / manifest).read_text()
         base_text = show(root, base, manifest)
         head_version = section_version(head_text, section)
@@ -525,10 +533,17 @@ def selftest():
         _write(root / "a" / "src" / "lib.rs", "pub fn a2() {}\n")
         _commit(root, env_git, "more work")
         expect("a second pass shares one bump", run(root, "base", "check", units_fx, out=sink), 0)
+        subprocess.run(["git", "tag", "-f", "extrabase"], cwd=root, check=True, capture_output=True)
 
         # The code unit: c changes, its version and code both move.
         _write(root / "c" / "src" / "lib.rs", "pub fn c() {}\n")
         _commit(root, env_git, "c work")
+        # A unit that answers for another's directory (loquax-android for
+        # loquax, 1667) is owed when only that directory moved.
+        owed_b = {r["unit"]: r["owed"] for r in survey(root, "extrabase", units_fx, "c", {"b": ["c"]})}["b"]
+        expect("b owed by c's change through its extra path", owed_b, True)
+        plain_b = {r["unit"]: r["owed"] for r in survey(root, "extrabase", units_fx, "c", {})}["b"]
+        expect("b not owed by c's change without one", plain_b, False)
         expect("c owed", {r["unit"]: r["owed"] for r in survey(root, "base", units_fx, "c")}["c"], True)
         run(root, "base", "bump", units_fx, "c", out=sink)
         c_text = (root / "c" / "Cargo.toml").read_text()
@@ -586,22 +601,30 @@ def selftest():
 
 
 def makefile_selftest():
-    """The Android Makefile takes versionCode and versionName from its
-    Cargo.toml: the real Makefile beside a fixture manifest whose values
-    match none of the old defaults."""
+    """The Android Makefile takes the versionCode from its Cargo.toml and the
+    versionName from loquax's (1667): the real Makefile beside fixture
+    manifests whose values match none of the old defaults, and its own
+    crate's version differs from loquax's so a wrong read shows."""
     makefile = ROOT / "loquax-android" / "Makefile"
     if shutil.which("make") is None:
         return ["make is not installed; the Makefile's version read cannot be checked"]
     with tempfile.TemporaryDirectory(prefix="bump-touched-make-") as tmp:
-        shutil.copy(makefile, Path(tmp) / "Makefile")
+        android = Path(tmp) / "loquax-android"
+        android.mkdir()
+        shutil.copy(makefile, android / "Makefile")
         _write(
-            Path(tmp) / "Cargo.toml",
-            '[package]\nname = "x"\n# a comment\nversion = "9.8.7"\n\n'
+            android / "Cargo.toml",
+            '[package]\nname = "x"\n# a comment\nversion = "1.2.3"\n\n'
             '[dependencies]\nfoo = { version = "1" }\n\n'
             "[package.metadata.android]\nversion-code = 4242\n",
         )
+        _write(
+            Path(tmp) / "loquax" / "Cargo.toml",
+            '[package]\nname = "loquax"\n# a comment\nversion = "9.8.7"\n\n'
+            '[dependencies]\nfoo = { version = "1" }\n',
+        )
         proc = subprocess.run(
-            ["make", "-s", "--no-print-directory", "-C", tmp, "print-version"],
+            ["make", "-s", "--no-print-directory", "-C", str(android), "print-version"],
             capture_output=True,
             text=True,
         )

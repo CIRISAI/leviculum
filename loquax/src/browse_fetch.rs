@@ -201,6 +201,8 @@ async fn serve(
     let (brought_tx, mut brought) = mpsc::unbounded_channel::<(u64, Brought)>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation = 0u64;
+    // The page asked last, for its outcome's event line.
+    let mut asked_page: Option<Target> = None;
     let (shots_tx, mut shots) = mpsc::unbounded_channel::<transfer::ImageOutcome>();
     let mut pictures: Option<tokio::task::JoinHandle<()>> = None;
     let mut picture_generation = 0u64;
@@ -217,6 +219,13 @@ async fn serve(
                     continue;
                 }
                 inflight = None;
+                if let (Brought::Page(result), Some(target)) = (&outcome, asked_page.take()) {
+                    let (state, why) = match result {
+                        Ok(_) => ("ok", String::from("-")),
+                        Err(text) => ("failed", text.resolve(lnomad::app::strings::Lang::En)),
+                    };
+                    crate::events::browse_fetch(&target.dest_hash, &target.path, state, &why);
+                }
                 let told = match outcome {
                     Brought::Page(Ok(page)) => vec![
                         Told::Browse(BrowseEvent::Loaded { micron: page.micron, title: page.title }),
@@ -268,11 +277,25 @@ async fn serve(
                 }
                 if let Some(handle) = inflight.take() {
                     handle.abort();
+                    // A page whose fetch ends here says so (1667, walk 11,
+                    // finding 65: an abandoned fetch left no end line): a
+                    // cancel is the reader stopping it, a Back or the
+                    // browser left (1669, walk 12, finding 73), anything
+                    // else another ask taking its place.
+                    if let Some(target) = asked_page.take() {
+                        let why = match ask {
+                            Ask::Cancel => "stopped",
+                            _ => "superseded",
+                        };
+                        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", why);
+                    }
                 }
                 generation = generation.wrapping_add(1);
                 let asked = generation;
                 match ask {
                     Ask::Navigate(target) => {
+                        crate::events::browse_fetch(&target.dest_hash, &target.path, "asked", "-");
+                        asked_page = Some(target.clone());
                         let (session, tx) = (Arc::clone(&session), brought_tx.clone());
                         inflight = Some(tokio::spawn(async move {
                             let page = transfer::fetch_page(&mut *session.lock().await, &target, TIMEOUT).await;
@@ -300,6 +323,9 @@ async fn serve(
     };
     // The lender may be stopping its node, which it can only once nothing
     // here holds it: the fetch in flight and the discovery go first.
+    if let (Some(_), Some(target)) = (&inflight, asked_page.take()) {
+        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", "stopped");
+    }
     for handle in [inflight.take(), pictures.take()].into_iter().flatten() {
         handle.abort();
         let _ = handle.await;

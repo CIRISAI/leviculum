@@ -12,14 +12,18 @@
 # --- Project ---
 APP_MODULE=loquax
 NAMESPACE=network.leviculum.loquax
-# The version lives in Cargo.toml beside this file, where
-# scripts/bump-touched.py moves it at every landing (1226): `version` is the
-# versionName, `[package.metadata.android] version-code` the versionCode,
-# which has to grow for a phone to accept the APK as an update. A command
-# line VERSION_CODE=... still wins, for a one-off build.
+# The versionName is loquax's version, the one the app itself shows (the
+# build stamp, the mailbox page's "älter" comparison): an APK that said
+# 0.1.8 around a library stamped 0.1.9 read as two builds (walk 11, 1667).
+# The versionCode lives in this directory's Cargo.toml, `[package.metadata
+# .android] version-code`, which has to grow for a phone to accept the APK
+# as an update; scripts/bump-touched.py raises it whenever loquax or this
+# crate moves (1226, 1667). A command line VERSION_CODE=... or
+# VERSION_NAME=... still wins, for a one-off build.
 CARGO_TOML:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))Cargo.toml
+LOQUAX_TOML:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))../loquax/Cargo.toml
 VERSION_CODE?=$(shell sed -n 's/^version-code *= *\([0-9][0-9]*\).*/\1/p' $(CARGO_TOML))
-VERSION_NAME?=$(shell sed -n 's/^version *= *"\([^"]*\)".*/\1/p' $(CARGO_TOML) | head -n 1)
+VERSION_NAME?=$(shell sed -n 's/^version *= *"\([^"]*\)".*/\1/p' $(LOQUAX_TOML) | head -n 1)
 
 # --- SDK / tools ---
 SDK?=/usr/lib/android-sdk
@@ -201,6 +205,9 @@ pack:
 	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) assets/emoji.tsv assets/emoji-LICENSE-UNICODE.txt
 	$(ZIPALIGN) -f 4 $(UNALIGNED_PACKAGE) $(PACKAGE)
 	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass $(KSPASS_ARG) $(PACKAGE)
+	# The APK says the version the app shows, or the build fails (1667).
+	$(AAPT) dump badging $(PACKAGE) | grep -q "versionCode='$(VERSION_CODE)' versionName='$(VERSION_NAME)'" \
+		|| { echo "$(PACKAGE): badging does not say versionName $(VERSION_NAME) versionCode $(VERSION_CODE)" >&2; exit 1; }
 
 uninstall:
 	$(ADB) uninstall $(NAMESPACE)

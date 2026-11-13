@@ -347,7 +347,8 @@ fn the_explore_tab_is_the_golden_scene() {
     for found in [
         node(0x5a, Some("Marcel's node"), 600, Some(2)),
         node(0x7c, Some("Relay Süd"), 2 * 86_400, Some(1)),
-        node(0x3d, None, 20 * 86_400, None),
+        // Five days: a page silent for a week is not listed (1644).
+        node(0x3d, None, 5 * 86_400, None),
         node(0x41, Some("Bergwacht"), 5 * 3_600, Some(4)),
     ] {
         update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));

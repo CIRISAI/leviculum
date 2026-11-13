@@ -34,11 +34,12 @@ pub struct Page {
     pub zoom: Option<u8>,
 }
 
-/// The overview behind the house key (1532): one row, the type's.
-pub fn house() -> Page {
+/// The settings behind the house key (1532, 1561): the cursor is the
+/// row among those a reader can change (`house::Overview::at`).
+pub fn house(cursor: usize) -> Page {
     Page {
         name: "house",
-        cursor: 0,
+        cursor,
         top: 0,
         zoom: None,
     }

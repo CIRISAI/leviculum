@@ -198,7 +198,7 @@ and carrying a second implementation is a design decision, not a port.
 measurement.** It implements `RxPort` and `RxWindowProbe` unchanged
 (`leviculum-lr11xx/README.md:43-45`), and on a ThinkNode M9 its receive
 interrupt word read back `0x38`, preamble, header and `RxDone` latched
-and readable without a clear (`leviculum-lr11xx/README.md:261-267`,
+and readable without a clear (`leviculum-lr11xx/README.md:263-269`,
 section 10, "Verification status"). The port was the driver in full and
 the two crates untouched.
 

@@ -93,7 +93,7 @@ pub(super) fn window(dir: Option<std::path::PathBuf>, w: f32, h: f32, at: World,
     let maps = frames.painter().epoch();
     let mut app = App::new(frames, None);
     app.screen = Screen::Map;
-    app.window = Size::new(w + LIST_WIDTH, h + 24.0);
+    app.window = Size::new(w + leviculum_ui_iced::chrome::RAIL, h + 24.0);
     app.seen.maps = maps;
     app.apply(Message::MapSize(Size::new(w, h)));
     app.fitted = true;

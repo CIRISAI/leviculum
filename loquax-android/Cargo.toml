@@ -12,8 +12,9 @@ description = "loquax on Android: the JNI library the app's Java calls"
 publish = false
 
 # The APK's versionCode. Android refuses an update whose code did not grow,
-# so scripts/bump-touched.py raises it by one whenever this crate's version
-# moves; the Makefile stamps it and the version above into the manifest.
+# so scripts/bump-touched.py raises it by one whenever this crate or loquax
+# moves; the Makefile stamps it into the manifest with loquax's version as
+# the versionName, the version the app shows (1667).
 [package.metadata.android]
 version-code = 9
 

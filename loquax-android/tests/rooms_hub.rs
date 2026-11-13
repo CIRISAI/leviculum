@@ -113,15 +113,15 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
     let (welcomed, joined, echoed, long, parted) = tokio::task::spawn_blocking(move || {
         let closed = screen(&s);
         assert!(closed.enabled && !closed.open, "the tab is there, closed");
-        // Opening the rooms links nothing; the first join does (1578),
-        // and the hub's welcome sends it.
+        // Opening the rooms of the hub the config names links (1652) and
+        // asks for its rooms; nothing is typed: a tap on one joins it.
         rooms(&s, "tab", "", 0);
-        rooms(&s, "say", "#lab", 0);
-        let welcomed = until(&s, 60, "the hub's welcome", |shown| {
-            shown.open && shown.status.is_empty()
+        let welcomed = until(&s, 60, "the hub's rooms", |shown| {
+            shown.open && shown.status.is_empty() && !shown.listed.is_empty()
         });
         assert!(welcomed.open, "{welcomed:?}");
-        let joined = until(&s, 30, "the room", |shown| shown.room == "#lab");
+        rooms(&s, "join", "lab", 0);
+        let joined = until(&s, 30, "the room", |shown| shown.room == "lab");
         rooms(&s, "say", "rrc line from the phone", 0);
         let echoed = until(&s, 30, "the echo", |shown| {
             shown
@@ -146,6 +146,13 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
 
     println!("ROOMS_SCREEN joined {joined:#?}");
     println!("ROOMS_SCREEN echoed {echoed:#?}");
+    // The hub's list, as it spells it, under its title, the field below
+    // as the way to another room (1652).
+    assert_eq!(welcomed.listed, ["general chat", "lab"], "{welcomed:?}");
+    assert_eq!(welcomed.listed_title, "Rooms on periculum");
+    assert_eq!(welcomed.other, "Join another room");
+    assert!(welcomed.empty.is_empty(), "the field moved under the list");
+    assert!(welcomed.retry.is_empty());
     assert_eq!(joined.rows.len(), 1);
     assert!(joined.rows[0].selected);
     assert!(joined.live.starts_with("A room is live"), "{}", joined.live);
@@ -162,8 +169,7 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
     assert_eq!((ours.who.as_str(), ours.ours), ("you", true));
     assert!(echoed.input.is_empty(), "a line that went leaves the field");
     assert!(long.lines.len() == echoed.lines.len());
-    // The join rides on the welcome now (1578), so the welcomed screen may
-    // already list #lab; after the part nothing is.
+    // After the part nothing is joined, and the hub names the room again.
     assert!(parted.room.is_empty() && parted.rows.is_empty());
     assert!(welcomed.status.is_empty(), "the link was up: {welcomed:?}");
 
@@ -184,11 +190,13 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
             .map(|e| e.kind)
             .filter(|kind| *kind != Kind::Pong)
             .collect();
+        // `/list` after the WELCOME (1652), then the tap's JOIN.
         assert_eq!(
             kinds,
-            [Kind::Hello, Kind::Join, Kind::Msg, Kind::Part],
+            [Kind::Hello, Kind::Msg, Kind::Join, Kind::Msg, Kind::Part],
             "{kinds:?}"
         );
+        assert_eq!(seen.envelopes[1].text(), Some("/list"));
     }
 
     let s = std::sync::Arc::try_unwrap(session).unwrap_or_else(|_| panic!("one session"));

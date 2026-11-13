@@ -6,7 +6,9 @@ experiments E1 to E3 run today as periculum cells, red by design. The
 study with every claim checked line by line is
 `docs/drafts/mailbox-for-friends-study-2026-11.md`. A single home, as
 it runs today, is [the home node](loquax-home-node.md); how a phone
-reaches it is [Reaching the mailbox from anywhere](loquax-reachability.md).
+reaches it is [Reaching the mailbox from anywhere](loquax-reachability.md);
+what each home is and is not on the network, at home and in a car, is
+[what a Loquax Mailbox is](loquax-mailbox-roles.md).
 
 ## Words
 
@@ -56,11 +58,11 @@ Invariants (the study's 2.7):
 What exists today for one home and carries over:
 
 - The move to a new device, with each archive entry's kind, id and time:
-  `archive_moving` (`loquax/src/store.rs:2638`) and `archive_moved_in`
-  (`loquax/src/store.rs:2690`), which adds nothing on a second take-in.
+  `archive_moving` (`loquax/src/store.rs:2770`) and `archive_moved_in`
+  (`loquax/src/store.rs:2822`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
-  `may_move` (`loquax/src/home/server.rs:1294`). Two homes recognise each
+  `may_move` (`loquax/src/home/server.rs:1345`). Two homes recognise each
   other the same way, by a signature only a key holder can make
   (planned: a `/sibling` request over a link).
 - The ratchet export and import of 1185, `take_over`
@@ -198,7 +200,7 @@ lost phone is no longer a lost identity, since another home still holds
 the key and a new phone takes a copy by code.
 
 What exists: revoking an admitted client device, `revoke`
-(`loquax/src/store.rs:3102`), checked again on every request. What is
+(`loquax/src/store.rs:3234`), checked again on every request. What is
 new: revoking a device that was itself a home, from any other device, and
 the re-seed of (b). The honest limit stays: Reticulum has no revocation
 of an identity key, the key is the address. The finder can no longer read

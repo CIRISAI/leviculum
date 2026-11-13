@@ -16,6 +16,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -85,7 +86,9 @@ final class ExplorePane {
         static final int PAGE = 4;
         static final int ROOM = 5;
         static final int SERVER = 6;
-        static final int KINDS = 7;
+        /** "Räume öffnen" (1655). */
+        static final int OPEN = 7;
+        static final int KINDS = 8;
 
         final int kind;
         final String key;
@@ -133,6 +136,15 @@ final class ExplorePane {
     private String drawnFor;
     /** What the tab showed last: Back decides by it. */
     private Map<String, Object> last;
+    /** The next answer comes after Back from what the list opened (1659, walk 10, 50). */
+    private boolean returning;
+    /** The bar over the list (1659, walk 10, 54): Seiten · Räume · Server, a tap jumps there. */
+    private final LinearLayout jumps;
+    private final TextView[] jump = new TextView[3];
+    private static final String[] JUMP_TO = {"title:pages", "title:rooms", "heading:servers"};
+    private static final String[] JUMP_WORDS = {"pages_title", "rooms_title", "servers_title"};
+    private static final String[] JUMP_TAGS = {"explore_jump_pages", "explore_jump_rooms",
+        "explore_jump_servers"};
     /** The server's sheet on screen, its server, its body and what it shows. */
     private AlertDialog sheet;
     private String sheetFor = "";
@@ -216,6 +228,39 @@ final class ExplorePane {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(top);
 
+        // Three chips that jump to the list's sections (1659, walk 10, 54:
+        // "Räume öffnen" was 20 swipes under 100 pages). The sections keep
+        // their order; the bar stays over the list.
+        jumps = new LinearLayout(activity);
+        jumps.setPadding(dp(12), 0, dp(12), dp(4));
+        jumps.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < jump.length; i++) {
+            final int section = i;
+            TextView chipView = new TextView(activity);
+            chipView.setTextSize(14);
+            chipView.setSingleLine(true);
+            chipView.setTextColor(activity.getColor(R.color.accent));
+            chipView.setPadding(dp(14), dp(6), dp(14), dp(6));
+            android.graphics.drawable.GradientDrawable outline =
+                    new android.graphics.drawable.GradientDrawable();
+            outline.setCornerRadius(dp(16));
+            outline.setStroke(dp(1), activity.getColor(R.color.accent));
+            chipView.setBackground(outline);
+            chipView.setTag(JUMP_TAGS[i]);
+            chipView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    jumpTo(section);
+                }
+            });
+            LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            gap.setMarginEnd(dp(8));
+            jumps.addView(chipView, gap);
+            jump[i] = chipView;
+        }
+        column.addView(jumps);
+
         // New pages that would move a row on screen wait behind this chip
         // (1621); a tap shows them, from the top. It floats over the list
         // (1629, walk 3: as a row above it, it pushed every row 87 px down
@@ -237,7 +282,11 @@ final class ExplorePane {
         fresh.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (rows.apply()) {
+                boolean applied = rows.apply();
+                // The band back to its resting 20 dp first (1653, walk 8,
+                // 38), then the list to its top under it.
+                chip();
+                if (applied) {
                     adapter.notifyDataSetChanged();
                     // After the list laid the new rows out: a selection set
                     // before that is taken back by the stable ids, which
@@ -245,19 +294,30 @@ final class ExplorePane {
                     list.post(new Runnable() {
                         @Override
                         public void run() {
-                            list.setSelection(0);
+                            measureBand();
+                            list.setSelectionFromTop(0, 0);
                         }
                     });
                 }
-                chip();
             }
         });
 
         list = new ListView(activity) {
             @Override
             public boolean dispatchTouchEvent(MotionEvent event) {
-                finger(event);
-                return super.dispatchTouchEvent(event);
+                // The press before ListView takes it, the lift after
+                // ListView decided the click (1653, walk 8, 39): whatever
+                // the lift does to the rows then cannot cost the tap.
+                int action = event.getActionMasked();
+                boolean lift = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL;
+                if (!lift) {
+                    finger(event);
+                }
+                boolean handled = super.dispatchTouchEvent(event);
+                if (lift) {
+                    finger(event);
+                }
+                return handled;
             }
         };
         list.setId(R.id.explore_list);
@@ -270,12 +330,15 @@ final class ExplorePane {
                 // position now (1632, walk 4: an answer between the lift
                 // and this click had put the row above there).
                 tapped(rows.hit(position));
+                // What came while the click was owed, now (1659, walk 10, 51).
+                settled();
             }
         });
         list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
                 Row row = rows.hit(position);
+                settled();
                 if (row.kind != Row.PAGE) {
                     return false;
                 }
@@ -317,10 +380,11 @@ final class ExplorePane {
         View.OnLayoutChangeListener edge = new View.OnLayoutChangeListener() {
             @Override
             public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
-                fresh.setTranslationY(top.getBottom() - fresh.getHeight() / 2f);
+                fresh.setTranslationY(jumps.getBottom() - fresh.getHeight() / 2f);
             }
         };
         top.addOnLayoutChangeListener(edge);
+        jumps.addOnLayoutChangeListener(edge);
         fresh.addOnLayoutChangeListener(edge);
     }
 
@@ -353,8 +417,54 @@ final class ExplorePane {
     /** The tab came to the front: its list, nothing it opened. */
     void show() {
         forced = true;
+        returning = false;
         verb("tab", "", "", 0);
     }
+
+    /**
+     * Back from a page or the rooms the list opened (1659, walk 10, 50):
+     * the list as it stood, the chip with it; no verb of the reader's.
+     */
+    void returned() {
+        forced = false;
+        returning = true;
+        verb("tab", "", "", 0);
+    }
+
+    /** A jump chip: the section's heading to the list's top (1659, walk 10, 54). */
+    private void jumpTo(int section) {
+        int at = rows.find(JUMP_TO[section]);
+        if (at < 0) {
+            return;
+        }
+        rows.touched(SystemClock.uptimeMillis());
+        rows.release();
+        list.setSelectionFromTop(at, 0);
+        restLater();
+    }
+
+    /** The click owed ran, or will not come: what came meanwhile is offered (1659, 51). */
+    private void settled() {
+        list.removeCallbacks(settleLater);
+        int top = topOfFirst();
+        int said = rows.settle(firstOnScreen(), list.getLastVisiblePosition());
+        if (said == ExploreRows.SHOWN) {
+            place(top);
+        } else if (said == ExploreRows.WAITING) {
+            rebind();
+        }
+        chip();
+    }
+
+    /** No click came after the lift (a row that takes none): settle anyway. */
+    private final Runnable settleLater = new Runnable() {
+        @Override
+        public void run() {
+            if (!screen.isDestroyed()) {
+                settled();
+            }
+        }
+    };
 
     /** The bar's magnifier on Explore (walk 14): the tab's own field, with the keyboard. */
     void focus() {
@@ -392,10 +502,13 @@ final class ExplorePane {
                 place(top);
             } else if (said == ExploreRows.WAITING) {
                 // The rows on screen took the waiting answer's words (1639).
-                adapter.notifyDataSetChanged();
+                rebind();
             }
             chip();
             restLater();
+            // A click owed that never comes still lets what waits through.
+            list.removeCallbacks(settleLater);
+            list.postDelayed(settleLater, ViewConfiguration.getPressedStateDuration() + 200);
             verb("touch", "", "", 0);
         }
     }
@@ -409,6 +522,25 @@ final class ExplorePane {
     private int topOfFirst() {
         View first = list.getChildAt(0);
         return first == null ? 0 : first.getTop();
+    }
+
+    /**
+     * The rows on screen take their rows' newest words, each view drawn
+     * again where it stands, with no word to the adapter (1653, walk 8,
+     * 39): {@code notifyDataSetChanged} sets ListView's
+     * {@code mDataChanged}, and a click that meets it is dropped. A
+     * waiting answer changes words only ({@link ExploreRows#notifies}), so
+     * every position keeps its row and its view type.
+     */
+    private void rebind() {
+        int first = list.getFirstVisiblePosition();
+        int count = adapter.getCount();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            int position = first + i;
+            if (position < count) {
+                adapter.getView(position, list.getChildAt(i), list);
+            }
+        }
     }
 
     /** The rows shown: the first row on screen back at its pixel, where the rule says. */
@@ -436,8 +568,26 @@ final class ExplorePane {
         int top = topOfFirst();
         list.setPadding(0, want, 0, 0);
         list.setClipToPadding(chip);
+        measureBand();
         if (first >= 0) {
             list.setSelectionFromTop(first, ExploreRows.fromTop(top, want));
+        }
+    }
+
+    /**
+     * ListView reads its padding into the band {@code setSelectionFromTop}
+     * counts from ({@code mListPadding}) only when it is measured (1653,
+     * walk 8, 38: after a tap on the chip "Seiten" stood 20 dp low, the
+     * selection set against the chip's deeper band, which had gone). A
+     * measure at the size it has makes the new band the one the next
+     * selection counts from.
+     */
+    private void measureBand() {
+        int width = list.getWidth();
+        int height = list.getHeight();
+        if (width > 0 && height > 0) {
+            list.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
         }
     }
 
@@ -471,6 +621,9 @@ final class ExplorePane {
                 break;
             case Row.SERVER:
                 verb("hub", "", Core.str(row.item, "dest"), 0);
+                break;
+            case Row.OPEN:
+                verb("rooms", "", "", 0);
                 break;
             default:
                 break;
@@ -592,14 +745,26 @@ final class ExplorePane {
         boolean own = forced || searched;
         forced = false;
         int top = topOfFirst();
-        int said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own,
-                atTop(), SystemClock.uptimeMillis());
+        int said;
+        if (returning && !own) {
+            said = rows.back(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(),
+                    atTop(), SystemClock.uptimeMillis());
+        } else {
+            said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own,
+                    atTop(), SystemClock.uptimeMillis());
+        }
+        returning = false;
+        for (int i = 0; i < jump.length; i++) {
+            String words = Core.str(shown, JUMP_WORDS[i]);
+            jump[i].setText(words);
+            jump[i].setVisibility(words.isEmpty() ? View.GONE : View.VISIBLE);
+        }
         if (said == ExploreRows.SHOWN) {
             place(top);
         } else if (said == ExploreRows.WAITING) {
             // Nothing moves, but the rows on screen say what the answer
             // says (1639, walk 5 new 26: a server row older than its sheet).
-            adapter.notifyDataSetChanged();
+            rebind();
         }
         chip();
         if (searched) {
@@ -612,6 +777,8 @@ final class ExplorePane {
     /** The answer as the list's rows, in its order. */
     private List<Row> flatten(Map<String, Object> shown) {
         List<Row> out = new ArrayList<Row>();
+        // How old the mailbox's list is, on top (1644).
+        note(out, "as_of", Core.str(shown, "as_of"));
         out.add(new Row(Row.TITLE, "title:pages", Core.str(shown, "pages_title"), null, 0));
         note(out, "off", Core.str(shown, "pages_off"));
         String address = Core.str(shown, "address");
@@ -635,6 +802,11 @@ final class ExplorePane {
             out.add(new Row(Row.ROOM, "room:" + Core.str(room, "name"), Core.str(room, "name"), room, i));
         }
         note(out, "joined_empty", Core.str(shown, "joined_empty"));
+        // The rooms screen of the server in use, joining nothing (1655).
+        String open = Core.str(shown, "open_rooms");
+        if (!open.isEmpty()) {
+            out.add(new Row(Row.OPEN, "open:rooms", open, null, 0));
+        }
         out.add(new Row(Row.HEADING, "heading:servers", Core.str(shown, "servers_title"), null, 0));
         for (Map<String, Object> hub : Core.list(shown, "hubs")) {
             out.add(new Row(Row.SERVER, "server:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
@@ -662,7 +834,15 @@ final class ExplorePane {
             return;
         }
         String shows = Core.str(shown, "sheet_said") + "|" + Core.bool(shown, "sheet_chosen") + "|"
-                + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note");
+                + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note") + "|"
+                + Core.str(shown, "sheet_retry") + "|" + Core.str(shown, "sheet_open_rooms");
+        // While the question is out the sentence turns at its time, 20 s
+        // (1653, walk 8, 42), which no answer may come to draw: once a
+        // second, as the Rooms pane counts its seconds.
+        list.removeCallbacks(askingTick);
+        if (Core.bool(shown, "sheet_asking")) {
+            list.postDelayed(askingTick, 1000);
+        }
         if (sheet != null && sheet.isShowing() && dest.equals(sheetFor)) {
             // The server's answer came (1621): the same sheet, its rooms now.
             if (!shows.equals(sheetShows)) {
@@ -710,6 +890,23 @@ final class ExplorePane {
             TextView inUse = words(Core.str(shown, "sheet_button"), 16, R.color.text);
             inUse.setPadding(0, dp(12), 0, dp(4));
             body.addView(inUse);
+            // Its rooms screen, joining nothing (1655, walk 9, 45).
+            String open = Core.str(shown, "sheet_open_rooms");
+            if (!open.isEmpty()) {
+                Button rooms = new Button(screen);
+                rooms.setText(open);
+                rooms.setAllCaps(false);
+                rooms.setTag("explore_sheet_open_rooms");
+                rooms.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        sheetFor = "";
+                        closeSheet();
+                        verb("rooms", "", "", 0);
+                    }
+                });
+                body.addView(rooms);
+            }
         } else {
             Button use = new Button(screen);
             use.setText(Core.str(shown, "sheet_button"));
@@ -749,7 +946,31 @@ final class ExplorePane {
             line.setTag("explore_sheet_note");
             body.addView(line);
         }
+        String retry = Core.str(shown, "sheet_retry");
+        if (!retry.isEmpty()) {
+            TextView again = words(retry, 16, R.color.accent);
+            again.setPadding(0, dp(10), 0, dp(10));
+            again.setTag("explore_sheet_retry");
+            again.setBackgroundResource(android.R.drawable.list_selector_background);
+            again.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    verb("ask", "", dest, 0);
+                }
+            });
+            body.addView(again);
+        }
     }
+
+    /** The sheet's question still out: draw again, its sentence may turn (1653). */
+    private final Runnable askingTick = new Runnable() {
+        @Override
+        public void run() {
+            if (sheet != null && sheet.isShowing() && !screen.isDestroyed()) {
+                draw();
+            }
+        }
+    };
 
     /** The sheet off the screen, by the library's word: no verb back. */
     private void closeSheet() {
@@ -797,7 +1018,8 @@ final class ExplorePane {
         @Override
         public boolean isEnabled(int position) {
             int kind = rows.at(position).kind;
-            return kind == Row.ADDRESS || kind == Row.PAGE || kind == Row.ROOM || kind == Row.SERVER;
+            return kind == Row.ADDRESS || kind == Row.PAGE || kind == Row.ROOM || kind == Row.SERVER
+                    || kind == Row.OPEN;
         }
 
         @Override
@@ -812,6 +1034,8 @@ final class ExplorePane {
                     return heading(convert, row.words);
                 case Row.ADDRESS:
                     return address(convert, row.words);
+                case Row.OPEN:
+                    return openRooms(convert, row.words);
                 case Row.PAGE:
                     return item(convert, row, Core.str(row.item, "said"), true);
                 case Row.ROOM:
@@ -908,6 +1132,15 @@ final class ExplorePane {
         TextView view = reuse(convert, 17, R.color.accent);
         view.setPadding(dp(16), dp(12), dp(16), dp(12));
         view.setId(R.id.explore_address);
+        view.setText(words);
+        return view;
+    }
+
+    /** "Räume öffnen" (1655): an action in the accent, as the address is. */
+    private TextView openRooms(View convert, String words) {
+        TextView view = reuse(convert, 17, R.color.accent);
+        view.setPadding(dp(16), dp(12), dp(16), dp(12));
+        view.setTag("explore_open_rooms");
         view.setText(words);
         return view;
     }

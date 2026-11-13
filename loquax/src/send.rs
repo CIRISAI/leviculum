@@ -395,7 +395,7 @@ async fn run_send_steps<O: Outbox>(
                         return Err(gave_up(id, state, on_link));
                     }
                 }
-                OutboxEvent::State { .. } => {}
+                OutboxEvent::State { .. } | OutboxEvent::Progress { .. } => {}
                 OutboxEvent::Left {
                     message_id: id,
                     last,
@@ -431,6 +431,8 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::MeshPosition { .. }
                 | OutboxEvent::HubAnnounced { .. }
                 | OutboxEvent::PageAnnounced { .. }
+                | OutboxEvent::NameHeard { .. }
+                | OutboxEvent::HubRooms { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }

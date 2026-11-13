@@ -20,7 +20,8 @@ use crate::image::{ImageSlot, SlotState};
 use crate::names::{PinStore, SearchHit};
 use crate::page_cache::PageCache;
 use crate::render::{
-    insert_image_rows, layout_blocks, FieldValue, RLine, RenderedField, RenderedLink,
+    insert_image_rows, layout_blocks, layout_blocks_wrapping, FieldValue, RLine, RenderedField,
+    RenderedLink,
 };
 use crate::theme::Theme;
 use crate::url::Target;
@@ -626,6 +627,10 @@ pub struct Model {
     /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
     /// the next fresh load.
     pub cached_view: bool,
+    /// The page on screen is a hosted browser's word that this target did
+    /// not come (1669, [`crate::app::event`]'s failure page): its retry
+    /// replaces the entry rather than pushing a second one.
+    pub failed: Option<Target>,
     /// lnomad's own identity fingerprint as lowercase hex. Stable for the whole
     /// session, so the IO shell sets it ONCE at model construction from
     /// [`Session::fingerprint_hex`](crate::fetch::Session::fingerprint_hex).
@@ -645,6 +650,22 @@ pub struct Model {
     /// here; the page cache only holds pages fetched this run, so the answer was
     /// always learned first.
     pub identify_known: alloc::collections::BTreeSet<[u8; 16]>,
+    /// A host that has said once what identifying means (1650): the first
+    /// switch-on in a hosted browser says the sentence a reader without the
+    /// help screen needs, every later one the usual toast.
+    pub identify_explained: bool,
+    /// The lines the scene carries for a host that scrolls the page itself
+    /// (1650, the phone's native scroll): the whole page while it has no
+    /// more lines than this, else a window this tall around
+    /// [`scroll`](Model::scroll). `None`, the terminal's rule: the
+    /// viewport's lines from `scroll`. [`scroll`](Model::scroll) keeps its
+    /// meaning either way, the top line the reader sees.
+    pub window: Option<usize>,
+    /// A host that scrolls the page sideways as well (1667, the phone): a
+    /// line of art without a space stays whole past the width instead of
+    /// breaking into pieces. `false`, the terminal's rule: every line
+    /// fits the width.
+    pub sideways: bool,
     /// The current page's inline images, one slot per standalone image link,
     /// in link order. Rebuilt on every page load; drives both the rows the
     /// relayout reserves and what is drawn into them.
@@ -760,7 +781,7 @@ impl Model {
         self.width = width;
         let values = self.field_values();
         let (mut page, mut links, mut block_lines, mut field_defs) =
-            layout_blocks(&self.doc, width, self.theme, &values);
+            layout_blocks_wrapping(&self.doc, width, self.theme, &values, self.sideways);
         // Inline pictures are reserved AFTER the text is laid out: their height
         // is not known until the image has arrived and been decoded, which is
         // long after the page first appeared.

@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lr11xx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "critical-section",
  "embassy-time",

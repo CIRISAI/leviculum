@@ -247,6 +247,30 @@ impl DrawTarget for Frame {
     }
 }
 
+/// The panel's frame blends (1565): the map's picture drawn straight
+/// onto it, without the kept copy (the census's draw, a host's), has its
+/// edges and names smoothed as the kept picture has them
+/// ([`crate::map::Kept`]), mixed by the same [`crate::map::mix`].
+impl leviculum_mapfill::coverage::Coverage for Frame {
+    fn smooth(&self) -> bool {
+        true
+    }
+
+    fn blend(&mut self, x: i32, y: i32, color: Rgb565, alpha: u8) -> Result<(), Self::Error> {
+        let (Ok(ux), Ok(uy)) = (u32::try_from(x), u32::try_from(y)) else {
+            return Ok(());
+        };
+        if ux >= WIDTH || uy >= HEIGHT {
+            return Ok(());
+        }
+        let mixed = crate::map::mix(self.pixel(ux, uy), color, alpha);
+        self.draw_iter(core::iter::once(Pixel(
+            Point::new(x, y),
+            Rgb565::from(RawU16::new(mixed)),
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

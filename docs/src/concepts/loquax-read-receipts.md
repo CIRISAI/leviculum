@@ -446,9 +446,24 @@ As built (1231):
   while the map, the help or a detail view covers the conversation, and
   asks for focus reports. The script's `focus in` and `focus out` play
   them.
+- **The reply from a notification (1506).** Whoever answers has read what
+  the notification showed. The phone's message notification carries an
+  inline reply; it sends `{"t": "noticereply", "peer", "key", "body"}`,
+  `key` the row's `notice_key` the notification was posted with (the
+  newest message of the peer's, `UiModel::notice_key`). The core's
+  `UiEvent::NoticeReply` (`UiModel::notice_reply`,
+  `loquax/src/ui/receipts.rs`) marks every message of the chat up to that
+  key seen through `UiModel::mark_seen`, the one function the viewport's
+  second calls too, reads the unread up to it (`UiModel::read_up_to`), and
+  sends the reply, on which the receipt rides as on any reply; a client of
+  a mailbox hands the seen mark instead. A message that came after the
+  notification stays unread and unseen. The open chat, its cursor and its
+  draft stay as they were. Cells: `a_reply_from_the_notification_*` in
+  `loquax/tests/device_receipts.rs` (the sender sees read, a later message
+  stays unread, the mailbox client's seen mark, the switch off).
 - Not yet: the window reports no viewport, so it sends no receipts; the
-  Android app sends no `viewport` request before R4; the reply from a
-  notification.
+  desktop notification (window and terminal) carries no actions, so there
+  is no reply from it.
 
 ## 6. The glyph ladder (built, R3)
 
@@ -526,9 +541,18 @@ As built (1232):
   (`state_clock`, `state_tick`, `state_ticks`, `state_ticks_read`,
   `state_failed`) and their words off the phone's screen.
 
-Not yet: the M9 has no Loquax screen yet, its renderer will read the same `Mark` and `Shape`;
-an imported read message loses its time in the import's archive entry
-(state code 8 without `read_at`), so it says "Read at" the epoch.
+**A read at no known time (1506).** An imported message its source kept as
+read carries no time (the archive entry holds the state code 8 alone).
+`DeliveryState::Read { at: 0 }` is that read: the store keeps
+`messages.read_at` NULL for it (the column takes NULL since schema 9, so
+no schema step), every screen says "Read" (`state_read_untimed`,
+"Gelesen") without a time, and the Info sheet has no read-time row. The
+import never invents a time; one the store learned since (a receipt for an
+imported message) survives a later import's new layout of the block. Test:
+`an_imported_read_message_has_no_read_time_and_never_the_epoch` in
+`loquax/src/store.rs`.
+
+Not yet: the M9 has no Loquax screen yet, its renderer will read the same `Mark` and `Shape`.
 
 ### The ticks tell the truth (1462)
 

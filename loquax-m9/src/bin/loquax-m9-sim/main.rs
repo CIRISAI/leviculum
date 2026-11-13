@@ -317,6 +317,12 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
                 now = 0;
             }
             Step::Dump(path) => write_png(board.frame(), Path::new(path))?,
+            Step::Bar => {
+                // The turns the clock owes first.
+                board.settle();
+                let top = board.text().first().cloned().unwrap_or_default();
+                board.log.line("[SIM] ", &format!("bar=\"{}\"", top.trim()));
+            }
             Step::Screen(byte, path) => {
                 board.show_screen(*byte);
                 write_png(board.frame(), Path::new(path))?;
@@ -555,5 +561,107 @@ mod bench_tests {
         let again = Board::boot_as(flash, log, 2, Arrivals::Shown).expect("reboot");
         assert_eq!(rows(again.model()), before, "and after a reboot");
         assert!(!again.text().join("\n").contains("bench arrival"));
+    }
+}
+
+/// 1564: a boot reads nothing. The board comes up on the list with the
+/// first row under the cursor; that row's unread stay unread, and no read
+/// mark is kept, until the reader opens the chat, after a power cycle
+/// (the boot resumes from the summary log) and after a reset in the
+/// middle of a pull (the ring went on past the summary: the watchdog's
+/// case, `[PREV_RUN] reason=wdt1` on the board), with the clock running
+/// past the read dwell.
+#[cfg(test)]
+mod boot_reads_nothing {
+    use super::*;
+
+    /// The top row's unread, and whether the boot's log since `from`
+    /// said the list and kept a read mark.
+    fn after_boot(board: &mut Board, from: usize) -> (usize, bool, Vec<String>) {
+        // Past the dwell (`loquax::ui::receipts::SEEN_MS`), the board
+        // turning all the while.
+        let mut now = 0;
+        while now < 6000 {
+            now += 50;
+            board::clock_to_ms(now);
+            board.run_until(now);
+        }
+        let model = board.model();
+        let top = model.order()[0];
+        let lines: Vec<String> = board.log.kept[from..].to_vec();
+        let listed = lines.iter().any(|l| l.starts_with("[PAGE] name=chats "));
+        let marks = lines
+            .iter()
+            .filter(|l| l.starts_with("[STORE] marks="))
+            .cloned()
+            .collect();
+        (model.conversations[top].unread, listed, marks)
+    }
+
+    #[test]
+    fn a_power_cycle_keeps_the_top_rows_unread() {
+        let board = power_on(Some("real"), Arrivals::Dropped).expect("power on");
+        let top = board.model().order()[0];
+        let unread = board.model().conversations[top].unread;
+        assert!(unread > 0, "the store's first row is unread");
+        let (flash, log) = board.power_off();
+        let from = log.kept.len();
+        let mut again = Board::boot_as(flash, log, 2, Arrivals::Dropped).expect("boot");
+        assert!(again.log.kept[from..]
+            .iter()
+            .any(|l| l.contains("restore=resumed")));
+        let (after, listed, marks) = after_boot(&mut again, from);
+        assert!(listed, "the boot shows the list");
+        assert_eq!(after, unread, "the top row's unread");
+        assert!(marks.is_empty(), "{marks:?}");
+    }
+
+    #[test]
+    fn a_reset_mid_pull_keeps_the_top_rows_unread() {
+        let mut board = power_on(Some("pulling"), Arrivals::Dropped).expect("power on");
+        board.fold_cost_us = 3600;
+        board.pull_next(20, 72);
+        board.settle();
+        // The next pages kept, their fold cut by the reset.
+        board.pull_next(20, 72);
+        board.run_until(200);
+        let (flash, log) = board.power_off();
+        let from = log.kept.len();
+        let mut again = Board::boot_as(flash, log, 2, Arrivals::Dropped).expect("boot");
+        let index = again.log.kept[from..]
+            .iter()
+            .find(|l| l.starts_with("[STORE] index="))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            index.contains("why=ring-moved") || !index.contains("tail=0"),
+            "the ring went on past the summary: {index}"
+        );
+        let top = again.model().order()[0];
+        let unread = again.model().conversations[top].unread;
+        assert!(unread > 0, "the restored first row is unread");
+        let (after, listed, marks) = after_boot(&mut again, from);
+        assert!(listed, "the boot shows the list");
+        assert_eq!(after, unread, "the top row's unread");
+        assert!(marks.is_empty(), "{marks:?}");
+        // The control: opened, the chat is read and its mark kept.
+        let enter = script::code("enter").expect("enter");
+        again.press_at(enter, 6100);
+        again.answer_keys();
+        let mut now = 6100;
+        while now < 12_000 {
+            now += 50;
+            board::clock_to_ms(now);
+            again.run_until(now);
+        }
+        assert_eq!(again.model().conversations[top].unread, 0, "opened");
+        assert!(
+            again
+                .log
+                .kept
+                .iter()
+                .any(|l| l.starts_with("[STORE] marks=")),
+            "the open keeps its mark"
+        );
     }
 }

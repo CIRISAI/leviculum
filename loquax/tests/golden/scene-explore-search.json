@@ -6,6 +6,7 @@
   "explore": {
     "pages": {
       "address": null,
+      "as_of": null,
       "az": true,
       "empty": null,
       "groups": [
@@ -62,6 +63,7 @@
         "args": [],
         "key": "explore_no_joined"
       },
+      "open_rooms": null,
       "servers_empty": {
         "args": [
           "marcel"

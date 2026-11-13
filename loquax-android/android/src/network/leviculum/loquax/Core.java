@@ -345,6 +345,16 @@ final class Core {
         return command(map("t", "send", "peer", peer, "body", body));
     }
 
+    /**
+     * A reply typed into the notification of `peer`'s messages (1506):
+     * `key` is the row's `notice_key` the notification was posted with.
+     * The library reads every message up to it, and its read receipt rides
+     * on the reply.
+     */
+    static String noticeReply(String peer, long key, String body) {
+        return command(map("t", "noticereply", "peer", peer, "key", key, "body", body));
+    }
+
     static String react(String peer, String target, String content) {
         return command(map("t", "react", "peer", peer, "target", target, "content", content));
     }

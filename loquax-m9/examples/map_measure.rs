@@ -255,10 +255,10 @@ fn world_row(region: &Region<&[u8]>, centre: World, z: u8, pw: u32, ph: u32) {
                 .expect("draw"),
         );
     });
-    let rows = PICTURE.height;
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
     let mut found = None;
     let names = time(|i| {
-        found = Some(map::names(region, &pan(&view, i), rows, &[], true).1);
+        found = Some(map::names(region, &pan(&view, i), &[], &mut glyphs, true).1);
     });
     let st = stats.unwrap_or_default();
     let n = found.unwrap_or_default();

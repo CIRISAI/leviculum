@@ -18,6 +18,11 @@ identity.
 The home node ends the sharing. One always-on Loquax holds the identity and
 keeps every message; the user's other devices read from it.
 
+How far the home node is a Reticulum node (an LXMF endpoint behind a full
+lnsd, never a transport or a propagation node, devices admitted by pairing
+and never by port) is [what a Loquax Mailbox is](loquax-mailbox-roles.md),
+invariants M1 to M5.
+
 ## Roles and keys
 
 | Role | Holds | Runs |
@@ -551,6 +556,12 @@ engine on the shared instance it is.
 - **Before 1132** the archive has no name entries: a client learns a
   peer's name from the first announce the home node hears after it runs
   this version.
+- **Every other name** (1643). The names of peers without a relation
+  are no archive entries but rows of the mailbox's `home_names` table,
+  every LXMF delivery announce's name with its first and last hearing
+  and hops, at most 4 096: they ride in the `/pages` delta as row kind
+  2, wake nobody, and the client folds them into its names as an
+  announce (`loquax-mailbox.md`, section 5).
 
 ## The reader's names on every device
 
@@ -590,6 +601,18 @@ and photo a phone shows stays on that phone
   clock then, `UiModel::home_petname`). A cleared petname is an entry
   with the empty name: the home needs no tombstone of its own, since its
   newest entry of a peer is the reader's last word.
+- **Peer states are owed the same way** (1640). A pin, a mute, an
+  archive or a block the device set is owed until the home answers
+  `/peerstate` with ok, by the same rules and the same code
+  (`ui::owed::Owed`, one per kind of word): the newest state of each peer
+  in the device's store (`owed_peer_states`, schema 21), handed again
+  after a restart, one hand at a time (`UiModel::take_peer_states`,
+  `UiEvent::PeerStatesHanded`), over any pulled entry while owed and over
+  an entry the home stamped before the answer until the pull ends
+  (`UiModel::home_peer_state`, the pull now carries the entry's `at`). A
+  pin loosened just before the app stopped no longer comes back from the
+  home after the restart. Verified is not among them: it stays on the
+  device that compared the key, and nothing of it goes to the home.
 
 ## Contact keys from a code
 

@@ -32,6 +32,8 @@ pub enum Icon {
     Map,
     /// The settings: a gear.
     Settings,
+    /// Fetch the messages now (1457): an arrow down into a tray.
+    Fetch,
     /// The compose bar's buttons beyond the emoji and Send (1270): the
     /// plus, the position button's crosshair, the camera, the microphone.
     Plus,
@@ -189,6 +191,22 @@ impl<M> canvas::Program<M> for Drawing {
                         line,
                     );
                 }
+            }
+            Icon::Fetch => {
+                frame.stroke(&Path::line(p(0.5, 0.15), p(0.5, 0.6)), line);
+                let head = Path::new(|b| {
+                    b.move_to(p(0.32, 0.43));
+                    b.line_to(p(0.5, 0.61));
+                    b.line_to(p(0.68, 0.43));
+                });
+                frame.stroke(&head, line);
+                let tray = Path::new(|b| {
+                    b.move_to(p(0.2, 0.62));
+                    b.line_to(p(0.2, 0.82));
+                    b.line_to(p(0.8, 0.82));
+                    b.line_to(p(0.8, 0.62));
+                });
+                frame.stroke(&tray, line);
             }
             Icon::Plus => {
                 frame.stroke(&Path::line(p(0.5, 0.22), p(0.5, 0.78)), line);

@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:1018-1055`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1039-1076`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1045-1055`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1066-1076`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
@@ -549,9 +549,9 @@ on it does:
   list's title (the reader's own name), and the palette's `my code`
   open it as a detail view; `s` there copies the code, Esc closes it;
 - the M9: the house key (provisionally `0x82`, `SPECIALS` in
-  `loquax-m9/src/keyboard.rs`, 1440) leads to the start screen, which
-  is the chats list until the overview exists; the M9 draws no profile
-  yet, so the cell below says missing.
+  `loquax-m9/src/keyboard.rs`, 1440) leads to the settings (1561,
+  `loquax-m9/src/house.rs`), which hold no profile: the M9 is a device
+  of its home, so the cell below says missing.
 
 Goldens: `loquax/tests/golden/gui-profile-light.png`,
 `loquax/tests/fixtures/tui_profile.frames`,
@@ -617,6 +617,42 @@ Goldens: `gui-settings-mailbox-light.png`, `tui-settings-mailbox.txt`
 and its German twin, and the phone's answers
 `mailbox-page-reachable.json` and `mailbox-page-unreachable.json`, all
 from `loquax/tests/support/mailbox_page.rs`.
+
+**Walk 6 (1647, 2026-11-10, the Pixel against Lew's mailbox on
+miauhaus).** What the page says now:
+
+- It holds still. The phone asks every five seconds; an answer of the
+  same shape (groups, lines, their kinds) is written into the lines on
+  screen (`MailboxLines.java`), so no view goes and the scroll position
+  stays; one of another shape is drawn whole when it is there and the
+  position put back. Before, each ask emptied the page and it jumped to
+  the top, and "Show my code" below the fold was out of reach.
+- A device the mailbox has not heard since it began keeping the time
+  (`last_seen` NULL after the schema 20 migration) is named without a
+  time: unknown is not never.
+- The version is words only, never a commit: "0.1.8", "0.1.9, newer",
+  "0.1.7, older", "0.1.8, another build" where the words agree and the
+  commits do not; the commits are in the phone's `HOME about` log line.
+  The Loquax build stamp marks a tree with uncommitted changes
+  `<hash>-dirty` (the 1642 APK was built before its own commits and
+  named the one before).
+- Under the address: "This is your address too: the mailbox and you are
+  one identity."
+- The way names the mailbox's machine from `/about` ("Connection to
+  miauhaus, shielded (the phone hears only its mailbox)"), else the
+  server; a port only where it is neither 4343 nor 4242.
+- "Connected for" counts the phone's watching link to the mailbox, and
+  no earlier than the mailbox's own start, which `/about` now says
+  (`started`, a sixth field a 1642 reader leaves): a mailbox restarted
+  under a TCP connection that stayed up says "less than a minute".
+- This device is said once ("This device" alone where it has no name).
+- The avatar, the profile and the list's bar read one chain for the own
+  name (`profile::own_name`): the names' word, the profile's name, then
+  the mailbox's `/about` name. The page said "lew" while the avatar said
+  "?" until a pull; the window's profile golden had that "?" in it.
+- The settings list says "Which mailbox, connection, devices" under
+  Mailbox, and the phone shows no toast of its own on a copy from
+  Android 13 on, where the system previews what was copied.
 
 ### Built 2026-11-09, the public rooms' hubs
 
@@ -850,7 +886,9 @@ hub's newest only, appended when the hub is new, its name or hops
 changed, or an hour passed since the kept hearing
 (`HUB_REFRESH_SECS`), bounded the same; like a name it wakes nobody and
 rides with the next pull, and a device that pulls it lists the hub as
-one it heard itself. A hub opened that did not answer stays listed,
+one it heard itself. Since 1643 the home also asks each hub it hears for
+its rooms, at most hourly, and the entry carries them, so a device's
+sheet lists them before it links (`loquax-mailbox.md`, section 6). A hub opened that did not answer stays listed,
 marked "no answer"; nothing is removed for that.
 
 **The settings row** shows one list (`settings::offered_hubs`): the
@@ -954,6 +992,7 @@ it). A missing cell is the next order.
 | `React` | a reaction on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key reacts |
 | `Reply` | Reply on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key replies |
 | `CancelReply` | the reply bar's cross | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no way out of a reply but sending or clearing | **missing**: no key replies |
+| `NoticeReply` | a reply typed into a message notification: read up to what it showed | built (`session.rs`) | **missing**: the desktop notification carries no actions | **missing**: the desktop notification carries no actions | n/a: the board posts no notifications |
 | `Forward` | Forward on a bubble, then a chat | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key forwards |
 | `SendAgain` | the red mark of a message not sent | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key sends again |
 | `ViewPhoto` | a tap on a bubble's photo: the photo whole | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no photo viewer | n/a: too large for the radio |
@@ -965,9 +1004,9 @@ it). A missing cell is the next order.
 | `StagePhoto` | the camera's photo staged in the bar | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
 | `Unstage` | the staged photo's cross | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
 | `CloseSheet` | a sheet of the compose bar closed | built (`session.rs`) | built (`gui.rs`) | n/a: the terminal opens no sheet | n/a: the M9 opens no compose sheet |
-| `ShareFix` | the position sheet's "Send my position now" | built (`session.rs`) | **missing**: the window's sheet has no "Send my position now" | built (palette) | **missing**: no key shares the position |
-| `StartShare` | a share row of the position sheet: 15 min, 1 h, 8 h, until stopped | built (`session.rs`) | **missing**: the window's sheet has no share rows | **missing**: the palette shares once, never for a while | **missing**: no key shares the position |
-| `StopShare` | a running share's Stop: the chat's chip, Settings, the notification | built (`session.rs`) | **missing**: the window draws no share chip | built (palette) | **missing**: no key shares the position |
+| `ShareFix` | the position sheet's "Send my position now" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key shares the position |
+| `StartShare` | a share row of the position sheet: 15 min, 1 h, 8 h, until stopped | built (`session.rs`) | built (`gui.rs`) | **missing**: the palette shares once, never for a while | **missing**: no key shares the position |
+| `StopShare` | a running share's Stop: the chat's chip, Settings, the notification | built (`session.rs`) | built (`chat.rs`) | built (palette) | **missing**: no key shares the position |
 | `LocationOn` | the position sheet without a fix: turn location on | built (`Locator.java`) | n/a: no position receiver | n/a: no position receiver | **missing**: the M9's GNSS is not wired to the sheet |
 | `EnterPosition` | the position sheet's entry on a shell without a receiver | n/a: the phone has a receiver | built (`gui.rs`) | built (palette) | **missing**: no key enters a position |
 | `FixAtMapCentre` | the position sheet's "map centre" row | n/a: the phone has a receiver | built (`gui.rs`) | **missing**: no "map centre" in the palette | **missing**: no key enters a position |
@@ -980,7 +1019,7 @@ it). A missing cell is the next order.
 | `PauseVoice` | a playing voice message's pause button | built (`session.rs`) | built (`gui.rs`) | **missing**: no key plays a voice message | n/a: too large for the radio |
 | `Delete` | Delete on a bubble, asked, then confirmed | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key deletes a message |
 | `Copy` | Copy on a bubble or a selection | built (`ChatActivity.java`) | built (`gui.rs`) | built (key) | n/a: no clipboard |
-| `Share` | a position shared from the map | built (`session.rs`) | **missing**: the window's map shares no position | n/a: the palette's position verbs share | **missing**: no key shares the position |
+| `Share` | a position shared from the map | built (`session.rs`) | built (`gui.rs`) | n/a: the palette's position verbs share | **missing**: no key shares the position |
 | `Pin` | a row's Pin | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
 | `Mute` | a row's Mute | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
 | `Archive` | a row's Archive | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
@@ -992,7 +1031,7 @@ it). A missing cell is the next order.
 | `AddContact` | a friend's code pasted or scanned: the contact | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no way to add a contact |
 | `Group` | New group, Join, the member sheet, Leave, Remove | built (`session.rs`) | built (`gui.rs`) | built (palette) | built (`group.rs`) |
 | `NewConversation` | the bar's pencil: a new chat | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no way to start a chat |
-| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet |
+| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key leads to the settings (1561), which hold no profile: the M9 is a device of its home (super::settings::PLACES) |
 | `ShareCode` | the profile's "Share my address" | built (`ProfileActivity.java`) | built (`gui.rs`) | built (`ui.rs`) | n/a: no clipboard or share sheet |
 | `Name` | the name recipients see | built (`session.rs`) | **missing**: the profile shows the name, nothing sets it | **missing**: the profile shows the name, nothing sets it | **missing**: the name is the pairing's |
 | `Scroll` | the list's cursor up and down | n/a: the list scrolls itself | built (`gui.rs`) | built (key) | built (`keys.rs`) |
@@ -1006,25 +1045,25 @@ it). A missing cell is the next order.
 | `OpenResult` | Enter on a search result | n/a: a result is a row; a tap opens it | n/a: a result is a row; a click opens it | built (key) | **missing**: no key searches |
 | `Match` | the next or previous match | n/a: the phone lists the results | n/a: the window lists the results | built (key) | **missing**: no key searches |
 | `OpenMessage` | Enter on a bubble: a position on the map, else its detail | n/a: a tap on the bubble is its own | n/a: a click on the bubble is its own | built (key) | **missing**: no key opens a message |
-| `Details` | a bubble's Info | built (`ChatActivity.java`) | **missing**: the bubble's menu has no Info | built (palette) | **missing**: no key opens a message |
+| `Details` | a bubble's Info | built (`ChatActivity.java`) | built (`chat.rs`) | built (palette) | **missing**: no key opens a message |
 | `ShowBlocked` | the blocked contacts | built (`ContactActivity.java`) | **missing**: the window lists no blocked contacts | built (palette) | **missing**: no list of the blocked |
 | `ShowArchived` | the archived chats | built (`ConversationsActivity.java`) | **missing**: the window lists no archived chats | built (palette) | **missing**: no list of the archived |
 | `Map` | zoom, pan, fit, step between pins, the map's drawing | n/a: pinch and pan are the map View's | built (`gui.rs`) | built (key) | **missing**: no key moves the map |
 | `SelectPin` | a tap or click on a pin: its card | built (`MapView.java`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no key steps between pins |
 | `LoadMapArea` | load the map's area here | n/a: the map loads what it shows | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
 | `MapDrawing` | how the map is drawn | n/a: the phone's map draws one way | **missing**: the window offers no drawing | built (palette) | n/a: the board draws one way |
-| `Pull` | fetch messages now | built (`session.rs`) | **missing**: the window has no fetch button | built (palette) | n/a: the board pulls on its own |
+| `Pull` | fetch messages now | built (`session.rs`) | built (`chat.rs`) | built (palette) | n/a: the board pulls on its own |
 | `Front` | the app came to the front or left it | built (`session.rs`) | built (`gui.rs`) | n/a: a terminal is in front while it runs | n/a: the board's screen is always in front |
 | `Network` | the platform's network changed | built (`session.rs`) | n/a: the daemon follows the network | n/a: the daemon follows the network | n/a: the board's radio is its network |
-| `Viewport` | these bubbles are on screen: what was read | built (`session.rs`) | **missing**: the window marks the open chat read whole | n/a: the open conversation is read | n/a: the open conversation is read |
+| `Viewport` | these bubbles are on screen: what was read | built (`session.rs`) | built (`gui.rs`) | n/a: the open conversation is read | n/a: the open conversation is read |
 | `Theme` | light or dark | n/a: follows the phone | built (`gui.rs`) | built (palette) | n/a: the panel draws dark |
 | `SendOnEnter` | whether Enter sends | n/a: the platform's text field does it | **missing**: the window has no switch for Enter | built (palette) | n/a: Enter sends |
 | `Mouse` | the mouse captured or the terminal's own selection | n/a: no pointer | n/a: the window's pointer is its own | built (palette) | n/a: no pointer |
 | `Import` | import from another messenger | **missing**: the phone imports nothing | **missing**: the window imports nothing | built (palette) | n/a: the board takes its history from the home |
-| `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
+| `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: the M9's settings have no read receipts row: the home signs them (super::settings::PLACES, Privacy) |
 | `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
-| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no menu screen and no key for it on the M9 (super::settings::PLACES) |
-| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no settings on the M9 |
+| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | built (`house.rs`) |
+| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no rooms: its settings hold no hub (super::settings::PLACES, Advanced) |
 <!-- intent-inventory:end -->
 
 ### The goldens' index
@@ -1052,12 +1091,13 @@ golden without its German twin.
 |---|---|---|---|---|---|---|
 | First start, before a mailbox | `gui-first-start.png`, `gui-first-start-profile.png` | `tui-first-start.txt`, `tui-first-start-profile.txt` | `tui-first-start-de.txt`, `tui-first-start-profile-de.txt` | `m9-fw-splash.png`, `m9-fw-pairing.png` | not pinned: the first start is `WelcomeActivity.java`'s own | |
 | Joining a mailbox with its code | not drawn: a desktop joins with `loquax mailbox join` | not drawn: a desktop joins with `loquax mailbox join` | | `m9-joining.png` | not pinned: the join form is `JoinForm.java`'s own | |
-| The mailbox out of reach, and back | not drawn: the desktop's shell never learns the mailbox's reach | not drawn: the desktop's shell never learns the mailbox's reach | | `m9-offline.png`, `m9-online.png` | not pinned: the offline bar is `ConversationsActivity.java`'s own | |
+| The mailbox out of reach, and back | not drawn: the desktop's shell never learns the mailbox's reach | not drawn: the desktop's shell never learns the mailbox's reach | | `m9-offline.png`, `m9-online.png`, `m9-way-radio.png` | not pinned: the offline bar is `ConversationsActivity.java`'s own | |
 | The chats list and an open chat | `gui-chat-light.png`, `gui-chat-dark.png` | `tui_session.frames`, `tui_chat.frames`, `tui_chat.styles`, `tui_layout.frames` | `tui_session_de.frames`, `tui_chat_de.frames`, `tui_layout_de.frames` | `m9-chats.png`, `m9-chats-cursor.png`, `m9-chat.png`, `m9-chat-cursor.png`, `m9-fw-chats.png`, `m9-fw-chat.png` | | `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json` |
 | A narrow window | `gui-chat-compact-chat.png`, `gui-chat-compact-list.png` | | | | | |
 | The large type | | | | `m9-chats-large.png`, `m9-chat-large.png` | | |
-| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png` (the house key's overview, the M9's only settings) | | |
-| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9 has no settings screen | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
+| The very small type (1561) | | | | `m9-chats-tiny.png`, `m9-chat-tiny.png` | | |
+| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png`, `m9-settings-tiny.png` (the house key's page: the core's settings for the M9, Appearance and Advanced, 1561) | | |
+| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9's settings have no mailbox page (`settings::PLACES`) | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
 | The keys' help | not pinned: the shared overlay lnomad's window draws | not pinned: `?` | | not drawn: no key opens the help; the keys stand on their screens (`m9-fw-pairing.png`, `m9-map-hint.png`, the group's frames) | n/a: no keys | |
 | The keymap and the mouse | | `tui_keys.frames`, `tui_mouse.frames` | `tui_keys_de.frames`, `tui_mouse_de.frames` | | | |
 | Typing and sending | | | | `m9-compose.png`, `m9-sent.png` | | |
@@ -1065,8 +1105,9 @@ golden without its German twin.
 | A reply being written | `gui-reply-compose.png` | `tui-reply-compose.txt` (the terminal draws no quote) | `tui-reply-compose-de.txt` | `m9-reply-compose.png` (the M9 says not what it answers) | | `scene-reply-compose.json` |
 | Reactions and their picker | | `tui_reactions.frames` | `tui_reactions_de.frames` | | | |
 | A long message read by the line | | `tui_long_message.frames` | `tui_long_message_de.frames` | `m9-chat-long-mid.png`, `m9-chat-long-back.png`, `m9-chat-top-held.png` | | |
-| Photos, files and voice in a chat | `gui-chat-media.png`, `gui-attach-sheet-light.png` | `tui_media.frames` | `tui_media_de.frames` | | | |
+| Photos, files and voice in a chat | `gui-chat-media.png`, `gui-attach-sheet-light.png` | `tui_media.frames`, `tui-file-progress.txt` | `tui_media_de.frames`, `tui-file-progress-de.txt` | | | |
 | Recording a voice message | `gui-recording-held.png`, `gui-recording-locked.png`, `gui-recording-paused.png` | `tui_recording.frames` | `tui_recording_de.frames` | | | |
+| A message's Info | `gui-info-light.png` | | | | | |
 | Selecting and copying text | `gui-chat-selected-light.png`, `gui-chat-selected-dark.png` | `tui-copy-mode.txt` | `tui-copy-mode-de.txt` | | | |
 | A late message at its sent time | `gui-late-message.png` | `tui-late-message.txt`, `tui_late.frames` | `tui-late-message-de.txt`, `tui_late_de.frames` | `m9-late-message.png` | `late-message.json` | |
 | Two contacts of one name | `gui-same-name.png` | `tui-same-name.txt`, `tui_names.frames` | `tui-same-name-de.txt`, `tui_names_de.frames` | `m9-same-name-list.png`, `m9-same-name-chat.png` | | |
@@ -1080,13 +1121,13 @@ golden without its German twin.
 | A group's one and two ticks | `gui-group-ticks.png` | `tui-group-ticks.txt` | `tui-group-ticks-de.txt` | `m9-group-ticks.png` | `group-ticks.json` | `scene-group-ticks.json` |
 | A relayed group | `gui-relay-group.png` | `tui-relay-group.txt` | `tui-relay-group-de.txt` | | `relay-group.json` | `scene-relay-group.json` |
 | A room | `gui-rooms-room.png` | `tui-rooms-room.txt` | `tui-rooms-room-de.txt` | not drawn: the M9 has no rooms | `rooms-room.json` | |
-| Explore | `gui-explore.png` | `tui-explore.txt`, `tui-explore-sheet.txt` | `tui-explore-de.txt`, `tui-explore-sheet-de.txt` | not drawn: the M9 has no Explore | | `scene-explore.json`, `scene-explore-search.json`, `scene-explore-sheet.json`, `scene-explore-wide.json` |
+| Explore | `gui-explore.png`, `gui-explore-as-of.png` | `tui-explore.txt`, `tui-explore-sheet.txt` | `tui-explore-de.txt`, `tui-explore-sheet-de.txt`, `tui-explore-as-of-de.txt` | not drawn: the M9 has no Explore | `explore-as-of-old.json`, `explore-as-of-down.json` | `scene-explore.json`, `scene-explore-search.json`, `scene-explore-sheet.json`, `scene-explore-wide.json` |
 | Browse, a NomadNet page | `gui-browse-list.png`, `gui-browse-page.png` | `tui-browse-list.txt`, `tui-browse-page.txt` | `tui-browse-list-de.txt`, `tui-browse-page-de.txt` | not drawn: the M9 has no Browse tab | | `scene-browse-list.json`, `scene-browse-page.json`, `scene-browse-form.json` |
-| The map with two peers, one selected | `gui-map-pins.png` | `tui-map-pins.txt` | `tui-map-pins-de.txt` | `m9-map-card.png` | | |
-| The map screen and its menu | `gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`, `gui-map-uncovered-dark.png` | `tui_map.frames`, `tui_map_cycle.frames`, `tui_mapload.frames` | `tui_map_de.frames`, `tui_map_cycle_de.frames`, `tui_mapload_de.frames` | `m9-map-open.png`, `m9-map-hint.png`, `m9-map-no-region.png`, `m9-map-overview.png`, `m9-map-world-z2.png`, `m9-map-z13.png`, `m9-map-z16.png`, `m9-map-sky-fix.png`, `m9-map-sky-searching.png`, `m9-fw-map.png`, `m9-fw-pan.png` | | |
+| The map with two peers, one selected | `gui-map-pins.png`, `gui-map-locations.png`, `gui-map-long-name.png` | `tui-map-pins.txt` | `tui-map-pins-de.txt` | `m9-map-card.png` | | |
+| The map screen and its menu | `gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`, `gui-map-uncovered-dark.png` | `tui_map.frames`, `tui_map_cycle.frames`, `tui_mapload.frames` | `tui_map_de.frames`, `tui_map_cycle_de.frames`, `tui_mapload_de.frames` | `m9-map-open.png`, `m9-map-hint.png`, `m9-map-no-region.png`, `m9-map-overview.png`, `m9-map-world-z2.png`, `m9-map-z13.png`, `m9-map-z15.png`, `m9-map-z16.png`, `m9-map-sky-fix.png`, `m9-map-sky-searching.png`, `m9-fw-map.png`, `m9-fw-pan.png` | | |
 | The map's picture: names and buildings | `gui-names-florence-z16.png`, `gui-buildings-light-z16.png`, `gui-buildings-dark-z16.png`, `gui-buildings-light-z17.png`, `gui-buildings-dark-z17.png` | | | | `map-florence-z16.png` | |
 | The world view over its outline, z2 and z6, and its disputed lines dashed over Kashmir at z5 | `gui-world-window-z2.png`, `gui-world-window-z6.png`, `gui-world-window-kashmir-z5.png` | | | `m9-map-world-z6.png` | `gui-world-phone-z2.png`, `gui-world-phone-z6.png` | |
-| A position in a chat, shared and typed | `gui-position-sheet-light.png`, `gui-position-entry-light.png` | `tui_telemetry.frames`, `tui_liveness.frames`, `tui_share_chip.frames` | `tui_telemetry_de.frames`, `tui_liveness_de.frames`, `tui_share_chip_de.frames` | | | |
+| A position in a chat, shared and typed | `gui-position-sheet-light.png`, `gui-position-entry-light.png`, `gui-share-chip-light.png` | `tui_telemetry.frames`, `tui_liveness.frames`, `tui_share_chip.frames` | `tui_telemetry_de.frames`, `tui_liveness_de.frames`, `tui_share_chip_de.frames` | | | |
 | Tracks | `gui-tracks-hiking.png`, `gui-tracks-park.png`, `gui-tracks-park-dark.png`, `gui-tracks-convoy.png`, `gui-tracks-week-old.png`, `gui-tracks-outlier.png`, `gui-tracks-handbag.png`, `gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`, `gui-tracks-battery.png`, `gui-tracks-fit-all.png` | `tracks-hiking.txt`, `tracks-park.txt`, `tracks-convoy.txt`, `tracks-week-old.txt`, `tracks-outlier.txt`, `tracks-handbag.txt`, `tracks-radar.txt`, `tracks-way-back.txt`, `tracks-late.txt`, `tracks-battery.txt`, `tracks-fit-all.txt` | `tracks-hiking-de.txt`, `tracks-park-de.txt`, `tracks-convoy-de.txt`, `tracks-week-old-de.txt`, `tracks-outlier-de.txt`, `tracks-handbag-de.txt`, `tracks-radar-de.txt`, `tracks-way-back-de.txt`, `tracks-late-de.txt`, `tracks-battery-de.txt`, `tracks-fit-all-de.txt` | | | |
 <!-- goldens-index:end -->
 

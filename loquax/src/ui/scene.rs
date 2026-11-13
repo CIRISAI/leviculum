@@ -118,6 +118,8 @@ pub enum NodeId {
     File(u64, usize),
     /// A bubble's voice message, by its message's key (1222).
     Voice(u64),
+    /// A bubble's bytes under way, by its message's key (1662).
+    Progress(u64),
     Compose,
     /// The compose bar's microphone (1222).
     Record,
@@ -191,6 +193,7 @@ impl NodeId {
             NodeId::Photo(key) => format!("photo_{key}"),
             NodeId::File(key, index) => format!("file_{key}_{index}"),
             NodeId::Voice(key) => format!("voice_{key}"),
+            NodeId::Progress(key) => format!("progress_{key}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Record => "record".to_string(),
             NodeId::Emoji => "emoji".to_string(),
@@ -503,6 +506,9 @@ pub struct BubbleNode {
     pub voice: Option<VoiceNode>,
     /// The invitation it carries, as a card (1307).
     pub invite: Option<super::group_scene::InviteNode>,
+    /// Its bytes under way (1662): a bar and its words, "wird gesendet ·
+    /// 43 %", under the media. Boxed, as the bubble's transfer is.
+    pub progress: Option<Box<ProgressNode>>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -524,11 +530,28 @@ pub struct MarkNode {
 pub struct PhotoNode {
     pub id: NodeId,
     pub format: String,
-    pub bytes: usize,
+    /// Its bytes on the wire, [`super::photos::PhotoRef::bytes`].
+    pub bytes: u32,
     /// `Photo, 312 KB`.
     pub words: Text,
     /// [`Intent::ViewPhoto`].
     pub open: Action,
+    /// A picture sent as a file (1662): its place among the bubble's
+    /// files, whose line is drawn under the thumbnail. A target that
+    /// draws no thumbnail (the window, the terminal, the M9) draws the
+    /// file's line alone.
+    pub file: Option<u16>,
+}
+
+/// A bubble's bytes under way (1662): how far, for the bar, and the
+/// words beside it, which a screen reader says too.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressNode {
+    pub id: NodeId,
+    /// 0 to 100.
+    pub percent: u8,
+    /// "wird gesendet · 43 %", "wird geholt · 1,2 MB von 3,0 MB".
+    pub words: Text,
 }
 
 /// A bubble's file: its name, size, what a screen reader says, and the
@@ -593,13 +616,18 @@ pub fn mark_words(
             _ => Text::key(StrId::StateArrived),
         },
         chat::Mark::Delivered => Text::key(StrId::StateDelivered),
-        chat::Mark::Read => {
-            let at = WallTime {
-                unix_secs: i64::from(read_at.unwrap_or(0)),
-                offset_secs: now.map_or(0, |now| now.offset_secs),
-            };
-            Text::Key(StrId::StateRead, Vec::from([Arg::Str(at.hh_mm())]))
-        }
+        // A read without its time (an import's, 1506) says "Read" alone:
+        // 0 is no time, never the epoch.
+        chat::Mark::Read => match read_at.filter(|&at| at > 0) {
+            Some(at) => {
+                let at = WallTime {
+                    unix_secs: i64::from(at),
+                    offset_secs: now.map_or(0, |now| now.offset_secs),
+                };
+                Text::Key(StrId::StateRead, Vec::from([Arg::Str(at.hh_mm())]))
+            }
+            None => Text::key(StrId::StateReadUntimed),
+        },
         chat::Mark::Failed => Text::key(StrId::StateFailed),
     }
 }
@@ -1403,13 +1431,7 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
         // The own name (1452 rule 4): the names' word for us, else the
         // name the profile has from the mailbox; never the own hash.
         Some(own) => Avatar::of(
-            chat::initials(
-                model
-                    .names
-                    .shown(&own)
-                    .or(Some(model.profile.name.as_str()).filter(|n| !n.is_empty())),
-                &own,
-            ),
+            chat::initials(super::profile::own_name(model), &own),
             &own,
             None,
             None,
@@ -1629,7 +1651,15 @@ pub fn share_words(share: &super::share::Share, now: i64) -> Text {
 pub fn share_chip<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<ShareChip> {
     let share = model.share(peer)?;
     let now = model.now.map_or(share.started_at, |now| now.unix_secs);
-    let words = share_words(share, now);
+    let words = match model.bar.by_hand {
+        // A shell without a receiver shares the position entered by hand
+        // (1371): the chip says so (1457), as the position sheet does.
+        true => Text::Join(Vec::from([
+            share_words(share, now),
+            Text::key(StrId::FixByHand),
+        ])),
+        false => share_words(share, now),
+    };
     Some(ShareChip {
         id: NodeId::ShareChip,
         a11y: A11y::of(NodeId::ShareChip, Role::Chip, words.clone()),
@@ -2037,6 +2067,7 @@ fn bubble_node(
             peer,
             key: bubble.key,
         }),
+        file: photo.file,
     });
     let files: Vec<FileNode> = bubble
         .files
@@ -2083,7 +2114,8 @@ fn bubble_node(
         bubble.body.trim().is_empty(),
     ) {
         (Some(live), _, _, _, true) => live.clone(),
-        (_, Some(photo), _, _, true) => photo.words.clone(),
+        // A picture sent as a file is said as its file, by its name (1662).
+        (_, Some(photo), _, _, true) if photo.file.is_none() => photo.words.clone(),
         (_, _, Some(file), _, true) => file.words.clone(),
         (_, _, _, Some(voice), true) => voice.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
@@ -2103,6 +2135,13 @@ fn bubble_node(
             })
         }),
     });
+    let progress = bubble.transfer.as_ref().map(|transfer| {
+        Box::new(ProgressNode {
+            id: NodeId::Progress(bubble.key),
+            percent: transfer.percent(),
+            words: transfer.words(),
+        })
+    });
     let text = (!bubble.body.trim().is_empty()).then(|| bubble.body.clone());
     BubbleNode {
         id,
@@ -2117,6 +2156,7 @@ fn bubble_node(
         files,
         voice,
         invite: None,
+        progress,
         actions,
     }
 }
@@ -2285,6 +2325,11 @@ const MONTHS_SHORT: [StrId; 12] = [
     StrId::DecemberShort,
 ];
 
+/// The weekday of `at`, in full: "Monday".
+pub fn weekday(at: &WallTime) -> Text {
+    Text::key(WEEKDAYS[at.civil().weekday as usize % 7])
+}
+
 const WEEKDAYS_SHORT: [StrId; 7] = [
     StrId::MondayShort,
     StrId::TuesdayShort,
@@ -2438,13 +2483,21 @@ impl BubbleNode {
                 "words": m.words.to_json(),
                 "activate": opt(m.activate.as_ref(), Action::to_json),
             })),
-            "photo": opt(self.photo.as_ref(), |p| json!({
-                "id": p.id.resource(),
-                "format": p.format,
-                "bytes": p.bytes,
-                "words": p.words.to_json(),
-                "open": p.open.to_json(),
-            })),
+            "photo": opt(self.photo.as_ref(), |p| {
+                let mut photo = json!({
+                    "id": p.id.resource(),
+                    "format": p.format,
+                    "bytes": p.bytes,
+                    "words": p.words.to_json(),
+                    "open": p.open.to_json(),
+                });
+                // A picture sent as a file only (1662): the goldens of
+                // a photo stay as they were.
+                if let (Some(file), Value::Object(map)) = (p.file, &mut photo) {
+                    map.insert("file".into(), json!(file));
+                }
+                photo
+            }),
             "files": self.files.iter().map(|f| json!({
                 "id": f.id.resource(),
                 "name": f.name,
@@ -2470,6 +2523,17 @@ impl BubbleNode {
         // A group's keys only where there is a group (1307): the goldens
         // of a plain chat stay as they were.
         if let Value::Object(map) = &mut value {
+            // Bytes under way only while they go (1662), as a group's.
+            if let Some(p) = &self.progress {
+                map.insert(
+                    "progress".into(),
+                    json!({
+                        "id": p.id.resource(),
+                        "percent": p.percent,
+                        "words": p.words.to_json(),
+                    }),
+                );
+            }
             if let Some(invite) = &self.invite {
                 map.insert("invite".into(), invite.to_json());
             }
@@ -2632,6 +2696,24 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1506: a bubble read at no known time (an import's) is "Read", never
+    /// the epoch's "Read at 00:00"; a known time is said.
+    #[test]
+    fn a_read_without_its_time_says_read_alone() {
+        let untimed = mark_words(chat::Mark::Read, None, None, None);
+        assert_eq!(untimed, Text::key(StrId::StateReadUntimed));
+        assert_eq!(untimed.resolve(super::super::strings::Lang::En), "Read");
+        assert_eq!(
+            mark_words(chat::Mark::Read, Some(0), None, None),
+            Text::key(StrId::StateReadUntimed)
+        );
+        let timed = mark_words(chat::Mark::Read, Some(3_600 * 10 + 60 * 32), None, None);
+        assert_eq!(
+            timed.resolve(super::super::strings::Lang::En),
+            "Read at 10:32"
+        );
+    }
     use crate::ui::strings::Lang;
     use crate::ui::tests::Field as Line;
     use crate::ui::{Message, Signature, UiEvent};
@@ -3394,8 +3476,15 @@ mod tests {
         let delivered = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 2 });
         assert!(delivered.is_empty(), "a delivered one is not sent again");
         let effects = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 });
+        // The new send, and what the failed one saved goes with it (1662).
         assert!(
-            matches!(effects.as_slice(), [UiEffect::Send { to, body, .. }] if *to == peer && body == "m0"),
+            matches!(
+                effects.as_slice(),
+                [
+                    UiEffect::Send { to, body, .. },
+                    UiEffect::ForgetSaved { peer: gone, key: Some(1) },
+                ] if *to == peer && body == "m0" && *gone == peer
+            ),
             "{effects:?}"
         );
         let bodies: Vec<&str> = model.conversations[0]

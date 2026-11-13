@@ -472,15 +472,26 @@ impl<B> UiModel<B> {
         if seen.is_empty() {
             return;
         }
-        let c = self.selected;
+        for key in &seen {
+            self.reading.since.remove(key);
+        }
+        self.mark_seen(self.selected, &seen, wall);
+    }
+
+    /// The messages `keys` of conversation `c` were read at the reader's
+    /// clock `wall`: each is seen in its ledger, and its id joins the
+    /// receipt owed its peer. The one path every read takes: the viewport's
+    /// second ([`Self::watch`]) and a reply from the notification
+    /// ([`Self::notice_reply`], 1506).
+    fn mark_seen(&mut self, c: usize, keys: &[u64], wall: crate::when::WallTime) {
+        let now = self.elapsed_ms;
         let Some(conversation) = self.conversations.get_mut(c) else {
             return;
         };
         let peer = conversation.peer;
         let mut ids = Vec::new();
         let mut touched = Vec::new();
-        for key in &seen {
-            self.reading.since.remove(key);
+        for key in keys {
             let at = conversation
                 .messages
                 .iter()
@@ -496,6 +507,9 @@ impl<B> UiModel<B> {
         for m in touched {
             self.touch(c, m);
         }
+        if ids.is_empty() {
+            return;
+        }
         let read_at = u32::try_from(wall.unix_secs.max(0)).unwrap_or(u32::MAX);
         let owed = self.reading.owed.entry(peer).or_insert(Owed {
             read_at,
@@ -509,6 +523,53 @@ impl<B> UiModel<B> {
             }
         }
         owed.last_ms = now;
+    }
+
+    /// The newest message of `peer`'s that a notification of the chat
+    /// shows, by its key ([`super::Message::activity`]): what a reply from
+    /// that notification reads up to (`notice_reply`, 1506).
+    pub fn notice_key(&self, peer: &[u8; 16]) -> Option<u64> {
+        let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
+        let newest = *conversation.received_by_arrival(true).first()?;
+        Some(conversation.messages[newest].activity)
+    }
+
+    /// A reply typed into the notification of `peer`'s messages (1506):
+    /// whoever answers has read what the notification showed. Every message
+    /// of the chat up to `key` (the newest the notification showed, its
+    /// [`super::Message::activity`]) is read: seen by [`Self::mark_seen`],
+    /// as the viewport's second makes it, and no longer unread. Then `body`
+    /// goes to `peer`, and the receipt rides on it as on any reply
+    /// ([`Self::read_step`]); on a client of a home node it goes as a seen
+    /// mark. A message that came after the notification stays unread and
+    /// unseen. The open chat, its cursor and its draft stay as they were:
+    /// the reply was not written there.
+    pub(super) fn notice_reply(&mut self, peer: [u8; 16], key: u64, body: String) -> Vec<UiEffect> {
+        let body = super::outgoing(body);
+        if body.is_empty() {
+            return Vec::new();
+        }
+        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+            return Vec::new();
+        };
+        if self
+            .groups
+            .get(&peer)
+            .is_some_and(|g| g.standing == super::groups::Standing::Ended)
+        {
+            return Vec::new();
+        }
+        if let (true, Some(wall)) = (self.takes_receipts(&peer), self.now) {
+            let keys: Vec<u64> = self.conversations[c]
+                .messages
+                .iter()
+                .filter(|m| m.activity <= key && owes_receipt(m, &peer))
+                .map(|m| m.activity)
+                .collect();
+            self.mark_seen(c, &keys, wall);
+        }
+        self.read_up_to(c, key);
+        self.send_fields(c, body, Vec::new())
     }
 
     /// The keys of the open chat's bubbles that count now: on screen, in

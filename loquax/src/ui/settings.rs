@@ -12,8 +12,9 @@
 //!   [`Section::summary`]), which the phone reads as `R.string` too.
 //! - The entry point is the target's own: the ⋮ menu on the phone, the
 //!   gear on the window, `S` and the palette's `settings` on the terminal
-//!   ([`super::intent::Intent::Settings`]), and on the M9 none yet
-//!   ([`PLACES`] says why).
+//!   ([`super::intent::Intent::Settings`]), and on the M9 the house key
+//!   (1561, `loquax-m9/src/house.rs`), whose page lists the sections the
+//!   M9 draws ([`PLACES`] says why the others are not).
 //! - The theme switch lives in Appearance: the window's bar has no
 //!   light/dark button any more.
 //! - [`PLACES`] says per section and target whether it is drawn, with the
@@ -157,11 +158,9 @@ const fn at(file: &'static str, token: &'static str) -> Cell {
     Cell::Built(Via::At(file, token))
 }
 
-/// The M9 has no settings yet: the reason each of its cells gives.
-const M9: Cell = Cell::Missing(
-    "the M9 has no menu screen to list the sections in: a screen in loquax-m9 that draws \
-     SettingsScreen, and the key that opens it (the home key is the list's, 1440)",
-);
+/// The M9's settings page (1561): the house key's, which draws
+/// [`screen`] for [`Target::M9`].
+const M9_HOUSE: &str = "loquax-m9/src/house.rs";
 
 /// Where each section is drawn. The window's and the terminal's cells are
 /// the page's handler for the section; the phone's the arm of
@@ -172,63 +171,63 @@ pub const PLACES: [Place; 9] = [
         phone: at(JAVA, "\"profile\".equals(target)"),
         window: at(GUI_CHAT, "Section::Profile =>"),
         terminal: at(UI, "Section::Profile =>"),
-        m9: M9,
+        m9: Cell::Na("the M9 is a device of its home (#232): its name and address are the home's, shown where the home runs"),
     },
     Place {
         section: Section::Mailbox,
         phone: at(JAVA, "\"mailbox\".equals(page)"),
         window: at(GUI_CHAT, "Section::Mailbox"),
         terminal: at(UI, "Section::Mailbox"),
-        m9: M9,
+        m9: Cell::Missing("the M9 joins its home on the pairing screen; a page that names the home and its devices is owed (1642's mailbox page drawn on the board)"),
     },
     Place {
         section: Section::Appearance,
         phone: at(JAVA, "\"appearance\".equals(page)"),
         window: at(GUI_CHAT, "Section::Appearance =>"),
         terminal: at(UI, "Section::Appearance"),
-        m9: M9,
+        m9: at(M9_HOUSE, "Section::Appearance =>"),
     },
     Place {
         section: Section::Chats,
         phone: at(JAVA, "\"chats\".equals(page)"),
         window: at(GUI_CHAT, "Section::Chats =>"),
         terminal: at(UI, "Section::Chats"),
-        m9: M9,
+        m9: Cell::Na("photo size: the M9 has no camera and sends no photos, and its Enter always sends"),
     },
     Place {
         section: Section::Notifications,
         phone: at(JAVA, "\"notifications\".equals(page)"),
         window: at(GUI_CHAT, "Section::Notifications"),
         terminal: at(UI, "Section::Notifications"),
-        m9: M9,
+        m9: Cell::Na("the M9 has no notification service: an arrival shows on its list and in its top bar"),
     },
     Place {
         section: Section::Privacy,
         phone: at(JAVA, "\"privacy\".equals(page)"),
         window: at(GUI_CHAT, "Section::Privacy =>"),
         terminal: at(UI, "Section::Privacy"),
-        m9: M9,
+        m9: Cell::Missing("read receipts: the home signs them, so a switch on the board must reach the home and the client record must keep it; neither path exists yet"),
     },
     Place {
         section: Section::Maps,
         phone: at(JAVA, "\"maps\".equals(page)"),
         window: at(GUI_CHAT, "Section::Maps =>"),
         terminal: at(UI, "Section::Maps"),
-        m9: M9,
+        m9: Cell::Na("the M9 draws the regions lnflash wrote and the world overview; it downloads none"),
     },
     Place {
         section: Section::Backup,
         phone: at(JAVA, "\"backup\".equals(page)"),
         window: at(GUI_CHAT, "Section::Backup"),
         terminal: at(UI, "Section::Backup"),
-        m9: M9,
+        m9: Cell::Na("the M9 keeps no history of its own to save: the home holds it, and a new board pulls it"),
     },
     Place {
         section: Section::Advanced,
         phone: at(JAVA, "\"advanced\".equals(page)"),
         window: at(GUI_CHAT, "Section::Advanced"),
         terminal: at(UI, "Section::Advanced"),
-        m9: M9,
+        m9: at(M9_HOUSE, "Section::Advanced =>"),
     },
 ];
 
@@ -333,6 +332,9 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
         Section::Profile => Vec::from([verb(StrId::ProfileTitle, None, 'p', Intent::Profile)]),
         // 1642: which mailbox, how it is reached, which devices use it.
         Section::Mailbox => super::mailbox_page::page(model).rows(),
+        // The M9 draws the dark tokens only (`Look::m9`), so no theme
+        // switch; its type size row is the board's own (`house.rs`).
+        Section::Appearance if target == Target::M9 => Vec::new(),
         Section::Appearance => {
             let value = Text::key(match model.theme {
                 Theme::Dark => StrId::SettingsDark,
@@ -381,6 +383,9 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
             false => Vec::new(),
         },
         Section::Backup => Vec::from([note(StrId::SettingsBackupDesktop)]),
+        // The M9 has no rooms and no help screen; its about rows (the
+        // version, the map's data) are the board's own (`house.rs`).
+        Section::Advanced if target == Target::M9 => Vec::new(),
         Section::Advanced => {
             let mut rows = Vec::from([
                 note(StrId::PropagationNode),
@@ -417,8 +422,24 @@ pub struct Offered {
 /// The hubs in the order the settings offer them (1599): the heard ones
 /// by last seen, the closer first on a tie, a shipped one among them
 /// marked as such; then the shipped ones not heard, closest first, as the
-/// shipped file is ordered.
+/// shipped file is ordered. The hub in force stands first (1659, walk 10,
+/// 55: it was tenth in the settings while Explore, which draws this same
+/// order, showed it elsewhere), so the settings and Explore list the
+/// servers alike.
 pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
+    let mut out = offered_by_seen(rooms);
+    if let Some(at) = rooms
+        .hub
+        .and_then(|hub| out.iter().position(|o| o.hash == hub))
+    {
+        let chosen = out.remove(at);
+        out.insert(0, chosen);
+    }
+    out
+}
+
+/// [`offered_hubs`] before the hub in force is put first.
+fn offered_by_seen(rooms: &super::rooms::Rooms) -> Vec<Offered> {
     let shipped = super::hubs::shipped();
     let mut out: Vec<Offered> = rooms
         .heard
@@ -497,14 +518,50 @@ pub fn suggested(
 /// The suggestion after the hubs heard changed: held while it fits,
 /// else the closest that does ([`suggested`]). A hub in force holds none.
 pub fn settle_suggestion(rooms: &mut super::rooms::Rooms) {
+    let before = rooms.heard.held();
+    let now = settled(rooms);
+    if now != before {
+        say_suggestion(rooms);
+    }
+}
+
+/// The suggestion settled ([`settle_suggestion`]) and said in the event
+/// log whether it moved or not: a start says where it stands.
+pub fn settle_suggestion_said(rooms: &mut super::rooms::Rooms) {
+    settled(rooms);
+    say_suggestion(rooms);
+}
+
+fn settled(rooms: &mut super::rooms::Rooms) -> Option<[u8; 16]> {
     let now = suggested(&offered_hubs(rooms), rooms.hub, rooms.heard.held());
     rooms.heard.hold(now);
+    now
+}
+
+/// `ROOMS_SUGGEST` (1653, walk 8, 41: no server said "empfohlen", and
+/// nothing on the device told why): the hub held, or `-`, and why: a hub
+/// in force (`in_use`), no named shipped hub heard that answers
+/// (`none_fits`), or the one marked (`marked`); `fits` counts the hubs
+/// that could be.
+fn say_suggestion(rooms: &super::rooms::Rooms) {
+    let offered = offered_hubs(rooms);
+    let fits = offered
+        .iter()
+        .filter(|o| o.shipped && o.heard && o.answered != Some(false) && o.name.is_some())
+        .count();
+    let held = rooms.heard.held();
+    let why = match (rooms.hub, held) {
+        (Some(_), _) => "in_use",
+        (None, None) => "none_fits",
+        (None, Some(_)) => "marked",
+    };
+    crate::events::rooms_suggest(held.as_ref(), why, fits);
 }
 
 /// What a hub's row says beside its name: how far, "suggested" for the
-/// one [`suggested`] names, "no answer", and the mark on the one in
-/// force.
-fn offered_value(hub: &Offered, chosen: bool, suggested: bool) -> Option<Text> {
+/// one [`suggested`] names, "no answer", and on the one in force how its
+/// link stands (`link`, 1655) and the mark.
+fn offered_value(hub: &Offered, chosen: bool, suggested: bool, link: Option<Text>) -> Option<Text> {
     let mut parts = Vec::new();
     match hub.hops {
         Some(1) => parts.push(Text::key(StrId::RoomsHubHop)),
@@ -517,11 +574,17 @@ fn offered_value(hub: &Offered, chosen: bool, suggested: bool) -> Option<Text> {
     if suggested {
         parts.push(Text::key(StrId::RoomsHubSuggested));
     }
-    if hub.answered == Some(false) {
-        parts.push(Text::key(StrId::RoomsHubNoAnswer));
-    }
     if chosen {
+        // The rooms screen's words (1655, walk 9, 49: the row said no
+        // state), which say a silence themselves.
+        match link {
+            Some(link) => parts.push(link),
+            None if hub.answered == Some(false) => parts.push(Text::key(StrId::RoomsHubNoAnswer)),
+            None => {}
+        }
         parts.push(Text::Raw(alloc::string::String::from("\u{2713}")));
+    } else if hub.answered == Some(false) {
+        parts.push(Text::key(StrId::RoomsHubNoAnswer));
     }
     match parts.len() {
         0 => None,
@@ -572,7 +635,12 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
                 Some(name) => Text::Raw(name.clone()),
                 None => Text::key(StrId::RoomsHubUnnamed),
             },
-            value: offered_value(hub, chosen == Some(hub.hash), suggest == Some(hub.hash)),
+            value: offered_value(
+                hub,
+                chosen == Some(hub.hash),
+                suggest == Some(hub.hash),
+                super::rooms::link_words(model).filter(|_| chosen == Some(hub.hash)),
+            ),
             key,
             action: Some(Action::of(Intent::RoomsHub(HubPick::Hub(hub.hash)))),
         });
@@ -601,7 +669,12 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
         key: Some('a'),
         action: Some(Action::of(Intent::RoomsHub(HubPick::Paste))),
     });
-    rows.push(note(super::rooms::name_notice(model)));
+    rows.push(PageRow {
+        label: super::rooms::name_notice(model),
+        value: None,
+        key: None,
+        action: None,
+    });
     rows
 }
 
@@ -677,13 +750,15 @@ mod tests {
             })
             .collect();
         assert_eq!(said[0], "Server for public rooms: Villa");
+        // The one in use first (1659, walk 10, 55: it stood tenth), saying
+        // its link in the rooms screen's words (1655).
         assert_eq!(
-            said[1], "Server without a name: reachable over 2 stations",
-            "a tie: the closer first"
+            said[1],
+            "Villa: reachable over 4 stations · The server does not answer. · \u{2713}"
         );
         assert_eq!(
-            said[2],
-            "Villa: reachable over 4 stations · no answer · \u{2713}"
+            said[2], "Server without a name: reachable over 2 stations",
+            "the rest by last seen, the closer first on a tie"
         );
         // A server is in use: none is suggested (1621).
         assert_eq!(said[3], "HADARC: reachable over 4 stations");
@@ -721,6 +796,45 @@ mod tests {
 
     /// The order is the phone's, every section has its row in the table,
     /// and its key reads back.
+    /// The row of the server in use says how its link stands, in the
+    /// rooms screen's words (1655, walk 9, 49: name and tick only); the
+    /// other rows and what a tap does stay as they were.
+    #[test]
+    fn the_server_in_use_says_how_its_link_stands() {
+        use crate::ui::rooms::{Down, HubState};
+        let mut model = UiModel::<crate::ui::tests::Field>::new(&[]);
+        let shipped = crate::ui::hubs::shipped();
+        let before = hub_rows(&model, Target::Phone);
+        model.rooms.hub = Some(shipped[0].hash);
+        model.rooms.enabled = true;
+        let value = |model: &UiModel<crate::ui::tests::Field>| {
+            hub_rows(model, Target::Phone)[1]
+                .value
+                .as_ref()
+                .map(|v| v.resolve(Lang::De))
+        };
+        assert_eq!(
+            value(&model).as_deref(),
+            Some("Noch nicht verbunden. · \u{2713}")
+        );
+        model.rooms.state = HubState::Linking;
+        assert_eq!(value(&model).as_deref(), Some("Verbinde… · \u{2713}"));
+        model.rooms.state = HubState::Ready;
+        assert_eq!(value(&model).as_deref(), Some("Verbunden · \u{2713}"));
+        model.rooms.state = HubState::Down(Down::NoAnswer);
+        assert_eq!(
+            value(&model).as_deref(),
+            Some("Server antwortet nicht. · \u{2713}")
+        );
+        // The others: as before, and every row's tap is the same verb.
+        let after = hub_rows(&model, Target::Phone);
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after).skip(2) {
+            assert_eq!((&b.label, &b.action), (&a.label, &a.action));
+        }
+        assert_eq!(before[1].action, after[1].action);
+    }
+
     #[test]
     fn nine_sections_in_the_phones_order_each_placed_once() {
         let titles: Vec<&str> = SECTIONS.iter().map(|s| s.title().text(Lang::En)).collect();
@@ -787,6 +901,14 @@ mod tests {
                 "{target:?} draws all nine"
             );
         }
+        // The M9 (1561): the type size and the about rows behind its
+        // house key; every other cell says why not.
+        assert_eq!(
+            sections(Target::M9).collect::<Vec<_>>(),
+            [Section::Appearance, Section::Advanced]
+        );
+        let entries = entries(Target::M9);
+        assert_eq!((entries[0].key, entries[1].key), ('1', '2'));
     }
 
     /// The control of the guard's ingredient: a token a file lacks is

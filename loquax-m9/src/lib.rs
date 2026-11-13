@@ -9,11 +9,11 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`font`]: the two atlases the cells are set in, 9 x 15 (35 x 16
-//!   cells, the default) and 10 x 20 (32 x 12), and what a cell measures
-//!   on the panel (1428, 1532).
-//! - [`house`]: the house key's overview, its type switch, and the held
-//!   house key that switches the size (1532).
+//! - [`font`]: the three atlases the cells are set in, 6 x 12 (53 x 20
+//!   cells), 9 x 15 (35 x 16, the default) and 10 x 20 (32 x 12), and
+//!   what a cell measures on the panel (1428, 1532, 1561).
+//! - [`house`]: the house key's settings page, the core's settings for
+//!   the M9 as a list of rows, the type size among them (1532, 1561).
 //! - [`screen`]: the scene as styled lines, 32 x 12 cells, the chats list
 //!   and the delivery marks on their ASCII ladder (the atlas has no tick),
 //!   and which scene and cursor a model shows.
@@ -52,6 +52,8 @@
 //!   image's walks (1540).
 //! - [`oplog`]: the bench image's ring of flash ops, said as `[FLASH]`
 //!   lines, and the ops it could not say counted (1613, 1622).
+//! - [`spi2`]: the panel and the LR1110 on one SPI bus, the radio first
+//!   between the panel's chunks, and the radio's boot lines (1478b).
 
 #![no_std]
 
@@ -65,6 +67,7 @@ pub mod field;
 pub mod fixture;
 pub mod font;
 pub mod frame;
+pub mod glyphs;
 pub mod gnss;
 pub mod group;
 pub mod home;
@@ -81,6 +84,7 @@ pub mod pair;
 pub mod read;
 pub mod render;
 pub mod screen;
+pub mod spi2;
 pub mod splash;
 
 /// The language the board speaks (1447, walk 1 finding 23): German unless

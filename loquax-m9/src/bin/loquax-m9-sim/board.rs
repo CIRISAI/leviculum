@@ -51,6 +51,7 @@ use loquax_m9::pair::{self, Pairing};
 use loquax_m9::read::Reader;
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ROWS};
+use loquax_m9::spi2;
 
 use loquax_m9::bench::{self, Arrivals};
 use loquax_m9::{fixture, group, page};
@@ -237,6 +238,46 @@ pub struct Board {
     pulled: usize,
 }
 
+/// The LR1110's boot as the sim stands in for it (1478b): the sim has no
+/// radio and no SPI, so it says the board's `[LORA] init ok` line in the
+/// board's shape with versions 0 (`spi2::InitOk`, the formatter the image
+/// prints with), and the `[SPI]` line of the SPI2 arbiter stepped over a
+/// full frame with the bench image's 10 ms status read
+/// (`spi2::interleave` on `spi2::BOARD`): the model's numbers, which the
+/// bench's own `[SPI]` and `[DISP]` lines replace.
+fn say_radio(log: &mut Log) {
+    log.line(
+        "[LORA] ",
+        &format!(
+            "{}",
+            spi2::InitOk {
+                hw: 0,
+                fw: 0,
+                phy: spi2::DEFAULT_PHY,
+            }
+        ),
+    );
+    let with = spi2::interleave(spi2::BOARD);
+    let alone = spi2::interleave(spi2::Model {
+        radio_every_us: 0,
+        ..spi2::BOARD
+    });
+    let window = spi2::Window {
+        owner: Some(spi2::Owner::Free),
+        wait_max_us: with.wait_max_us,
+        grants: with.grants,
+        chunks: with.chunks,
+        yields: with.yields,
+    };
+    log.line(
+        "[SPI] ",
+        &format!(
+            "{window} held_max_us={} flush_us={} alone_us={} source=model",
+            with.gap_max_us, with.flush_us, alone.flush_us
+        ),
+    );
+}
+
 impl Board {
     /// Power on over `flash`: the store restored for its home, or the
     /// pairing over the fixture on a board without one, and the first
@@ -272,6 +313,7 @@ impl Board {
                 },
             ),
         );
+        say_radio(&mut log);
         let mut outgoing = Outgoing::default();
         let (model, shelf, shown) = match flash.home {
             None => {
@@ -347,7 +389,7 @@ impl Board {
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
         let size = match board.flash.home {
-            Some(_) => Size::of_large(board.flash.large_type),
+            Some(_) => Size::of_record(board.flash.type_size),
             None => Size::DEFAULT,
         };
         board.overview.restore(size);
@@ -549,7 +591,10 @@ impl Board {
         let (cols, rows) = self.overview.size.grid();
         let lines = match &self.shown.pairing {
             Some(pairing) => pair::screen(pairing, self.shown.word, &look, cols, rows),
-            None if self.overview.open => self.overview.lines(&look, cols, rows),
+            None if self.overview.open => {
+                let page = house::page(&self.model, self.overview.size, env!("CARGO_PKG_VERSION"));
+                self.overview.lines(&page, &look, cols, rows)
+            }
             None if map::shown(&self.model) => {
                 let bare = map::view(&self.model)
                     .is_none_or(|(view, _)| self.map.choose(&view) == map::Drawn::Bare);
@@ -704,7 +749,6 @@ impl Board {
             row: self.row,
             home: self.shown.word,
             fault: self.shown.fault,
-            note: self.overview.note(),
             map: self.shown.map,
             ..Look::of(&self.model)
         }
@@ -864,10 +908,17 @@ impl Board {
                         let line = keyboard::key_line(ms, code, key);
                         self.log.raw(&line);
                         self.last_key = Some(line);
-                        // The house key and the open overview (1532);
-                        // the pairing has the keys while it shows.
+                        // The house key and its settings page (1532,
+                        // 1561); the pairing has the keys while it shows.
                         let took = match self.shown.pairing {
-                            None => self.overview.press(key, ms),
+                            None => {
+                                let page = house::page(
+                                    &self.model,
+                                    self.overview.size,
+                                    env!("CARGO_PKG_VERSION"),
+                                );
+                                self.overview.press(key, &page)
+                            }
                             Some(_) => None,
                         };
                         if let Some(did) = took {
@@ -927,9 +978,6 @@ impl Board {
         }
 
         let t_draw = std::time::Instant::now();
-        // A house tap's gap, the switch's word (1532).
-        let did = self.overview.tick(uptime_ms() as u32);
-        dirty |= self.did(did);
         dirty |= std::mem::take(&mut self.owed);
         dirty |= self.drawn.due(&self.model);
         let now = uptime_ms();
@@ -983,9 +1031,11 @@ impl Board {
         let overview = self.overview;
         let drawn = match &self.shown.pairing {
             Some(pairing) => pair::draw(&mut self.renderer, pairing, self.shown.word, &look),
-            None if overview.open => self
-                .renderer
-                .text(|cols, rows| overview.lines(&look, cols, rows)),
+            None if overview.open => {
+                let page = house::page(&self.model, overview.size, env!("CARGO_PKG_VERSION"));
+                self.renderer
+                    .text(|cols, rows| overview.lines(&page, &look, cols, rows))
+            }
             None => self.renderer.show(&self.model, &look, &mut self.map),
         };
         if drawn.is_err() {
@@ -997,17 +1047,18 @@ impl Board {
             self.log.line(
                 "[MAP] ",
                 &format!(
-                    "zoom={} picture_ms={} names_ms={} names={} dropped={}",
+                    "zoom={} picture_ms={} names_ms={} names={} dropped={} glyphs={}",
                     stats.zoom,
                     ms(stats.picture_us),
                     ms(stats.names_us),
                     stats.names.drawn,
-                    stats.names.dropped()
+                    stats.names.dropped(),
+                    stats.names.glyphs
                 ),
             );
         }
         let at = match self.shown.pairing.is_none() && overview.open {
-            true => page::house(),
+            true => page::house(overview.at),
             false => page::of(
                 &self.model,
                 self.row,
@@ -1068,7 +1119,7 @@ impl Board {
                     // it until the power goes.
                     let kept = match self.flash.home {
                         Some(_) => {
-                            self.flash.large_type = size.large();
+                            self.flash.type_size = size.record();
                             "yes"
                         }
                         None => "no reason=no-record",

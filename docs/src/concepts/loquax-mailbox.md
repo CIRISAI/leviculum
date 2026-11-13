@@ -595,6 +595,7 @@ device.
 /pages    [since: uint, (page: uint)]   -> [status, stamp: uint, more: bool, [row, ...]]
   row:    [0, dest: bin16, name: str, first: int, last: int, hops: uint, count: uint]
         | [1, url: str, title: str, at: int, deleted: bool]
+        | [2, address: bin16, name: str, first: int, last: int, hops: uint]
 /bookmark [url: str, title: str, at: int, deleted: bool] -> [status]
 ```
 
@@ -612,3 +613,118 @@ full list of 2 000 rows with names of 15 to 18 characters and one
 bookmark is 100 969 bytes in four answers, each a resource, and took
 52 ms. Over BLE it is not measured yet: the same four answers, about 50
 bytes a row.
+
+## 5. Every name the mailbox hears (1643)
+
+**Two behaviours, not two modes (decided 2026-11-11, Lew; [the expedition
+map](loquax-expedition-map.md), section 11).** The mailbox split of
+2026-11-10 set two modes a user picks between: a Loquax on its own, or a
+Loquax with an external mailbox that takes its directory from the mailbox
+and hears no mesh. They become two behaviours one app switches between by
+itself. Every Loquax is always a home of its own; an external mailbox,
+once set up, is a second home of the same identity. While that mailbox is
+in reach, the device rests as its client, the behaviour this section
+describes; when it is not, the device is the node and hears the mesh
+itself. The first-start question on Android retires with the modes. This
+depends on the N homes of [N homes under one identity](loquax-homes.md),
+of which nothing is built; until they are, the two modes below are what
+runs. **Open:** what the node behaviour costs a phone's battery, which
+nobody has measured on a real phone; a bad number means the switch needs
+a brake ([what a Loquax Mailbox is](loquax-mailbox-roles.md), M6).
+
+Lew, 2026-11-10 (the mailbox split, step 3): a phone with an external
+mailbox takes its whole directory from the mailbox and hears no mesh of
+its own while it rests as the mailbox's client, so a stranger nobody
+wrote to yet stayed a hash on it. The
+archive's name entries cannot carry them: every archive entry wakes the
+devices, and 1136 limited them to peers the user has a relation to for
+that reason. The names get a table of their own beside the pages. Why the
+mailbox is the one that hears (an LXMF endpoint behind a full lnsd, the
+devices its leaves) is [what a Loquax Mailbox is](loquax-mailbox-roles.md).
+
+**What the mailbox keeps.** Every LXMF delivery announce with a name its
+node hears (the engine's `OutboxEvent::NameHeard`, raised beside
+`Announced` because only it carries the hops) becomes a row of
+`home_names` (store schema 22, `Store::name_heard`,
+`loquax/src/store/pages.rs`): the address, the name as announced, first
+and last seen by the mailbox's clock, and hops (`home::pages::NameRow`).
+A row takes a new stamp when it is new, its name or hops changed, or an
+hour passed since its kept `last_seen` (`NAME_REFRESH_SECS`); any other
+announce changes nothing. Unknown hops never clear known ones. At most
+4 096 rows (`NAMES_CAP`), the one heard longest ago going first, never
+the one just heard. The mailbox's own announce is no row. The 1136
+filter stays for the archive's name entries.
+
+**The ask.** The rows share the stamp of the pages and bookmarks and ride
+in the same `/pages` delta as row kind 2, under the same 32 KiB bound and
+`more`; they wake nobody and move no cursor. A client from before 1643
+passes kind 2 by, as it passes every kind it does not know (the reader's
+rule since 1579, tested by `an_old_client_passes_the_name_rows_by`); a
+mailbox from before 1643 sends none.
+
+**On the device** the rows go through the path an announce takes
+(`ui::name_announced`): the screen's `Names` sanitise them and note a
+rename in a conversation, so the chats, the contacts and a new
+conversation name the strangers the mailbox heard. The rows are not
+written to the device's store: its `/pages` stamp lives in memory, so
+every start asks for the whole list again. A device whose mailbox is
+older keeps the names it heard itself (1632), and so does one out of
+its mailbox's reach.
+
+**Measured** (`home::client::tests::a_phone_names_the_two_thousand_strangers_its_mailbox_heard_after_one_pull`,
+2026-11-10, coder host, two nodes over loopback TCP, debug build): 2 000
+name rows with names of 10 to 13 characters are 88 899 bytes in one
+pull, answers of at most 32 KiB each, and took 45 ms; the 2 001 page
+rows of 1579 were 100 969 bytes.
+
+## 6. The rooms of the hubs the mailbox hears (1643)
+
+A device's server sheet listed a hub's rooms only once its own `/list`
+came back over a link it first had to build (1652). The mailbox asks
+every hub it hears instead (`loquax/src/home/hub_rooms.rs`): the sheet's
+own question (`rooms_link::Ask::Peek`, a link of its own, a throwaway
+identity and no nick, HELLO, `/list`, the notices read), over the
+mailbox's node lent to the Rooms, at most once an hour a hub
+(`LIST_EVERY_SECS`), one question at a time. The rooms named go into the
+hub's `KIND_HUB` archive entry as a fifth element
+(`wire::hub_entry_rooms`), a new entry only when they changed; the
+hourly refresh of the hearing keeps them. A client from before reads
+the four elements it knows. The pull hands them on as
+`Command::HomeHubRooms`, and the sheet lists them the moment it opens
+(`Rooms::mailbox_named`); the device's own answer, from the sheet's
+question or from `/list` after it connects, replaces them as the fresher
+copy. The census counts the questions' table (`hub_rooms`). The mailbox
+starts the questions with the first hub it hears, so one that hears none
+runs no question task; a mailbox on the phone lends the Rooms' slot of
+its node to its own screen and asks nothing itself, since a second lend
+to the Rooms would end the screen's, whose sheet asks over the same node.
+
+## 7. Explore asks when it opens, and says how old its list is (1644)
+
+Lew, 2026-11-10 (the mailbox split, step 4): pages and servers never
+wake a device, so without a message a phone saw a new server hours
+late. Opening Explore now asks `/pages` once more, the same stamp and
+the same bound as the ask after a pull (`UiEffect::AskPages`, folded in
+`loquax/src/ui/explore.rs`). The model starts at most one such ask a
+minute (`ASK_EVERY_MS`), counted from the last ask of either kind; the
+host runs one ask at a time and drops a second while the first runs.
+Only a device that has told the model of its mailbox link asks
+(`ExploreEvent::Mailbox`: the terminal's and the window's shell from
+the watching link, the phone from the same debounced word as its "no
+connection" bar).
+
+**The line on top.** The model notes when the last answer came
+(`MailboxList::answered`, in memory like the stamp) and the list says
+how old it is (`explore::as_of`): nothing while the link is up and the
+answer at most an hour old (`AS_OF_AFTER_SECS`); "As of 3 h ago" when it
+is older; "Not connected · as of yesterday 14:20" while the link is
+down, or only "Not connected" before any answer. The words are the
+catalogue's (`explore_as_of*`), the same on every target.
+
+**Ageing.** A page or a server not announced for seven days is not
+listed (`HIDDEN_AFTER_SECS`, a default and not a setting, Lew took the
+plan's recommendation); the row stays in the mailbox's table, the
+device's store and the browser's registry, and the next announce lists
+it again. A bookmarked page, the server in use and the servers Loquax
+ships stay listed whatever their age. Since no unbookmarked page can be
+older than a week now, the "Older" heading holds none.

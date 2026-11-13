@@ -47,7 +47,16 @@ pub fn mailbox_about() -> About {
                 admitted_at: MAILBOX_NOW - 3 * 86_400,
                 last_seen: Some(MAILBOX_NOW - 7_200),
             },
+            // Admitted before the mailbox kept the time (schema 20, 1647):
+            // named, no time.
+            KnownDevice {
+                device: [0x77; 16],
+                name: "Laptop".to_string(),
+                admitted_at: MAILBOX_NOW - 40 * 86_400,
+                last_seen: None,
+            },
         ],
+        started: Some(MAILBOX_NOW - 5 * 86_400),
     }
 }
 

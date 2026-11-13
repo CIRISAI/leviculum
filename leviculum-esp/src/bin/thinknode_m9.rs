@@ -44,6 +44,7 @@
 //! [STACK] bytes=<n> t=<ms>
 //! [FLASH] identity=<offset|none/why> client=<offset|none/why> messages=<offset|none/why> t=<ms>  (1414, 1476)
 //! [MAP] regions=firenze:image,world:image[,<name>:area:<bytes>|,<name>:damaged][ area=<error>] area=<offset|none/why> world_bytes=<n> t=<ms>  (1477; again with the banner)
+//! [WIFI] creds=<set ssid_bytes=<n> secured=<0|1>|none> slot=<offset|none/why>[ error=<why>] radio=off t=<ms>  (1479: the WLAN lnflash --wifi wrote, never its passphrase)
 //! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
@@ -67,10 +68,12 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] map_kept held=153600 t=<ms>   the map's picture kept between
 //!                           draws from here on (1507), after the census
-//! [MAP] zoom=<z> picture_ms=.. names_ms=.. names=<n> dropped=<n> kept=<0|1>
+//! [MAP] zoom=<z> picture_ms=.. names_ms=.. names=<n> dropped=<n> glyphs=<n> heap_peak=<B> kept=<0|1>
 //!                           every map draw (1531); kept=1 copied the kept
 //!                           picture back, a page switch or a key that moved
-//!                           no view and no pin (1507), and its ms are 0
+//!                           no view and no pin (1507), and its ms are 0;
+//!                           glyphs= the names' glyphs rasterised, heap_peak=
+//!                           the draw's peak above what was live (1565)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=... page=.. max_answer=.. home=<32 hex>
 //!                           home: the LXMF address of the home the client
@@ -247,10 +250,7 @@ use esp_hal::{
     i2c::master::{Config as I2cConfig, I2c},
     main,
     psram::{Psram, PsramConfig, PsramMode, PsramSize, SpiRamFreq},
-    spi::{
-        master::{Config as SpiConfig, Spi, SpiDma, SpiDmaTransfer},
-        Mode,
-    },
+    spi::master::{Spi, SpiDma, SpiDmaTransfer},
     time::{Duration, Rate},
     timer::{
         timg::{TimerGroup, Wdt},
@@ -264,10 +264,10 @@ use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
 use leviculum_esp::flash::Stores;
 use leviculum_esp::handheld::{self, CodeRefusal, Handheld};
 use leviculum_esp::stall::{self, Core, Isr, Lock, Stage, Watchdog};
-use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
+use leviculum_esp::{boards::thinknode_m9 as m9, m9_radio, uptime_ms, UartLog};
 use leviculum_ui::input::{KeyCode, KeyEventKind};
 use loquax::home::ask::Verb;
-use loquax::home::board::Word;
+use loquax::home::board::{Way, Word};
 use loquax::home::wire::{Entry, Mark};
 use loquax::ui::listing::Row;
 use loquax::ui::strings::{StrId, Text};
@@ -501,8 +501,8 @@ enum ToUi {
     Entries(Vec<Entry>, [u8; 16]),
     /// How an ask ended, for the model.
     Answer(Answer),
-    /// The top bar's word moved.
-    Word(Option<Word>),
+    /// The top bar's word moved, or the way to the home it says (1478).
+    Word(Option<Word>, Option<Way>),
     /// The receiver made a fix (1477): the model's own.
     Fix(loquax_m9::gnss::Location),
     /// What the receiver says of the sky moved (1477): the map's corner.
@@ -767,6 +767,16 @@ static mut APP_CORE_STACK: Stack<UI_STACK> = Stack::new();
 /// the bar a key is answered within.
 const SLOW_TURN_MS: u64 = 100;
 
+/// The M9's LR1110 as the driver holds it (1478b): a `'static` the
+/// driver borrows, out of the board's constant.
+static LR1110: leviculum_lr11xx::Board = m9::LR1110;
+
+/// The bench image's status read after the probe (1478b): the order's
+/// "radio polling every 10 ms", the load the `[SPI]` line measures the
+/// panel and the radio under.
+#[cfg(m9_bench)]
+const RADIO_POLL_MS: u64 = 10;
+
 // The `[FLASH]` drain's reserve (1630) is half the send ring the board
 // has: less than all of it, or the drain could never write, and no more
 // than the bench needs for a turn's own lines.
@@ -906,6 +916,9 @@ struct Flush {
     /// Since when the next chunk waits for the flash (1563): its DMA
     /// found a flash op announced; `None` while none waits.
     held_since: Option<u64>,
+    /// Since when the panel stands aside for the radio on SPI2 (1478b):
+    /// it gave the bus up before a chunk; `None` while it holds it.
+    radio_since: Option<u64>,
 }
 
 /// A flush, for its `[DISP] flush` line.
@@ -921,6 +934,10 @@ struct Sent {
     /// Microseconds of it the chunks waited for the flash (1563,
     /// `leviculum_esp::mspi`).
     waited_us: u64,
+    /// Microseconds of it the panel stood aside for the radio on SPI2,
+    /// and how often (1478b, `leviculum_esp::m9_radio`).
+    radio_us: u64,
+    yields: u32,
 }
 
 /// The panel on SPI2 with DMA, its chip select and data/command line,
@@ -932,10 +949,18 @@ struct Sent {
 /// [`Panel::begin`] starts it, [`Panel::pump`] moves it on between the
 /// turn's other work, [`Panel::settle`] waits it out before the frame is
 /// drawn into again.
+///
+/// Since 1478b the panel shares SPI2 with the LR1110
+/// (`leviculum_esp::m9_radio`, the rules in `loquax_m9::spi2`): it holds
+/// the bus from a flush's first chunk to its last and gives it up before
+/// any chunk a radio waits for, closing the row window it was in and
+/// reopening it at the next row. A panel with no flush on its way holds
+/// nothing.
 struct Panel<'d> {
-    /// The bus, `None` while a transfer owns it.
-    spi: Option<SpiDma<'d, Blocking>>,
-    inflight: Option<SpiDmaTransfer<'d, Blocking, DmaTxBuf>>,
+    /// The bus, `None` while a transfer owns it or the panel does not
+    /// hold it.
+    spi: Option<SpiDma<'static, Blocking>>,
+    inflight: Option<SpiDmaTransfer<'static, Blocking, DmaTxBuf>>,
     /// The transfer's descriptors, `None` while one runs.
     descriptors: Option<DmaAlignedMut<'static, [DmaDescriptor]>>,
     flush: Flush,
@@ -972,10 +997,60 @@ impl splash::Panel for Panel<'_> {
 
 impl Panel<'_> {
     fn cmd(&mut self, op: u8, data: &[u8]) -> Result<(), PanelError> {
+        self.settle()?;
+        // A radio transaction holds the bus a few hundred microseconds;
+        // a bus that does not come back in 100 ms is lost.
+        let since = leviculum_esp::uptime_us();
+        while !self.hold() {
+            if leviculum_esp::uptime_us().saturating_sub(since) > 100_000 {
+                return Err(PanelError::Spi(esp_hal::spi::Error::Unsupported));
+            }
+            core::hint::spin_loop();
+        }
         self.cs.set_low();
         let r = self.send(op, data);
         self.cs.set_high();
+        self.release();
         r
+    }
+
+    /// Give SPI2 up, if the panel holds it and nothing of it is in flight.
+    fn release(&mut self) {
+        if let Some(spi) = self.spi.take() {
+            m9_radio::panel_give(spi);
+        }
+    }
+
+    /// Hold SPI2 for the next chunk (1478b): `false` when a radio waits for
+    /// it or has it, and then the panel's row window is closed first, its
+    /// run to go on at the next row, and the bus given up after.
+    fn hold(&mut self) -> bool {
+        if m9_radio::panel_hold(&mut self.spi) {
+            if let Some(since) = self.flush.radio_since.take() {
+                let us = leviculum_esp::uptime_us().saturating_sub(since);
+                m9_radio::panel_held(u32::try_from(us).unwrap_or(u32::MAX));
+                if let Some(report) = self.flush.report.as_mut() {
+                    report.radio_us += us;
+                }
+            }
+            return true;
+        }
+        if self.flush.open {
+            self.cs.set_high();
+            self.flush.open = false;
+            if let (Some(row), Some(run)) = (self.flush.at.take(), self.flush.runs.front_mut()) {
+                run.0 = row;
+            }
+        }
+        // Deselected before the radio can have the bus.
+        self.release();
+        if self.flush.radio_since.is_none() {
+            self.flush.radio_since = Some(leviculum_esp::uptime_us());
+            if let Some(report) = self.flush.report.as_mut() {
+                report.yields += 1;
+            }
+        }
+        false
     }
 
     fn send(&mut self, op: u8, data: &[u8]) -> Result<(), PanelError> {
@@ -1050,6 +1125,8 @@ impl Panel<'_> {
                 began_us: leviculum_esp::uptime_us(),
                 us: 0,
                 waited_us: 0,
+                radio_us: 0,
+                yields: 0,
             }),
             _ => None,
         };
@@ -1060,6 +1137,7 @@ impl Panel<'_> {
             base: frame.pixels().as_ptr() as usize,
             report,
             held_since: None,
+            radio_since: None,
         };
         self.pump().map(|_| ())
     }
@@ -1095,8 +1173,12 @@ impl Panel<'_> {
             Err(_) => {
                 self.flush = Flush::default();
                 self.cs.set_high();
+                if self.inflight.is_none() {
+                    self.release();
+                }
             }
             Ok(true) => {
+                self.release();
                 if let Some(mut sent) = self.flush.report.take() {
                     sent.us = leviculum_esp::uptime_us().saturating_sub(sent.began_us);
                     self.done = Some(sent);
@@ -1123,6 +1205,13 @@ impl Panel<'_> {
                 self.cs.set_high();
                 self.flush.open = false;
                 self.flush.runs.pop_front();
+            }
+            if self.flush.runs.is_empty() {
+                return Ok(true);
+            }
+            // SPI2 for this chunk: a radio that asked goes first (1478b).
+            if !self.hold() {
+                return Ok(false);
             }
             let Some(&(first, last)) = self.flush.runs.front() else {
                 return Ok(true);
@@ -1160,6 +1249,7 @@ impl Panel<'_> {
                 }
             }
             self.chunks = self.chunks.wrapping_add(1);
+            m9_radio::SPI2.panel_chunk();
             self.flush.at = (end < last).then_some(end + 1);
         }
     }
@@ -1395,6 +1485,8 @@ fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
 struct Shown {
     pairing: Option<Pairing>,
     word: Option<Word>,
+    /// The way to the home the word says (1478).
+    way: Option<Way>,
     fault: Option<StrId>,
     /// The map's key hint and corner credit (1531), as the loop's
     /// [`map::Chrome`] says them.
@@ -1454,16 +1546,23 @@ fn redraw(
     let look = screen::Look {
         row,
         home: shown.word,
+        way: shown.way,
         fault: shown.fault,
-        note: shown.overview.note(),
         map: shown.map,
         ..screen::Look::of(model)
     };
     let overview = shown.overview;
+    // The draw's heap peak for the `[MAP]` line (1565).
+    let heap_before = leviculum_esp::heap_window_start();
+    // The house key's settings page (1561), the core's settings for the M9.
+    let house_page = || house::page(model, overview.size, env!("CARGO_PKG_VERSION"));
     #[cfg(not(m9_bench))]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
-        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
+        None if overview.open => {
+            let page = house_page();
+            renderer.text(|cols, rows| overview.lines(&page, &look, cols, rows))
+        }
         None => renderer.show(model, &look, map),
     };
     // The bench times the scene and the draw apart (1540).
@@ -1472,7 +1571,10 @@ fn redraw(
     #[cfg(m9_bench)]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
-        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
+        None if overview.open => {
+            let page = house_page();
+            renderer.text(|cols, rows| overview.lines(&page, &look, cols, rows))
+        }
         None => bench::show(renderer, model, &look, map),
     };
     #[cfg(m9_bench)]
@@ -1490,24 +1592,28 @@ fn redraw(
         return false;
     }
     // What the map's draw did (1531): its zoom, the picture's and the
-    // label pass's time, the names set and dropped.
+    // label pass's time, the names set and dropped; since 1565 the glyphs
+    // the names took and the draw's heap peak above what was live before.
     if let Some(stats) = renderer.take_map_stats() {
         let ms = |us: u64| alloc::format!("{}.{:03}", us / 1000, us % 1000);
+        let heap_peak = leviculum_esp::heap_window_peak().saturating_sub(heap_before);
         log.line(
             "[MAP] ",
             alloc::format!(
-                "zoom={} picture_ms={} names_ms={} names={} dropped={} kept={}",
+                "zoom={} picture_ms={} names_ms={} names={} dropped={} glyphs={} heap_peak={} kept={}",
                 stats.zoom,
                 ms(stats.picture_us),
                 ms(stats.names_us),
                 stats.names.drawn,
                 stats.names.dropped(),
+                stats.names.glyphs,
+                heap_peak,
                 u8::from(stats.kept)
             ),
         );
     }
     let at = match shown.pairing.is_none() && overview.open {
-        true => page::house(),
+        true => page::house(overview.at),
         false => page::of(model, row, shown.pairing.is_some(), &renderer.window()),
     };
     let moved = said.say(at);
@@ -1555,7 +1661,7 @@ fn flushed(
     log.line(
         "[DISP] ",
         alloc::format!(
-            "flush rows={}..{} ms={}.{:03} runs={} bytes={} waited_ms={}.{:03}",
+            "flush rows={}..{} ms={}.{:03} runs={} bytes={} waited_ms={}.{:03} radio_ms={}.{:03} yields={}",
             sent.first,
             sent.last,
             sent.us / 1000,
@@ -1563,7 +1669,10 @@ fn flushed(
             sent.runs,
             sent.bytes,
             sent.waited_us / 1000,
-            sent.waited_us % 1000
+            sent.waited_us % 1000,
+            sent.radio_us / 1000,
+            sent.radio_us % 1000,
+            sent.yields
         ),
     );
     if !panel.lit {
@@ -1701,6 +1810,32 @@ fn main() -> ! {
         ),
     );
 
+    // The WLAN `lnflash --wifi` named (1479). The name is said, the
+    // passphrase never; without a record the WiFi radio stays off.
+    let wifi = stores.load_wifi();
+    match &wifi {
+        Ok(Some(creds)) => log.line(
+            "[WIFI] ",
+            format_args!(
+                "creds=set ssid_bytes={} secured={} slot={} radio=off",
+                creds.ssid().len(),
+                u8::from(!creds.passphrase().is_empty()),
+                stores.wifi_slot()
+            ),
+        ),
+        Ok(None) => log.line(
+            "[WIFI] ",
+            format_args!("creds=none slot={} radio=off", stores.wifi_slot()),
+        ),
+        Err(error) => log.line(
+            "[WIFI] ",
+            format_args!(
+                "creds=none slot={} error={error} radio=off",
+                stores.wifi_slot()
+            ),
+        ),
+    }
+
     // The true random source: the SoC's RNG with the ADC's noise. Kept for
     // the life of the image; `Trng` refuses to exist without it.
     let _entropy = TrngSource::new(p.RNG, p.ADC1);
@@ -1752,7 +1887,15 @@ fn main() -> ! {
     let lcd_te: m9::LcdTe = p.GPIO19;
     let io = Io::new(p.IO_MUX);
     let _vext = Output::new(vext, Level::Low, OutputConfig::default());
-    let _lora_nss = Output::new(lora_nss, Level::High, OutputConfig::default());
+    let lora_nss = Output::new(lora_nss, Level::High, OutputConfig::default());
+    // The LR1110's other three nets (1478b): NRESET high, the chip out of
+    // reset; BUSY and IRQ read by the radio's task.
+    let lora_reset: m9::LoRaReset = p.GPIO45;
+    let lora_busy: m9::LoRaBusy = p.GPIO41;
+    let lora_irq: m9::LoRaIrq = p.GPIO42;
+    let lora_reset = Output::new(lora_reset, Level::High, OutputConfig::default());
+    let lora_busy = Input::new(lora_busy, InputConfig::default());
+    let lora_irq = Input::new(lora_irq, InputConfig::default());
     let _sd_cs = Output::new(sd_cs, Level::High, OutputConfig::default());
     let cs = Output::new(lcd_cs, Level::High, OutputConfig::default());
     let dc = Output::new(lcd_dc, Level::High, OutputConfig::default());
@@ -1766,9 +1909,9 @@ fn main() -> ! {
         log.line("[DISP] ", format_args!("state=down reason=dma-buffers"));
         halt_with_banner(&mut log, bytes);
     };
-    let spi_config = SpiConfig::default()
-        .with_frequency(Rate::from_mhz(m9::LCD_SPI_MHZ))
-        .with_mode(Mode::_0);
+    // The panel's clock is the bus's resting one; the radio switches to
+    // its own for each transaction and back (1478b).
+    let spi_config = m9_radio::config(m9_radio::CLOCKS.panel_hz);
     let Ok(spi) = Spi::new(p.SPI2, spi_config) else {
         log.line("[DISP] ", format_args!("state=down reason=spi-config"));
         halt_with_banner(&mut log, bytes);
@@ -1805,6 +1948,11 @@ fn main() -> ! {
         backlight,
         lit: false,
     };
+    // The panel holds SPI2 from here (1478b): its init and the splash
+    // run before the radio's task exists.
+    if !m9_radio::panel_start() {
+        log.line("[SPI] ", format_args!("SPI2 state=down reason=panel-start"));
+    }
     match panel.init(&mut rst, &delay) {
         Ok(()) => log.line(
             "[DISP] ",
@@ -2092,10 +2240,11 @@ fn main() -> ! {
     let shown = Shown {
         pairing: node.address().is_none().then(Pairing::new),
         word: node.word(),
+        way: node.way(uptime_ms()),
         fault: None,
         map: map::Overlay::default(),
         // The record's type (1532); a board without one shows the default.
-        overview: Overview::new(node.large_type().map_or(Size::DEFAULT, Size::of_large)),
+        overview: Overview::new(node.type_size().map_or(Size::DEFAULT, Size::of_record)),
     };
 
     // The seed the UI core draws client ids from (1493): entropy taken
@@ -2148,6 +2297,23 @@ fn main() -> ! {
     // flash again; the word is the state, the log has the detail.
     let mut faulted = false;
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
+    // The LR1110 (1478b): its boot probe, polled once a turn with the
+    // panel already on the UI core, and in the bench image a status read
+    // every 10 ms after it, the load the `[SPI]` numbers are taken under.
+    #[cfg(m9_bench)]
+    let radio_poll = Some(RADIO_POLL_MS);
+    #[cfg(not(m9_bench))]
+    let radio_poll = None;
+    let mut radio = m9_radio::RadioTask::new(
+        leviculum_lr11xx::Lr11xx::new(
+            m9_radio::RadioSpi::new(lora_nss),
+            lora_reset,
+            m9_radio::Polled(lora_busy),
+            m9_radio::Polled(lora_irq),
+            &LR1110,
+        ),
+        radio_poll,
+    );
     // Where the `[IDLE]` line's window began (1507).
     let mut idle_since = uptime_ms();
     let _ = leviculum_esp::idle::waited_us();
@@ -2190,6 +2356,25 @@ fn main() -> ! {
     loop {
         wdt.feed();
         stall::turned(Core::Io);
+        stall::stage(Core::Io, Stage::Radio);
+        radio.poll();
+        match radio.take_said() {
+            Some(m9_radio::Said::Ok(version)) => log.line(
+                "[LORA] ",
+                format_args!(
+                    "{}",
+                    loquax_m9::spi2::InitOk {
+                        hw: version.hw,
+                        fw: version.fw,
+                        phy: m9_radio::PHY,
+                    }
+                ),
+            ),
+            Some(m9_radio::Said::Failed { step, err }) => {
+                log.line("[LORA] ", format_args!("init failed step={step} err={err}"))
+            }
+            None => {}
+        }
         stall::stage(Core::Io, Stage::Host);
         let now = uptime_ms();
         let mut turn = Turn::default();
@@ -2205,6 +2390,18 @@ fn main() -> ! {
             log.set_stack_free(watch.free());
             log.set_ui_stack_free(ui_watch().map(|ui| ui.free()));
             log.say_rx_counts(true);
+            // SPI2 between the panel and the radio this window (1478b):
+            // the radio's longest wait for the bus, the panel's longest
+            // stand-aside (what its watchdog feeding sees of the radio).
+            let (polls, poll_errors) = radio.polls();
+            log.line(
+                "[SPI] ",
+                format_args!(
+                    "{} held_max_us={} polls={polls} poll_errors={poll_errors}",
+                    m9_radio::SPI2.take_window(),
+                    m9_radio::take_held_max_us()
+                ),
+            );
             // How much of the window each core waited (1507).
             let [io, ui] = leviculum_esp::idle::waited_us();
             let window_us = (now.saturating_sub(idle_since) * 1000).max(1);
@@ -2342,7 +2539,7 @@ fn main() -> ! {
                                 Ok(taken) => {
                                     if let Some(taken) = taken {
                                         to_ui(ToUi::Model(Box::new(taken)));
-                                        to_ui(ToUi::Word(node.word()));
+                                        to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                                     }
                                     envelope::encode_ack(envelope::TYPE_HOME_CODE)
                                 }
@@ -2419,7 +2616,7 @@ fn main() -> ! {
                         }
                         if let Some(model) = node.bench_reopen(&mut stores, &mut log, &feed) {
                             to_ui(ToUi::Model(Box::new(model)));
-                            to_ui(ToUi::Word(node.word()));
+                            to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                         }
                         log.line("[BENCH] ", format_args!("forget=reopened"));
                     }
@@ -2484,7 +2681,7 @@ fn main() -> ! {
             faulted = true;
             to_ui(ToUi::Fault(Some(StrId::M9NotSaved)));
         }
-        to_ui_word(node.word());
+        to_ui_word(node.word(), node.way(uptime_ms()));
 
         // What the UI core asked for. A dump's lines are timed apart
         // (1603): `turn.dump`, not the take.
@@ -2589,7 +2786,7 @@ fn main() -> ! {
                 FromUi::Gnss(wanted) => gnss_run.wanted = wanted,
                 FromUi::Type(size) => {
                     // The reader's type into the client record (1532).
-                    let kept = match node.keep_type(size.large(), &mut stores) {
+                    let kept = match node.keep_type(size.record(), &mut stores) {
                         Some(true) => "yes",
                         Some(false) => "no reason=write",
                         None => "no reason=no-record",
@@ -2604,7 +2801,7 @@ fn main() -> ! {
                     }) {
                         Ok(Some(taken)) => {
                             to_ui(ToUi::Model(Box::new(taken)));
-                            to_ui(ToUi::Word(node.word()));
+                            to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                         }
                         Ok(None) => {}
                         Err(CodeRefusal::Value) => {}
@@ -2682,11 +2879,16 @@ fn main() -> ! {
         turn.say(&mut log, node.entries());
         if core::mem::take(&mut first_turn) {
             log.set_lossy(true);
-        } else if !busy && KB_TICKING.load(Ordering::Acquire) {
+        } else if !busy
+            && KB_TICKING.load(Ordering::Acquire)
+            && !m9_radio::SPI2.radio_waits(leviculum_esp::uptime_us() as u32)
+        {
             // A quiet turn waits for the next interrupt (1507): the
             // keyboard's tick within 10 ms, the line's bytes, the send
             // FIFO running dry. A frame under the receive threshold waits
-            // for the tick, as it waited for the loop before.
+            // for the tick, as it waited for the loop before. A radio
+            // waiting for SPI2 keeps the loop turning (1478b): the panel
+            // stood aside for it and waits for its transaction.
             stall::stage(Core::Io, Stage::IoIdle);
             leviculum_esp::idle::wait(0);
         }
@@ -2695,14 +2897,15 @@ fn main() -> ! {
 
 /// The last word the UI core was told, so the queue carries changes, not
 /// a word per turn.
-fn to_ui_word(word: Option<Word>) {
-    static LAST: Mutex<RefCell<Option<Option<Word>>>> = Mutex::new(RefCell::new(None));
+fn to_ui_word(word: Option<Word>, way: Option<Way>) {
+    type Said = (Option<Word>, Option<Way>);
+    static LAST: Mutex<RefCell<Option<Said>>> = Mutex::new(RefCell::new(None));
     stall::locked(Core::Io, Lock::Word, || {
         critical_section::with(|cs| {
             let mut last = LAST.borrow_ref_mut(cs);
-            if last.as_ref() != Some(&word) {
-                *last = Some(word);
-                TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
+            if last.as_ref() != Some(&(word, way)) {
+                *last = Some((word, way));
+                TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word, way));
             }
         })
     });
@@ -3185,9 +3388,10 @@ fn ui_main(
                     dirty |= map::shown(&model);
                 }
                 ToUi::Sky(said) => sky = said,
-                ToUi::Word(word) => {
-                    if word != shown.word {
+                ToUi::Word(word, way) => {
+                    if word != shown.word || way != shown.way {
                         shown.word = word;
+                        shown.way = way;
                         dirty = true;
                     }
                 }
@@ -3230,6 +3434,7 @@ fn ui_main(
                         let fresh = Shown {
                             pairing: Some(Pairing::new()),
                             word: None,
+                            way: None,
                             fault: None,
                             map: map::Overlay::default(),
                             overview: Overview::default(),
@@ -3284,10 +3489,17 @@ fn ui_main(
                         // The `[UART]` line's `keys_ui=` (1612): this
                         // press reached a UI turn.
                         leviculum_esp::count_key_ui();
-                        // The house key and the open overview (1532);
-                        // the pairing has the keys while it shows.
+                        // The house key and its settings page (1532,
+                        // 1561); the pairing has the keys while it shows.
                         let took = match shown.pairing {
-                            None => shown.overview.press(key, ms),
+                            None => {
+                                let page = house::page(
+                                    &model,
+                                    shown.overview.size,
+                                    env!("CARGO_PKG_VERSION"),
+                                );
+                                shown.overview.press(key, &page)
+                            }
                             Some(_) => None,
                         };
                         if let Some(did) = took {
@@ -3371,9 +3583,6 @@ fn ui_main(
 
         let t_draw = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Draw);
-        // A house tap's gap, the switch's word (1532).
-        let did = shown.overview.tick(leviculum_esp::uptime_ms() as u32);
-        dirty |= switched(did, &mut model, &mut renderer, &mut log, &mut asked);
         dirty |= drawn.due(&model);
         // The map's words come and go by the clock (1531): a redraw when
         // they change, none while they stand.

@@ -47,7 +47,7 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
 )]
 #[command(group(
     clap::ArgGroup::new("port_user")
-        .args(["home", "region", "regions", "management_identity", "clear_management"])
+        .args(["home", "region", "regions", "management_identity", "clear_management", "wifi"])
         .multiple(false)
 ))]
 struct Cli {
@@ -536,7 +536,20 @@ struct Cli {
     #[arg(long, requires = "port")]
     regions: bool,
 
-    /// The serial port of the board --home, --region or --regions talks
+    /// Tell the ThinkNode M9 on --port which WLAN to join, then exit: the
+    /// network's name. The board joins it at boot and speaks Reticulum's
+    /// AutoInterface over it, so lnsd and Loquax in the same network see
+    /// it with nothing configured. Written through the ROM loader by
+    /// espflash; the board resets. Without it the board's WiFi stays off.
+    #[arg(long, value_name = "SSID", requires = "port")]
+    wifi: Option<String>,
+
+    /// The passphrase of the --wifi network; leave it out for an open
+    /// network. lnflash never prints it.
+    #[arg(long, value_name = "PASS", requires = "wifi", default_value = "")]
+    wifi_pass: String,
+
+    /// The serial port of the board --home, --region, --regions or --wifi talks
     /// to, such as /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the
     /// M9's CH340K. Opening it resets the board; the session waits for its
     /// boot.
@@ -840,6 +853,11 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     if let (false, Some(port)) = (cli.region.is_empty(), &cli.port) {
         let said = lnflash::maps::write(port, &cli.region)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let (Some(ssid), Some(port)) = (&cli.wifi, &cli.port) {
+        let said = lnflash::wifi::write(port, ssid, &cli.wifi_pass)?;
         ui.say(&said);
         return Ok(ExitCode::SUCCESS);
     }
@@ -1500,6 +1518,31 @@ mod tests {
             "/dev/ttyUSB0"
         ])
         .is_err());
+    }
+
+    /// 1479: `--wifi` names its port, takes an optional passphrase, and
+    /// goes alone like the other M9 writes.
+    #[test]
+    fn the_wifi_flag_needs_its_port_and_goes_alone() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--wifi", "Heimnetz"]).is_err());
+        assert!(parse(&["--wifi-pass", "geheimgeheim", "--port", "/dev/ttyUSB0"]).is_err());
+        let cli = parse(&[
+            "--wifi",
+            "Heimnetz",
+            "--wifi-pass",
+            "geheimgeheim",
+            "--port",
+            "/dev/ttyUSB0",
+        ])
+        .expect("wifi with a passphrase");
+        assert_eq!(cli.wifi.as_deref(), Some("Heimnetz"));
+        assert_eq!(cli.wifi_pass, "geheimgeheim");
+        let open = parse(&["--wifi", "cafe", "--port", "/dev/ttyUSB0"]).expect("open");
+        assert_eq!(open.wifi_pass, "");
+        assert!(parse(&["--wifi", "a", "--regions", "--port", "/dev/ttyUSB0"]).is_err());
     }
 
     fn plan(args: &[&str]) -> Result<RadioPlan, String> {

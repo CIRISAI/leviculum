@@ -530,7 +530,8 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         read_at: last
             .filter(|m| m.outbound)
             .and_then(|m| match shown(m.delivery, model) {
-                Some(DeliveryState::Read { at }) => Some(at),
+                // 0 is a read at no known time (1506): no time to say.
+                Some(DeliveryState::Read { at }) if at > 0 => Some(at),
                 _ => None,
             }),
         pinned: conversation.is_some_and(|c| c.pinned),
@@ -629,6 +630,11 @@ pub struct Bubble {
     /// A group's line that came after newer ones (1307 pass four, study
     /// 6.1): a screen says "arrived late" under it, so nobody misses it.
     pub late: bool,
+    /// How far its bytes have gone while they go (1662): ours only while
+    /// it still sends, one being fetched until it is whole. Boxed: a
+    /// bubble without one, nearly every bubble, pays a pointer (the M9's
+    /// heap census, `m9_scene_census`).
+    pub transfer: Option<alloc::boxed::Box<super::transfer::Transfer>>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -781,7 +787,7 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
                     .outbound
                     .then(|| Mark::of(shown(message.delivery, model))),
                 read_at: match shown(message.delivery, model) {
-                    Some(DeliveryState::Read { at }) if message.outbound => Some(at),
+                    Some(DeliveryState::Read { at }) if message.outbound && at > 0 => Some(at),
                     _ => None,
                 },
                 witness: match shown(message.delivery, model) {
@@ -810,9 +816,19 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
                 updates,
                 since,
                 liveness: liveness.filter(|_| newest_report == Some(m)),
-                photo: super::photos::photo_of(&message.fields),
+                // A picture sent as a file shows as a photo does (1662),
+                // its file's line under it.
+                photo: super::photos::picture_of(&message.fields),
                 files: super::files::files_of(&message.fields),
                 voice: super::voice::voice_of(&message.fields),
+                transfer: model
+                    .transfers
+                    .of(&conversation.peer, message.activity)
+                    .filter(|_| {
+                        !message.outbound
+                            || Mark::of(shown(message.delivery, model)) == Mark::Sending
+                    })
+                    .map(alloc::boxed::Box::new),
             };
             // A digest (1307 pass four): one bubble a line, under its
             // writer's name and at its writer's time, as if each had come
@@ -1270,6 +1286,7 @@ mod tests {
             invite: None,
             note: false,
             late: false,
+            transfer: None,
         }
     }
 

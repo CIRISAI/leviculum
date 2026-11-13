@@ -33,7 +33,7 @@ use leviculum_core::transport::dispatch_actions;
 use leviculum_core::{EmbeddedStorage, Identity, InterfaceMode, TickOutput};
 use loquax::home::ask::{Ask, HomeError, Outcome, Verb};
 use loquax::home::board::{
-    self, Batch, Executor, LinkClass, Progress, Reach, Report, Session, Word,
+    self, Batch, Executor, LinkClass, Medium, Progress, Reach, Report, Session, Way, Word,
 };
 use loquax::home::record::{Admission, ClientRecord};
 use loquax::home::wire::{Entry, Mark};
@@ -75,6 +75,17 @@ pub const PULL_BUDGET_MS: u64 = 300_000;
 /// How long one send may take: the ladder's first rungs and a link.
 pub const SEND_BUDGET_MS: u64 = 120_000;
 
+/// How often [`Handheld::way`] reads the path table: the bar's word moves
+/// with an ask's end, a second is well under any of them.
+pub const WAY_EVERY_MS: u64 = 1_000;
+
+/// The medium the bar names for the interface at `index` (1478): the host's
+/// serial line is a cable. Every other index is none until its interface
+/// joins the node and says what it is.
+pub fn medium_of(index: usize) -> Option<Medium> {
+    (index == SERIAL_IFACE.0).then_some(Medium::Cable)
+}
+
 /// The name the board joins its home under: what the phone's device list
 /// shows (`loquax_m9::pair::DEVICE_NAME`).
 pub const DEVICE_NAME: &str = "M9";
@@ -112,6 +123,10 @@ pub struct Handheld {
     pub serial: SerialIface,
     ifac: BTreeMap<usize, IfacConfig>,
     client: Option<Client>,
+    /// The way to the home as last read from the path table (1478), and
+    /// when: read at most every [`WAY_EVERY_MS`], not every turn, since a
+    /// read clones the path entry.
+    way: Option<(u64, Option<Way>)>,
     /// The bench's owe, armed and not fired yet (1540): its flags.
     #[cfg(m9_bench)]
     owe: Option<u8>,
@@ -124,6 +139,9 @@ struct Client {
     device: Identity,
     /// The home's LXMF address, which the board's model shows as its own.
     address: [u8; 16],
+    /// The home's destination, whose path says the way to it (1478);
+    /// none where the record's key makes none.
+    destination: Option<[u8; 16]>,
     batch: Batch,
     session: Session,
     exec: Option<Executor>,
@@ -213,6 +231,7 @@ impl Handheld {
             serial: SerialIface::new(),
             ifac: BTreeMap::new(),
             client: None,
+            way: None,
             #[cfg(m9_bench)]
             owe: None,
         };
@@ -424,10 +443,12 @@ impl Handheld {
                 if !outgoing.is_empty() {
                     session.hurry(crate::uptime_ms());
                 }
+                let destination = loquax::home::destination_hash(&record.home).ok();
                 self.client = Some(Client {
                     record,
                     device,
                     address,
+                    destination,
                     batch,
                     session,
                     exec: None,
@@ -462,24 +483,26 @@ impl Handheld {
             .map_or(0, |shelf| shelf.ring.entries())
     }
 
-    /// The reader's type size as the client record keeps it (1532): the
-    /// large one when its flag is set; none on a board that is no device
-    /// of a home, which has no record to keep it in.
-    pub fn large_type(&self) -> Option<bool> {
-        self.client.as_ref().map(|client| client.record.large_type)
+    /// The reader's type size as the client record keeps it (1532,
+    /// 1561): its two bits, which `loquax_m9::font::Size::of_record`
+    /// names; none on a board that is no device of a home, which has no
+    /// record to keep it in.
+    pub fn type_size(&self) -> Option<u8> {
+        self.client.as_ref().map(|client| client.record.type_size)
     }
 
-    /// Keep the reader's type size in the client record (1532), through
-    /// its two slots as a join's write. `Some(true)` kept, `Some(false)`
-    /// the write failed (counted unsaved, which the screen says), `None`
-    /// no record to keep it in. The record goes whole, with the cursor
-    /// it holds in memory, which the boot agrees with the store anyway.
-    pub fn keep_type(&mut self, large: bool, stores: &mut Stores<'_>) -> Option<bool> {
+    /// Keep the reader's type size in the client record (1532, 1561),
+    /// through its two slots as a join's write. `Some(true)` kept,
+    /// `Some(false)` the write failed (counted unsaved, which the screen
+    /// says), `None` no record to keep it in. The record goes whole, with
+    /// the cursor it holds in memory, which the boot agrees with the store
+    /// anyway.
+    pub fn keep_type(&mut self, size: u8, stores: &mut Stores<'_>) -> Option<bool> {
         let client = self.client.as_mut()?;
-        if client.record.large_type == large {
+        if client.record.type_size == size {
             return Some(true);
         }
-        client.record.large_type = large;
+        client.record.type_size = size;
         let saved = stores.save_client(&client.record).is_ok();
         if !saved {
             client.drained.unsaved += 1;
@@ -493,6 +516,31 @@ impl Handheld {
             let admitted = client.record.admitted();
             Word::of(&client.session, admitted, client.progress)
         })
+    }
+
+    /// The board's way to its home for the top bar (1478): the medium of
+    /// the interface its path leaves on and the path's hops, none where
+    /// the board holds no path or the interface is none the bar names.
+    /// Read from the path table at most every [`WAY_EVERY_MS`].
+    pub fn way(&mut self, now_ms: u64) -> Option<Way> {
+        if let Some((at, way)) = self.way {
+            if now_ms.saturating_sub(at) < WAY_EVERY_MS {
+                return way;
+            }
+        }
+        let way = self
+            .client
+            .as_ref()
+            .and_then(|client| client.destination)
+            .and_then(|destination| self.node.get_path_clone(&destination))
+            .and_then(|path| {
+                medium_of(path.interface_index).map(|medium| Way {
+                    medium,
+                    hops: path.hops,
+                })
+            });
+        self.way = Some((now_ms, way));
+        way
     }
 
     /// What a fold asked for (1493): every verb queued under a fresh id

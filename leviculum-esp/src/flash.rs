@@ -22,6 +22,7 @@ use esp_hal::peripherals::FLASH;
 use esp_storage::{FlashStorage, FlashStorageError};
 use leviculum_core::identity::Identity;
 use leviculum_core::identity_store::{self, ENCODED_SIZE_ALIGNED as IDENTITY_SIZE};
+use leviculum_core::wifi_credentials::{self, WifiCredentials};
 use loquax::home::board::store::{Sectors, SECTOR as STORE_SECTOR};
 use loquax::home::record::{slots, ClientRecord, RecordError};
 
@@ -154,6 +155,8 @@ pub const CLIENT_LABEL: &str = "loquax_client";
 pub const CLIENT_B_LABEL: &str = "loquax_client_b";
 /// The partition the message store lives in (1476).
 pub const MESSAGES_LABEL: &str = "messages";
+/// The partition the WLAN credentials live in (1479).
+pub const WIFI_LABEL: &str = "wifi";
 /// The partition the map regions `lnflash --region` wrote live in (1477),
 /// a `leviculum_map::area`.
 pub const REGIONS_LABEL: &str = "regions";
@@ -254,6 +257,8 @@ pub struct Stores<'d> {
     messages: Result<(u32, u32), NoRegion>,
     /// The map regions' area (1477): its offset and how many sectors.
     regions: Result<(u32, u32), NoRegion>,
+    /// The WLAN credentials (1479).
+    wifi: Slot,
 }
 
 impl<'d> Stores<'d> {
@@ -272,9 +277,10 @@ impl<'d> Stores<'d> {
         // for the op's whole window.
         let mut flash = unsafe { FlashStorage::new(flash).multicore_ignore() };
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
-        let (identity, client, client_b, messages, regions) =
+        let (identity, client, client_b, messages, regions, wifi) =
             match partitions::read_partition_table(&mut flash, &mut table.0) {
                 Err(_) => (
+                    Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
@@ -287,6 +293,7 @@ impl<'d> Stores<'d> {
                     let mut client_b = Err(NoRegion::NoEntry);
                     let mut messages = Err(NoRegion::NoEntry);
                     let mut regions = Err(NoRegion::NoEntry);
+                    let mut wifi = Err(NoRegion::NoEntry);
                     for entry in table.iter() {
                         let found = match entry.label_as_str() {
                             IDENTITY_LABEL => &mut identity,
@@ -294,6 +301,7 @@ impl<'d> Stores<'d> {
                             CLIENT_B_LABEL => &mut client_b,
                             MESSAGES_LABEL => &mut messages,
                             REGIONS_LABEL => &mut regions,
+                            WIFI_LABEL => &mut wifi,
                             _ => continue,
                         };
                         *found = if entry.raw_type() != TYPE_DATA {
@@ -312,6 +320,7 @@ impl<'d> Stores<'d> {
                         client_b.map(|(offset, _)| offset),
                         messages,
                         regions,
+                        wifi.map(|(offset, _)| offset),
                     )
                 }
             };
@@ -322,6 +331,7 @@ impl<'d> Stores<'d> {
             client_b: Slot(client_b),
             messages,
             regions,
+            wifi: Slot(wifi),
         }
     }
 
@@ -389,6 +399,20 @@ impl<'d> Stores<'d> {
     /// Where its second slot lives (1493).
     pub fn client_b_slot(&self) -> Slot {
         self.client_b
+    }
+
+    /// Where the WLAN credentials live (1479).
+    pub fn wifi_slot(&self) -> Slot {
+        self.wifi
+    }
+
+    /// The WLAN the board joins (1479): `None` where `lnflash --wifi`
+    /// wrote nothing, which keeps the WiFi radio off. Read only, the
+    /// board never writes it.
+    pub fn load_wifi(&mut self) -> Result<Option<WifiCredentials>, StoreError> {
+        let mut record = Aligned([0u8; wifi_credentials::RECORD_LEN]);
+        self.read(self.wifi, &mut record.0)?;
+        Ok(WifiCredentials::decode(&record.0))
     }
 
     /// Where the message store lives.

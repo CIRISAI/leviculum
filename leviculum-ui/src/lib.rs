@@ -42,6 +42,7 @@ pub mod input;
 pub mod keymap;
 pub mod link;
 pub mod pixel;
+pub mod read;
 pub mod scene;
 pub mod spinner;
 pub mod strings;

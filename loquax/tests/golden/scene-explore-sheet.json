@@ -6,6 +6,7 @@
   "explore": {
     "pages": {
       "address": null,
+      "as_of": null,
       "az": true,
       "empty": null,
       "groups": [
@@ -95,7 +96,7 @@
               },
               "seen": {
                 "args": [
-                  20
+                  5
                 ],
                 "key": "explore_seen_days"
               },
@@ -121,6 +122,26 @@
     },
     "rooms": {
       "hubs": [
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "99999999999999999999999999999999",
+          "name": {
+            "raw": "Werkstatt"
+          },
+          "seen": {
+            "args": [
+              1
+            ],
+            "key": "explore_seen_minutes"
+          },
+          "value": {
+            "args": [
+              3
+            ],
+            "key": "rooms_hub_hops"
+          }
+        },
         {
           "chosen": false,
           "cursor": false,
@@ -250,26 +271,6 @@
             "key": "explore_not_seen"
           },
           "value": null
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "99999999999999999999999999999999",
-          "name": {
-            "raw": "Werkstatt"
-          },
-          "seen": {
-            "args": [
-              1
-            ],
-            "key": "explore_seen_minutes"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
         }
       ],
       "joined": [],
@@ -278,6 +279,7 @@
         "args": [],
         "key": "explore_no_joined"
       },
+      "open_rooms": null,
       "servers_empty": null,
       "servers_title": {
         "args": [],
@@ -313,6 +315,7 @@
         "args": [],
         "key": "rooms_no_name"
       },
+      "open_rooms": null,
       "rooms": [],
       "rooms_note": {
         "args": [],

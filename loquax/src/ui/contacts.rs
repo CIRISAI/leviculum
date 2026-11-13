@@ -228,8 +228,7 @@ impl<B> UiModel<B> {
         if self.home_client {
             // Owed until the home node takes it (1635): kept in the store,
             // handed again after a restart.
-            self.owed_petnames.insert(peer, petname);
-            self.owed_petnames_changed = true;
+            self.owed_petnames.set(peer, petname);
         }
         let label = self.names.label(&peer, self.lang);
         let text = match cleared {
@@ -262,18 +261,8 @@ impl<B> UiModel<B> {
         at: i64,
     ) -> Vec<UiEffect> {
         let petname = petname.as_deref().and_then(names::sanitise);
-        if let Some(owed) = self.owed_petnames.get(&peer) {
-            if *owed == petname {
-                self.owed_petnames.remove(&peer);
-                self.owed_petnames_changed = true;
-            }
+        if !self.owed_petnames.pulled(&peer, &petname, at) {
             return Vec::new();
-        }
-        if let Some((taken, taken_at)) = self.taken_petnames.get(&peer) {
-            if *taken == petname || at <= *taken_at {
-                return Vec::new();
-            }
-            self.taken_petnames.remove(&peer);
         }
         let mut contact = self.names.contacts.of(&peer);
         if contact.petname == petname {
@@ -289,14 +278,7 @@ impl<B> UiModel<B> {
     /// the home takes a peer's names in the order they were set (1635):
     /// two hands at once could reach it the other way round.
     pub fn take_petnames(&mut self) -> Vec<([u8; 16], Option<String>)> {
-        if self.petnames_in_flight || self.owed_petnames.is_empty() {
-            return Vec::new();
-        }
-        self.petnames_in_flight = true;
-        self.owed_petnames
-            .iter()
-            .map(|(peer, petname)| (*peer, petname.clone()))
-            .collect()
+        self.owed_petnames.take()
     }
 
     /// A hand ended (1635): what the home took is owed no more, unless the
@@ -304,33 +286,15 @@ impl<B> UiModel<B> {
     /// older entries until the next pull ends. What it did not take goes
     /// with the next hand.
     pub(super) fn petnames_handed(&mut self, taken: Vec<([u8; 16], Option<String>)>) {
-        self.petnames_in_flight = false;
         let now = self.now.map_or(0, |at| at.unix_secs);
-        for (peer, petname) in taken {
-            if self.owed_petnames.get(&peer) == Some(&petname) {
-                self.owed_petnames.remove(&peer);
-                self.owed_petnames_changed = true;
-                self.taken_petnames.insert(peer, (petname, now));
-            }
-        }
+        self.owed_petnames.handed(taken, now);
     }
 
     /// The petnames the store kept as owed (1635), at the start: handed
     /// again with the first hand, and the reader's word over what the
     /// first pull brings.
     pub fn restore_owed_petnames(&mut self, owed: BTreeMap<[u8; 16], Option<String>>) {
-        self.owed_petnames = owed;
-        self.taken_petnames.clear();
-        self.petnames_in_flight = false;
-        self.owed_petnames_changed = false;
-    }
-
-    /// The owed petnames whole, when they changed since the last call,
-    /// for the store to keep in place of what it kept.
-    pub(super) fn take_owed_petnames_changed(
-        &mut self,
-    ) -> Option<BTreeMap<[u8; 16], Option<String>>> {
-        core::mem::take(&mut self.owed_petnames_changed).then(|| self.owed_petnames.clone())
+        self.owed_petnames.restore(owed);
     }
 }
 

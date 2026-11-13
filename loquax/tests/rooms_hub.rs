@@ -133,6 +133,14 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
             body_limit: 350
         }
     );
+    // Its rooms without a name typed (1652): `/list` after the WELCOME,
+    // the answer's names as the hub spells them, nothing else told.
+    assert_eq!(
+        next(&mut link.told, 10).await,
+        Told::Listed {
+            rooms: vec!["general chat".into(), "lab".into()]
+        }
+    );
 
     // The hub's PING right after WELCOME is answered on the link and
     // tells the Rooms nothing: wait for the hub to have the PONG, so the
@@ -227,15 +235,25 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
             "the link was identified with the reader's identity"
         );
         let kinds: Vec<Kind> = seen.envelopes.iter().map(|e| e.kind).collect();
-        // One HELLO (welcomed at once), the PONG, JOIN, the one line that
-        // went, PART: the refused line never reached the hub.
+        // One HELLO (welcomed at once), `/list` (1652), the PONG, JOIN,
+        // the one line that went, PART: the refused line never reached
+        // the hub.
         assert_eq!(
             kinds,
-            [Kind::Hello, Kind::Pong, Kind::Join, Kind::Msg, Kind::Part]
+            [
+                Kind::Hello,
+                Kind::Msg,
+                Kind::Pong,
+                Kind::Join,
+                Kind::Msg,
+                Kind::Part
+            ]
         );
+        assert_eq!(seen.envelopes[1].room, None, "a command names no room");
+        assert_eq!(seen.envelopes[1].text(), Some("/list"));
         let ping = Envelope::decode(&vector("ping_down")).expect("ping");
         assert_eq!(
-            seen.envelopes[1].body, ping.body,
+            seen.envelopes[2].body, ping.body,
             "the PONG hands the PING's body back"
         );
         assert!(seen
@@ -278,4 +296,129 @@ async fn a_hub_without_a_path_is_given_up() {
     tap.abort();
     drop(node);
     daemon.stop().await.expect("stop the daemon");
+}
+
+/// 1643, item 6: a mailbox that heard a hub asks it for its rooms (a
+/// question of its own, the throwaway identity the sheet's question uses),
+/// keeps them with the hub's archive entry, and a device that pulled the
+/// entry lists them on the hub's sheet the moment it opens, before it
+/// asked anything over a link of its own. Control: the entry the mailbox
+/// kept before the answer carried no rooms, and a device that pulled only
+/// that one opens the sheet empty.
+#[cfg(feature = "history")]
+#[tokio::test]
+async fn a_mailbox_asks_a_heard_hub_for_its_rooms_and_the_sheet_lists_them_before_any_link() {
+    use loquax::home::hub_rooms::{Answered, Lister};
+    use loquax::ui::explore::ExploreEvent;
+    let (_daemon, _daemon_storage, instance, tcp) = daemon().await;
+    let hub = Hub::start(tcp).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mailbox_dir = tempfile::tempdir().expect("the mailbox's store");
+    let mut store = loquax::store::Store::open_in(mailbox_dir.path(), [0x11; 16]).expect("store");
+    let heard = loquax::ui::hubs::HeardHub {
+        hash: hub.dest,
+        name: Some("periculum".into()),
+        hops: Some(1),
+        first: 1_800_000_000,
+        last: 1_800_000_000,
+        answered: None,
+    };
+    store.archive_hub(&heard, u64::MAX).expect("heard");
+    let before = hub_entry(&store);
+    assert_eq!(before.1, None, "no rooms before the answer");
+
+    let host_storage = tempfile::tempdir().expect("host storage");
+    let (_node, lent, _tap, _end) = host(&instance, &host_storage).await;
+    let (lends, lends_rx) = tokio::sync::mpsc::unbounded_channel();
+    lends.send(lent).expect("lend");
+    let mut lister = Lister::over(lends_rx);
+    assert!(lister.heard(hub.dest, 1_800_000_000));
+    assert!(!lister.heard(hub.dest, 1_800_000_060), "once an hour");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let answered = loop {
+        let answers = lister.take(&mut store, u64::MAX);
+        if let Some(answer) = answers.into_iter().next() {
+            break answer;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the hub never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let Answered::Rooms {
+        hub: asked,
+        rooms,
+        seq,
+    } = answered
+    else {
+        panic!("the hub answered: {answered:?}");
+    };
+    assert_eq!(asked, hub.dest);
+    assert!(seq.is_some(), "kept with the hub's entry");
+    for room in ["general chat", "lab"] {
+        assert!(rooms.iter().any(|r| r == room), "{room} in {rooms:?}");
+    }
+    assert!(
+        hub.seen
+            .lock()
+            .expect("seen")
+            .envelopes
+            .iter()
+            .any(|e| e.text() == Some("/list")),
+        "the question was /list"
+    );
+    let after = hub_entry(&store);
+    assert_eq!(after.1.as_deref(), Some(rooms.as_slice()));
+
+    // The device: the pulled hub and its rooms, as the pull hands them on.
+    let sheet = |entry: &(loquax::ui::hubs::HeardHub, Option<Vec<String>>)| {
+        let mut model = loquax::ui::UiModel::<leviculum_ui::input::Line>::new(&[]);
+        update_engine(
+            &mut model,
+            loquax::outbox::OutboxEvent::HubAnnounced {
+                hub: entry.0.clone(),
+            },
+        );
+        if let Some(rooms) = &entry.1 {
+            update_engine(
+                &mut model,
+                loquax::outbox::OutboxEvent::HubRooms {
+                    hub: entry.0.hash,
+                    rooms: rooms.clone(),
+                },
+            );
+        }
+        loquax::ui::update(
+            &mut model,
+            loquax::ui::UiEvent::Explore(ExploreEvent::Hub(entry.0.hash)),
+        );
+        loquax::ui::explore::node(&model)
+            .sheet
+            .expect("the sheet")
+            .rooms
+    };
+    assert_eq!(sheet(&after), rooms, "listed before any link");
+    assert!(sheet(&before).is_empty(), "the control: nothing to list");
+}
+
+#[cfg(feature = "history")]
+fn update_engine(
+    model: &mut loquax::ui::UiModel<leviculum_ui::input::Line>,
+    event: loquax::outbox::OutboxEvent,
+) {
+    loquax::ui::update(model, loquax::ui::UiEvent::Engine(event));
+}
+
+/// The newest hub entry the mailbox's archive keeps, with its rooms.
+#[cfg(feature = "history")]
+fn hub_entry(store: &loquax::store::Store) -> (loquax::ui::hubs::HeardHub, Option<Vec<String>>) {
+    let page = store.archive_since(0, usize::MAX).expect("the archive");
+    let entry = page
+        .entries
+        .iter()
+        .rfind(|e| e.kind == loquax::home::KIND_HUB)
+        .expect("a hub entry");
+    loquax::home::wire::read_hub_entry_rooms(&entry.packed).expect("a hub entry")
 }

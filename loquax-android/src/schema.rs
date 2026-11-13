@@ -292,6 +292,17 @@ pub enum Request {
         target: String,
         body: String,
     },
+    /// Replied with `body` from the notification of `peer`'s messages
+    /// (1506, the notification's inline reply): `key` is the row's
+    /// [`ConversationRow::notice_key`] the notification was posted with.
+    /// Every message up to it is read and its read receipt rides on the
+    /// reply; a message that came later stays unread.
+    #[serde(rename = "noticereply")]
+    NoticeReply {
+        peer: String,
+        key: i64,
+        body: String,
+    },
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
     Forward {
@@ -506,7 +517,8 @@ pub enum Request {
     /// node's resource: `link_3`, `field_1`, `place_0`, `name_2`,
     /// `address`), `go` with the address field's `text`, `fill` with a
     /// field's `node` and `text`, `scroll` with `text` `up`, `down`,
-    /// `pageup`, `pagedown`, `top` or `bottom`, and `size` with the page
+    /// `pageup`, `pagedown`, `top` or `bottom`, `at` with the top line
+    /// the native scroll shows in `text` (1650), and `size` with the page
     /// view's `cols` and `rows` in cells.
     Browse {
         verb: String,
@@ -1779,6 +1791,11 @@ pub struct ConversationRow {
     pub group_words: String,
     #[serde(default)]
     pub group_invited: bool,
+    /// The newest received message's key ([`MessageRow::key`]), what a
+    /// notification of this row shows (1506): its inline reply sends it
+    /// back in [`Request::NoticeReply`]. Absent without one.
+    #[serde(default)]
+    pub notice_key: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1925,6 +1942,13 @@ pub struct MessageRow {
     /// asks [`Query::SaveFile`] with its place.
     #[serde(default)]
     pub files: Vec<FileRow>,
+    /// Its photo's or files' bytes under way (1662): the words the
+    /// bubble shows under its media, "wird gesendet · 43 %", and the bar's
+    /// 0 to 100; empty and 0 while nothing goes.
+    #[serde(default)]
+    pub progress_words: String,
+    #[serde(default)]
+    pub progress_percent: u32,
     /// The voice message it carries (1222), else 0 and empty: the
     /// sender's audio mode, its length in ms and as `0:07`, the level bar
     /// (32 heights 0 to 100, empty for an even bar), whether this build
@@ -2223,13 +2247,28 @@ pub struct BrowseScreen {
     pub loading_words: String,
     /// The page: the window's lines, the line it starts at, how many the
     /// page has, and the focused node's resource (`link_2`, `field_1`) or
-    /// empty.
+    /// empty. Since 1650 the window is the whole page up to
+    /// [`crate::browser::WHOLE_PAGE`] lines, which the phone scrolls
+    /// natively; only a longer page comes as a window, and only then are
+    /// `first` and `total` apart and the paging arrows shown.
     #[serde(default)]
     pub lines: Vec<BrowseLine>,
     pub first: u32,
     pub total: u32,
     #[serde(default)]
     pub focus: String,
+    /// The page line the reader's view starts at (1650), absolute like
+    /// `first`: the browser's scroll, which Java reports back with the
+    /// verb `at` as the finger moves it. When the browser moves it itself
+    /// (a new page, an anchor, Back to a cached page, the arrows) Java
+    /// scrolls its view to it.
+    #[serde(default)]
+    pub at: u32,
+    /// The page's form fields (1650), for the platform's editor: a text
+    /// field opens a dialog with its value, a checkbox or a radio is
+    /// toggled by `activate` alone.
+    #[serde(default)]
+    pub fields: Vec<BrowseField>,
     /// The places panel or the name results, while open: its title and
     /// rows.
     #[serde(default)]
@@ -2257,6 +2296,28 @@ pub struct BrowseAction {
     pub verb: String,
     pub label: String,
     pub enabled: bool,
+}
+
+/// A form field of [`BrowseScreen`]'s page (1650).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseField {
+    /// Its node's resource, as its runs carry it (`field_1`).
+    pub node: String,
+    /// `text`, `checkbox` or `radio`.
+    pub kind: String,
+    /// A text field that hides what is typed (a password).
+    #[serde(default)]
+    pub masked: bool,
+    /// A text field's current text; a checkbox's or radio's value.
+    #[serde(default)]
+    pub value: String,
+    /// What the field is called on the page: a checkbox's or radio's
+    /// label, a text field's name.
+    #[serde(default)]
+    pub label: String,
+    /// A checkbox or radio is ticked.
+    #[serde(default)]
+    pub checked: bool,
 }
 
 /// One line of [`BrowseScreen`]'s page.
@@ -2364,6 +2425,23 @@ pub struct RoomsScreen {
     /// With no room open, where the room would be: how to join one.
     #[serde(default)]
     pub empty: String,
+    /// Under the state while the link is neither up nor coming (1652):
+    /// "Connect" or "Try again"; a tap sends the `retry` verb. Empty
+    /// otherwise.
+    #[serde(default)]
+    pub retry: String,
+    /// The rooms the hub names, with no room open (1652): "Rooms on
+    /// ShadowLink" over them, a tap sends `join` with the name; the note
+    /// while they are asked or when it names none; "Join another room"
+    /// over the field once there are rows.
+    #[serde(default)]
+    pub listed_title: String,
+    #[serde(default)]
+    pub listed: Vec<String>,
+    #[serde(default)]
+    pub listed_note: String,
+    #[serde(default)]
+    pub other: String,
 }
 
 /// What [`Query::Explore`] answers (1578): the Explore tab
@@ -2403,6 +2481,10 @@ pub struct ExploreScreen {
     /// The one sentence where pages cannot be opened on this device.
     #[serde(default)]
     pub pages_off: String,
+    /// How old the mailbox's list is (1644): "As of 3 h ago", "Not
+    /// connected · as of yesterday 14:20"; empty while it is fresh.
+    #[serde(default)]
+    pub as_of: String,
     /// "Rooms" (1621): the rooms the reader is in, or the one sentence
     /// that there is none.
     #[serde(default)]
@@ -2411,6 +2493,10 @@ pub struct ExploreScreen {
     pub joined: Vec<RoomsRow>,
     #[serde(default)]
     pub joined_empty: String,
+    /// "Räume öffnen" while a server is in use (1655): a tap is the
+    /// `rooms` verb, its rooms screen without joining. Empty otherwise.
+    #[serde(default)]
+    pub open_rooms: String,
     /// "Servers": the servers Loquax ships, the reader's own and those
     /// heard on the mesh, in one list, or the one sentence that there is
     /// none (in a search: none matches).
@@ -2447,6 +2533,18 @@ pub struct ExploreScreen {
     /// The one sentence about them: asking, no answer, or none named.
     #[serde(default)]
     pub sheet_rooms_note: String,
+    /// "Erneut versuchen" once the server gave no answer, or none in
+    /// 20 s (1653); a tap is the `ask` verb. Empty otherwise.
+    #[serde(default)]
+    pub sheet_retry: String,
+    /// The question is out: the pane draws again within a second, so the
+    /// sentence turns at its time (1653).
+    #[serde(default)]
+    pub sheet_asking: bool,
+    /// "Räume öffnen" on the sheet of the server in use (1655): the
+    /// `rooms` verb. Empty on any other sheet.
+    #[serde(default)]
+    pub sheet_open_rooms: String,
     #[serde(default)]
     pub sheet_close: String,
 }

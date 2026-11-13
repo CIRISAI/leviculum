@@ -313,6 +313,10 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// The resource progress last said of each tracked message
+    /// ([`OutboxEvent::Progress`], 1662), as the router's outbound entry
+    /// holds it.
+    progress: BTreeMap<[u8; 32], u16>,
     /// Why the last failed attempt of a tracked message failed, for its
     /// [`OutboxEvent::Left`] (1330).
     failures: BTreeMap<[u8; 32], AttemptFailure>,
@@ -373,6 +377,7 @@ impl Engine {
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
             failures: BTreeMap::new(),
+            progress: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
@@ -534,6 +539,30 @@ impl Engine {
                 out.events.push(event);
             }
         }
+        self.say_progress(ready);
+    }
+
+    /// Each tracked message whose resource moved since it was last said
+    /// (1662): the router keeps the share in its outbound entry and
+    /// reports no event of it.
+    fn say_progress(&mut self, ready: &Ready) {
+        let outbound = ready.router.outbound();
+        let tracked = &self.tracked;
+        self.progress
+            .retain(|id, _| tracked.contains_key(id) && outbound.contains_key(id));
+        let moved: Vec<([u8; 32], u16)> = outbound
+            .iter()
+            .filter(|(id, _)| tracked.contains_key(*id))
+            .map(|(id, entry)| (*id, crate::ui::transfer::Transfer::permille(entry.progress)))
+            .filter(|(id, permille)| *permille > 0 && self.progress.get(id) != Some(permille))
+            .collect();
+        for (message_id, permille) in moved {
+            self.progress.insert(message_id, permille);
+            self.emit(OutboxEvent::Progress {
+                message_id,
+                permille,
+            });
+        }
     }
 
     /// Turn one router event into something the frontend can act on.
@@ -628,9 +657,27 @@ impl Engine {
                 path_response,
             } => {
                 let destination = destination.into_bytes();
+                let name = announce.display_name();
+                // For a home's devices (1643): the name with the hearing's
+                // time and hops, which `Announced` does not carry. Only a
+                // home keeps it; every other host passes it by.
+                if let Some(name) = &name {
+                    let at = core.emission_secs();
+                    self.emit(OutboxEvent::NameHeard {
+                        row: crate::home::pages::NameRow {
+                            address: destination,
+                            name: name.clone(),
+                            first_seen: at,
+                            last_seen: at,
+                            hops: core
+                                .hops_to(&leviculum_core::DestinationHash::new(destination))
+                                .map(u32::from),
+                        },
+                    });
+                }
                 self.emit(OutboxEvent::Announced {
                     destination,
-                    name: announce.display_name(),
+                    name,
                     path_response: path_response || self.replayed == Some(destination),
                 });
             }
@@ -769,6 +816,7 @@ impl Engine {
                 | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
                 | Command::HomeHub { .. }
+                | Command::HomeHubRooms { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
             }
@@ -1007,6 +1055,9 @@ impl Engine {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }
                 Command::HomeHub { hub } => self.emit(OutboxEvent::HubAnnounced { hub }),
+                Command::HomeHubRooms { hub, rooms } => {
+                    self.emit(OutboxEvent::HubRooms { hub, rooms })
+                }
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
@@ -1021,9 +1072,15 @@ impl Engine {
                     petname,
                     at,
                 }),
-                Command::HomePeerState { destination, state } => {
-                    self.emit(OutboxEvent::HomePeerState { destination, state })
-                }
+                Command::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                } => self.emit(OutboxEvent::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"
@@ -2473,6 +2530,64 @@ mod tests {
             &announce_bytes(&other, "nomadnetwork", &["other"], b"x"),
         );
         assert!(pages(&events).is_empty(), "another aspect: {events:?}");
+    }
+
+    /// 1643: a peer's `lxmf.delivery` announce with a name reaches the
+    /// seam as a name row with the hearing's time and hops, beside the
+    /// `Announced` that names it here; the control: a nameless announce is
+    /// no row, though it is still `Announced`.
+    #[test]
+    fn a_named_delivery_announce_reaches_the_seam_as_a_name_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let rows = |events: &[OutboxEvent]| -> Vec<crate::home::pages::NameRow> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::NameHeard { row } => Some(row.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let announced = |events: &[OutboxEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, OutboxEvent::Announced { .. }))
+                .count()
+        };
+        let peer = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(Some(b"Kaja"), None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&peer, "lxmf", &["delivery"], &app_data),
+        );
+        let heard = rows(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(announced(&events), 1);
+        assert_eq!(heard[0].address, delivery_address(&peer).expect("address"));
+        assert_eq!(heard[0].name, "Kaja");
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert!(heard[0].last_seen > 0 && heard[0].first_seen == heard[0].last_seen);
+        let nameless = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(None, None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&nameless, "lxmf", &["delivery"], &app_data),
+        );
+        assert!(rows(&events).is_empty(), "no name, no row: {events:?}");
+        assert_eq!(announced(&events), 1);
     }
 
     /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,

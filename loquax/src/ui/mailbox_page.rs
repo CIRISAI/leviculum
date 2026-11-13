@@ -123,6 +123,48 @@ pub fn span(secs: i64) -> Text {
     }
 }
 
+/// A build's words and its commit: `0.1.8 (1aa683db…)` is `0.1.8` and the
+/// commit; a version without the parenthesis has no commit.
+fn split_version(version: &str) -> (&str, Option<&str>) {
+    let version = version.trim();
+    match version.split_once(" (") {
+        Some((words, rest)) => (words.trim(), Some(rest.trim_end_matches(')').trim())),
+        None => (version, None),
+    }
+}
+
+/// The numbers of a version's words, `0.1.8-nightly.x` as `[0, 1, 8]`;
+/// `None` when they do not read as numbers.
+fn version_numbers(words: &str) -> Option<Vec<u64>> {
+    let core = words.split(['-', '+']).next().unwrap_or(words);
+    core.split('.').map(|n| n.parse().ok()).collect()
+}
+
+/// The mailbox's version as the page says it (1647, walk 6, finding 30):
+/// the words only, never a commit (`feedback_no_hashes_on_screen`), and
+/// how they stand to this device's: "0.1.9, newer", "0.1.7, older", and
+/// "0.1.8-nightly.1, another build" where the words differ and do not
+/// read as numbers. Where the words agree it says them alone, whatever the
+/// commits (1669, walk 12, finding 66: "0.1.9, anderer Stand" read as a
+/// problem nobody could act on). The commits are in the phone's log line
+/// (`HOME_ABOUT`).
+pub fn version_said(theirs: &str, ours: &str) -> Text {
+    let (words, _) = split_version(theirs);
+    let (our_words, _) = split_version(ours);
+    let said = |id| Text::Key(id, Vec::from([Arg::Str(String::from(words))]));
+    if ours.trim().is_empty() {
+        return Text::Raw(String::from(words));
+    }
+    if words == our_words {
+        return Text::Raw(String::from(words));
+    }
+    match (version_numbers(words), version_numbers(our_words)) {
+        (Some(a), Some(b)) if a > b => said(StrId::MailboxVersionNewer),
+        (Some(a), Some(b)) if a < b => said(StrId::MailboxVersionOlder),
+        _ => said(StrId::MailboxVersionBuild),
+    }
+}
+
 /// The server and port of `entry` (`host:port`, `[v6]:port`).
 fn split_entry(entry: &str) -> Option<(&str, u16)> {
     let (host, port) = entry.rsplit_once(':')?;
@@ -132,9 +174,22 @@ fn split_entry(entry: &str) -> Option<(&str, u16)> {
 
 /// The connection's lines: up or down since when, the last contact, the
 /// way and what it means.
-fn reach_lines(reach: &Reach, now: Option<i64>) -> Vec<Line> {
+///
+/// "Connected for" counts the link to the mailbox (1647, walk 6, finding
+/// 37): the shell's `since` is the watching link's, and no earlier than
+/// the mailbox's own start (`/about`'s `started`), so a mailbox restarted
+/// under a transport that stayed up says "less than a minute". The way
+/// names the mailbox's machine where it says one, else the server; a port
+/// only where it is neither the shielded nor the ordinary one (finding 33).
+fn reach_lines(reach: &Reach, now: Option<i64>, about: Option<&About>) -> Vec<Line> {
     let mut lines = Vec::new();
-    let since = reach.since.zip(now).map(|(at, now)| now.saturating_sub(at));
+    let started = about.and_then(|a| a.started);
+    let since = match (reach.up, reach.since, started) {
+        (Some(true), Some(at), Some(started)) => Some(at.max(started)),
+        (Some(true), None, Some(started)) => Some(started),
+        (_, at, _) => at,
+    };
+    let since = since.zip(now).map(|(at, now)| now.saturating_sub(at));
     let state = match (reach.up, since) {
         (Some(true), Some(secs)) => Text::Key(
             StrId::MailboxUpFor,
@@ -145,7 +200,7 @@ fn reach_lines(reach: &Reach, now: Option<i64>) -> Vec<Line> {
             StrId::MailboxDownFor,
             Vec::from([Arg::Text(Box::new(span(secs)))]),
         ),
-        (Some(false) | None, _) => Text::key(StrId::MailboxDown),
+        (Some(false) | None, _) => Text::key(StrId::MailboxDownHere),
     };
     lines.push(line(state, None));
     let contact = match (reach.last_contact, now) {
@@ -154,11 +209,15 @@ fn reach_lines(reach: &Reach, now: Option<i64>) -> Vec<Line> {
     };
     lines.push(line(Text::key(StrId::MailboxContact), Some(contact)));
     match reach.entry.as_deref().and_then(split_entry) {
-        Some((host, port)) => {
-            let (way, explained) = match port {
-                ACCESS_POINT_PORT => (StrId::MailboxWayShielded, Some(StrId::MailboxShieldedText)),
-                PEER_PORT => (StrId::MailboxWayOpen, Some(StrId::MailboxOpenText)),
-                _ => (StrId::MailboxWayOther, None),
+        Some((server, port)) => {
+            let host = about
+                .map(|a| a.host.trim())
+                .filter(|h| !h.is_empty())
+                .unwrap_or(server);
+            let way = match port {
+                ACCESS_POINT_PORT => StrId::MailboxWayShielded,
+                PEER_PORT => StrId::MailboxWayOpen,
+                _ => StrId::MailboxWayOther,
             };
             lines.push(line(
                 Text::Key(
@@ -167,7 +226,6 @@ fn reach_lines(reach: &Reach, now: Option<i64>) -> Vec<Line> {
                 ),
                 None,
             ));
-            lines.extend(explained.map(note));
         }
         None => lines.push(line(
             Text::key(match reach.dials {
@@ -180,8 +238,26 @@ fn reach_lines(reach: &Reach, now: Option<i64>) -> Vec<Line> {
     lines
 }
 
+/// The line of this device: its name and "this device", or "This device"
+/// alone where it has no name (1647, walk 6, finding 34: "Dieses Gerät:
+/// dieses Gerät").
+fn this_device(name: &str) -> Line {
+    match name.trim() {
+        "" => line(Text::key(StrId::ProfileThisDeviceUnnamed), None),
+        name => line(
+            Text::Raw(String::from(name)),
+            Some(Text::key(StrId::MailboxThisDevice)),
+        ),
+    }
+}
+
 /// The devices' lines: each the mailbox admitted, by name, with when it was
 /// last there, this one said as such; or why there is no list.
+///
+/// A device the mailbox has not heard since it began keeping the time
+/// (`last_seen` NULL, schema 20, 1647) says "never connected yet": a row
+/// with no second line read as broken (walk 11, finding 57, 1667). Its
+/// first request gives it a time.
 fn access_lines(
     told: &Told,
     this: Option<[u8; 16]>,
@@ -192,17 +268,28 @@ fn access_lines(
     match told {
         Told::Told(about) => {
             for device in &about.devices {
+                if this == Some(device.device) {
+                    lines.push(this_device(&device.name));
+                    continue;
+                }
                 let name = match device.name.trim() {
                     "" => Text::key(StrId::ProfileDeviceUnnamed),
                     name => Text::Raw(String::from(name)),
                 };
-                let value = match (this == Some(device.device), device.last_seen, now) {
-                    (true, _, _) => Text::key(StrId::MailboxThisDevice),
-                    (false, Some(at), Some(now)) => Text::Key(
+                let value = match (device.last_seen, now) {
+                    (Some(at), Some(now)) => Text::Key(
                         StrId::MailboxSeen,
                         Vec::from([Arg::Text(Box::new(ago(now.saturating_sub(at))))]),
                     ),
-                    (false, _, _) => Text::key(StrId::MailboxSeenNone),
+                    // Walk 11, finding 57: a row without a second line
+                    // read as broken. A device the mailbox never heard
+                    // since it keeps the time says so (1667).
+                    (None, _) => Text::key(StrId::MailboxSeenNever),
+                    // No clock here: say nothing rather than guess.
+                    (Some(_), None) => {
+                        lines.push(line(name, None));
+                        continue;
+                    }
                 };
                 lines.push(line(name, Some(value)));
             }
@@ -210,11 +297,7 @@ fn access_lines(
         Told::NotYet | Told::Older => {
             // What this device knows on its own: itself.
             for device in own.iter().filter(|d| d.this) {
-                let name = match device.name.trim() {
-                    "" => Text::key(StrId::ProfileThisDeviceUnnamed),
-                    name => Text::Raw(String::from(name)),
-                };
-                lines.push(line(name, Some(Text::key(StrId::MailboxThisDevice))));
+                lines.push(this_device(&device.name));
             }
             lines.push(note(match told {
                 Told::Older => StrId::MailboxDevicesOld,
@@ -278,6 +361,8 @@ pub fn page<B>(model: &UiModel<B>) -> MailboxPage {
         copy: Some(hex.clone()),
         ..line(Text::key(StrId::MailboxAddress), Some(Text::Raw(hex)))
     });
+    // The mailbox's address is the reader's own (1647, walk 6, finding 32).
+    which.push(note(StrId::MailboxAddressOwn));
     if let Some(host) = about.map(|a| a.host.trim()).filter(|h| !h.is_empty()) {
         which.push(line(
             Text::key(StrId::MailboxHost),
@@ -286,14 +371,7 @@ pub fn page<B>(model: &UiModel<B>) -> MailboxPage {
     }
     match &facts.told {
         Told::Told(about) => {
-            let ours = facts.version.as_str();
-            let value = match about.version.as_str() {
-                theirs if ours.is_empty() || theirs == ours => Text::Raw(String::from(theirs)),
-                theirs => Text::Key(
-                    StrId::MailboxVersionOther,
-                    Vec::from([Arg::Str(String::from(theirs)), Arg::Str(String::from(ours))]),
-                ),
-            };
+            let value = version_said(&about.version, &facts.version);
             which.push(line(Text::key(StrId::MailboxVersion), Some(value)));
         }
         Told::Older => {
@@ -314,7 +392,7 @@ pub fn page<B>(model: &UiModel<B>) -> MailboxPage {
             },
             Group {
                 title: Text::key(StrId::MailboxReach),
-                lines: reach_lines(&facts.reach, now),
+                lines: reach_lines(&facts.reach, now, about),
             },
             Group {
                 title: Text::key(StrId::MailboxAccess),
@@ -446,6 +524,7 @@ mod tests {
                     last_seen: Some(NOW - 7200),
                 },
             ]),
+            started: Some(NOW - 86_400),
         }
     }
 
@@ -469,11 +548,11 @@ mod tests {
             "Name: Lew Palm",
             &alloc::format!("Adresse: {hex}"),
             "Läuft auf: miauhaus",
+            "Das ist auch deine Adresse: Postfach und du sind eine Identität.",
             "Version: 0.9.7",
-            "Verbunden seit 12 Min.",
+            "Dieses Gerät verbunden seit 12 Min.",
             "Letzter Kontakt: gerade eben",
-            "Verbindung über leviculum.network, Tor 4343, geschirmt",
-            "Geschirmt: dieses Gerät hört nur, was für es bestimmt ist.",
+            "Verbindung zu miauhaus, geschirmt (das Handy hört nur sein Postfach)",
             "Fairphone: dieses Gerät",
             "M9: zuletzt da vor 2 Std.",
             "Meinen Code zeigen",
@@ -500,9 +579,9 @@ mod tests {
         for want in [
             "Name: not heard yet",
             "Version: older than this device",
-            "Not connected for 2 h",
+            "This device not connected for 2 h",
             "Last contact: 2 h ago",
-            "Connection over leviculum.network, port 4242, not shielded",
+            "Connection to leviculum.network, not shielded (the phone hears the whole network, which costs battery and data)",
             "Fairphone: this device",
             "Your mailbox does not list its devices yet: that needs a newer version there.",
         ] {
@@ -511,15 +590,123 @@ mod tests {
         assert!(!en.iter().any(|l| l.starts_with("Runs on")), "{en:#?}");
     }
 
-    /// A mailbox on another build says both: the stale mailbox is seen.
+    /// The version line says words, never a commit (1647, walk 6, finding
+    /// 30, Lew's "0.1.8 (1aa683db…) (dieses Gerät: 0.1.8 (c274f885…))"):
+    /// older, newer, or the words alone where they agree, another build or
+    /// not (1669, walk 12, finding 66).
     #[test]
-    fn a_mailbox_on_another_build_says_both_versions() {
-        let mut older = about();
-        older.version = String::from("0.9.2");
-        let de = said(&page(&model(Told::Told(older), Reach::default())), Lang::De);
+    fn the_version_says_words_and_how_they_stand_never_a_commit() {
+        let a = "0.1.8 (1aa683db8a2c4f0e9d1b7c6a5f4e3d2c1b0a9f8e)";
+        let b = "0.1.8 (c274f8853f6743cfe98237bd22203f93e38d69cf)";
+        let cases = [
+            (a, b, "0.1.8"),
+            (a, a, "0.1.8"),
+            ("0.1.9 (1aa683db)", b, "0.1.9, neuer"),
+            ("0.1.7 (1aa683db)", b, "0.1.7, älter"),
+            ("0.1.10 (1aa683db)", "0.1.9 (c274f885)", "0.1.10, neuer"),
+            (
+                "0.1.8-nightly.1 (1aa683db)",
+                b,
+                "0.1.8-nightly.1, anderer Stand",
+            ),
+            (a, "", "0.1.8"),
+            ("0.1.8", "0.1.8 (c274f885)", "0.1.8"),
+        ];
+        for (theirs, ours, want) in cases {
+            assert_eq!(
+                version_said(theirs, ours).resolve(Lang::De),
+                want,
+                "{theirs} vs {ours}"
+            );
+        }
+        let mut other = about();
+        other.version = String::from(a);
+        let mut model = model(Told::Told(other), Reach::default());
+        model.profile.version = String::from(b);
+        let de = said(&page(&model), Lang::De);
+        assert!(de.iter().any(|l| l == "Version: 0.1.8"), "{de:#?}");
+        for line in &de {
+            assert!(
+                !line.contains("1aa683db") && !line.contains("c274f885"),
+                "{line}"
+            );
+        }
+    }
+
+    /// Walk 11, finding 57: a device whose `last_seen` the mailbox does
+    /// not know (never heard since schema 20) says "never connected yet"
+    /// rather than a bare name that read as a broken row. Walk 6,
+    /// finding 34: this device is said once.
+    #[test]
+    fn a_device_never_heard_says_never_connected() {
+        let mut told = about();
+        told.devices[1].last_seen = None;
+        told.devices[0].name = String::new();
+        let de = said(&page(&model(Told::Told(told), Reach::default())), Lang::De);
+        assert!(de.iter().any(|l| l == "M9: noch nie verbunden"), "{de:#?}");
+        assert!(!de.iter().any(|l| l == "M9"), "{de:#?}");
+        assert!(de.iter().any(|l| l == "Dieses Gerät"), "{de:#?}");
+        // In the devices' list; the connection's line names this device
+        // too since walk 11 (1667).
+        assert_eq!(
+            de.iter()
+                .filter(|l| *l == "Dieses Gerät" || l.ends_with(": dieses Gerät"))
+                .count(),
+            1,
+            "{de:#?}"
+        );
+        let mut alone = model(Told::Older, Reach::default());
+        alone.profile.devices[0].name = String::new();
+        let de = said(&page(&alone), Lang::De);
+        assert!(de.iter().any(|l| l == "Dieses Gerät"), "{de:#?}");
+    }
+
+    /// Walk 6, finding 37: "connected for" counts the link to the mailbox,
+    /// and a mailbox restarted under a transport that stayed up says less
+    /// than a minute.
+    #[test]
+    fn a_restarted_mailbox_is_connected_for_less_than_a_minute() {
+        let reach = Reach {
+            up: Some(true),
+            since: Some(NOW - 3 * 3600),
+            last_contact: Some(NOW),
+            entry: Some(String::from("192.168.178.61:4343")),
+            dials: true,
+        };
+        let mut restarted = about();
+        restarted.started = Some(NOW - 20);
+        let de = said(
+            &page(&model(Told::Told(restarted), reach.clone())),
+            Lang::De,
+        );
         assert!(
             de.iter()
-                .any(|l| l == "Version: 0.9.2 (dieses Gerät: 0.9.7)"),
+                .any(|l| l == "Dieses Gerät verbunden seit weniger als einer Minute"),
+            "{de:#?}"
+        );
+        let de = said(&page(&model(Told::Told(about()), reach.clone())), Lang::De);
+        assert!(
+            de.iter().any(|l| l == "Dieses Gerät verbunden seit 3 Std."),
+            "{de:#?}"
+        );
+        // Without a host word the way names the server; an unusual port
+        // is said, the usual ones never.
+        let mut nameless = about();
+        nameless.host = String::new();
+        let de = said(&page(&model(Told::Told(nameless.clone()), reach)), Lang::De);
+        assert!(
+            de.iter().any(|l| l
+                == "Verbindung zu 192.168.178.61, geschirmt (das Handy hört nur sein Postfach)"),
+            "{de:#?}"
+        );
+        let odd = Reach {
+            entry: Some(String::from("192.168.178.61:5000")),
+            ..Reach::default()
+        };
+        let de = said(&page(&model(Told::Told(nameless), odd)), Lang::De);
+        assert!(
+            de.iter()
+                .any(|l| l == "Verbindung zu 192.168.178.61, Port 5000"),
             "{de:#?}"
         );
     }

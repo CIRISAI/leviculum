@@ -177,6 +177,9 @@ pub enum StoreWrite {
     /// place of what was kept (1635, schema 19): a restart hands them
     /// again.
     OwedPetnames(alloc::collections::BTreeMap<[u8; 16], Option<String>>),
+    /// Keep the peer states this device owes the home node, all of them
+    /// in place of what was kept (1640, schema 20).
+    OwedPeerStates(alloc::collections::BTreeMap<[u8; 16], crate::home::wire::PeerState>),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -241,7 +244,12 @@ impl<B: InputBuffer> UiModel<B> {
             false => self.order().first().copied().unwrap_or(0),
         };
         self.selected = open;
-        self.read_out(open);
+        // Where the list is a screen of its own (1564: the phone, the M9)
+        // the start shows the list, not the chat under its cursor: nothing
+        // is read until the reader opens it ([`super::UiEvent::Open`]).
+        if !self.list_apart {
+            self.read_out(open);
+        }
         if let Some(conversation) = self.conversations.get(open) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
@@ -445,8 +453,11 @@ impl<B> UiModel<B> {
         if let Some(state) = self.pn_asker.take_changed() {
             writes.push(StoreWrite::PnAsks(state));
         }
-        if let Some(owed) = self.take_owed_petnames_changed() {
+        if let Some(owed) = self.owed_petnames.take_changed() {
             writes.push(StoreWrite::OwedPetnames(owed));
+        }
+        if let Some(owed) = self.owed_peer_states.take_changed() {
+            writes.push(StoreWrite::OwedPeerStates(owed));
         }
         // The rows the list shows, re-derived beside what changed them
         // (1490): a conversation with nothing loaded writes none, and
@@ -759,7 +770,11 @@ impl<B> UiModel<B> {
             let conversation = &mut self.conversations[c];
             conversation.new_rule = conversation.rule_from_unread();
             if open {
-                self.read_out(c);
+                // The list apart (1564), the page a selection asked lands
+                // behind the list: the open reads ([`super::UiEvent::Open`]).
+                if !self.list_apart {
+                    self.read_out(c);
+                }
                 self.message_cursor = self.conversations[c].messages.len().saturating_sub(1);
                 self.scroll_top = None;
                 self.selection = None;
@@ -952,6 +967,7 @@ impl<B> UiModel<B> {
         let Some(id) = self.remove_message(peer, key) else {
             return;
         };
+        self.saved_goes(peer, Some(key));
         self.forgotten.push(StoreWrite::ForgetMessage { key });
         let text = match (self.home_client, id) {
             (true, Some(id)) => {
@@ -987,6 +1003,7 @@ impl<B> UiModel<B> {
             }
             if let Some(id) = self.remove_message(peer, key) {
                 self.forgotten.push(StoreWrite::ForgetMessage { key });
+                self.saved_goes(peer, Some(key));
                 ids.extend(id);
                 deleted += 1;
             }
@@ -1011,6 +1028,18 @@ impl<B> UiModel<B> {
         self.toast(ToastKind::Info, text);
     }
 
+    /// The message `key` of `peer`'s conversation, or the whole
+    /// conversation for no key, was deleted (1662): what this device saved
+    /// of it goes too ([`super::UiEffect::ForgetSaved`]), and a transfer
+    /// it had ends.
+    pub(super) fn saved_goes(&mut self, peer: [u8; 16], key: Option<u64>) {
+        match key {
+            Some(key) => self.transfers.end(&peer, key),
+            None => self.transfers.end_all(&peer),
+        }
+        self.saved_gone.push((peer, key));
+    }
+
     /// Another device of the home deleted the message `id`: gone here too,
     /// from the screen if it shows it and from the store either way.
     pub(super) fn forget_by_id(&mut self, id: &[u8; 32]) {
@@ -1022,6 +1051,7 @@ impl<B> UiModel<B> {
         });
         if let Some((peer, key)) = shown {
             self.remove_message(peer, key);
+            self.saved_goes(peer, Some(key));
         }
         self.forgotten.push(StoreWrite::ForgetId { id: *id });
     }
@@ -1193,6 +1223,7 @@ impl<B> UiModel<B> {
         let Some(removed) = self.remove_conversation(peer) else {
             return;
         };
+        self.saved_goes(peer, None);
         let everywhere = everywhere && self.home_client;
         if everywhere {
             let ids = removed.messages.iter().filter_map(|m| m.id).collect();

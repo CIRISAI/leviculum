@@ -210,10 +210,12 @@ impl Presses {
 
 /// How often a key the bench holds answers again (1533): the cadence of
 /// the quickest same-key answers in the bench logs of 2026-11-07 (180 to
-/// 240 ms, `rig-run/m9/*/board.log`). Whether the controller repeats a
-/// held key on its own is not measured yet (`thinknode-m9.md`, "The
-/// keyboard controller, measured"); a held key here is presses at this
-/// interval, which is what the board would read if it did.
+/// 240 ms, `rig-run/m9/*/board.log`). Injection only: the controller does
+/// not repeat a held key (1561, measured by Lew at the 840cdaae bench on
+/// 2026-11-08 13:0x: the house key held 1.2 s did what a tap does,
+/// `thinknode-m9.md`, "The keyboard controller, measured"). A hold here
+/// is presses at this interval, which the hardware never sends; nothing
+/// on the board may rely on a held key.
 pub const HOLD_REPEAT_MS: u32 = 200;
 
 /// The answer the controller gives for `code` under `protocol`: the code

@@ -127,6 +127,7 @@ leviculum_ui::catalogue! {
     NothingToCopy = "browser_nothing_to_copy", "nothing to copy", "nichts zu kopieren";
     Copied = "browser_copied", "copied %1$s", "%1$s kopiert";
     IdentifyingTo = "browser_identifying_to", "Identifying to %1$s as %2$s  (i to stop)", "Identifiziert bei %1$s als %2$s  (i beendet)";
+    IdentifyExplained = "browser_identify_explained", "The page learns your address while this is on", "Die Seite erfährt deine Adresse, solange das an ist";
     AnonymousTo = "browser_anonymous_to", "Now anonymous to %1$s", "Jetzt anonym bei %1$s";
     WontOpen = "browser_wont_open", "won't open %1$s: link", "öffne keinen %1$s:-Link";
     LxmfCopied = "browser_lxmf_copied", "LXMF address copied: %1$s", "LXMF-Adresse kopiert: %1$s";
@@ -145,6 +146,9 @@ leviculum_ui::catalogue! {
     FetchSave = "browser_fetch_save", "could not save download: %1$s", "Download nicht gespeichert: %1$s";
     FetchDecode = "browser_fetch_decode", "malformed response payload", "fehlerhafte Antwort";
     FetchNode = "browser_fetch_node", "node error: %1$s", "Knotenfehler: %1$s";
+    // A hosted browser's page that did not come, said on the page (1669).
+    FetchNoConnection = "browser_fetch_no_connection", "No connection to %1$s.", "Keine Verbindung zu %1$s.";
+    FetchTryAgain = "browser_fetch_try_again", "Try again", "Erneut versuchen";
     // The name search's rows (1227).
     NameRow = "browser_name_row", "%1$s  ·  %2$s  ·  %3$s%4$s", "%1$s  ·  %2$s  ·  %3$s%4$s";
     OneHop = "browser_one_hop", "1 hop", "1 Sprung";

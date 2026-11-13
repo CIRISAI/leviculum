@@ -2129,6 +2129,195 @@ async fn a_cleared_petname_the_home_took_stays_cleared_after_a_restart() {
     a_cleared_petname_across_a_restart(true).await;
 }
 
+/// The peer state entries the home node of `home` keeps for `peer`,
+/// oldest first, and their sequences (1640).
+fn home_peer_states(
+    home: &Path,
+    address: [u8; 16],
+    peer: [u8; 16],
+) -> Vec<(u64, loquax::home::wire::PeerState)> {
+    let store =
+        loquax::store::Store::open_read_only(&home.join(loquax::store::STORE_FILE), address)
+            .expect("the home store")
+            .expect("there");
+    let page = store.archive_since(0, usize::MAX).expect("page");
+    page.entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_PEERSTATE)
+        .map(|e| {
+            let (about, state) =
+                loquax::home::wire::read_peer_state_entry(&e.packed).expect("peer state");
+            (about, (e.seq, state))
+        })
+        .filter(|(about, _)| *about == peer)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// Wait until the home node of `home` keeps `peer` pinned or not as
+/// `pinned` says, reading `session`'s events meanwhile; the entry's
+/// sequence (1640).
+fn home_keeps_pin(session: &Session, home: &Path, peer: [u8; 16], pinned: bool) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let kept = home_peer_states(home, session.address(), peer);
+        if let Some((seq, state)) = kept.last() {
+            if state.pinned == pinned {
+                return *seq;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the home never kept pinned={pinned}: {kept:?}"
+        );
+        let _ = session.next_event(Duration::from_millis(200));
+    }
+}
+
+/// 1640, the shape of 1635's petname test for a peer state: the reader
+/// pins a peer, the home node keeps it, and the reader loosens the pin
+/// again. `taken` says whether the home node took the loosening before
+/// the session stopped; without it the home is killed first. The phone's
+/// pull cursor is set back before the pinned entry and the home node comes
+/// back. The second start must show the peer unpinned, and the home must
+/// come to keep it so.
+async fn an_unpinned_peer_across_a_restart(taken: bool) {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = [0x5c; 16];
+    let hex = loquax::address::to_hex(&peer);
+    let runtime = tokio::runtime::Handle::current();
+    let (to, at) = (hex.clone(), home_dir.clone());
+    let mut node = Some(node);
+    let (pinned, address) = tokio::task::spawn_blocking(move || {
+        let mut kill = || {
+            if let Some(node) = node.take() {
+                runtime.block_on(node.kill());
+            }
+        };
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::Pin {
+                peer: to.clone(),
+                on: true,
+            })
+            .expect("pin");
+        let pinned = home_keeps_pin(&session, &at, peer, true);
+        if !taken {
+            kill();
+        }
+        session
+            .request(Request::Pin {
+                peer: to.clone(),
+                on: false,
+            })
+            .expect("unpin");
+        if taken {
+            home_keeps_pin(&session, &at, peer, false);
+            kill();
+        }
+        let address = session.address();
+        session.stop();
+        (pinned, address)
+    })
+    .await
+    .expect("the first session");
+    // What the phone owes its home: the loosening, unless the home took it.
+    let owed = loquax::store::Store::open_read_only(
+        &phone.path().join(loquax::store::STORE_FILE),
+        address,
+    )
+    .expect("the phone's store")
+    .expect("there")
+    .owed_peer_states()
+    .expect("owed");
+    let want = match taken {
+        true => std::collections::BTreeMap::new(),
+        false => {
+            std::collections::BTreeMap::from([(peer, loquax::home::wire::PeerState::default())])
+        }
+    };
+    assert_eq!(owed, want, "what the phone owes its home");
+
+    // The cursor before the pinned entry.
+    let cursors = files_named(phone.path(), loquax::home::client::CURSOR_FILE);
+    assert!(cursors.len() <= 1, "{cursors:?}");
+    for cursor in cursors {
+        std::fs::write(&cursor, format!("{}\n", pinned - 1)).expect("the cursor set back");
+    }
+
+    let listener =
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}")).expect("the same port again");
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let shown: schema::Detail = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Detail { peer: hex.clone() })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert!(!shown.pinned, "the loosened pin came back");
+        // The home node comes to keep the loosening, and the phone still
+        // shows it once its echo is pulled.
+        home_keeps_pin(&session, &home_dir, peer, false);
+        session.request(Request::Pull).expect("pull");
+        let shown: schema::Detail = wait_for(
+            &session,
+            schema::Query::Detail { peer: hex.clone() },
+            5,
+            |d: &schema::Detail| !d.pinned,
+        );
+        assert!(!shown.pinned);
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
+}
+
+/// 1640: a pin loosened while the home node could not take it stays
+/// loosened after a restart, and reaches the home node then.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_peer_the_home_never_took_stays_unpinned_after_a_restart() {
+    an_unpinned_peer_across_a_restart(false).await;
+}
+
+/// 1640's control: the home node took the loosening before the stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_peer_the_home_took_stays_unpinned_after_a_restart() {
+    an_unpinned_peer_across_a_restart(true).await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2416,24 +2605,43 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
         let answer = started(&loquax_android::start(&schema::encode(&first)));
         assert!(answer.ok, "{answer:?}");
         link_event(true, 30);
-        let reachable = until("the mailbox's devices", &|l| {
+        // The connection is the watching link to the mailbox (1647).
+        let reachable = until("the mailbox's devices, connected", &|l| {
             l.iter().any(|l| l == "phone: this device")
+                && l.iter().any(|l| l.starts_with("This device connected"))
         });
         let said = lines(&reachable);
-        let version = format!("Version: {}", loquax::VERSION);
-        let way = format!("Connection over 127.0.0.1, port {port}");
+        // The version's words, never a commit (1647, finding 30).
+        let words = loquax::VERSION
+            .split(" (")
+            .next()
+            .expect("the words")
+            .to_string();
+        let version = format!("Version: {words}");
+        // The machine the mailbox says it runs on, an unusual port said.
+        let host = reachable.groups[0]
+            .lines
+            .iter()
+            .find(|l| l.label == "Runs on")
+            .and_then(|l| l.value.clone())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let way = format!("Connection to {host}, port {port}");
         for want in [
             "Which mailbox",
             version.as_str(),
             way.as_str(),
             "Last contact: now",
+            "This is your address too: the mailbox and you are one identity.",
         ] {
             assert!(
                 said.iter().any(|l| l == want) || reachable.groups.iter().any(|g| g.title == want),
                 "{want:?} in {said:#?}"
             );
         }
-        assert!(said.iter().any(|l| l.starts_with("Connected")), "{said:#?}");
+        assert!(
+            said.iter().any(|l| l.starts_with("This device connected")),
+            "{said:#?}"
+        );
         let address = reachable.groups[0]
             .lines
             .iter()
@@ -2449,9 +2657,61 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
             .find(|l| l.action.as_deref() == Some("profile"))
             .expect("Show my code");
         assert_eq!(code.label, "Show my code");
+        for line in &said {
+            assert!(
+                !line.contains(loquax::VERSION.split(['(', ')']).nth(1).unwrap_or("-")),
+                "no commit on the page: {line}"
+            );
+        }
         println!(
             "FACADE mailboxpage reachable:\n{}",
             serde_json::to_string_pretty(&reachable).expect("json")
+        );
+        // 1647, walk 6, finding 28: the page asked again five seconds
+        // later has the same shape (groups, lines, their kinds), so the
+        // phone writes it into the lines on screen and the scroll anchor
+        // stays (`MailboxLines.java`, `fling.rs`). Only words move.
+        let shape = |page: &schema::MailboxPage| -> Vec<String> {
+            page.groups
+                .iter()
+                .flat_map(|g| {
+                    std::iter::once(format!("group {}", g.title)).chain(g.lines.iter().map(|l| {
+                        let kind = match (l.note, l.copy.is_some(), &l.action) {
+                            (true, _, _) => "note".to_string(),
+                            (false, true, _) => "copy".to_string(),
+                            (false, false, Some(action)) => format!("action {action}"),
+                            (false, false, None) => "line".to_string(),
+                        };
+                        match &l.value {
+                            Some(_) => format!("{kind} value"),
+                            None => kind,
+                        }
+                    }))
+                })
+                .collect()
+        };
+        let mut asks = Vec::new();
+        for _ in 0..2 {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                let _ = loquax_android::next_event(Duration::from_millis(200));
+            }
+            asks.push(page());
+        }
+        for (i, again) in asks.iter().enumerate() {
+            assert_eq!(
+                shape(again),
+                shape(&reachable),
+                "ask {} five seconds on changed the page's shape:\n{:#?}\nvs\n{:#?}",
+                i + 1,
+                lines(again),
+                said
+            );
+        }
+        println!(
+            "FACADE mailboxpage anchor: shape {:?} held over two asks five seconds apart; last ask {:?}",
+            shape(&reachable),
+            lines(&asks[1])
         );
     });
     up.await.expect("the page while the mailbox runs");
@@ -2459,7 +2719,10 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
     tokio::task::spawn_blocking(move || {
         link_event(false, 30);
         let unreachable = until("not connected", &|l| {
-            l.iter().any(|l| l.starts_with("Not connected"))
+            l.iter().any(|l| {
+                l.starts_with("This device is not connected")
+                    || l.starts_with("This device not connected")
+            })
         });
         let said = lines(&unreachable);
         assert!(
@@ -3838,6 +4101,184 @@ fn the_phone_reads_grouping_days_and_search_from_the_scene() {
     // substring of the name or the last line.
     let old = |text: &str| text.to_lowercase().contains("anna rome");
     assert!(!old(&row.name) && !old(&row.last), "{row:?}");
+}
+
+/// 1662, a file tells its progress: a scripted resource moves the
+/// running send of a file to 43 % and then a fetch to 1.2 MB of 3.0 MB;
+/// the facade's rows carry the bubble's words in the phone's language and
+/// the bar's percent, and a sent message has neither.
+#[test]
+fn a_file_under_way_carries_its_words_and_bar_to_the_phone() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::transfer::{Transfer, Way};
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let peer = ugly_store::peer(93);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(
+        &mut model,
+        UiEvent::SendFile {
+            peer,
+            name: "Protokoll.pdf".into(),
+            data: vec![7; 300_000],
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Queued {
+            message_id: [0x62; 32],
+        }),
+    );
+    update(&mut model, UiEvent::Elapsed(1_000));
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Progress {
+            message_id: [0x62; 32],
+            permille: 430,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let ours = rows.iter().find(|r| r.ours).expect("our row");
+    assert_eq!(ours.progress_words, "wird gesendet · 43 %");
+    assert_eq!(ours.progress_percent, 43);
+    assert_eq!(ours.files.len(), 1, "the file's line stays");
+    // A client's upload names the running send the same way.
+    update(&mut model, UiEvent::Elapsed(1_250));
+    update(&mut model, UiEvent::SendProgress(870));
+    let rows = session::rows(&model, 0, Lang::En);
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.ours)
+            .map(|r| r.progress_words.as_str()),
+        Some("sending · 87 %")
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::State {
+            message_id: [0x62; 32],
+            state: leviculum_lxmf::router::MessageState::Delivered,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let ours = rows.iter().find(|r| r.ours).expect("our row");
+    assert_eq!(
+        (ours.progress_words.as_str(), ours.progress_percent),
+        ("", 0)
+    );
+    // A fetch says its bytes of the whole.
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x63; 32],
+            source: peer,
+            title: Vec::new(),
+            body: b"das Bild".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }),
+    );
+    let key = model.conversations[0]
+        .messages
+        .iter()
+        .find(|m| !m.outbound)
+        .map(|m| m.activity)
+        .expect("theirs");
+    update(&mut model, UiEvent::Elapsed(2_000));
+    update(
+        &mut model,
+        UiEvent::Transfer {
+            peer,
+            key,
+            transfer: Transfer {
+                way: Way::Fetching,
+                done: 1_234_567,
+                total: 3_000_000,
+            },
+        },
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let theirs = rows.iter().find(|r| !r.ours).expect("their row");
+    assert_eq!(theirs.progress_words, "wird geholt · 1,2 MB von 3,0 MB");
+    assert_eq!(theirs.progress_percent, 41);
+}
+
+/// 1662, a picture sent as a file shows its thumbnail: a PNG that goes
+/// through the file path, ours and theirs, gives its row the photo's
+/// format, its size upright and its words, as a photo's row has them, with
+/// the file's line under it; the library draws its pixels. A file that
+/// only calls itself `.png` is a file row alone.
+#[test]
+fn a_png_sent_as_a_file_shows_its_thumbnail_with_the_file_line() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{files, photos, update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 40, 30);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer
+            .write_image_data(&[0xc0; 40 * 30 * 4])
+            .expect("png data");
+    }
+    let peer = ugly_store::peer(94);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(
+        &mut model,
+        UiEvent::SendFile {
+            peer,
+            name: "Bild.png".into(),
+            data: png.clone(),
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x64; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("scan.dat", png.clone()),
+            verified: true,
+        }),
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x65; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("not-a-picture.png", b"%PDF-1.7".to_vec()),
+            verified: true,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::En);
+    assert_eq!(rows.len(), 3, "{rows:#?}");
+    for (row, name) in [(&rows[0], "Bild.png"), (&rows[1], "scan.dat")] {
+        assert_eq!(row.photo, "png", "{row:#?}");
+        assert_eq!((row.photo_w, row.photo_h), (40, 30));
+        assert_eq!(row.photo_bytes as usize, png.len());
+        assert!(
+            row.photo_words.starts_with("Photo, "),
+            "{}",
+            row.photo_words
+        );
+        let names: Vec<&str> = row.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, [name], "the file's line stays under it");
+    }
+    let lie = &rows[2];
+    assert_eq!((lie.photo.as_str(), lie.photo_w), ("", 0), "{lie:#?}");
+    assert_eq!(lie.files.len(), 1);
+    // What the phone's thumbnail asks for: the file's bytes, drawn.
+    let theirs = &model.conversations[0].messages[1];
+    let bytes = photos::picture_bytes(&theirs.fields).expect("the picture's bytes");
+    let pixels = loquax::photo::fit(bytes, 20).expect("drawn");
+    assert_eq!((pixels.width, pixels.height), (20, 15));
 }
 
 /// The map's Friends sheet (1200), as the facade answers it from the
@@ -6120,6 +6561,7 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
             (listed.last.as_str(), listed.kind.as_str()),
             ("Protokoll.pdf", "file")
         );
+        let mut kept = Vec::new();
         for (index, want) in [(0u32, &report[..]), (1, &b"#!/bin/sh\n"[..])] {
             let saved: schema::SavedFile = rmp_serde::from_slice(
                 &session
@@ -6142,6 +6584,7 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
                 path.file_name().and_then(|n| n.to_str()),
                 Some(saved.name.as_str())
             );
+            kept.push(path);
         }
         assert!(session
             .query(schema::Query::SaveFile {
@@ -6150,6 +6593,28 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
                 index: 2,
             })
             .is_err());
+        // 1662: a saved file goes with its message. The reader exported
+        // the report out of the app (the share sheet's "Save to
+        // Downloads"); deleting the message takes both saved files from
+        // the app's storage and leaves the exported copy.
+        let downloads = tempfile::tempdir().expect("downloads");
+        let exported = downloads.path().join("Protokoll.pdf");
+        std::fs::copy(&kept[0], &exported).expect("exported");
+        session
+            .request(Request::Delete {
+                peer: shown_python.clone(),
+                keys: vec![row.key],
+            })
+            .expect("deleted");
+        for path in &kept {
+            assert!(!path.exists(), "still saved: {}", path.display());
+            assert!(
+                !path.parent().is_some_and(Path::exists),
+                "its folder stays: {}",
+                path.display()
+            );
+        }
+        assert_eq!(std::fs::read(&exported).expect("exported"), report);
         session
     })
     .await

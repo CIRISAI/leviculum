@@ -47,16 +47,16 @@ settles the conflicts.
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:497-529`; `pane`,
+   (`update_key`, `lnomad/src/app/event.rs:578-610`; `pane`,
    `lnomad/src/app/keys.rs:339`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
-   (`lnomad/src/app/model.rs:101-120`), each with its own handler. Text modes
+   (`lnomad/src/app/model.rs:102-121`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:536`,
-   whitelist at `lnomad/src/app/event.rs:546-552`).
+   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:617`,
+   whitelist at `lnomad/src/app/event.rs:627-633`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
    (page down), `d` (places) and `Ctrl-d` (half page), `n` (next match) and
@@ -78,7 +78,7 @@ That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:469-654` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:470-677` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
 `lnomad/src/app/event.rs:36-105` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
@@ -97,16 +97,16 @@ anything else for a messenger, and the answer is yes.
 `AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:105`) arrives from
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
-(`set_announce_sink`, `lnomad/src/fetch.rs:350-352`, wiring comment at
+(`set_announce_sink`, `lnomad/src/fetch.rs:374-376`, wiring comment at
 `lnomad/src/tui.rs:1295-1298`), a non-blocking unbounded send on every
-recorded announce (`note_announce`, `lnomad/src/fetch.rs:494-515`), a
+recorded announce (`note_announce`, `lnomad/src/fetch.rs:518-539`), a
 dedicated background task parked on the shared session in 250 ms lock
 slices (`spawn_discovery`, `lnomad/src/transfer.rs:207-229`), and a
 `tokio::select!` arm that folds the result into the model
 (`lnomad/src/tui.rs:1454-1456`). The main loop has five arms
 (`lnomad/src/tui.rs:1358-1461`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:881-884`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:902-905`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -133,26 +133,26 @@ browser is holding, and pictures differ in size by three orders of
 magnitude" (`lnomad/src/image_cache.rs:11-14`).
 
 **Rendering.** One layout core, two sinks. `layout_blocks`
-(`lnomad/src/render.rs:197-222`) produces `Vec<RLine>` where `RLine`, the
+(`lnomad/src/render.rs:197-243`) produces `Vec<RLine>` where `RLine`, the
 shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
 (`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either the scene's page, a window of
-runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:468`,
+runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:489`,
 since 1255), or `emit_ansi`
-(`lnomad/src/render.rs:230-236`) for `--print`. Scrolling is a slice, not a
+(`lnomad/src/render.rs:251-257`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
-(`lnomad/src/app/scene.rs:444-448`), and there is one scroll rule shared by
+(`lnomad/src/app/scene.rs:446-449`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
 which Loquax's help and detail view scroll by too.
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
-`lnomad/src/render.rs:778-805`), which will overflow on CJK and emoji. No
+`lnomad/src/render.rs:803-830`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:759-783`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:780-804`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -175,9 +175,9 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1576-1579`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1662-1665`). The messenger is the natural target of that
 handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
-over instead (`lnomad/src/app/event.rs:1572-1575`), and Loquax opens that chat.
+over instead (`lnomad/src/app/event.rs:1658-1661`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
@@ -810,7 +810,7 @@ Three specific things `lnomad` does that must change:
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:759-783`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:780-804`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.

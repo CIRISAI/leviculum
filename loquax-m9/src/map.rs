@@ -42,13 +42,15 @@ use embedded_graphics::pixelcolor::{Rgb565, Rgb888};
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::{Baseline, Text};
-use leviculum_map::draw::{draw_in_scaled, Ink};
-use leviculum_map::labels::{place, Candidate, LabelKind, Rect as LabelRect, Rule, ViewLabel};
+use leviculum_map::draw::{draw_in_scaled, draws_buildings, Ink};
+use leviculum_map::labels::{Rect as LabelRect, ViewLabel};
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, RegionError};
 use leviculum_map::timezones;
 use leviculum_map::viewport::Viewport;
+use leviculum_mapfill::coverage::{Clip, Coverage};
 use leviculum_mapfill::fill::{Edge, Filler, Scratch};
+use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{Profile, Style};
 use leviculum_ui::color::Ink as UiInk;
@@ -58,10 +60,12 @@ use leviculum_ui::style::{RLine, RStyle};
 use leviculum_ui::text::fit_width;
 use leviculum_ui::Rect;
 use loquax::keys::{panes_of, resolve, MapCmd};
-use loquax::ui::map::{self as core_map, MapSetup, NameCell, PinCell};
+use loquax::mapnames::{self, PlacedName};
+use loquax::ui::map::{self as core_map, MapSetup, PinCell};
 use loquax::ui::strings::{Lang, StrId, Text as Words};
 use loquax::ui::{Pane, UiModel};
 
+use crate::glyphs::Glyphs;
 use crate::keys::M9Key;
 use crate::screen::{cut, fill, push, Look, COLS, ROWS as GRID_ROWS};
 
@@ -99,12 +103,14 @@ pub const WORLD: &[u8] = include_bytes!("../../leviculum-map/data/world-overview
 /// the lines are still the region's and a street is a hand wide.
 pub const OVERZOOM: u8 = 2;
 
-/// The map's finish on the M9: its square caps, no casings and no
-/// buildings, in the light table (1531: Lew read the dark one on the
-/// board as grey-brown and far too dark). The UI around it keeps its dark
-/// tokens until the house page's theme switch.
+/// The map's finish on the M9: the phone's and the window's since 1565
+/// ([`Style::SCREEN`]: casings under the roads, round joins, buildings
+/// from z16), in the light table (1531: Lew read the dark one on the
+/// board as grey-brown and far too dark), the edges smoothed by the
+/// panel's frame ([`Coverage`]). The UI around it keeps its dark tokens
+/// until the house page's theme switch.
 pub fn style() -> Style {
-    Style::M9
+    Style::SCREEN
 }
 
 /// What the board tells the model it draws the map with: a cell of the
@@ -444,25 +450,12 @@ pub fn bottom<B: InputBuffer>(
 /// they come.
 pub const CHIP_ROWS: [u16; 2] = [0, BOTTOM];
 
-/// The names the label pass sets at most on one screen (1531): eight,
-/// the most the 32 x 12 cells hold apart without covering the streets
-/// they name.
-pub const NAMES_MAX: usize = 8;
-
-/// One name per block of this many cells on the M9 (1531): the
-/// terminal's 20 x 6 left three of its 32 x 11 cells' blocks.
-pub const NAME_BLOCK: (i32, i32) = (11, 3);
-
-/// From this zoom on the names of parks and waters are set too (1531).
-pub const POI_ZOOM: u8 = 15;
-
-/// The shortest straight stretch of a street that carries its name, in
-/// pixels (1531): three cells, so a stub between two junctions is not
-/// named.
-pub const STRETCH_PX: i64 = 30;
-
-/// The straight stretches of a street tried for its name, longest first.
-const STRETCHES: usize = 3;
+/// The phone's logical pixel on the panel (1565): the label pass's sizes,
+/// halo, margin and repeat ([`loquax::mapnames`]) are the phone's times
+/// this, so a street's name is 11 x 1.6 = 17.6 px to the em, Fira Sans's
+/// x-height (527 of 1000) 9.3 px, the 9 to 10 px the order asked for.
+/// The lines keep the panel's own widths.
+pub const SCALE: f32 = 1.6;
 
 /// What the label pass did, for the board's `[MAP]` line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -471,113 +464,69 @@ pub struct NameStats {
     pub found: usize,
     /// The names set.
     pub drawn: usize,
+    /// The glyphs rasterised for them ([`Glyphs::made`]): every name with
+    /// a spot wholly in the picture is drawn once, set or not.
+    pub glyphs: u32,
 }
 
 impl NameStats {
-    /// The names found and not set: no room, no straight stretch, or past
-    /// the cap.
+    /// The names found and not set: no room, no straight run, or the rule
+    /// put another there.
     pub fn dropped(&self) -> usize {
         self.found.saturating_sub(self.drawn)
     }
 }
 
-/// The candidates of `labels` on a picture of `cols` x `rows` cells: a
-/// point's name centred on its anchor, a street's or a river's centred on
-/// the midpoint of one of its [`STRETCHES`] longest straight stretches,
-/// horizontal (the atlas cannot turn text). A name that does not fit the
-/// picture whole is no candidate, nor one in a chip row ([`CHIP_ROWS`])
-/// or one outside `within`, the cells the drawn region covers (1727).
-fn candidates(
-    labels: &[ViewLabel],
-    cols: i64,
-    rows: i64,
-    within: Option<LabelRect>,
-) -> Vec<Candidate> {
-    let sub = leviculum_map::labels::SUBPIXEL;
-    let (cw, ch) = (i64::from(CELL_PX.0) * sub, i64::from(CELL_PX.1) * sub);
-    let mut out = Vec::new();
-    for l in labels {
-        let len = fit_width(&l.text) as i64;
-        if len == 0 {
-            continue;
-        }
-        let centres: Vec<(i64, i64)> = match l.kind.is_line() {
-            false => vec![l.anchor],
-            true => {
-                let mut stretches: Vec<(i64, (i64, i64))> = l
-                    .line
-                    .iter()
-                    .flat_map(|piece| piece.windows(2))
-                    .map(|w| {
-                        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
-                        let (dx, dy) = ((x1 - x0) / sub, (y1 - y0) / sub);
-                        (dx * dx + dy * dy, ((x0 + x1) / 2, (y0 + y1) / 2))
-                    })
-                    .filter(|(d2, _)| *d2 >= STRETCH_PX * STRETCH_PX)
-                    .collect();
-                stretches.sort_by_key(|(d2, at)| (core::cmp::Reverse(*d2), *at));
-                stretches
-                    .into_iter()
-                    .take(STRETCHES)
-                    .map(|(_, at)| at)
-                    .collect()
-            }
-        };
-        for (x, y) in centres {
-            let col = x.div_euclid(cw) - len / 2;
-            let row = y.div_euclid(ch);
-            if col < 0 || col + len > cols || !(0..rows).contains(&row) {
-                continue;
-            }
-            let (Ok(x0), Ok(y0), Ok(n)) =
-                (i32::try_from(col), i32::try_from(row), i32::try_from(len))
-            else {
-                continue;
-            };
-            if CHIP_ROWS.iter().any(|&r| i32::from(r) == y0) {
-                continue;
-            }
-            let inside = |w: &LabelRect| x0 >= w.x0 && y0 >= w.y0 && x0 + n <= w.x1 && y0 < w.y1;
-            if within.as_ref().is_some_and(|w| !inside(w)) {
-                continue;
-            }
-            out.push(Candidate {
-                kind: l.kind,
-                rank: l.rank,
-                text: l.text.clone(),
-                at: l.at,
-                boxes: vec![LabelRect {
-                    x0,
-                    y0,
-                    x1: x0 + n,
-                    y1: y0 + 1,
-                }],
-            });
-        }
-    }
-    out
+/// The cells `taken` (col, row, width) as the label rule's boxes in the
+/// picture's pixels.
+pub fn taken_px(taken: &[(u16, u16, u16)]) -> Vec<LabelRect> {
+    let (cw, ch) = (i32::from(CELL_PX.0), i32::from(CELL_PX.1));
+    taken
+        .iter()
+        .map(|&(col, row, width)| LabelRect {
+            x0: i32::from(col) * cw,
+            y0: i32::from(row) * ch,
+            x1: (i32::from(col) + i32::from(width)) * cw,
+            y1: (i32::from(row) + 1) * ch,
+        })
+        .collect()
 }
 
-/// The names of `view` in `region` placed on the cells of `rows` rows of
-/// the picture (1531), by the map core's placement rule
-/// (`leviculum_map::labels::place`) in three rounds: places (city, town,
-/// village, suburb, as the region's zooms let them in), then streets and
-/// rivers on a straight stretch of their line, then from [`POI_ZOOM`]
-/// parks and waters. Never over `taken` (the pins and the words over the
-/// picture: col, row, width) nor a name of an earlier round, one per
-/// [`NAME_BLOCK`] in a round, at most [`NAMES_MAX`] in all.
+/// The names of `view` in `region` the phone's label pass places on the
+/// picture (1565, [`loquax::mapnames::place`]): places centred on their
+/// point, streets and rivers along a straight run of their line at its
+/// angle, each with its halo, by the map core's rule in one round, never
+/// over `taken` (the pins and the words over the picture: col, row,
+/// width) nor in a chip row ([`CHIP_ROWS`]), whose words come and go over
+/// the picture, at [`SCALE`] the phone's sizes. Set in Fira Sans by
+/// `glyphs`.
 ///
 /// With `overview` the world region is what is shown, whose own names are
 /// only the places at z3: the world view's names ([`outline::NAMES_M9`],
 /// countries, seas, ranges, deserts and its places) join them (1683). A
-/// name both tables carry is placed once, by its text.
+/// name both tables carry is placed once, by its text. Without it a name
+/// stays on the ground the region covers (1727): off it the picture is
+/// the background, and a name there would name nothing drawn.
 pub fn names(
     region: &Region<&[u8]>,
     view: &Viewport,
-    rows: u16,
     taken: &[(u16, u16, u16)],
+    glyphs: &mut Glyphs,
     overview: bool,
-) -> (Vec<NameCell>, NameStats) {
+) -> (Vec<PlacedName>, NameStats) {
+    names_scaled(region, view, taken, glyphs, overview, SCALE)
+}
+
+/// [`names`] at `scale` the phone's sizes instead of [`SCALE`]: what the
+/// measuring tool (`examples/map_measure.rs`) compares sizes with.
+pub fn names_scaled(
+    region: &Region<&[u8]>,
+    view: &Viewport,
+    taken: &[(u16, u16, u16)],
+    glyphs: &mut Glyphs,
+    overview: bool,
+    scale: f32,
+) -> (Vec<PlacedName>, NameStats) {
     let mut found: Vec<ViewLabel> = Vec::new();
     if region.view_labels(view, true, &mut found).is_err() {
         found.clear();
@@ -587,37 +536,67 @@ pub fn names(
     }
     // The region's names on the ground it covers (1727), the world's
     // anywhere: the world region covers every view.
-    let within = (!overview).then(|| covered_cells(view, &region.header().bounds));
-    place_names(found, view, rows, taken, within)
+    let outside = match overview {
+        true => Vec::new(),
+        false => outside_of(view, &view.area_of(&region.header().bounds)),
+    };
+    place_found(&found, view, taken, &outside, glyphs, scale)
 }
 
-/// The whole cells of the picture that `bounds` covers in `view`: the
-/// area the region is drawn into ([`Viewport::area_of`]), shrunk to whole
-/// cells, empty when it covers none.
-fn covered_cells(view: &Viewport, bounds: &leviculum_map::region::Bounds) -> LabelRect {
-    let area = view.area_of(bounds);
-    let (cw, ch) = (i32::from(CELL_PX.0), i32::from(CELL_PX.1));
-    let (x, y) = (area.top_left.x, area.top_left.y);
-    let w = i32::try_from(area.size.width).unwrap_or(i32::MAX);
-    let h = i32::try_from(area.size.height).unwrap_or(i32::MAX);
-    let ceil = |v: i32, c: i32| v.div_euclid(c) + i32::from(v.rem_euclid(c) != 0);
-    LabelRect {
-        x0: ceil(x, cw),
-        y0: ceil(y, ch),
-        x1: x.saturating_add(w).div_euclid(cw),
-        y1: y.saturating_add(h).div_euclid(ch),
-    }
+/// The picture's pixels outside `area` (the ground a region is drawn
+/// into, [`Viewport::area_of`]) as up to four boxes the label rule keeps
+/// clear (1727).
+fn outside_of(view: &Viewport, area: &Rectangle) -> Vec<LabelRect> {
+    let (w, h) = view.size();
+    let (w, h) = (
+        i32::try_from(w).unwrap_or(i32::MAX),
+        i32::try_from(h).unwrap_or(i32::MAX),
+    );
+    let (x0, y0) = (area.top_left.x, area.top_left.y);
+    let x1 = x0.saturating_add(i32::try_from(area.size.width).unwrap_or(i32::MAX));
+    let y1 = y0.saturating_add(i32::try_from(area.size.height).unwrap_or(i32::MAX));
+    let (x0, y0) = (x0.clamp(0, w), y0.clamp(0, h));
+    let (x1, y1) = (x1.clamp(x0, w), y1.clamp(y0, h));
+    [
+        LabelRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: y0,
+        },
+        LabelRect {
+            x0: 0,
+            y0: y1,
+            x1: w,
+            y1: h,
+        },
+        LabelRect {
+            x0: 0,
+            y0,
+            x1: x0,
+            y1,
+        },
+        LabelRect {
+            x0: x1,
+            y0,
+            x1: w,
+            y1,
+        },
+    ]
+    .into_iter()
+    .filter(|b| b.x1 > b.x0 && b.y1 > b.y0)
+    .collect()
 }
 
 /// The time zone view's names (1684): each zone's clock at `unix` by the
-/// board's own rules ([`timezones::board_time`]), `HH:MM`, placed as
+/// board's own rules ([`timezones::board_offset`]), `HH:MM`, placed as
 /// [`names`] places a view's names; a zone the table lacks is left out.
 pub fn zone_names(
     view: &Viewport,
-    rows: u16,
     taken: &[(u16, u16, u16)],
+    glyphs: &mut Glyphs,
     unix: i64,
-) -> (Vec<NameCell>, NameStats) {
+) -> (Vec<PlacedName>, NameStats) {
     let mut found: Vec<ViewLabel> = Vec::new();
     timezones::labels(view, &mut found);
     found.retain_mut(|l| {
@@ -630,7 +609,7 @@ pub fn zone_names(
         l.text = alloc::format!("{:02}:{:02}", minute / 60, minute % 60);
         true
     });
-    place_names(found, view, rows, taken, None)
+    place_found(&found, view, taken, &[], glyphs, SCALE)
 }
 
 /// Whether the time zone view is on, and the minute its clocks show
@@ -641,70 +620,40 @@ pub fn zones<B>(model: &UiModel<B>) -> Option<i64> {
     Some(now.unix_secs - now.unix_secs.rem_euclid(60))
 }
 
-/// `found` placed on the cells of `rows` rows by the rounds [`names`]
-/// documents.
-fn place_names(
-    mut found: Vec<ViewLabel>,
+/// `found` placed by the phone's label pass on the picture of `view`,
+/// clear of `taken`, of the chip rows ([`CHIP_ROWS`]) and of `outside`
+/// (pixel boxes), at `scale`. A text placed twice keeps its first spot
+/// (1683: the world's names and the overview region's places share
+/// some).
+fn place_found(
+    found: &[ViewLabel],
     view: &Viewport,
-    rows: u16,
     taken: &[(u16, u16, u16)],
-    within: Option<LabelRect>,
-) -> (Vec<NameCell>, NameStats) {
-    let zoom = view.zoom();
-    let poi = |k: LabelKind| matches!(k, LabelKind::Park | LabelKind::Water);
-    found.retain(|l| zoom >= POI_ZOOM || !poi(l.kind));
-    let all = candidates(&found, i64::from(PICTURE.width), i64::from(rows), within);
-    let mut boxes: Vec<LabelRect> = taken
-        .iter()
-        .map(|&(col, row, width)| LabelRect {
-            x0: i32::from(col),
-            y0: i32::from(row),
-            x1: i32::from(col) + i32::from(width),
-            y1: i32::from(row) + 1,
-        })
-        .collect();
-    let rule = Rule {
-        margin: 1,
-        block: NAME_BLOCK,
-        repeat: i32::from(PICTURE.width),
-    };
-    let rounds: [fn(LabelKind) -> bool; 3] = [
-        |k| !k.is_line() && !matches!(k, LabelKind::Park | LabelKind::Water),
-        |k| k.is_line(),
-        |k| matches!(k, LabelKind::Park | LabelKind::Water),
-    ];
-    let mut placed: Vec<NameCell> = Vec::new();
-    for round in rounds {
-        let these: Vec<Candidate> = all.iter().filter(|c| round(c.kind)).cloned().collect();
-        let set = place(&these, &boxes, rule);
-        for i in set {
-            if placed.len() >= NAMES_MAX {
-                break;
-            }
-            let Some(c) = these.get(i) else {
-                continue;
-            };
-            let Some(b) = c.boxes.first() else {
-                continue;
-            };
-            if placed.iter().any(|p| p.text == c.text) {
-                continue;
-            }
-            boxes.push(*b);
-            let (Ok(col), Ok(row)) = (u16::try_from(b.x0), u16::try_from(b.y0)) else {
-                continue;
-            };
-            placed.push(NameCell {
-                col,
-                row,
-                text: c.text.clone(),
-                kind: c.kind,
-            });
+    outside: &[LabelRect],
+    glyphs: &mut Glyphs,
+    scale: f32,
+) -> (Vec<PlacedName>, NameStats) {
+    let (w, h) = view.size();
+    let sub = leviculum_map::labels::SUBPIXEL as f64;
+    let px = |v: (i64, i64)| (v.0 as f64 / sub, v.1 as f64 / sub);
+    let made = glyphs.made;
+    let mut boxes = taken_px(taken);
+    let chips: Vec<(u16, u16, u16)> = CHIP_ROWS.iter().map(|&r| (0, r, PICTURE.width)).collect();
+    boxes.extend(taken_px(&chips));
+    boxes.extend_from_slice(outside);
+    let mut placed = mapnames::place(w, h, found, px, &boxes, scale, glyphs);
+    let mut seen: Vec<String> = Vec::new();
+    placed.retain(|p| match seen.contains(&p.text) {
+        true => false,
+        false => {
+            seen.push(p.text.clone());
+            true
         }
-    }
+    });
     let stats = NameStats {
         found: found.len(),
         drawn: placed.len(),
+        glyphs: glyphs.made.saturating_sub(made),
     };
     (placed, stats)
 }
@@ -721,39 +670,14 @@ pub fn pin_cells(pins: &[PinCell]) -> Vec<(u16, u16, u16)> {
         .collect()
 }
 
-/// The ink of a name of `kind` on the light map: water and rivers blue,
-/// parks green, every other dark grey (the terminal's light colours).
-fn name_ink(kind: LabelKind) -> Rgb565 {
-    match kind {
-        LabelKind::Water | LabelKind::River | LabelKind::Sea => {
-            Rgb888::new(0x1f, 0x4e, 0x8c).into()
-        }
-        LabelKind::Park => Rgb888::new(0x2e, 0x6b, 0x2e).into(),
-        _ => Rgb888::new(0x20, 0x20, 0x20).into(),
-    }
-}
-
-/// Draw `names` in the atlas, each on a white box as wide as it, so a
-/// name stays readable over the streets it crosses.
-pub fn draw_names<D>(names: &[NameCell], font: &MonoFont<'_>, panel: &mut D) -> Result<(), MapError>
+/// Draw `names` into `panel` as the phone does
+/// ([`loquax::mapnames::paint_placed_on`]): each halo, then its glyphs,
+/// blended by their coverage.
+pub fn draw_names<D>(names: &[PlacedName], panel: &mut D)
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
 {
-    for name in names {
-        let style = MonoTextStyleBuilder::new()
-            .font(font)
-            .text_color(name_ink(name.kind))
-            .background_color(Rgb565::WHITE)
-            .build();
-        let at = Point::new(
-            i32::from(name.col * CELL_PX.0),
-            i32::from(name.row * CELL_PX.1),
-        );
-        Text::with_baseline(&crate::screen::narrow(&name.text), at, style, Baseline::Top)
-            .draw(panel)
-            .map_err(|_| MapError::Draw)?;
-    }
-    Ok(())
+    mapnames::paint_placed_on(panel, names, style().theme);
 }
 
 /// The words over the picture (1531): `bottom` on the bottom row, and
@@ -862,6 +786,8 @@ pub enum MapError {
     Region(RegionError),
     /// The panel refused a pixel.
     Draw,
+    /// The names' face did not read.
+    Font,
 }
 
 /// The filler's storage, made once, as large as the window's painter
@@ -909,11 +835,12 @@ impl Painter {
     }
 
     /// Draw `view` of `region` into `panel`'s picture rows: the
-    /// background, then the tiles the region holds there, class by class.
-    /// What the filler counted. With `overview` — the world region, which
-    /// carries no boundary class — the country borders and the disputed
-    /// boundary lines go over it too (1683), from the world outline's
-    /// tables.
+    /// background, then the tiles the region holds there, class by class,
+    /// with the buildings from z16 ([`draws_buildings`]), the edges
+    /// blended where `panel` blends ([`Coverage`]). What the filler
+    /// counted. With `overview` — the world region, which carries no
+    /// boundary class — the country borders and the disputed boundary
+    /// lines go over it too (1683), from the world outline's tables.
     pub fn picture<D>(
         &mut self,
         region: &Region<&[u8]>,
@@ -922,7 +849,7 @@ impl Painter {
         overview: bool,
     ) -> Result<RenderStats, MapError>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
     {
         let style = style();
         let top = i32::from(PICTURE.y * CELL_PX.1);
@@ -931,8 +858,18 @@ impl Painter {
         panel
             .fill_solid(&whole, style.theme.palette().background)
             .map_err(|_| MapError::Draw)?;
-        let mut target = panel.cropped(&Rectangle::new(Point::new(0, top), Size::new(w, h)));
-        let tiles = region.view(view).map_err(MapError::Region)?;
+        // The picture starts at the panel's top row ([`PICTURE`]), so the
+        // view's pixels are the panel's: clipped, not moved, which keeps
+        // the panel's blend.
+        let mut target = Clip::new(panel, &whole);
+        let mut tiles = region.view(view).map_err(MapError::Region)?;
+        // A section that does not read leaves the buildings out, never
+        // the map under them (as the phone's painter does).
+        if draws_buildings(style, Ink::Colour, view.zoom())
+            && region.with_buildings(&mut tiles).is_err()
+        {
+            tiles.iter_mut().for_each(|t| t.buildings = None);
+        }
         let mut scratch = Scratch {
             edges: &mut self.edges,
             heads: &mut self.heads,
@@ -960,11 +897,6 @@ impl Painter {
             // parted by the world outline's own lines (1683), drawn over
             // the land the region filled. The scratch is this painter's,
             // freed again by the pass just gone.
-            let mut scratch = Scratch {
-                edges: &mut self.edges,
-                heads: &mut self.heads,
-                active: &mut self.active,
-            };
             let mut filler = Filler::new(&mut scratch, target.bounding_box());
             let _ = outline::bounds(
                 &outline::BOUNDARIES,
@@ -984,11 +916,12 @@ impl Painter {
     /// line of the map has. Past the outline's deepest zoom nothing.
     pub fn zone_borders<D>(&mut self, view: &Viewport, panel: &mut D)
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
     {
         let top = i32::from(PICTURE.y * CELL_PX.1);
         let (w, h) = view.size();
-        let mut target = panel.cropped(&Rectangle::new(Point::new(0, top), Size::new(w, h)));
+        let whole = Rectangle::new(Point::new(0, top), Size::new(w, h));
+        let mut target = Clip::new(panel, &whole);
         let mut scratch = Scratch {
             edges: &mut self.edges,
             heads: &mut self.heads,
@@ -1112,6 +1045,8 @@ pub struct Map<'r> {
     /// The world overview ([`WORLD`]), where the board carries it.
     pub world: Option<Region<&'r [u8]>>,
     pub painter: Painter,
+    /// The names' face (1565), read in place from the image.
+    pub glyphs: Glyphs,
     /// The picture and its names as last drawn, once the board keeps
     /// them ([`Map::keep_pictures`], 1507); `None` draws every time.
     pub kept: Option<Kept>,
@@ -1136,6 +1071,7 @@ impl<'r> Map<'r> {
             more: Vec::new(),
             world: None,
             painter: Painter::new(),
+            glyphs: Glyphs::new().ok_or(MapError::Font)?,
             kept: None,
         })
     }
@@ -1294,20 +1230,22 @@ impl Kept {
     }
 
     /// Draw `view` of `map`'s region and its names into the kept pixels,
-    /// clear of `taken`, with `font`: what [`Renderer::show`] draws on the
-    /// panel without a cache. The label pass's count. `overview` says the
-    /// view shows the world overview, which brings the border table and
-    /// the world's names (1683).
+    /// clear of `taken`, the names set by `glyphs`: what
+    /// [`Renderer::show`] draws on the panel without a cache. The label
+    /// pass's count, the picture's and the names' microseconds by `clock`.
+    /// `overview` says the view shows the world overview, which brings the
+    /// border table and the world's names (1683); `zones`, the time zone
+    /// view's minute, its borders and clocks in place of the names (1684).
     ///
     /// [`Renderer::show`]: crate::render::Renderer::show
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         painter: &mut Painter,
+        glyphs: &mut Glyphs,
         region: &Region<&[u8]>,
         view: &Viewport,
         taken: &[(u16, u16, u16)],
-        font: &MonoFont<'_>,
         overview: bool,
         zones: Option<i64>,
         clock: &dyn Fn() -> u64,
@@ -1320,12 +1258,11 @@ impl Kept {
             painter.zone_borders(view, self);
         }
         let t1 = clock();
-        let rows = (view.size().1 / u32::from(CELL_PX.1)) as u16;
         let (names, found) = match zones {
-            Some(unix) => zone_names(view, rows, taken, unix),
-            None => names(region, view, rows, taken, overview),
+            Some(unix) => zone_names(view, taken, glyphs, unix),
+            None => names(region, view, taken, glyphs, overview),
         };
-        draw_names(&names, font, self)?;
+        draw_names(&names, self);
         let t2 = clock();
         self.holds = Some((*view, taken.to_vec(), zones));
         self.drawn = self.drawn.saturating_add(1);
@@ -1381,6 +1318,40 @@ impl DrawTarget for Kept {
         }
         Ok(())
     }
+}
+
+/// The kept picture blends (1565): the filler's edges and the names'
+/// halos and glyphs mixed into the pixel under them by their coverage,
+/// out of 256, in eight bits a channel and kept in Rgb565.
+impl Coverage for Kept {
+    fn smooth(&self) -> bool {
+        true
+    }
+
+    fn blend(&mut self, x: i32, y: i32, color: Rgb565, alpha: u8) -> Result<(), Self::Error> {
+        let top = i32::from(PICTURE.y * CELL_PX.1);
+        let (width, height) = (crate::frame::WIDTH as i32, crate::frame::HEIGHT as i32);
+        let y = y - top;
+        if !(0..width).contains(&x) || !(0..height).contains(&y) {
+            return Ok(());
+        }
+        let at = (y * width + x) as usize;
+        self.pixels[at] = mix(self.pixels[at], color, alpha);
+        Ok(())
+    }
+}
+
+/// The raw Rgb565 word `under` with `color` blended over it by `alpha`
+/// of 256, each channel in eight bits as the RGBA frame blends
+/// (`leviculum_mapfill::frame::RgbaFrame`), then narrowed again.
+pub fn mix(under: u16, color: Rgb565, alpha: u8) -> u16 {
+    use embedded_graphics::pixelcolor::raw::RawU16;
+    let below = rgb888(Rgb565::from(RawU16::new(under)));
+    let over = rgb888(color);
+    let (a, keep) = (u16::from(alpha), 256 - u16::from(alpha));
+    let c = |i: usize| ((u16::from(over[i]) * a + u16::from(below[i]) * keep) >> 8) as u8;
+    let mixed: Rgb565 = Rgb888::new(c(0), c(1), c(2)).into();
+    RawU16::from(mixed).into_inner()
 }
 
 #[cfg(test)]

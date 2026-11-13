@@ -144,6 +144,8 @@ reference/LXMF/LXMF/__init__.py loquax/home_node the_owner_deletes_a_group_and_e
 # 1462: the stock Python recipient's proof is one tick, never two.
 reference/Reticulum/RNS/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
 reference/LXMF/LXMF/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
+reference/Reticulum/RNS/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
+reference/LXMF/LXMF/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
 
 # loquax-android fling compiles Fling.java and its host test with javac and
 # runs them with java (1209). rust:bookworm carries no JDK, and the land gate
@@ -209,6 +211,10 @@ command:java loquax-android/fling the_recorders_windows_are_the_librarys
 command:javac loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
 command:java loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
 
+# The form field's hint (1667): FormField.java run with its host test.
+command:javac loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+command:java loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+
 # When nothing changes, nothing is drawn (1455): Quiet.java run with its
 # host test.
 command:javac loquax-android/fling the_phone_draws_nothing_while_nothing_changes
@@ -235,6 +241,10 @@ command:java loquax-android/fling the_group_picker_is_the_people_list_with_check
 command:javac loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
 command:java loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
 
+# The mailbox page holds still (1647): MailboxLines.java with its host test.
+command:javac loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+command:java loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+
 # The engine's questions (1496): Engine.java over host stand-ins for
 # Handler, Looper and Log, run with its host test.
 command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path
@@ -245,3 +255,8 @@ command:java loquax-android/fling a_question_that_throws_reaches_its_failure_pat
 # without the tzdata package lacks.
 /usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones tzif_matches_the_hosts_libc
 /usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones system_zone_bytes_reads_zoneinfo
+
+# What a whole browser page costs to cross (1650): the facade's answer read
+# by MsgPack.java with its host test.
+command:javac loquax-android/browse a_long_page_crosses_in_time
+command:java loquax-android/browse a_long_page_crosses_in_time

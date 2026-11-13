@@ -20,7 +20,9 @@
 //! it the test returns at once. The map gestures run over the Florence
 //! fixture, or over the regions in `LOQUAX_WINDOW_BENCH_MAPS`.
 
-use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_florence, ANNA};
+use super::tests::{
+    long_chat, long_chat_of, real_chat, real_chat_grown, seen_of, window_over_florence, ANNA,
+};
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
@@ -174,12 +176,11 @@ pub(super) fn map_window(w: u32, h: u32) -> (App, Rectangle) {
     // The window without the frame meter's overlay, which stacks over it
     // and would move the path below (1456).
     let node = headless::layout(app.window_view(), w, h).expect("a renderer");
-    // The rail, then the map screen: the column, then the map over its bar.
+    // The rail, then the map screen: the map over its bar (1430).
     let map = Layout::new(&node)
         .children()
         .nth(1)
-        .and_then(|screen| screen.children().nth(1))
-        .and_then(|column| column.children().next())
+        .and_then(|screen| screen.children().next())
         .expect("the map")
         .bounds();
     (app, map)
@@ -1008,4 +1009,230 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
             "a frame of the first pull took {ms:.2} ms {clock} (budget {REFRESH_BUDGET_MS:.1} ms)"
         );
     }
+}
+
+/// The window with what its rows widgets did counted at every frame
+/// drawn (1487): per frame, what [`leviculum_ui_iced::rows::counted`] says.
+struct Counted {
+    window: Window,
+    frames: std::cell::RefCell<Vec<leviculum_ui_iced::rows::Counts>>,
+}
+
+impl Program for Counted {
+    type Message = Message;
+
+    fn view(&self) -> Element<'_, Message> {
+        self.window.view()
+    }
+
+    fn update(&mut self, message: Message) {
+        self.window.update(message);
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<Message> {
+        if drawn {
+            self.frames
+                .borrow_mut()
+                .push(leviculum_ui_iced::rows::counted());
+        }
+        self.window.pump(drawn)
+    }
+
+    fn idle(&self) -> bool {
+        self.window.idle()
+    }
+
+    fn marked(&self) -> bool {
+        self.window.marked()
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        self.window.style()
+    }
+}
+
+/// How much more a frame of the wheel may cost over 30,000 bubbles than
+/// over 300, by the frame's update: the noise of two runs of the same
+/// (the bench's A/A moved rows by up to a quarter, 1470).
+const SAME_FRAME: f64 = 1.3;
+
+/// The update a frame of the chat's wheel may take (1487's bar), in
+/// milliseconds: the conversation's length no longer counts.
+const UPDATE_BAR_MS: f64 = 0.2;
+
+/// A frame of the chat's wheel costs the same over 30,000 bubbles as over
+/// 300 (1487): the chat's rows widget hands a frame's event to the rows
+/// in view and their margin, and builds and lays out only the rows that
+/// scroll in. Counted (every build), after the first frame that measured
+/// every row once: the most rows one event of the gesture was handed to,
+/// and the most rows one layout built, within a few rows of each other
+/// for the two lengths and far under the 300 (per event and per layout,
+/// not per frame: a loaded host bunches several events into a frame).
+/// Timed (an optimised build on a quiet host,
+/// [`HostLoad`]): the frames' update, mean, within [`SAME_FRAME`] of each
+/// other, and under [`UPDATE_BAR_MS`]. Before 1487 the update grew with
+/// the conversation: 0.73 to 0.85 ms a frame over 3000 bubbles, 0.12 over
+/// the 300 of the real-shaped chat (`just window-bench`). Unoptimised,
+/// 3000 stand in for 30,000, to keep the debug suite short.
+#[test]
+fn thirty_thousand_bubbles_cost_the_frame_of_three_hundred() {
+    let optimised = !cfg!(debug_assertions);
+    let (w, h) = (900, 560);
+    let long = if optimised { 30_000 } else { 3000 };
+    let host = HostLoad::start();
+    let mut seen = Vec::new();
+    for n in [300, long] {
+        let (_, events) = Case::ChatWheel(Chat::Long).setup(w, h);
+        let mut clock = headless::Paced::new(events.iter().map(|(t, _)| *t).collect(), PACE);
+        let mut script = script(events);
+        let mut counted = Counted {
+            window: Window::new(long_chat_of(n, w, h)),
+            frames: std::cell::RefCell::new(Vec::new()),
+        };
+        leviculum_ui_iced::rows::count(true);
+        let mut watched = Watched {
+            inner: &mut counted,
+            host: &host,
+        };
+        let run = headless::drive_on(&mut watched, w, h, &mut clock, &mut script, SETTLE)
+            .expect("the software renderer");
+        leviculum_ui_iced::rows::count(false);
+        let at = SETTLE.as_secs_f64();
+        let frames: Vec<&DrawnFrame> = run.frames.iter().filter(|f| f.at >= at).collect();
+        let update = frames.iter().map(|f| f.update_ms).sum::<f64>() / frames.len().max(1) as f64;
+        // The first frame measured every row: the frames after it. Per
+        // event and per layout, so that frames a loaded host bunches
+        // (several events in one) count the same.
+        let counts = counted.frames.borrow();
+        let handed = counts
+            .iter()
+            .skip(2)
+            .map(|c| c.handed / c.events.max(1))
+            .max()
+            .unwrap_or(0);
+        let built = counts
+            .iter()
+            .skip(2)
+            .map(|c| c.built / c.layouts.max(1))
+            .max()
+            .unwrap_or(0);
+        let first = counts.first().map_or(0, |c| c.built);
+        println!(
+            "LONG_CHAT bubbles={n} frames={} update_ms_mean={update:.3} most_handed_per_event={handed} most_built_per_layout={built} first_built={first}",
+            frames.len()
+        );
+        assert!(frames.len() > 3, "{n} bubbles: {} frames", frames.len());
+        assert!(
+            first > n as usize,
+            "{n} bubbles: the first frame measured {first} rows"
+        );
+        seen.push((handed, built, update));
+    }
+    let ((h0, b0, u0), (h1, b1, u1)) = (seen[0], seen[1]);
+    assert!(h0 < 300 && h1 < 300, "rows handed an event: {h0} and {h1}");
+    assert!(
+        h1 <= h0 + 8 && h0 <= h1 + 8,
+        "rows handed an event: {h0} for 300, {h1} for {long}"
+    );
+    assert!(
+        b1 <= b0 + 8 && b0 <= b1 + 8,
+        "rows built in a layout: {b0} for 300, {b1} for {long}"
+    );
+    if optimised && host.measured("the long chat's frames") {
+        assert!(
+            u1 <= u0 * SAME_FRAME + 0.02,
+            "a frame's update: {u0:.3} ms for 300, {u1:.3} for {long}"
+        );
+        assert!(
+            u1 < UPDATE_BAR_MS,
+            "a frame's update over {long} bubbles: {u1:.3} ms"
+        );
+    }
+}
+
+/// How many frames of the wheel's notches a long frame spans in
+/// [`a_wheel_notch_during_a_long_frame_is_not_lost`]: each frame lasts
+/// eight notches of the gesture.
+const LONG_FRAME: u32 = 8;
+
+/// A notch of the wheel that comes while a frame is drawn is not lost
+/// (1487). iced 0.14 runs the window on one thread (iced_winit 0.14.1,
+/// `lib.rs`): the window's input is queued as it comes (`events.push`)
+/// and handed to the widgets in order, all of it, before the next frame
+/// (`AboutToWait`), and a frame is the update with `RedrawRequested`, the
+/// draw and the present; while a frame is drawn the input waits in the
+/// display server's socket and comes with the next turn. A notch adds to
+/// what the soft scroll has left to scroll ([`leviculum_ui_iced::smooth`]),
+/// so notches that come together scroll as far as notches a frame apart.
+/// The proof: the chat's wheel gesture (40 notches, 50 ms apart) on a
+/// clock that moves [`LONG_FRAME`] notches a frame (every frame "takes"
+/// 400 ms, so its notches come during it, together), against the same
+/// gesture a notch a frame: the window ends on the same place, up to the
+/// edge pixels of a scroll drawn as a shift ([`EDGE`], [`EDGE_PIXELS`]).
+/// The control: the same long frames with one notch left out end
+/// elsewhere.
+#[test]
+fn a_wheel_notch_during_a_long_frame_is_not_lost() {
+    let (w, h) = (900, 560);
+    let run = |step: Duration, drop_one: bool| {
+        let (app, mut events) = Case::ChatWheel(Chat::Long).setup(w, h);
+        if drop_one {
+            let last = events.len() - 1;
+            events.remove(last);
+        }
+        let notches = events.len() - 1;
+        let mut window = Window::new(app);
+        let mut clock = headless::Paced::new(events.iter().map(|(t, _)| *t).collect(), step);
+        let mut script = script(events);
+        let run = headless::drive_on(&mut window, w, h, &mut clock, &mut script, SETTLE)
+            .expect("the software renderer");
+        (run, notches)
+    };
+    let (each, n_each) = run(PACE, false);
+    let (long, n_long) = run(PACE * LONG_FRAME, false);
+    let (lost, n_lost) = run(PACE * LONG_FRAME, true);
+    // The frames drawn while the notches came (the easing after them
+    // aside): a notch each, or eight.
+    let during = |run: &headless::Run| {
+        let (from, until) = (SETTLE.as_secs_f64(), (SETTLE + PACE * 40).as_secs_f64());
+        run.frames
+            .iter()
+            .filter(|f| f.at >= from && f.at < until)
+            .count()
+    };
+    let compare = |a: &[u8], b: &[u8]| {
+        let mut worst = 0u8;
+        let mut past_one = 0;
+        for (x, y) in a.iter().zip(b) {
+            let d = x.abs_diff(*y);
+            worst = worst.max(d);
+            past_one += usize::from(d > 1);
+        }
+        (worst, past_one)
+    };
+    let (worst, past_one) = compare(&each.rgb, &long.rgb);
+    let (lost_worst, lost_past) = compare(&each.rgb, &lost.rgb);
+    println!(
+        "a notch a frame: {n_each} notches in {} frames ({} during them); {LONG_FRAME} notches a frame: {n_long} in {} ({}), \
+         at the end {past_one} channels more than one step off, by at most {worst}; one notch left out: \
+         {n_lost} notches, {lost_past} channels off, by at most {lost_worst}",
+        each.frames.len(),
+        during(&each),
+        long.frames.len(),
+        during(&long)
+    );
+    assert!(
+        during(&long) * 4 <= during(&each),
+        "the long frames took the notches together: {} frames during the notches against {}",
+        during(&long),
+        during(&each)
+    );
+    assert!(
+        worst <= EDGE && past_one <= 3 * EDGE_PIXELS,
+        "a notch was lost: {past_one} channels off, by {worst}"
+    );
+    assert!(
+        lost_past > 1000 && lost_worst > EDGE,
+        "the control: a notch left out moved nothing"
+    );
 }

@@ -50,6 +50,9 @@ leviculum_ui::catalogue! {
     ExploreSortSeen = "explore_sort_seen", "Last seen", "Zuletzt gesehen";
     BrowseLoading = "browse_loading", "Loading %1$s …", "Lade %1$s …";
     BrowseLoadingSecs = "browse_loading_secs", "Loading %1$s … %2$d s", "Lade %1$s … %2$d s";
+    // 1667 (walk 11, finding 59): a page's text field's editor, titled by
+    // the field's label or name, never a lone name.
+    BrowseFieldTitle = "browse_field_title", "Input: %1$s", "Eingabe: %1$s";
     ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
     ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
     ExploreToday = "explore_today", "Today", "Heute";
@@ -62,6 +65,8 @@ leviculum_ui::catalogue! {
     // 1621 (walk 2): the rooms the reader is in, then the servers, each
     // section one sentence when empty.
     ExploreNoJoined = "explore_no_joined", "You are in no room. Pick a server below.", "Du bist in keinem Raum. Such dir unten einen Server aus.";
+    ExploreNoJoinedOn = "explore_no_joined_on", "You are in no room on %1$s.", "Du bist in keinem Raum auf %1$s.";
+    ExploreOpenRooms = "explore_open_rooms", "Open rooms", "Räume öffnen";
     ExploreServers = "explore_servers", "Servers", "Server";
     ExploreNoServers = "explore_no_servers", "No server within reach.", "Kein Server in Reichweite.";
     ExploreNoServerMatch = "explore_no_server_match", "No server matches “%1$s”.", "Kein Server passt zu „%1$s“.";
@@ -78,6 +83,15 @@ leviculum_ui::catalogue! {
     ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
     ExploreSeenDay = "explore_seen_day", "seen yesterday", "gesehen gestern";
     ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "gesehen vor %1$d Tagen";
+    // How old the mailbox's list is, on top of Explore (1644): "As of 3 h
+    // ago" when the last answer is over an hour old, "Not connected · as of
+    // yesterday 14:20" while the link is down.
+    ExploreAsOf = "explore_as_of", "As of %1$s", "Stand: %1$s";
+    ExploreDownAsOf = "explore_down_as_of", "Not connected · %1$s", "Nicht verbunden · %1$s";
+    ExploreAsOfToday = "explore_as_of_today", "as of today %1$s", "Stand von heute %1$s";
+    ExploreAsOfYesterday = "explore_as_of_yesterday", "as of yesterday %1$s", "Stand von gestern %1$s";
+    ExploreAsOfWeekday = "explore_as_of_weekday", "as of %1$s %2$s", "Stand von %1$s %2$s";
+    ExploreAsOfDate = "explore_as_of_date", "as of %1$s %2$s", "Stand vom %1$s %2$s";
     ExploreHop = "explore_hop", "directly reachable", "direkt erreichbar";
     ExploreHops = "explore_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
     ExploreOpenAddress = "explore_open_address", "Open %1$s", "%1$s öffnen";
@@ -91,18 +105,30 @@ leviculum_ui::catalogue! {
     ExploreServerUse = "explore_server_use", "Use this server for rooms", "Diesen Server für Räume nutzen";
     ExploreServerInUse = "explore_server_in_use", "Your rooms are on this server.", "Deine Räume laufen über diesen Server.";
     ExploreServerRooms = "explore_server_rooms", "Its rooms", "Seine Räume";
-    ExploreServerNoRooms = "explore_server_no_rooms", "This server names no rooms. Use it, then type a room's name to join.", "Dieser Server nennt keine Räume. Nutz ihn und tipp dann den Namen eines Raums.";
     ExploreServerAsking = "explore_server_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
-    ExploreServerNoAnswer = "explore_server_no_answer", "The server did not answer, so its rooms are unknown. Use it, then type a room's name to join.", "Der Server hat nicht geantwortet, seine Räume sind unbekannt. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerAskingFor = "explore_server_asking_for", "Asking the server for its rooms… %1$d s", "Frage den Server nach seinen Räumen… %1$d s";
     ExploreServerClose = "explore_server_close", "Close", "Schließen";
+    // 1669 (walk 12, 68): from 20 s on, while the question is still alive.
+    ExploreServerSlowFor = "explore_server_slow_for", "The server is slow. Still waiting for its rooms… %1$d s", "Der Server antwortet langsam. Warte weiter auf seine Räume… %1$d s";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
     RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a server under Explore.", "Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
+    RoomsLinkingFor = "rooms_linking_for", "Connecting… %1$d s", "Verbinde… %1$d s";
+    // 1659 (walk 10, 53): from 20 s until the patience of 45 s.
+    RoomsSlowFor = "rooms_slow_for", "The server is answering slowly… %1$d s", "Server antwortet langsam… %1$d s";
+    RoomsNotLinked = "rooms_not_linked", "Not connected yet.", "Noch nicht verbunden.";
+    RoomsLinked = "rooms_linked", "Connected", "Verbunden";
+    RoomsConnect = "rooms_connect", "Connect", "Verbinden";
+    RoomsRetry = "rooms_retry", "Try again", "Erneut versuchen";
+    RoomsOnHub = "rooms_on_hub", "Rooms on %1$s", "Räume auf %1$s";
+    RoomsAsking = "rooms_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
+    RoomsNoneNamed = "rooms_none_named", "This server names no public rooms.", "Dieser Server nennt keine öffentlichen Räume.";
+    RoomsOther = "rooms_other", "Join another room", "Anderen Raum beitreten";
     RoomsNoPath = "rooms_no_path", "The rooms cannot be reached. Is their server on this network?", "Die Räume sind nicht erreichbar. Ist ihr Server in diesem Netz?";
-    RoomsNoAnswer = "rooms_no_answer", "The rooms did not answer. Try again later.", "Die Räume haben nicht geantwortet. Versuch es später noch einmal.";
-    RoomsLost = "rooms_lost", "The connection to the rooms broke. Open the Rooms again to reconnect.", "Die Verbindung zu den Räumen ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
+    RoomsNoAnswer = "rooms_no_answer", "The server does not answer.", "Server antwortet nicht.";
+    RoomsLost = "rooms_lost", "The connection to the server broke.", "Die Verbindung zum Server ist abgerissen.";
     RoomsLeft = "rooms_left", "Not connected.", "Nicht verbunden.";
     RoomsOff = "rooms_off", "There are no public rooms here yet. Choose a server under Explore.", "Hier gibt es noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
@@ -110,7 +136,7 @@ leviculum_ui::catalogue! {
     RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
     RoomsTooLong = "rooms_too_long", "This line is %1$d bytes long and a room takes at most %2$d. Shorten it.", "Diese Zeile ist %1$d Bytes lang, ein Raum nimmt höchstens %2$d. Kürze sie.";
     RoomsTooBig = "rooms_too_big", "This line needs %1$d bytes and the link carries %2$d. Shorten it.", "Diese Zeile braucht %1$d Bytes, die Verbindung trägt %2$d. Kürze sie.";
-    RoomsBadRoom = "rooms_bad_room", "A room name needs a few letters and no spaces.", "Ein Raumname braucht ein paar Buchstaben und keine Leerzeichen.";
+    RoomsBadRoom = "rooms_bad_room", "A room name needs a few letters on one line.", "Ein Raumname braucht ein paar Buchstaben in einer Zeile.";
     RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as their server allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie ihr Server erlaubt. Verlass zuerst einen.";
     RoomsYou = "rooms_you", "you", "du";
     RoomsCameIn = "rooms_came_in", "%1$s came in", "%1$s ist da";
@@ -142,14 +168,15 @@ leviculum_ui::catalogue! {
     RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
     RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
     RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
-    RoomsNoName = "rooms_no_name", "You have no name here: in the room you appear without one.", "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.";
+    RoomsNoName = "rooms_no_name", "You have no name on this server yet: in the room you appear without one.", "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen.";
+    RoomsNoNameProfile = "rooms_no_name_profile", "You have no name on this server yet (your profile is called %1$s): in the room you appear without one.", "Auf diesem Server hast du noch keinen Namen (dein Profil heißt %1$s): Im Raum erscheinst du ohne Namen.";
     Settings = "settings", "Settings", "Einstellungen";
     // 1450 (walk 1, finding 21): the settings' nine sections, one list on
     // every target (`super::settings`), in the phone's order.
     SettingsProfile = "settings_profile", "Profile", "Profil";
     SettingsProfileSummary = "settings_profile_summary", "Name, address, QR code", "Name, Adresse, QR-Code";
     Mailbox = "mailbox", "Mailbox", "Postfach";
-    SettingsMailboxSummary = "settings_mailbox_summary", "Where it lives", "Wo es liegt";
+    SettingsMailboxSummary = "settings_mailbox_summary", "Which mailbox, connection, devices", "Welches Postfach, Verbindung, Geräte";
     SettingsAppearance = "settings_appearance", "Appearance", "Darstellung";
     SettingsAppearanceSummary = "settings_appearance_summary", "Light or dark, the map", "Hell oder dunkel, die Karte";
     SettingsChats = "settings_chats", "Chats", "Chats";
@@ -286,6 +313,9 @@ leviculum_ui::catalogue! {
     // A group's two ticks (1466): every member's device said it has it.
     StateGroupDelivered = "state_group_delivered", "On the devices", "Auf den Geräten";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
+    // A read whose time nobody knows (1506): an imported message the
+    // source kept as read without a time; never the epoch's "01:00".
+    StateReadUntimed = "state_read_untimed", "Read", "Gelesen";
     // The arrived rung's words when the propagation node, not a proof,
     // witnessed it (1395, 1462, loquax-propagation-receipts.md).
     StateCollected = "state_collected", "Collected from the propagation network", "Aus dem Propagation-Netz abgeholt";
@@ -469,29 +499,31 @@ leviculum_ui::catalogue! {
     MailboxName = "mailbox_name", "Name", "Name";
     MailboxNameUnheard = "mailbox_name_unheard", "not heard yet", "noch nicht gehört";
     MailboxAddress = "mailbox_address", "Address", "Adresse";
+    MailboxAddressOwn = "mailbox_address_own", "This is your address too: the mailbox and you are one identity.", "Das ist auch deine Adresse: Postfach und du sind eine Identität.";
     MailboxHost = "mailbox_host", "Runs on", "Läuft auf";
     MailboxVersion = "mailbox_version", "Version", "Version";
-    MailboxVersionOther = "mailbox_version_other", "%1$s (this device: %2$s)", "%1$s (dieses Gerät: %2$s)";
+    MailboxVersionNewer = "mailbox_version_newer", "%1$s, newer", "%1$s, neuer";
+    MailboxVersionOlder = "mailbox_version_older", "%1$s, older", "%1$s, älter";
+    MailboxVersionBuild = "mailbox_version_build", "%1$s, another build", "%1$s, anderer Stand";
     MailboxVersionOld = "mailbox_version_old", "older than this device", "älter als dieses Gerät";
     MailboxOldText = "mailbox_old_text", "Your mailbox runs an older version. Update it there so that Explore and this page are complete.", "Dein Postfach läuft mit einer älteren Version. Aktualisiere es dort, damit Entdecken und diese Seite vollständig sind.";
     MailboxReach = "mailbox_reach", "Connection", "Verbindung";
-    MailboxUp = "mailbox_up", "Connected", "Verbunden";
-    MailboxUpFor = "mailbox_up_for", "Connected for %1$s", "Verbunden seit %1$s";
+    MailboxUp = "mailbox_up", "This device is connected", "Dieses Gerät ist verbunden";
+    MailboxUpFor = "mailbox_up_for", "This device connected for %1$s", "Dieses Gerät verbunden seit %1$s";
     MailboxDown = "mailbox_down", "Not connected", "Nicht verbunden";
-    MailboxDownFor = "mailbox_down_for", "Not connected for %1$s", "Nicht verbunden seit %1$s";
+    MailboxDownHere = "mailbox_down_here", "This device is not connected", "Dieses Gerät ist nicht verbunden";
+    MailboxDownFor = "mailbox_down_for", "This device not connected for %1$s", "Dieses Gerät nicht verbunden seit %1$s";
     MailboxMoment = "mailbox_moment", "less than a minute", "weniger als einer Minute";
     MailboxContact = "mailbox_contact", "Last contact", "Letzter Kontakt";
     MailboxContactNone = "mailbox_contact_none", "none yet", "noch keiner";
-    MailboxWayShielded = "mailbox_way_shielded", "Connection over %1$s, port %2$d, shielded", "Verbindung über %1$s, Tor %2$d, geschirmt";
-    MailboxWayOpen = "mailbox_way_open", "Connection over %1$s, port %2$d, not shielded", "Verbindung über %1$s, Tor %2$d, ungeschirmt";
-    MailboxWayOther = "mailbox_way_other", "Connection over %1$s, port %2$d", "Verbindung über %1$s, Tor %2$d";
+    MailboxWayShielded = "mailbox_way_shielded", "Connection to %1$s, shielded (the phone hears only its mailbox)", "Verbindung zu %1$s, geschirmt (das Handy hört nur sein Postfach)";
+    MailboxWayOpen = "mailbox_way_open", "Connection to %1$s, not shielded (the phone hears the whole network, which costs battery and data)", "Verbindung zu %1$s, ungeschirmt (das Handy hört das ganze Netz, kostet Akku und Daten)";
+    MailboxWayOther = "mailbox_way_other", "Connection to %1$s, port %2$d", "Verbindung zu %1$s, Port %2$d";
     MailboxWayNone = "mailbox_way_none", "No server reached yet", "Noch kein Server erreicht";
     MailboxWayLocal = "mailbox_way_local", "Over this computer's network connection", "Über die Netzverbindung dieses Rechners";
-    MailboxShieldedText = "mailbox_shielded_text", "Shielded: this device hears only what is meant for it.", "Geschirmt: dieses Gerät hört nur, was für es bestimmt ist.";
-    MailboxOpenText = "mailbox_open_text", "Not shielded: the shielded port could not be reached, so this device hears the whole mesh, which costs data and battery.", "Ungeschirmt: das geschirmte Tor war nicht erreichbar, deshalb hört dieses Gerät das ganze Mesh mit, was Daten und Akku kostet.";
     MailboxAccess = "mailbox_access", "Devices of this mailbox", "Geräte dieses Postfachs";
     MailboxSeen = "mailbox_seen", "last there %1$s", "zuletzt da %1$s";
-    MailboxSeenNone = "mailbox_seen_none", "not there yet", "noch nicht da gewesen";
+    MailboxSeenNever = "mailbox_seen_never", "never connected yet", "noch nie verbunden";
     MailboxThisDevice = "mailbox_this_device", "this device", "dieses Gerät";
     MailboxDevicesAsking = "mailbox_devices_asking", "Asking your mailbox which devices use it …", "Dein Postfach wird gefragt, welche Geräte es nutzen …";
     MailboxDevicesOld = "mailbox_devices_old", "Your mailbox does not list its devices yet: that needs a newer version there.", "Dein Postfach nennt seine Geräte noch nicht: dafür braucht es dort eine neuere Version.";
@@ -545,6 +577,10 @@ leviculum_ui::catalogue! {
     FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
     FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
     FileNoApp = "file_no_app", "No app on this device opens this file.", "Keine App auf diesem Gerät kann diese Datei öffnen.";
+    // A photo or a file under way, in its bubble (1662).
+    TransferSending = "transfer_sending", "sending · %1$d %%", "wird gesendet · %1$d %%";
+    TransferFetching = "transfer_fetching", "fetching · %1$s of %2$s", "wird geholt · %1$s von %2$s";
+    Megabytes = "megabytes", "%1$d.%2$d MB", "%1$d,%2$d MB";
     // Voice messages (1222): the bubble's words, its buttons, the
     // microphone's hint, the slide that cancels, the refusals, and what
     // the phone says without the microphone.
@@ -680,6 +716,13 @@ leviculum_ui::catalogue! {
     FitWindow = "scene_fit_window", "Fit all", "Alle zeigen";
     // 1684: the map menu's time zone view, the zones and their clocks.
     TimeZones = "scene_time_zones", "Time zones", "Zeitzonen";
+    // 1430: the window's map card has the phone's actions, one catalogue
+    // for both; the map's menu opens the locations list over the map
+    // (devices send positions: never "friends", never "contacts").
+    CardChat = "card_chat", "Chat", "Chat";
+    CardNavigate = "card_navigate", "Navigate", "Navigieren";
+    CardShare = "card_share", "Share mine", "Meine teilen";
+    Locations = "scene_locations", "Locations", "Standorte";
     LoadMapArea = "scene_load_map_area", "Load this map area", "Diesen Kartenausschnitt laden";
     // The day line: the weekday, the day and the month, the year when it
     // is not this one.
@@ -737,13 +780,42 @@ leviculum_ui::catalogue! {
     M9NotSaved = "m9_not_saved", "Not saved: memory error", "Nicht gespeichert: Speicherfehler";
     M9JoinNotSaved = "m9_join_not_saved", "Connected, but not saved: pair again after a restart", "Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln";
     M9NoIdentity = "m9_no_identity", "Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.", "Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.";
-    // The M9's overview behind the house key and its type switch (1532).
-    M9Overview = "m9_overview", "Overview", "Übersicht";
+    // The M9's settings behind the house key (1532, 1561): the type size
+    // row, its three sizes, the words under a row, the about rows.
     M9Type = "m9_type", "Text", "Schrift";
+    M9TypeTiny = "m9_type_tiny", "very small", "sehr klein";
     M9TypeSmall = "m9_type_small", "small", "klein";
     M9TypeLarge = "m9_type_large", "large", "groß";
-    M9TypeNowSmall = "m9_type_now_small", "Text: small", "Schrift: klein";
-    M9TypeNowLarge = "m9_type_now_large", "Text: large", "Schrift: groß";
+    M9SettingsChange = "m9_settings_change", "Enter changes, Back closes", "Enter ändert, Zurück schließt";
+    M9SettingsApply = "m9_settings_apply", "Enter applies, Back keeps", "Enter übernimmt, Zurück nicht";
+    M9Version = "m9_version", "Version", "Version";
+    M9MapData = "m9_map_data", "Map data", "Kartendaten";
+    // The M9's top bar (1564): the page's name and at most one short word
+    // of state that stands on its own, never a sentence cut by the bar.
+    M9BarConnected = "m9_bar_connected", "Connected", "Verbunden";
+    M9BarDisconnected = "m9_bar_disconnected", "Disconnected", "Getrennt";
+    M9BarConnecting = "m9_bar_connecting", "Connecting…", "Verbindet…";
+    M9BarFetching = "m9_bar_fetching", "Fetching…", "Holt ab…";
+    M9BarRefused = "m9_bar_refused", "Refused", "Abgelehnt";
+    M9BarNotSaved = "m9_bar_not_saved", "Not saved", "Nicht gespeichert";
+    // The way to the home in the top bar (1478): the medium its first hop
+    // takes and the path's hops, or that the board holds no path at all.
+    M9BarWayRadio = "m9_bar_way_radio", "Mailbox over radio · %1$d stations", "Postfach über Funk · %1$d Stationen";
+    M9BarWayRadioOne = "m9_bar_way_radio_one", "Mailbox over radio · %1$d station", "Postfach über Funk · %1$d Station";
+    M9BarWayCable = "m9_bar_way_cable", "Mailbox over cable · %1$d stations", "Postfach über Kabel · %1$d Stationen";
+    M9BarWayCableOne = "m9_bar_way_cable_one", "Mailbox over cable · %1$d station", "Postfach über Kabel · %1$d Station";
+    M9BarWayWifi = "m9_bar_way_wifi", "Mailbox over WiFi · %1$d stations", "Postfach über WLAN · %1$d Stationen";
+    M9BarWayWifiOne = "m9_bar_way_wifi_one", "Mailbox over WiFi · %1$d station", "Postfach über WLAN · %1$d Station";
+    M9BarNoWay = "m9_bar_no_way", "No way to mailbox", "Kein Weg zum Postfach";
+    // The same without the mailbox's name, for a bar the long form does
+    // not fit beside its title (at the default type, "Chats" leaves 27
+    // cells).
+    M9BarRadio = "m9_bar_radio", "Radio · %1$d stations", "Funk · %1$d Stationen";
+    M9BarRadioOne = "m9_bar_radio_one", "Radio · %1$d station", "Funk · %1$d Station";
+    M9BarCable = "m9_bar_cable", "Cable · %1$d stations", "Kabel · %1$d Stationen";
+    M9BarCableOne = "m9_bar_cable_one", "Cable · %1$d station", "Kabel · %1$d Station";
+    M9BarWifi = "m9_bar_wifi", "WiFi · %1$d stations", "WLAN · %1$d Stationen";
+    M9BarWifiOne = "m9_bar_wifi_one", "WiFi · %1$d station", "WLAN · %1$d Station";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.

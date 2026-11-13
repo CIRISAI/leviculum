@@ -389,7 +389,9 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     assert!(inks_of(&overview) > 8, "the world is drawn");
     // The names the board sets on that picture (1733), from the renderer's
     // own inputs: the painted view, the own pin's cell and the overview's
-    // two rows of words. Three countries, and why no more:
+    // two rows of words. Three countries, and why no more (the reasons in
+    // the cells of the pass before 1565; the phone's pass at 1.6 times its
+    // sizes sets the same three, checked on the merge of 2026-11-13):
     // - Deutschland's and Frankreich's boxes touch the own pin at Frankfurt
     //   (the cell below), which is placed first and never covered.
     // - Vereinigtes Königreich is 22 cells wide and its label point lies 9
@@ -407,15 +409,15 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     let mut taken = map::pin_cells(&pins);
     assert!(taken.contains(&(16, 5, 1)), "the own pin: {taken:?}");
     taken.extend(map::overview_rows());
-    let rows = (painted.size().1 / CELL_PX.1 as u32) as u16;
-    let (names, stats) = map::names(&board.region, &painted, rows, &taken, true);
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, stats) = map::names(&board.region, &painted, &taken, &mut glyphs, true);
     let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
     assert_eq!(texts, ["Italien", "Irland", "Polen"], "{names:?}");
     assert!(stats.found > texts.len(), "{stats:?}");
     // The control: without the own pin, Deutschland is set, and Frankreich
     // still gives way, now to Deutschland's box beside it.
     let free = map::overview_rows().to_vec();
-    let (names, _) = map::names(&board.region, &painted, rows, &free, true);
+    let (names, _) = map::names(&board.region, &painted, &free, &mut glyphs, true);
     let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
     assert!(texts.contains(&"Deutschland"), "{texts:?}");
     assert!(!texts.contains(&"Frankreich"), "{texts:?}");
@@ -554,19 +556,21 @@ fn the_world_overview_draws_germany_at_z6() {
     // holds no pin.
     let world = board.of(map::Drawn::Overview).expect("the overview");
     let painted = map::with_bottom(&view);
-    let rows = (painted.size().1 / u32::from(CELL_PX.1)) as u16;
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
     let words = map::overview_rows();
-    let (names, _) = map::names(world, &painted, rows, &words, true);
+    let (names, stats) = map::names(world, &painted, &words, &mut glyphs, true);
     let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
-    assert_eq!(texts, ["Frankfurt am Main"], "{names:?}");
-    // Without the words, Deutschland is served first: its label point
-    // lies on row 2, which the words over the picture take on the board.
-    let (free, _) = map::names(world, &painted, rows, &[], true);
-    assert_eq!(
-        free.first().map(|n| (n.text.as_str(), n.kind, n.row)),
-        Some(("Deutschland", leviculum_map::labels::LabelKind::Country, 2)),
-        "{free:?}"
-    );
+    // Both tables are read (1683): the region's Frankfurt am Main and the
+    // world table's Deutschland. Since the phone's label pass (1565) sets
+    // the names at 1.6 times the phone's sizes, neither is set here:
+    // "Frankfurt am Main" at the picture's middle is wider than the
+    // picture leaves it, so no candidate, and Deutschland's box (its label
+    // point on row 2) reaches with the rule's margin into the top chip
+    // row, which no name takes (1727), words or not.
+    assert!(texts.is_empty(), "{texts:?}");
+    assert_eq!(stats.found, 2, "{stats:?}");
+    let (free, _) = map::names(world, &painted, &[], &mut glyphs, true);
+    assert!(free.is_empty(), "{free:?}");
     if let Some(state) = model.map.as_mut() {
         state.zoom = 12;
     }
@@ -613,50 +617,97 @@ fn at_zoom(zoom: u8) -> UiModel<Field> {
     model
 }
 
-/// 1531: the M9's map carries names. Over Florence at z16 the label pass
-/// sets street names, never on a pin's cells, and they are in the
-/// frame; at z13 the fixture holds no name its zoom shows (its place
-/// points lie outside the cut, its streets start at z14), and the frame
-/// is the picture alone. Both pinned as goldens. The control: the same
-/// z16 frame without the names differs.
+/// 1531, 1565: the M9's map carries names, set as the phone sets them.
+/// Whatever the phone's label pass sets lies inside the picture, off the
+/// bottom row, never on a pin's cells and never on another name. Over
+/// Florence at z16 it sets a street's name along the street, turned to
+/// it, in Fira Sans; at z15 it finds the streets' names and sets none at
+/// the board's size (no straight run of a street long enough for its name
+/// lies wholly in the 320 x 240 picture: the 1565 report's table); at
+/// z13 the fixture holds no name its zoom shows (its place points lie
+/// outside the cut, its streets start at z14), and the frame is the
+/// picture alone. All three pinned as goldens. The control: the z16
+/// picture drawn without its names differs from the one with them.
 #[test]
-fn the_map_carries_names_at_z13_and_z16() {
-    let region = Map::new(FIXTURE).expect("region");
-    for (zoom, golden) in [(13, "m9-map-z13.png"), (16, "m9-map-z16.png")] {
+fn the_map_carries_names_at_z13_z15_and_z16() {
+    let mut region = Map::new(FIXTURE).expect("region");
+    for (zoom, golden) in [
+        (13, "m9-map-z13.png"),
+        (15, "m9-map-z15.png"),
+        (16, "m9-map-z16.png"),
+    ] {
         let model = at_zoom(zoom);
         let (view, pins) = map::view(&model).expect("map");
         let tall = map::with_bottom(&view);
         let taken = map::pin_cells(&pins);
-        let (names, stats) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken, false);
-        println!("z{zoom}: {stats:?} {names:?}");
+        let (names, stats) = map::names(&region.region, &tall, &taken, &mut region.glyphs, false);
+        let texts: Vec<(&str, f64)> = names.iter().map(|n| (n.text.as_str(), n.angle)).collect();
+        println!("z{zoom}: {stats:?} {texts:?}");
         assert_eq!(stats.drawn, names.len());
-        assert!(names.len() <= map::NAMES_MAX);
         match zoom {
-            13 => assert_eq!(stats.found, 0, "{names:?}"),
-            _ => assert!(names.len() >= 2, "z{zoom}: {stats:?}"),
+            13 => assert_eq!(stats.found, 0, "{texts:?}"),
+            15 => assert!(stats.found > 0, "z15 finds the streets: {stats:?}"),
+            _ => {
+                assert!(
+                    names.iter().any(|n| n.angle != 0.0 && n.kind.is_line()),
+                    "z{zoom}: a street's name along it: {texts:?}"
+                );
+                assert!(stats.glyphs > 0, "z{zoom}: {stats:?}");
+            }
         }
-        for name in &names {
-            let width = name.text.chars().count() as u16;
-            assert!(name.col + width <= PICTURE.width, "{name:?}");
-            for &(col, row, w) in &taken {
-                let apart = row != name.row || col + w <= name.col || name.col + width <= col;
-                assert!(apart, "{name:?} over a pin at {col},{row}");
+        let (w, h) = tall.size();
+        let mut pins_px = map::taken_px(&taken);
+        pins_px.extend(map::taken_px(&[(0, map::BOTTOM, PICTURE.width)]));
+        let apart = |a: &leviculum_map::labels::Rect, b: &leviculum_map::labels::Rect| {
+            a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0
+        };
+        for (i, name) in names.iter().enumerate() {
+            for b in &name.boxes {
+                assert!(
+                    b.x0 >= 0 && b.y0 >= 0 && b.x1 as u32 <= w && b.y1 as u32 <= h,
+                    "{} leaves the picture: {b:?}",
+                    name.text
+                );
+                for p in &pins_px {
+                    assert!(apart(b, p), "{} over a pin at {p:?}", name.text);
+                }
+                for other in &names[i + 1..] {
+                    for o in &other.boxes {
+                        assert!(apart(b, o), "{} over {}", name.text, other.text);
+                    }
+                }
             }
         }
         let frame = drawn_with(&model, map::Overlay::default());
         support::check(golden, &frame);
+        if zoom == 16 {
+            let mut bare = Frame::new();
+            let mut painter = map::Painter::new();
+            painter
+                .picture(&region.region, &tall, &mut bare, false)
+                .expect("picture");
+            assert_ne!(
+                bare.pixels()[..(WIDTH * HEIGHT_PICTURE) as usize],
+                frame.pixels()[..(WIDTH * HEIGHT_PICTURE) as usize],
+                "the control: the names are in the frame"
+            );
+        }
     }
 }
 
-/// 1531: places are set first, then the streets and rivers, then from
-/// z15 the parks: over Berlin's Mitte (the map core's second fixture,
-/// which holds the city's point) "Berlin" is the first name at every
-/// zoom its box is wide enough to hold it, and a park comes only from
-/// z15. Since 1727 a region's names stay on the ground it covers: the
-/// box is 0.01 degrees wide, 29 pixels at z12 and 58 at z13, under the
-/// 60 "Berlin" takes, so from z14.
+/// 1565: the label pass is the phone's, one round by the map core's rule,
+/// which sets a city before what it names around it: over Berlin's Mitte
+/// (the map core's second fixture, which holds the city's point)
+/// "Berlin" is set wherever the region's ground holds it. Since 1727 a
+/// region's names stay on the ground it covers: the box is 0.01 degrees
+/// wide, 29 pixels at z12 and 58 at z13, too narrow for the name, so it
+/// is set from z14 to z16 and nothing at z12 and z13. The parks: no park
+/// name of the fixture lies on its region's own ground, so the control
+/// reads the names as the overview does, which keeps them anywhere on
+/// screen: at z15 a park's name (the Lustgarten), at z12, where the
+/// fixture holds no park's name, none.
 #[test]
-fn places_come_first_and_parks_from_z15() {
+fn the_phones_rule_sets_berlin_on_its_ground() {
     use leviculum_map::labels::LabelKind;
     use leviculum_map::mercator::{project, LatLon};
     use leviculum_map::region::Region;
@@ -664,46 +715,34 @@ fn places_come_first_and_parks_from_z15() {
 
     let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
     let region = Region::from_bytes(bytes).expect("region");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
     let at = project(LatLon::from_e6(52_517_500, 13_395_000));
     for zoom in 12..=13 {
         let view = Viewport::new(at, zoom, 320, 240);
-        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
-        assert!(names.is_empty() && stats.found > 0, "z{zoom}: {names:?}");
+        let (names, stats) = map::names(&region, &view, &[], &mut glyphs, false);
+        let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+        assert!(names.is_empty() && stats.found > 0, "z{zoom}: {texts:?}");
     }
     for zoom in 14..=16 {
         let view = Viewport::new(at, zoom, 320, 240);
-        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
-        println!("z{zoom}: {stats:?} {names:?}");
-        let first = names.first().expect("a name");
-        assert_eq!(
-            (first.kind, first.text.as_str()),
-            (LabelKind::City, "Berlin")
-        );
-        let kinds: Vec<LabelKind> = names.iter().map(|n| n.kind).collect();
-        let parks = kinds.iter().any(|k| matches!(k, LabelKind::Park));
-        assert!(!(parks && zoom < map::POI_ZOOM), "z{zoom}: {kinds:?}");
-        // Rounds in order: no place after a street, no street after a park.
-        let round = |k: &LabelKind| match k {
-            LabelKind::Park | LabelKind::Water => 2,
-            k if k.is_line() => 1,
-            _ => 0,
-        };
+        let (names, stats) = map::names(&region, &view, &[], &mut glyphs, false);
+        let texts: Vec<(&str, LabelKind)> =
+            names.iter().map(|n| (n.text.as_str(), n.kind)).collect();
+        println!("z{zoom}: {stats:?} {texts:?}");
         assert!(
-            kinds.windows(2).all(|w| round(&w[0]) <= round(&w[1])),
-            "{kinds:?}"
+            names
+                .iter()
+                .any(|n| n.kind == LabelKind::City && n.text == "Berlin"),
+            "z{zoom}: {texts:?}"
         );
     }
-    // The control: z15 sets a park and z14 none. No park name of the
-    // fixtures lies on its region's own ground, so the control reads the
-    // names as the overview does, which keeps the world's names anywhere
-    // on screen (1727); the park-zoom rule is the same either way.
-    let parks = |zoom| {
+    let mut parks = |zoom| {
         let view = Viewport::new(at, zoom, 320, 240);
-        let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[], true);
+        let (names, _) = map::names(&region, &view, &[], &mut glyphs, true);
         names.iter().any(|n| n.kind == LabelKind::Park)
     };
-    assert!(parks(15), "the control: z15 sets a park");
-    assert!(!parks(14), "the control: z14 sets none");
+    assert!(parks(15), "z15 sets a park");
+    assert!(!parks(12), "the control: z12 sets none");
 }
 
 /// 1531: the map's chrome. No title row and no legend: the picture
@@ -796,7 +835,8 @@ fn the_time_zone_view_writes_the_boards_clocks() {
     assert_eq!(unix, 1_782_907_200);
     let centre = leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0));
     let view = leviculum_map::Viewport::new(centre, 3, 320, 240);
-    let (names, _) = map::zone_names(&view, map::BOTTOM + 1, &[], unix);
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, _) = map::zone_names(&view, &[], &mut glyphs, unix);
     assert!(!names.is_empty());
     assert!(
         names
@@ -815,35 +855,37 @@ fn the_time_zone_view_writes_the_boards_clocks() {
 /// Over the fixture at every zoom it names.
 #[test]
 fn no_name_in_the_chip_rows_nor_off_the_region() {
-    let region = Map::new(FIXTURE).expect("region");
+    let mut region = Map::new(FIXTURE).expect("region");
     let mut checked = 0;
+    let ch = i32::from(CELL_PX.1);
+    let bottom = i32::from(map::BOTTOM) * ch;
     for zoom in 13..=18 {
         let model = at_zoom(zoom);
         let (view, pins) = map::view(&model).expect("map");
         let tall = map::with_bottom(&view);
         let taken = map::pin_cells(&pins);
-        let (names, _) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken, false);
+        let (names, _) = map::names(&region.region, &tall, &taken, &mut region.glyphs, false);
         let area = tall.area_of(&region.region.header().bounds);
-        let (cw, ch) = (i64::from(CELL_PX.0), i64::from(CELL_PX.1));
+        let (ax, ay) = (area.top_left.x, area.top_left.y);
+        let (aw, ah) = (area.size.width as i32, area.size.height as i32);
         for name in &names {
             checked += 1;
-            assert!(
-                name.row != 0 && name.row != map::BOTTOM,
-                "z{zoom}: {name:?} in a chip row"
-            );
-            let width = i64::try_from(name.text.chars().count()).unwrap_or(0);
-            let (x0, y0) = (i64::from(name.col) * cw, i64::from(name.row) * ch);
-            let (x1, y1) = (x0 + width * cw, y0 + ch);
-            let (ax, ay) = (i64::from(area.top_left.x), i64::from(area.top_left.y));
-            let (aw, ah) = (i64::from(area.size.width), i64::from(area.size.height));
-            assert!(
-                x0 >= ax && y0 >= ay && x1 <= ax + aw && y1 <= ay + ah,
-                "z{zoom}: {name:?} off the region drawn at {area:?}"
-            );
+            for b in &name.boxes {
+                assert!(
+                    b.y0 >= ch && b.y1 <= bottom,
+                    "z{zoom}: {} {b:?} in a chip row",
+                    name.text
+                );
+                assert!(
+                    b.x0 >= ax && b.y0 >= ay && b.x1 <= ax + aw && b.y1 <= ay + ah,
+                    "z{zoom}: {} {b:?} off the region drawn at {area:?}",
+                    name.text
+                );
+            }
         }
     }
     assert!(
-        checked >= 5,
-        "only {checked} names checked (7 on 2026-11-12)"
+        checked >= 3,
+        "only {checked} names checked (3 on 2026-11-13 under the phone's pass, 1565)"
     );
 }

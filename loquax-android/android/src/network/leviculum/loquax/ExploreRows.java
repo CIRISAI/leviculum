@@ -65,6 +65,19 @@ final class ExploreRows<T> {
     /** {@link #offer}: it would move a row on screen; it waits behind the chip. */
     static final int WAITING = 2;
 
+    /**
+     * Whether the pane tells the adapter after {@code said}
+     * ({@code notifyDataSetChanged}): only when the rows changed. A
+     * {@link #WAITING} answer changes words in place, which the pane
+     * draws into the rows on screen as they stand (1653, walk 8, 39: the
+     * notification between a press and ListView's {@code onTouchUp} sets
+     * its {@code mDataChanged}, and ListView drops the click; with the
+     * chip up every tap opened nothing).
+     */
+    static boolean notifies(int said) {
+        return said == SHOWN;
+    }
+
     /** How long the list must rest untouched at its top before an answer shows there at once. */
     static final long QUIET_MS = 3000;
 
@@ -72,9 +85,16 @@ final class ExploreRows<T> {
     private List<T> shown = Collections.emptyList();
     private List<T> waiting;
     private boolean down;
+    /** An answer came while the finger was down. */
+    private boolean arrived;
     private int anchor = -1;
     /** The row the finger came down on, until its click or the gesture's end. */
     private T pressed;
+    /**
+     * The finger lifted off {@link #pressed} and ListView's click is still
+     * to run (1659, walk 10, 51): answers wait for it ({@link #settle}).
+     */
+    private boolean owed;
     /** When the reader last touched or scrolled the list; never, at first. */
     private long touched = Long.MIN_VALUE / 2;
 
@@ -124,15 +144,20 @@ final class ExploreRows<T> {
      */
     int offer(List<T> rows, int first, int last, boolean force, boolean atTop, long now) {
         List<T> copy = new ArrayList<T>(rows);
-        if (!down && atTop && now - touched >= QUIET_MS) {
+        // A click owed waits nothing out: ListView runs it a moment after
+        // the lift and drops it when the adapter was told meanwhile (1659,
+        // walk 10, 51). The answer waits, as under the finger, and is
+        // offered once the click ran.
+        if (down || owed) {
+            refresh(copy);
+            waiting = copy;
+            arrived = true;
+            return HELD;
+        }
+        if (atTop && now - touched >= QUIET_MS) {
             show(copy);
             anchor = 0;
             return SHOWN;
-        }
-        if (down) {
-            refresh(copy);
-            waiting = copy;
-            return HELD;
         }
         anchor = -1;
         if (force || shown.isEmpty() || first < 0) {
@@ -230,24 +255,48 @@ final class ExploreRows<T> {
     /** A finger came down on the list. */
     void down() {
         down = true;
+        arrived = false;
     }
 
     /**
-     * The finger lifted: what waited for it is offered as the screen
-     * stands, {@link #SHOWN} or {@link #WAITING}; {@link #HELD} when
-     * nothing waited.
+     * The finger lifted: an answer that came while it was down is offered
+     * as the screen stands, {@link #SHOWN} or {@link #WAITING};
+     * {@link #HELD} when none came. What already waited behind the chip
+     * before the press is not offered again (1653, walk 8, 39): it waited
+     * as the screen stood, and offering it again told the adapter and
+     * cost the tap its click.
      */
     int up(int first, int last) {
         down = false;
-        if (waiting == null) {
+        owed = pressed != null;
+        if (waiting == null || !arrived || owed) {
             return HELD;
         }
+        arrived = false;
+        return offer(waiting, first, last, false);
+    }
+
+    /**
+     * The click owed ran, or will not come (a scroll, a long press, a row
+     * that takes no click; the pane's timer after the pressed state's
+     * duration): what came meanwhile is offered as the screen stands,
+     * {@link #SHOWN} or {@link #WAITING}; {@link #HELD} when none came or
+     * a finger is down again (1659, walk 10, 51).
+     */
+    int settle(int first, int last) {
+        owed = false;
+        pressed = null;
+        if (down || waiting == null || !arrived) {
+            return HELD;
+        }
+        arrived = false;
         return offer(waiting, first, last, false);
     }
 
     /** The lift of the 1618 rule, the screen unknown: what waited shows. */
     boolean up() {
         down = false;
+        arrived = false;
         if (waiting == null) {
             return false;
         }
@@ -293,6 +342,19 @@ final class ExploreRows<T> {
         return true;
     }
 
+    /**
+     * The reader came back from a page or the rooms it opened (1659, walk
+     * 10, 50: the waiting order applied on Back, the chip went, and other
+     * rows stood where the page just read had stood). Coming back is no
+     * verb on the list: the answer is offered as the screen stands, so
+     * what waited still waits behind the chip; only the chip, or the top
+     * at rest, shows it.
+     */
+    int back(List<T> rows, int first, int last, boolean atTop, long now) {
+        return offer(rows, first, last, false, atTop, now);
+    }
+
+
     int size() {
         return shown.size();
     }
@@ -312,6 +374,7 @@ final class ExploreRows<T> {
     /** The gesture became a scroll or was cancelled: no click follows it. */
     void release() {
         pressed = null;
+        owed = false;
     }
 
     /**
@@ -322,7 +385,18 @@ final class ExploreRows<T> {
     T hit(int position) {
         T row = pressed;
         pressed = null;
+        owed = false;
         return row != null ? row : shown.get(position);
+    }
+
+    /** Where the row with {@code key} stands among the rows shown; -1 when it is not (1659, 54). */
+    int find(String key) {
+        for (int i = 0; i < shown.size(); i++) {
+            if (keys.key(shown.get(i)).equals(key)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     T at(int position) {

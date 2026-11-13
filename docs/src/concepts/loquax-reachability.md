@@ -87,7 +87,7 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1799`;
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1826`;
   `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own
@@ -460,7 +460,7 @@ the device keeps the most direct way that answers.
   The outbox's retries carry a send that was cut off; a message is never
   dropped by a change of way, and never sent twice: a send repeated
   after a cut is matched to the first by its client id
-  (`outbox_by_client`, `loquax/src/home/server.rs:201`).
+  (`outbox_by_client`, `loquax/src/home/server.rs:249`).
 - **The network change** (1298's `Network` word, below) restarts the
   race; the settle of 1298 folds a burst of callbacks into one race.
 - **The re-race.** A device kept on an indirect way (relayed or mesh)

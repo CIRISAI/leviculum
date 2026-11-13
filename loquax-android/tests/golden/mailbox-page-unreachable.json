@@ -20,6 +20,13 @@
           "note": false
         },
         {
+          "label": "Das ist auch deine Adresse: Postfach und du sind eine Identität.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
           "label": "Version",
           "value": "älter als dieses Gerät",
           "copy": null,
@@ -39,7 +46,7 @@
       "title": "Verbindung",
       "lines": [
         {
-          "label": "Nicht verbunden seit 2 Std.",
+          "label": "Dieses Gerät nicht verbunden seit 2 Std.",
           "value": null,
           "copy": null,
           "action": null,
@@ -53,18 +60,11 @@
           "note": false
         },
         {
-          "label": "Verbindung über leviculum.network, Tor 4242, ungeschirmt",
+          "label": "Verbindung zu leviculum.network, ungeschirmt (das Handy hört das ganze Netz, kostet Akku und Daten)",
           "value": null,
           "copy": null,
           "action": null,
           "note": false
-        },
-        {
-          "label": "Ungeschirmt: das geschirmte Tor war nicht erreichbar, deshalb hört dieses Gerät das ganze Mesh mit, was Daten und Akku kostet.",
-          "value": null,
-          "copy": null,
-          "action": null,
-          "note": true
         }
       ]
     },

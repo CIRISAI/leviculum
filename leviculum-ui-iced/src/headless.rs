@@ -701,13 +701,25 @@ fn drive_with<P: Program>(
             if want {
                 let c = cpu();
                 let t = Instant::now();
-                let (state, _) = ui.update(
-                    &[Event::Window(iced::window::Event::RedrawRequested(t))],
-                    cursor,
-                    &mut renderer,
-                    &mut clipboard::Null,
-                    &mut messages,
-                );
+                // As iced_winit 0.14.1 (`lib.rs`, `RedrawRequested`): a
+                // redraw whose update laid the window out again (a rows
+                // widget building the rows scrolled in, 1487) is sent
+                // again, three times at most, before the frame is drawn.
+                let mut sent = 0;
+                let state = loop {
+                    let before = messages.len();
+                    let (state, _) = ui.update(
+                        &[Event::Window(iced::window::Event::RedrawRequested(t))],
+                        cursor,
+                        &mut renderer,
+                        &mut clipboard::Null,
+                        &mut messages,
+                    );
+                    if messages.len() != before || !state.has_layout_changed() || sent >= 2 {
+                        break state;
+                    }
+                    sent += 1;
+                };
                 pending.update_ms += ms(t.elapsed());
                 add_cpu(&mut pending, c);
                 if !messages.is_empty() || matches!(state, State::Outdated) {

@@ -3158,10 +3158,22 @@ m9-sim-walk out="target/m9-sim-walk":
     grep -q '^\[PAGE\] name=compose ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached compose"; exit 1; }
     grep -q 'restore=resumed' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the real store's second boot did not resume"; exit 1; }
     grep -q '^\[STORE\] page_read ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL no chat page was read from the ring"; exit 1; }
-    grep -q '^\[PAGE\] name=house ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the house key never opened the overview"; exit 1; }
-    grep -q '^\[TYPE\] size=large via=row ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the overview's row did not switch the type"; exit 1; }
-    grep -q '^\[TYPE\] size=small via=hold ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the held house key did not switch the type"; exit 1; }
+    grep -q '^\[PAGE\] name=house ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the house key never opened the settings"; exit 1; }
+    # 1478b: the LR1110's boot line, in the board's shape (the sim's
+    # stand-in, versions 0), and the SPI2 arbiter's line beside it.
+    grep -qE '^\[LORA\] init ok hw=0x[0-9a-f]{2} fw=0x[0-9a-f]{4} phy=869463000/125000/8/5 ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the boot never said [LORA] init ok on the default PHY"; exit 1; }
+    grep -m 2 -E '^\[(LORA|SPI)\] ' "{{out}}/fixture/board.log"
+    grep -qE '^\[SPI\] SPI2 owner=[a-z]+ wait_max_us=[0-9]+ chunks=[0-9]+ ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the boot never said the SPI2 line"; exit 1; }
+    # 1561: the settings' row confirms each of the three sizes, in the
+    # walk's order, and nothing else switches the type.
+    [ "$(sed -n 's/^\[TYPE\] size=\([a-z]*\) via=\([a-z]*\) .*/\1:\2/p' "{{out}}/fixture/board.log" | grep -v ':boot$' | tr '\n' ' ')" = "tiny:row large:row tiny:row small:row " ] || { echo "m9-sim-walk: FAIL the settings' row did not confirm tiny, large, tiny, small"; exit 1; }
     grep -q '^\[TYPE\] size=large via=boot ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the record did not keep the large type across the reboot"; exit 1; }
+    # 1564: the top bar says the page and one word, in the small type, the
+    # large one and on the settings; no sentence, no avatar, no cut word.
+    grep '^\[SIM\] bar=' "{{out}}/real/board.log" || true
+    [ "$(grep -c '^\[SIM\] bar=' "{{out}}/real/board.log")" -eq 3 ] || { echo "m9-sim-walk: FAIL the real walk did not say its three bars"; exit 1; }
+    [ "$(grep -cE '^\[SIM\] bar="Chats +Verbunden" ' "{{out}}/real/board.log")" -eq 2 ] || { echo "m9-sim-walk: FAIL a list bar said more than the page and its word"; exit 1; }
+    [ "$(grep -cE '^\[SIM\] bar="Einstellungen +Verbunden" ' "{{out}}/real/board.log")" -eq 1 ] || { echo "m9-sim-walk: FAIL the settings' bar said more than the page and its word"; exit 1; }
     # 1575: the pull walk, the fold costing the board's 3.6 ms an entry
     # (window 16b), with the drain's budget and without it (as before):
     # every key's frame under 100 ms with it, the control over it without.

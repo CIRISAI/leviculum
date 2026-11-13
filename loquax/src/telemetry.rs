@@ -5,7 +5,9 @@
 //! both read with the codec of `leviculum-lxmf`:
 //!
 //! - `FIELD_TELEMETRY`, one node's own readings. Who measured is the
-//!   message's signed source.
+//!   message's signed source, except in a group's copy of a member's
+//!   message: the home signs that with the group, and the writer travels in
+//!   `lev.group_copy` (1687).
 //! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Who measured is the row's
 //!   source hash; the message's source only delivered it (`via`).
 //!
@@ -23,6 +25,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+use leviculum_lxmf::lev::Lev;
 use leviculum_lxmf::msgpack::{self, Number};
 use leviculum_lxmf::telemetry::{decode_stream_field_value, Location, Telemetry};
 use leviculum_lxmf::Field;
@@ -165,6 +168,14 @@ pub fn has_telemetry(fields: &[Field]) -> bool {
 /// `source`, received at `received_at`.
 pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Read {
     let mut out = Read::default();
+    // 1687: the home sends a group's copy of a member's message under the
+    // group's own address, so the source is the group and the writer is in
+    // `lev.group_copy`. A position a member shared into a group belongs to
+    // that member: read under the source alone, every such pin landed on
+    // the group, a place nobody stands.
+    let writer = Lev::from_fields(fields)
+        .and_then(|lev| lev.group_copy)
+        .map_or(source, |copy| copy.sender);
     let fix = |peer: [u8; 16], location: Location, telemetry: &[u8]| Fix {
         peer,
         via: source,
@@ -180,7 +191,7 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
                 Some(blob) => match Telemetry::decode(blob) {
                     Ok(telemetry) => {
                         if let Some(location) = telemetry.location {
-                            out.fixes.push(fix(source, location, blob));
+                            out.fixes.push(fix(writer, location, blob));
                         }
                     }
                     Err(e) => out.unreadable.push(Unreadable {
@@ -766,6 +777,40 @@ mod tests {
             "33.86880 S 151.20930 E"
         );
         assert_eq!(accuracy(&read.fixes[1].location), None, "none given");
+    }
+
+    /// 1687: the home sends a group's copy of a member's message under the
+    /// group's own address, so the message's signed source is the group and
+    /// the writer travels in `lev.group_copy`. Read under the source alone,
+    /// every position shared into a group landed on the group: a pin for a
+    /// place nobody stands, and the member who shared it went unmarked.
+    #[test]
+    fn a_group_copys_position_belongs_to_its_writer() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+
+        const GROUP: [u8; 16] = [0x60; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: BOB,
+                sent_ms: 1_793_015_000_000,
+                epoch: 3,
+            }),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let read = read(GROUP, &fields, Some(NOW));
+        assert!(read.unreadable.is_empty());
+        assert_eq!(read.fixes.len(), 1);
+        assert_eq!(
+            (read.fixes[0].peer, read.fixes[0].via),
+            (BOB, GROUP),
+            "the writer measured it; the group delivered the copy"
+        );
     }
 
     fn stream(rows: &[([u8; 16], Location)]) -> Vec<u8> {

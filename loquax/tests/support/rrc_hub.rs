@@ -33,6 +33,10 @@ pub fn vector(name: &str) -> Vec<u8> {
     hex::decode(v["cbor"].as_str().expect("cbor")).expect("hex")
 }
 
+/// The fake hub's answer to `/list` (1652), in rrcd's words: a room with
+/// a topic and one whose name has a space, as another implementation's.
+pub const LIST_ANSWER: &str = "Registered public rooms:\n  general chat\n  lab - the lab";
+
 /// What the fake hub saw.
 #[derive(Default)]
 pub struct Seen {
@@ -135,6 +139,13 @@ async fn serve(
                         };
                         let mut answer = Envelope::decode(&vector(name)).expect("a vector");
                         answer.room.clone_from(&envelope.room);
+                        answers.push(answer.encode());
+                    }
+                    // A room-less command (1652): `/list` answered as
+                    // rrcd's `commands.py` does, one NOTICE from the hub.
+                    Kind::Msg if envelope.room.is_none() && envelope.text() == Some("/list") => {
+                        let mut answer = Envelope::new(Kind::Notice, [9; 8], envelope.ts);
+                        answer.body = Some(Value::Text(LIST_ANSWER.into()));
                         answers.push(answer.encode());
                     }
                     Kind::Msg | Kind::Notice | Kind::Action => {

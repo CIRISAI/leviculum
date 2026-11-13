@@ -33,17 +33,35 @@ text Hallo M9
 dump 08-compose.png
 back
 
-# The house key (1532): a tap opens the overview once its gap passed, its
-# row switches the type, Back leaves; a held house key switches it back.
+# The house key (1532, 1561): a press opens the settings at once (the
+# controller repeats no held key, so there is no hold to wait for). Left
+# steps the type's value, Enter confirms it: very small. Right twice and
+# Enter: large. A step Back drops keeps the size; Back again closes.
 home
-wait 400
 dump 09-house.png
+left
+dump 09-house-stepped.png
+enter
+dump 09-house-tiny.png
+right
+right
 enter
 dump 09-house-large.png
+left
+back
 back
 dump 09-chat-large.png
-hold home 1200
-wait 400
+# Enter steps round the values from large to very small, Enter confirms.
+home
+enter
+enter
+dump 09-chat-tiny-house.png
+back
+dump 09-chat-tiny.png
+home
+right
+enter
+back
 dump 09-chat-small.png
 
 # Every screen the goldens pin, through the board's FRAME_DUMP path.

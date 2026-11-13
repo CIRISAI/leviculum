@@ -956,7 +956,14 @@ enum Until {
     /// The newest message we wrote in the selected conversation shows this
     /// state.
     Delivery(DeliveryState),
-    /// This many received messages, across every conversation.
+    /// This many received messages the model holds, across every
+    /// conversation. A conversation restored from its kept row and not
+    /// opened holds none (46f91e3c, "the boot reads rows not bodies"), so
+    /// a restarted TUI counts from 0 whatever its home received before:
+    /// a script asks for what arrives while it runs, and periculum's
+    /// receipts cells count that way since its 1670 (1559,
+    /// `a_restarted_model_counts_only_what_it_holds`).
+    /// [`Self::Verified`] counts the same way.
     Received(usize),
     /// This many peers' announces carried a name.
     Named(usize),
@@ -1804,23 +1811,44 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
             (name, room_lines(open, inner_width, lang))
         }
         None => {
-            let empty = node.empty.as_ref().map(|e| e.resolve(lang));
-            let lines = empty
-                .map(|e| {
-                    centred(
-                        &e,
-                        inner_width,
-                        Style::default().add_modifier(Modifier::DIM),
-                    )
-                })
-                .into_iter()
-                .collect();
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            let mut lines: Vec<Line> = Vec::new();
+            // The link's verb (1652): Enter on an empty field takes it.
+            if let Some(retry) = &node.retry {
+                lines.push(Line::from(Span::styled(
+                    format!("Enter: {}", retry.resolve(lang)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+            }
+            // The rooms the hub names (1652): typing one's name joins it.
+            if let Some(listed) = &node.listed {
+                lines.push(Line::from(Span::styled(
+                    listed.title.resolve(lang),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for room in &listed.rooms {
+                    lines.push(Line::from(format!("  {room}")));
+                }
+                if let Some(note) = &listed.note {
+                    lines.push(Line::from(Span::styled(note.resolve(lang), dim)));
+                }
+                if let Some(other) = &listed.other {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(other.resolve(lang), dim)));
+                }
+            }
+            if let Some(empty) = node.empty.as_ref().map(|e| e.resolve(lang)) {
+                lines.push(centred(&empty, inner_width, dim));
+            }
             (String::new(), lines)
         }
     };
     // The newest lines that fit, the room's one line kept on top.
     let inner = usize::from(room.height.saturating_sub(2));
-    if lines.len() > inner && inner > 1 {
+    if node.open.is_none() {
+        // The hub's rooms read from the top (1652).
+        lines.truncate(inner);
+    } else if lines.len() > inner && inner > 1 {
         let live = lines.remove(0);
         let keep = lines.split_off(lines.len() - (inner - 1));
         lines = std::iter::once(live).chain(keep).collect();
@@ -1896,6 +1924,10 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     let mark = |on: bool| if on { "▌" } else { " " };
     let mut lines: Vec<Line> = Vec::new();
     let mut at: Option<usize> = None;
+    // How old the mailbox's list is, on top (1644).
+    if let Some(as_of) = &pages.as_of {
+        lines.push(Line::from(Span::styled(as_of.resolve(lang), quiet)));
+    }
     lines.push(Line::from(Span::styled(pages.title.resolve(lang), bold)));
     if let Some(off) = &pages.off {
         lines.push(Line::from(Span::styled(off.resolve(lang), quiet)));
@@ -1991,6 +2023,17 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     if let Some(empty) = &rooms.joined_empty {
         lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
     }
+    // The rooms screen of the server in use (1655).
+    if let Some(open) = &rooms.open_rooms {
+        if rooms.open_cursor {
+            at = Some(lines.len());
+        }
+        lines.push(Line::from(format!(
+            "{}[ {} ]",
+            mark(rooms.open_cursor),
+            open.resolve(lang)
+        )));
+    }
     // The servers under their own heading (1621).
     lines.push(Line::from(Span::styled(
         format!(" {}", rooms.servers_title.resolve(lang)),
@@ -2030,13 +2073,27 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
                 mark(sheet.cursor == row),
                 sheet.button.resolve(lang)
             )));
-            lines.push(Line::from(Span::styled(
-                format!("  {}", sheet.notice.resolve(lang)),
-                quiet,
-            )));
+            // Wrapped (1667: the notice that names the profile is longer
+            // than a row; the border cut it).
+            let cols = usize::from(area.width).saturating_sub(4);
+            for said in wrap_cols(&sheet.notice.resolve(lang), cols) {
+                lines.push(Line::from(Span::styled(format!("  {said}"), quiet)));
+            }
             row += 1;
         } else {
             lines.push(Line::from(format!(" ✓ {}", sheet.button.resolve(lang))));
+            // Its rooms screen (1655).
+            if let Some(open) = &sheet.open_rooms {
+                if sheet.cursor == row {
+                    at = Some(lines.len());
+                }
+                lines.push(Line::from(format!(
+                    "{}[ {} ]",
+                    mark(sheet.cursor == row),
+                    open.resolve(lang)
+                )));
+            }
+            row += 1;
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -2593,10 +2650,11 @@ mod tests {
             "Name: Lew Palm",
             "Adresse: 5a3e910c7742d81b6f03a4e258c92d80",
             "Läuft auf: miauhaus",
-            "Verbunden seit 12 Min.",
-            "Verbindung über leviculum.network, Tor 4343, geschirmt",
+            "Dieses Gerät verbunden seit 12 Min.",
+            "Verbindung zu miauhaus, geschirmt",
             "Fairphone: dieses Gerät",
             "M9: zuletzt da vor 2 Std.",
+            "Laptop",
             "c  Meinen Code zeigen",
         ] {
             says(&german, words);
@@ -2604,17 +2662,62 @@ mod tests {
         same_text(&german_name("tui-settings-mailbox.txt"), &german);
         let mut model = open(Lang::En, true);
         let shown = screen(&model);
-        says(
-            &shown,
-            "Connection over leviculum.network, port 4343, shielded",
-        );
+        says(&shown, "Connection to miauhaus, shielded");
         same_text("tui-settings-mailbox.txt", &shown);
         let away = screen(&open(Lang::En, false));
-        says(&away, "Not connected for 2 h");
-        says(&away, "port 4242, not shielded");
+        says(&away, "This device not connected for 2 h");
+        says(&away, "Connection to leviculum.network, not shielded");
         says(&away, "Version: older than this device");
         update(&mut model, key('c'));
         assert!(model.profile_open, "c shows the code");
+    }
+
+    /// 1662, a file tells its progress: the terminal draws the bubble of
+    /// a 300 KB file mid-transfer, 43 % sent by its link's resource, the
+    /// bar and its words under the file's line; the golden is the screen,
+    /// 80 by 24, in both languages.
+    #[test]
+    fn a_file_mid_transfer_is_the_terminals_golden() {
+        use loquax::outbox::OutboxEvent;
+        let scene = |lang| {
+            let peer = [0x41; 16];
+            let mut model = Model::new(&[peer]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            update(&mut model, UiEvent::Clock(shell::script_clock()));
+            update(
+                &mut model,
+                UiEvent::SendFile {
+                    peer,
+                    name: "Protokoll.pdf".into(),
+                    data: vec![7; 300_000],
+                },
+            );
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Queued {
+                    message_id: [0x62; 32],
+                }),
+            );
+            update(&mut model, UiEvent::Elapsed(1_000));
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Progress {
+                    message_id: [0x62; 32],
+                    permille: 430,
+                }),
+            );
+            model.focus = loquax::ui::Pane::Messages;
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let screen = scene(Lang::En);
+        says(&screen, "▤ Protokoll.pdf · 300 KB");
+        says(&screen, "▰▰▰▰▰▱▱▱▱▱ sending · 43 %");
+        same_text("tui-file-progress.txt", &screen);
+        let german = scene(Lang::De);
+        says(&german, "▰▰▰▰▰▱▱▱▱▱ wird gesendet · 43 %");
+        same_text(&german_name("tui-file-progress.txt"), &german);
     }
 
     /// 1505, a late message sits at its sent time: the terminal draws
@@ -3187,12 +3290,20 @@ mod tests {
             update(&mut model, key('m'));
         }
         let first = shipped[0].hash;
+        // Choosing links at once (1652), the privacy sentence with it.
         assert_eq!(
             update(&mut model, key('1')),
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some(first)
-            }]
+            [
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some(first)
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(first)
+                },
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Open { hub: first })
+            ]
         );
         assert!(model.rooms.enabled, "the Rooms tab is there");
         let shown = whole_screen(&model);
@@ -3201,8 +3312,9 @@ mod tests {
             "{shown}"
         );
         assert!(
-            // Never heard here: no distance beside it (1629).
-            shown.contains(&format!("1  {}: \u{2713}", shipped[0].name)),
+            // Never heard here: no distance beside it (1629); the link's
+            // state in the rooms screen's words (1655, walk 9, 49).
+            shown.contains(&format!("1  {}: Connecting… · \u{2713}", shipped[0].name)),
             "{shown}"
         );
         update(&mut model, key('a'));
@@ -3212,12 +3324,21 @@ mod tests {
         for c in "07070707070707070707070707070707".chars() {
             update(&mut model, key(c));
         }
+        // The link to the first one closes, the pasted one links.
         assert_eq!(
             update(&mut model, enter),
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some([0x07; 16])
-            }]
+            [
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Close),
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some([0x07; 16])
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some([0x07; 16])
+                },
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Open { hub: [0x07; 16] })
+            ]
         );
         let shown = whole_screen(&model);
         assert!(
@@ -3250,9 +3371,9 @@ mod tests {
             model.rooms.hub = Some(HUB);
             // Told before (1577): no sentence over the golden.
             model.rooms.told = Some(HUB);
-            // Opening the rooms links nothing; the first join does (1578).
+            // Opening the rooms links (1652); a join meanwhile waits.
             let effects = update(&mut model, key('R'));
-            assert_eq!(effects, vec![]);
+            assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
             assert!(model.rooms.showing());
             for c in "#lab".chars() {
                 update(&mut model, key(c));
@@ -3261,7 +3382,7 @@ mod tests {
                 &mut model,
                 UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             );
-            assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
+            assert_eq!(effects, vec![], "the join waits for the welcome");
             for event in [
                 RoomsEvent::Welcomed {
                     name: Some("periculum".into()),
@@ -3367,6 +3488,58 @@ mod tests {
         update(&mut off, key('R'));
         assert!(!off.rooms.showing());
         assert!(!whole_screen(&off).contains("A room is live"));
+    }
+
+    /// 1644: the line on top of Explore says how old the mailbox's list
+    /// is: in German, the link down and the last answer yesterday at
+    /// 14:20; the golden. Up and three hours old it says that instead, and
+    /// fresh nothing.
+    #[test]
+    fn explore_says_how_old_the_mailboxs_list_is() {
+        use loquax::ui::browse::BrowseEvent;
+        use loquax::ui::explore::ExploreEvent;
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        const NOW: i64 = 1_800_000_000;
+        let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+        let at = |model: &mut Model, unix_secs| {
+            model.now = Some(loquax::when::WallTime {
+                unix_secs,
+                offset_secs: 0,
+            });
+        };
+        let mut model = Model::new(&[]);
+        model.lang = Lang::De;
+        model.browse.enabled = true;
+        browse_like_the_terminal(&mut model);
+        at(&mut model, answered);
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Node(lnomad::DiscoveredNode {
+                dest_hash: [0x5a; 16],
+                name: Some("Marcel's node".to_string()),
+                first_seen: (answered - 600) as u64,
+                last_seen: (answered - 600) as u64,
+                hops: Some(2),
+            })),
+        );
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(true)));
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(loquax::home::pages::Delta {
+                stamp: 1,
+                more: false,
+                rows: Vec::new(),
+            })),
+        );
+        update(&mut model, key('E'));
+        assert!(!whole_screen(&model).contains("Stand"), "fresh");
+        at(&mut model, answered + 3 * 3_600);
+        says(&whole_screen(&model), "Stand: vor 3 Std.");
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(false)));
+        at(&mut model, answered + 86_400);
+        let screen = whole_screen(&model);
+        says(&screen, "Nicht verbunden · Stand von gestern 14:20");
+        same_text("tui-explore-as-of-de.txt", &screen);
     }
 
     /// 1578: `E` brings Explore to the front over the whole terminal: the
@@ -3694,6 +3867,59 @@ mod tests {
         assert!(!until.holds(&model, &[((0, 0), Leg::Direct)]));
         assert!(!until.holds(&model, &[((0, 1), Leg::Propagated)]));
         assert!(until.holds(&model, &[((0, 1), Leg::Direct)]));
+    }
+
+    /// 1559: after a restart a conversation known only by its kept row
+    /// counts no received message toward `until received`; one that
+    /// arrives while the script runs does. Bob's earlier reply sits in a
+    /// restored row (unread 1, the store holding 1 message), Dave's
+    /// arrives: `received 1` holds, `received 2` does not, as periculum's
+    /// `loquax_read_receipt_mixed` expects since its 1670.
+    #[test]
+    fn a_restarted_model_counts_only_what_it_holds() {
+        use loquax::outbox::OutboxEvent;
+        use loquax::ui::listing::{Listing, Row};
+        const BOB: [u8; 16] = [0xb0; 16];
+        const DAVE: [u8; 16] = [0xda; 16];
+        let mut model = Model::new(&[]);
+        model.restore_rows(
+            vec![(
+                Row {
+                    peer: BOB,
+                    unread: 1,
+                    activity: 1,
+                    unread_ids: vec![[0x0b; 32]],
+                    listing: Listing {
+                        line: "a reply".to_string(),
+                        unread_rows: 1,
+                        ..Listing::default()
+                    },
+                },
+                1,
+            )],
+            Vec::new(),
+        );
+        assert!(Until::Received(0).holds(&model, &[]));
+        assert!(
+            !Until::Received(1).holds(&model, &[]),
+            "a row is no message"
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [0x0d; 32],
+                source: DAVE,
+                title: Vec::new(),
+                body: b"Dave's reply".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            }),
+        );
+        assert!(Until::Received(1).holds(&model, &[]));
+        assert!(!Until::Received(2).holds(&model, &[]));
+        assert!(Until::Verified(1).holds(&model, &[]));
+        assert!(!Until::Verified(2).holds(&model, &[]));
     }
 
     fn render(model: &Model) -> String {

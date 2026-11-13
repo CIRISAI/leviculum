@@ -65,6 +65,7 @@ const TUI: &str = "loquax/src/tui.rs";
 const KEYS: &str = "loquax/src/keys.rs";
 const M9_KEYS: &str = "loquax-m9/src/keys.rs";
 const M9_GROUP: &str = "loquax-m9/src/group.rs";
+const M9_HOUSE: &str = "loquax-m9/src/house.rs";
 
 const KEY: Cell = Cell::Built(Via::Key);
 const PALETTE: Cell = Cell::Built(Via::Palette);
@@ -326,6 +327,14 @@ pub const INVENTORY: &[Row] = &[
         m9: missing("no key replies"),
     },
     Row {
+        intent: "NoticeReply",
+        action: "a reply typed into a message notification: read up to what it showed",
+        phone: at(SESSION, "Intent::NoticeReply"),
+        window: missing("the desktop notification carries no actions"),
+        terminal: missing("the desktop notification carries no actions"),
+        m9: na("the board posts no notifications"),
+    },
+    Row {
         intent: "Forward",
         action: "Forward on a bubble, then a chat",
         phone: at(SESSION, "Intent::Forward"),
@@ -417,7 +426,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "ShareFix",
         action: "the position sheet's \"Send my position now\"",
         phone: at(SESSION, "Intent::ShareFix"),
-        window: missing("the window's sheet has no \"Send my position now\""),
+        window: at(GUI, "Intent::ShareFix"),
         terminal: PALETTE,
         m9: missing("no key shares the position"),
     },
@@ -425,7 +434,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "StartShare",
         action: "a share row of the position sheet: 15 min, 1 h, 8 h, until stopped",
         phone: at(SESSION, "Intent::StartShare"),
-        window: missing("the window's sheet has no share rows"),
+        window: at(GUI, "Intent::StartShare"),
         terminal: missing("the palette shares once, never for a while"),
         m9: missing("no key shares the position"),
     },
@@ -433,7 +442,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "StopShare",
         action: "a running share's Stop: the chat's chip, Settings, the notification",
         phone: at(SESSION, "Intent::StopShare"),
-        window: missing("the window draws no share chip"),
+        window: at(GUI_CHAT, "fn share_chip"),
         terminal: PALETTE,
         m9: missing("no key shares the position"),
     },
@@ -540,7 +549,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "Share",
         action: "a position shared from the map",
         phone: at(SESSION, "Intent::Share"),
-        window: missing("the window's map shares no position"),
+        window: at(GUI, "Intent::Share {"),
         terminal: na("the palette's position verbs share"),
         m9: missing("no key shares the position"),
     },
@@ -639,7 +648,7 @@ pub const INVENTORY: &[Row] = &[
         window: at(GUI, "Intent::Profile"),
         terminal: KEY,
         m9: missing(
-            "the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet",
+            "the house key leads to the settings (1561), which hold no profile: the M9 is a device of its home (super::settings::PLACES)",
         ),
     },
     Row {
@@ -750,7 +759,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "Details",
         action: "a bubble's Info",
         phone: at(JAVA_CHAT, "Core.info("),
-        window: missing("the bubble's menu has no Info"),
+        window: at(GUI_CHAT, "Message::Intent(Intent::Details)"),
         terminal: PALETTE,
         m9: missing("no key opens a message"),
     },
@@ -788,7 +797,7 @@ pub const INVENTORY: &[Row] = &[
             "loquax-android/android/src/network/leviculum/loquax/MapView.java",
             "pin",
         ),
-        window: at(GUI, "Message::Select(pin.peer)"),
+        window: at(GUI, "self.selected = press.pin"),
         terminal: at(UI, "Target::Pin(peer) => Some(peer)"),
         m9: missing("no key steps between pins"),
     },
@@ -812,7 +821,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "Pull",
         action: "fetch messages now",
         phone: at(SESSION, "Intent::Pull"),
-        window: missing("the window has no fetch button"),
+        window: at(GUI_CHAT, "Message::Intent(Intent::Pull)"),
         terminal: PALETTE,
         m9: na("the board pulls on its own"),
     },
@@ -836,7 +845,7 @@ pub const INVENTORY: &[Row] = &[
         intent: "Viewport",
         action: "these bubbles are on screen: what was read",
         phone: at(SESSION, "Intent::Viewport"),
-        window: missing("the window marks the open chat read whole"),
+        window: at(GUI, "UiEvent::Viewport { peer, keys }"),
         terminal: na("the open conversation is read"),
         m9: na("the open conversation is read"),
     },
@@ -878,7 +887,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(SESSION, "Query::Receipts"),
         window: at(GUI, "Intent::ReadReceipts"),
         terminal: PALETTE,
-        m9: missing("no settings on the M9"),
+        m9: missing("the M9's settings have no read receipts row: the home signs them (super::settings::PLACES, Privacy)"),
     },
     Row {
         intent: "DeleteAllRegions",
@@ -894,7 +903,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(JAVA_LIST, "SettingsActivity.class"),
         window: at(GUI, "Intent::Settings"),
         terminal: KEY,
-        m9: missing("no menu screen and no key for it on the M9 (super::settings::PLACES)"),
+        m9: at(M9_HOUSE, "settings::screen(model, Target::M9, None)"),
     },
     Row {
         intent: "RoomsHub",
@@ -902,7 +911,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(SESSION, "Query::RoomsHub"),
         window: at(GUI, "Intent::RoomsHub"),
         terminal: at(UI, "Intent::RoomsHub(rooms::HubPick::Paste)"),
-        m9: missing("no settings on the M9"),
+        m9: missing("the M9 has no rooms: its settings hold no hub (super::settings::PLACES, Advanced)"),
     },
 ];
 

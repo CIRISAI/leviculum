@@ -134,21 +134,30 @@ impl<B> UiModel<B> {
         }
         let effects = self.apply_peer_state(peer, state);
         if self.home_client {
-            self.owed_peer_states.insert(peer, state);
-            self.peer_states.push((peer, state));
+            // Owed until the home node takes it (1640), as a petname is:
+            // kept in the store, handed again after a restart.
+            self.owed_peer_states.set(peer, state);
         }
         effects
     }
 
-    /// A peer state one of the home's devices set, pulled: taken here,
-    /// never handed back. Left while this device's own newer one has not
-    /// come back from the home, as a petname is (1614).
-    pub(super) fn home_peer_state(&mut self, peer: [u8; 16], state: PeerState) -> Vec<UiEffect> {
-        if let Some(owed) = self.owed_peer_states.get(&peer) {
-            if *owed != state {
-                return Vec::new();
-            }
-            self.owed_peer_states.remove(&peer);
+    /// A peer state one of the home's devices set, pulled, and when the
+    /// home took it (`at`, the home's clock): taken here, never handed
+    /// back.
+    ///
+    /// Not over a newer word of this device's (1640): the rules of a
+    /// petname ([`super::owed`]). While this device owes the home a state
+    /// for the peer, a pulled one is older, a pin the reader loosened among
+    /// them; once the home took it, until the next pull ends, a different
+    /// one counts only if the home took it after the answer came.
+    pub(super) fn home_peer_state(
+        &mut self,
+        peer: [u8; 16],
+        state: PeerState,
+        at: i64,
+    ) -> Vec<UiEffect> {
+        if !self.owed_peer_states.pulled(&peer, &state, at) {
+            return Vec::new();
         }
         if self.peer_state(&peer) == state {
             return Vec::new();
@@ -235,10 +244,31 @@ impl<B> UiModel<B> {
         !muted
     }
 
-    /// The peer states this device set, for the shell to hand the home
-    /// node.
+    /// The peer states this device owes the home node, the newest of each
+    /// peer, for the shell to hand it; it answers with
+    /// [`super::UiEvent::PeerStatesHanded`]. Nothing while a hand is under
+    /// way, so the home takes a peer's states in the order they were set
+    /// (1640).
     pub fn take_peer_states(&mut self) -> Vec<([u8; 16], PeerState)> {
-        core::mem::take(&mut self.peer_states)
+        self.owed_peer_states.take()
+    }
+
+    /// A hand ended (1640): what the home took is owed no more, unless the
+    /// reader set another state for the peer meanwhile; what it did not
+    /// take goes with the next hand.
+    pub(super) fn peer_states_handed(&mut self, taken: Vec<([u8; 16], PeerState)>) {
+        let now = self.now.map_or(0, |at| at.unix_secs);
+        self.owed_peer_states.handed(taken, now);
+    }
+
+    /// The peer states the store kept as owed (1640), at the start: handed
+    /// again with the first hand, and the reader's word over what the
+    /// first pull brings.
+    pub fn restore_owed_peer_states(
+        &mut self,
+        owed: alloc::collections::BTreeMap<[u8; 16], PeerState>,
+    ) {
+        self.owed_peer_states.restore(owed);
     }
 
     /// The palette's `archive`: the open conversation into the archive or

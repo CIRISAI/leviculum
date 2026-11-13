@@ -295,7 +295,7 @@ LR1110MB1DXS shield's PA table (`LR1110MB1DXS_PA_TABLE`,
 `leviculum-nrf/src/boards/t1000e.rs:143-145`).
 
 The driver's README has a section headed "Worked example: ThinkNode M9
-(incomplete)" (`leviculum-lr11xx/README.md:142-163`). Its values come from
+(incomplete)" (`leviculum-lr11xx/README.md:142-165`). Its values come from
 Meshtastic's M9 variant, and some were probed on a bench:
 
 - the TCXO at 3.3 V;
@@ -304,7 +304,7 @@ Meshtastic's M9 variant, and some were probed on a bench:
   clean `GetErrors`, so a 32.768 kHz crystal is fitted.
 
 On one M9 the driver initialised, ran CAD, transmitted, and received
-frames over the air (`leviculum-lr11xx/README.md:261-269`). There is still
+frames over the air (`leviculum-lr11xx/README.md:263-271`). There is still
 no `Board` constant for the M9. The PA table and whether the DC-DC
 inductor is fitted cannot be settled without the Elecrow schematic.
 
@@ -406,8 +406,15 @@ and `distinct-20261104.txt`):
   answer (`86868686868602`) looked like a state byte; it is the code's
   two low bits, the two matrix positions the bitmap table read from the
   answer's byte 6 (`every_captured_answer_is_one_code_and_the_kb_state_byte_was_its_low_bits`).
-  Whether the controller repeats a held key, and what the long-press
-  time of register 0x03 makes it send, is read in the walk.
+- **No repeat.** The controller does not repeat a held key: Lew held
+  the house key 1.2 s on the 840cdaae bench (2026-11-08 13:0x) and the
+  board did what a tap does, it opened the house page (1561). So no
+  feature on the board may rely on a held key; the walker's `hold` step
+  injects repeats every 200 ms (`HOLD_REPEAT_MS`,
+  `loquax-m9/src/kbraw.rs`) and simulates what the hardware does not do,
+  which is why window 13 saw 1532's held-key switch fire (`via=hold`)
+  where Lew's hand never could. What the long-press time of register
+  0x03 makes it send is still the walk's.
 
 **The walk** (for the reviewer, one flash of the current image): attach
 the reader, press each key once in layout order, row by row from the top
@@ -504,12 +511,17 @@ another firmware's header.
   chat, the group screens, the pairing and the overview follow the
   reader's size, the top bar with them, as one cell row of the same
   grid; the map's cells, its hint line, pins and names stay on the
-  large grid, which its picture is laid on (1531). The reader switches
-  on the overview behind the house key ("Schrift: klein | groß") or by
-  holding the house key a second (house presses at most 300 ms apart,
-  which only a controller that repeats a held key sends; that is not
-  measured yet). The client record's byte 6 keeps the choice across a
-  power cycle; a board without a home has no record and starts small.
+  large grid, which its picture is laid on (1531). Since 1561 a third,
+  very small size is offered, the 6 x 12 (53 x 20 cells, x 5 px): Lew
+  asked for it on 2026-11-08 although 5 px was hard for him on
+  2026-11-04, his choice to offer. The reader switches on the settings
+  behind the house key (`loquax-m9/src/house.rs`): the row "Schrift",
+  Left or Right steps it ("sehr klein", "klein", "groß"), Enter confirms,
+  Back keeps the size. The held house key of 1532 is gone: the
+  controller repeats no held key ("No repeat" above). The client
+  record's byte 6, bits 0-1, keeps the choice across a power cycle (0
+  small, 1 large as 1532's flag was, 2 very small); a board without a
+  home has no record and starts small.
   There is no tab bar on the M9 (the scene's `Viewing::tabs` is off):
   the map and the house have keys of their own.
 - **Input.** The 37-key QWERTY behind the I2C controller at 0x6D (V1.1,
@@ -518,13 +530,13 @@ another firmware's header.
   panel is lit, and the keyboard light does nothing on a version-2 board
   (both: "The keypad"). The controller sends one ASCII code per press
   and resolves its layers itself ("The keyboard controller, measured");
-  which code each navigation and side key sends, and whether a held key
-  repeats, is the walk's.
+  which code each navigation and side key sends is the walk's; a held
+  key does not repeat (1561).
 - **Memory.** 512 KB SRAM, 8 MB PSRAM (came up with 8,388,608 bytes in
   the map measurement), 16 MB flash. How much SRAM is free beside the
   radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
   `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
-  `leviculum-esp/src/lib.rs:399`); the UI budgets on the messenger page
+  `leviculum-esp/src/lib.rs:423`); the UI budgets on the messenger page
   say what has to replace it.
 - **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
   +17 dBm ("What the community port measured"). For the UI it is the

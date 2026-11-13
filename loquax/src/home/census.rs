@@ -22,6 +22,7 @@
 //! | `wakes` | the watching links |
 //! | `costs` | the device links and their keepalive ledger |
 //! | `pn_asks` | the `/lev/status` questions in flight |
+//! | `hub_rooms` | when each heard hub was last asked for its rooms ([`super::hub_rooms`], at most [`crate::ui::hubs::HEARD_BOUND`]) |
 //! | `router` | every engine's LXMF router tables ([`leviculum_lxmf::router::LxmfRouter::heap_bytes`]) |
 //! | `engine` | every engine's own maps and queues |
 //!
@@ -61,6 +62,7 @@ pub const COLUMNS: &[&str] = &[
     "wakes",
     "costs",
     "pn_asks",
+    "hub_rooms",
     "router",
     "engine",
 ];
@@ -89,6 +91,7 @@ pub const RUN_LOCALS: &[(&str, &str)] = &[
     ("fetch", "-"),
     ("pn_round", "-"),
     ("pn_asks", "pn_asks"),
+    ("hub_rooms", "hub_rooms"),
     ("selected_pn", "-"),
     ("engine_ready", "-"),
     ("next_pump", "-"),
@@ -102,6 +105,7 @@ pub const RUN_LOCALS: &[(&str, &str)] = &[
     ("census", "-"),
     ("next_census", "-"),
     ("census_ask", "-"),
+    ("groups_owed", "-"),
     ("usr1", "-"),
     ("unstarted", "-"),
     ("turns", "-"),
@@ -118,6 +122,7 @@ pub struct MailboxCensus {
     pub wakes: usize,
     pub costs: usize,
     pub pn_asks: usize,
+    pub hub_rooms: usize,
     pub router: usize,
     pub engine: usize,
     pub rss_kb: u64,
@@ -142,7 +147,7 @@ pub struct MailboxCensus {
 
 impl MailboxCensus {
     /// The columns' values in [`COLUMNS`] order.
-    pub fn columns(&self) -> [(&'static str, usize); 10] {
+    pub fn columns(&self) -> [(&'static str, usize); 11] {
         [
             ("outbox", self.outbox),
             ("group_outbox", self.group_outbox),
@@ -152,6 +157,7 @@ impl MailboxCensus {
             ("wakes", self.wakes),
             ("costs", self.costs),
             ("pn_asks", self.pn_asks),
+            ("hub_rooms", self.hub_rooms),
             ("router", self.router),
             ("engine", self.engine),
         ]
@@ -224,6 +230,7 @@ impl MailboxCensus {
             wakes = self.wakes,
             costs = self.costs,
             pn_asks = self.pn_asks,
+            hub_rooms = self.hub_rooms,
             router = self.router,
             engine = self.engine,
             tables = self.tables(),

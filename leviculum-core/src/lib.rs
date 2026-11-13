@@ -100,6 +100,7 @@ pub(crate) mod tracing {
 }
 
 pub(crate) mod announce;
+pub mod auto_wire;
 pub mod bounded_map;
 #[cfg(feature = "compression")]
 pub mod compression;
@@ -159,6 +160,7 @@ pub(crate) mod test_utils;
 pub mod traits;
 pub mod transport;
 pub mod tunnel;
+pub mod wifi_credentials;
 
 // Re-export key types
 pub use announce::{

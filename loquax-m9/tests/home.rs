@@ -7,7 +7,7 @@ use leviculum_core::Identity;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use leviculum_ui::style::RLine;
 use loquax::home::ask::Verb;
-use loquax::home::board::Word;
+use loquax::home::board::{Medium, Way, Word};
 use loquax::home::code::HomeCode;
 use loquax::home::wire::Entry;
 use loquax::home::{lxmf_address, KIND_RECEIVED, KIND_SENT};
@@ -40,11 +40,13 @@ fn pack(from: &Identity, to: [u8; 16], body: &str, at: f64) -> Vec<u8> {
     .pack()
 }
 
-/// The word stands at the bar's right end and the title gives way to it;
-/// the bar is the grid's width whatever the word; without a home the bar
-/// is the one the goldens pin.
+/// The word stands at the bar's right end, one short word whole (1564):
+/// "Chats" and "Verbunden", never "90 · Chats · Du. Dein Postfach ist…"
+/// (Lew at the M9, 2026-11-08). No avatar of the reader's, no count, no
+/// sentence, no word cut; the bar is the grid's width whatever the word;
+/// without a home the bar says the page alone.
 #[test]
-fn the_top_bar_says_the_home_at_its_right_end() {
+fn the_top_bar_says_the_page_and_one_word() {
     let me = Identity::generate(&mut OsRng);
     let model = home::model(lxmf_address(&me.public_key_bytes()).expect("address"));
     let scene = screen::scene(&model);
@@ -56,37 +58,178 @@ fn the_top_bar_says_the_home_at_its_right_end() {
         };
         row_text(&screen::lines(&scene, &look, COLS, ROWS)[0])
     };
-    let none = bar(None, Lang::En);
-    for (word, said) in [
-        (Word::Joining, "Joining your mailbox"),
-        (Word::Unreachable, "Mailbox unreachable"),
+    let none = bar(None, Lang::De);
+    assert_eq!(none.trim(), "Chats", "{none:?}");
+    let fetched = Word::Fetched {
+        taken: 12,
+        of: Some(40),
+    };
+    for (word, en, de) in [
+        (Word::Joining, "Connecting…", "Verbindet…"),
+        // No way known: since 1478 the bar says there is none.
         (
-            Word::Fetched {
-                taken: 12,
-                of: Some(40),
-            },
-            "Fetched 12 of 40",
+            Word::Unreachable,
+            "No way to mailbox",
+            "Kein Weg zum Postfach",
         ),
+        (fetched, "Fetching…", "Holt ab…"),
+        (Word::Connected, "Connected", "Verbunden"),
+        (Word::Refused, "Refused", "Abgelehnt"),
+        (Word::CodeRefused, "Refused", "Abgelehnt"),
     ] {
-        let line = bar(Some(word), Lang::En);
-        assert_eq!(line.chars().count(), COLS, "{line:?}");
-        assert!(line.trim_end().ends_with(said), "{line:?}");
-        assert_ne!(line, none);
+        for (lang, said) in [(Lang::En, en), (Lang::De, de)] {
+            let line = bar(Some(word), lang);
+            assert_eq!(line.chars().count(), COLS, "{line:?}");
+            let rest = line.trim().strip_prefix("Chats").map(str::trim);
+            assert_eq!(rest, Some(said), "{line:?}");
+        }
     }
-    let german = bar(
-        Some(Word::Fetched {
-            taken: 3,
-            of: Some(9),
-        }),
-        Lang::De,
-    );
-    assert!(
-        german.trim_end().ends_with("3 von 9 abgeholt"),
-        "{german:?}"
-    );
-    // A sentence longer than the bar is cut, the bar still whole.
-    let long = bar(Some(Word::CodeRefused), Lang::En);
-    assert_eq!(long.chars().count(), COLS, "{long:?}");
+}
+
+/// The bar tells the way to the mailbox per interface (1478): connected
+/// over a path the board holds, the medium of its first hop and the hops;
+/// unreachable with no path at all, that there is none. A word whose way
+/// is not known, or a state the way does not change, says the 1564 word.
+/// A bar too narrow for the long form beside its title says the short
+/// one, the way without the mailbox's name (the default type's 35 cells
+/// hold "Postfach über Funk · 2 Stationen" beside "Chats" in neither
+/// language; the very small type's 53 hold every long form). Hops are
+/// said as stations, the catalogue's word for them (1618).
+#[test]
+fn the_top_bar_says_the_way_to_the_mailbox() {
+    const WIDE: usize = 53;
+    let me = Identity::generate(&mut OsRng);
+    let model = home::model(lxmf_address(&me.public_key_bytes()).expect("address"));
+    let scene = screen::scene(&model);
+    let bar = |word: Word, way: Option<Way>, lang, cols| {
+        let look = Look {
+            home: Some(word),
+            way,
+            lang,
+            ..Look::of(&model)
+        };
+        row_text(&screen::lines(&scene, &look, cols, ROWS)[0])
+    };
+    let radio = |hops| {
+        Some(Way {
+            medium: Medium::Radio,
+            hops,
+        })
+    };
+    let cable = |hops| {
+        Some(Way {
+            medium: Medium::Cable,
+            hops,
+        })
+    };
+    let wifi = |hops| {
+        Some(Way {
+            medium: Medium::Wifi,
+            hops,
+        })
+    };
+    let fetched = Word::Fetched { taken: 3, of: None };
+    // (word, way, [wide en, wide de], [narrow en, narrow de])
+    let cases = [
+        (
+            Word::Connected,
+            radio(2),
+            [
+                "Mailbox over radio · 2 stations",
+                "Postfach über Funk · 2 Stationen",
+            ],
+            ["Radio · 2 stations", "Funk · 2 Stationen"],
+        ),
+        (
+            Word::Connected,
+            radio(1),
+            [
+                "Mailbox over radio · 1 station",
+                "Postfach über Funk · 1 Station",
+            ],
+            ["Radio · 1 station", "Funk · 1 Station"],
+        ),
+        (
+            Word::Connected,
+            cable(3),
+            [
+                "Mailbox over cable · 3 stations",
+                "Postfach über Kabel · 3 Stationen",
+            ],
+            ["Cable · 3 stations", "Kabel · 3 Stationen"],
+        ),
+        (
+            Word::Connected,
+            cable(1),
+            [
+                "Mailbox over cable · 1 station",
+                "Postfach über Kabel · 1 Station",
+            ],
+            ["Cable · 1 station", "Kabel · 1 Station"],
+        ),
+        // 1479: the LAN rung, a mailbox in the WLAN the board joined.
+        (
+            Word::Connected,
+            wifi(1),
+            [
+                "Mailbox over WiFi · 1 station",
+                "Postfach über WLAN · 1 Station",
+            ],
+            ["WiFi · 1 station", "WLAN · 1 Station"],
+        ),
+        (
+            Word::Connected,
+            wifi(2),
+            [
+                "Mailbox over WiFi · 2 stations",
+                "Postfach über WLAN · 2 Stationen",
+            ],
+            ["WiFi · 2 stations", "WLAN · 2 Stationen"],
+        ),
+        (
+            Word::Unreachable,
+            None,
+            ["No way to mailbox", "Kein Weg zum Postfach"],
+            ["No way to mailbox", "Kein Weg zum Postfach"],
+        ),
+        // A path held and no answer: the way is there, the mailbox did
+        // not answer over it.
+        (
+            Word::Unreachable,
+            radio(2),
+            ["Disconnected", "Getrennt"],
+            ["Disconnected", "Getrennt"],
+        ),
+        // Connected with the path since expired: the ask got through.
+        (
+            Word::Connected,
+            None,
+            ["Connected", "Verbunden"],
+            ["Connected", "Verbunden"],
+        ),
+        (
+            fetched,
+            radio(2),
+            ["Fetching…", "Holt ab…"],
+            ["Fetching…", "Holt ab…"],
+        ),
+        (
+            Word::Joining,
+            None,
+            ["Connecting…", "Verbindet…"],
+            ["Connecting…", "Verbindet…"],
+        ),
+    ];
+    for (word, way, wide, narrow) in cases {
+        for (cols, said) in [(WIDE, wide), (COLS, narrow)] {
+            for (lang, said) in [(Lang::En, said[0]), (Lang::De, said[1])] {
+                let line = bar(word, way, lang, cols);
+                assert_eq!(line.chars().count(), cols, "{line:?}");
+                let rest = line.trim().strip_prefix("Chats").map(str::trim);
+                assert_eq!(rest, Some(said), "{word:?} {way:?} {cols} {line:?}");
+            }
+        }
+    }
 }
 
 /// The pairing screen: the code in fives, the verdict, the keys, the
@@ -739,7 +882,9 @@ fn a_fault_is_a_word_in_the_top_bar() {
     };
     let lines = screen::lines(&scene, &look, COLS, ROWS);
     let top = row_text(&lines[0]);
-    assert!(top.contains("Not saved"), "{top:?}");
+    // The state in its short word (1564), the sentence is the log's.
+    assert!(top.trim_end().ends_with("Not saved"), "{top:?}");
+    assert!(!top.contains("memory"), "{top:?}");
     let clear = Look {
         fault: None,
         lang: Lang::En,

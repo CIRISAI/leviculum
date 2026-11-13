@@ -230,10 +230,6 @@ pub(crate) struct Shell {
     fetch_task: Option<(tokio::task::JoinHandle<()>, &'static str)>,
     /// The tasks handing marks to the home node, waited for before leaving.
     mark_tasks: Vec<tokio::task::JoinHandle<()>>,
-    /// The peer states on their way to the home node, in the
-    /// order they were set (1614), waited for before leaving; opened with
-    /// the first of them.
-    hand_offs: Option<runner::HandOffs>,
     /// The mailbox's syncs that failed before a link, and the nodes they
     /// excluded.
     unanswered: Unanswered,
@@ -386,6 +382,8 @@ impl Shell {
                     }));
                 }
                 UiEffect::PnLine(line) => tracing::info!("{line}"),
+                // Explore opened (1644): the mailbox's list asked again.
+                UiEffect::AskPages => self.ask_pages(),
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
@@ -464,6 +462,17 @@ impl Shell {
                     Ok(path) => self.outputs.push(Output::Photo(path)),
                     Err(line) => answers.push(UiEvent::Notice(line)),
                 },
+                // A deleted message's saved copies go with it (1662).
+                UiEffect::ForgetSaved { peer, key } => {
+                    match loquax::file_save::forget(&self.context.home, peer, key) {
+                        Ok(0) => {}
+                        Ok(gone) => tracing::info!(
+                            "FILES forgot {gone} saved of {} key={key:?}",
+                            short(&peer)
+                        ),
+                        Err(line) => answers.push(UiEvent::Notice(format!("not removed: {line}"))),
+                    }
+                }
                 // A file (1221): saved under the home's files/, as the
                 // phone keeps it under its app files, then the system's
                 // handler opens it.
@@ -610,7 +619,7 @@ impl Shell {
             .find(|c| c.peer == peer)
             .and_then(|c| c.messages.iter().find(|m| m.activity == key))
             .and_then(|m| {
-                let (format, data) = loquax::ui::photos::photo_parts(&m.fields)?;
+                let (format, data, _) = loquax::ui::photos::picture_parts(&m.fields)?;
                 Some((format, data.to_vec()))
             })
             .ok_or_else(|| "that message has no photo".to_string())?;
@@ -750,26 +759,25 @@ impl Shell {
         }));
     }
 
-    /// The peer states the reader set (1146), handed to the home node in
-    /// order on the lane of [`runner::HandOffs`] (1614).
+    /// The peer states the reader set (1146), handed to the home node as
+    /// petnames are, and owed until it takes them (1640).
     fn hand_peer_states(&mut self) {
-        let states = self.model.take_peer_states();
-        if !states.is_empty() {
-            self.hand_off(runner::HandOff::PeerStates(states));
-        }
-    }
-
-    /// Queue `off` on the lane to the home node, opened on the first.
-    fn hand_off(&mut self, off: runner::HandOff) {
+        // Taken only with a client to hand them to: a take waits for its
+        // answer before the next (1640).
         let Some(client) = self.context.client.clone() else {
             return;
         };
+        let states = self.model.take_peer_states();
+        if states.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
         let budget = self.context.timeout;
-        self.hand_offs
-            .get_or_insert_with(|| {
-                runner::HandOffs::new(&tokio::runtime::Handle::current(), client, budget)
-            })
-            .hand(off);
+        let done = self.done_tx.clone();
+        self.mark_tasks.push(tokio::spawn(async move {
+            let event = runner::hand_peer_states(client, states, budget).await;
+            let _ = done.send(Finished::Event(event));
+        }));
     }
 
     /// The marks a fold made, handed to the home node in order, on a task
@@ -1068,8 +1076,14 @@ impl Shell {
                 let tap = self.fanout.tap();
                 let context = self.job_context();
                 let done = self.done_tx.clone();
+                let told = self.done_tx.clone();
                 self.send_task = Some(tokio::spawn(async move {
-                    let event = send(tap, context, to, body, fields).await;
+                    // How far a client's upload went (1662), folded as
+                    // it comes, before the send's end.
+                    let mut progress = move |event: UiEvent| {
+                        let _ = told.send(Finished::Event(event));
+                    };
+                    let event = send(tap, context, to, body, fields, &mut progress).await;
                     let _ = done.send(Finished::Send(event));
                 }));
             }
@@ -1247,6 +1261,10 @@ impl Shell {
             if reach.up != Some(up) {
                 reach.up = Some(up);
                 reach.since = Some(now);
+                // Explore says how old the mailbox's list is (1644).
+                self.apply(UiEvent::Explore(
+                    loquax::ui::explore::ExploreEvent::Mailbox(up),
+                ));
             }
         }
         if up != Some(false) {
@@ -1350,11 +1368,13 @@ impl Shell {
         let stamp = self.model.browse.shared.stamp;
         let budget = self.context.timeout;
         let done = self.done_tx.clone();
+        tracing::info!("HOME pages asked since={stamp}");
         self.pages_task = Some(tokio::spawn(async move {
             if let Some(event) = runner::home_pages(client, pending, stamp, budget).await {
                 let _ = done.send(Finished::Event(event));
             }
         }));
+        loquax::ui::explore::pages_asked(&mut self.model);
     }
 
     /// The bookmark changes the reader made (1579), handed to the home on a
@@ -1455,7 +1475,7 @@ impl Shell {
     pub(crate) async fn settle(&mut self) {
         // The marks the reader made before leaving reach the home node, or
         // run out of a send's budget, and so do the petnames and peer
-        // states (1614).
+        // states (1614, owed until the home takes them since 1640).
         self.hand_marks();
         self.hand_petnames();
         self.hand_peer_states();
@@ -1464,10 +1484,6 @@ impl Shell {
             if tokio::time::timeout_at(budget, task).await.is_err() {
                 tracing::warn!("HOME mark still running at the end; given up");
             }
-        }
-        if let Some(lane) = self.hand_offs.take() {
-            let left = budget.saturating_duration_since(tokio::time::Instant::now());
-            lane.finish(left).await;
         }
         let mut tasks: Vec<tokio::task::JoinHandle<()>> =
             self.send_task.take().into_iter().collect();
@@ -1532,11 +1548,21 @@ async fn send(
     to: [u8; 16],
     body: String,
     fields: Vec<Field>,
+    progress: &mut (dyn FnMut(UiEvent) + Send),
 ) -> UiEvent {
     if let Some(client) = &context.client {
         let settle = Duration::from_millis(SETTLE_MS);
-        return runner::send_home(&mut tap, client, to, body, fields, context.timeout, settle)
-            .await;
+        return runner::send_home(
+            &mut tap,
+            client,
+            to,
+            body,
+            fields,
+            context.timeout,
+            settle,
+            progress,
+        )
+        .await;
     }
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
@@ -1733,6 +1759,7 @@ pub(crate) async fn start(
                 store.fixes_between(None, i64::MIN, i64::MAX)?,
                 store.pn_asks()?,
                 store.owed_petnames()?,
+                store.owed_peer_states()?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1831,8 +1858,17 @@ pub(crate) async fn start(
     // Only the contacts: the names already know the peers `Model::new`
     // opened conversations with (1452, two nameless ones collide).
     model.names.contacts = contacts;
-    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks, owed_petnames) =
-        history;
+    let (
+        restored,
+        names,
+        last_key,
+        positions,
+        unverified,
+        track_fixes,
+        pn_asks,
+        owed_petnames,
+        owed_peer_states,
+    ) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1887,6 +1923,9 @@ pub(crate) async fn start(
     // The petnames the home node had not taken when loquax ended (1635):
     // handed again, and the reader's word over what the first pull brings.
     model.restore_owed_petnames(owed_petnames);
+    // The peer states likewise (1640): a pin loosened before the end
+    // stays loosened.
+    model.restore_owed_peer_states(owed_peer_states);
     model.restore_positions(positions);
     model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);
@@ -2022,7 +2061,6 @@ pub(crate) async fn start(
         send_task: None,
         fetch_task: None,
         mark_tasks: Vec::new(),
-        hand_offs: None,
         unanswered: Unanswered::default(),
         replacing: None,
         legs_seen: Vec::new(),

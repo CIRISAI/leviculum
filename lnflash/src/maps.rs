@@ -120,6 +120,12 @@ pub fn espflash() -> Option<PathBuf> {
 
 /// The arguments that write `image` at the area's start on `port`.
 pub fn write_args(port: &Path, image: &Path) -> Vec<OsString> {
+    write_at_args(port, AREA_OFFSET, image)
+}
+
+/// The arguments that write `image` at `offset` in the M9's flash on
+/// `port`, through the ROM loader at its rate.
+pub fn write_at_args(port: &Path, offset: u32, image: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "write-bin",
         "--chip",
@@ -133,7 +139,7 @@ pub fn write_args(port: &Path, image: &Path) -> Vec<OsString> {
     args.push(LOADER_BAUD.to_string().into());
     args.push("--port".into());
     args.push(port.into());
-    args.push(format!("{AREA_OFFSET:#x}").into());
+    args.push(format!("{offset:#x}").into());
     args.push(image.into());
     args
 }
@@ -162,7 +168,7 @@ pub fn read_args(port: &Path, out: &Path) -> Vec<OsString> {
 
 /// Run espflash with `args`; an error in words when it is missing or
 /// fails.
-fn run(args: &[OsString]) -> Result<(), String> {
+pub(crate) fn run(args: &[OsString]) -> Result<(), String> {
     let program = espflash().ok_or_else(|| {
         String::from("espflash is not installed: `cargo install espflash` puts it in ~/.cargo/bin")
     })?;

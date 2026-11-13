@@ -145,8 +145,9 @@ ground is the radar's blank one with its rings.
 `gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`:
 the window's map screen (1419) beside the rail, 900 x 560, light, the
 chat fixture's model with no map frame drawn: the bar with no time strip
-and the title "Map"; the map's menu open over the map's corner, "Time
-window" with the six windows, the current movement marked, and "Fit all";
+and the title "Map"; the map's menu open over the map's corner,
+"Locations" (1430) first, then "Time window" with the six windows, the
+current movement marked, and "Fit all";
 the bar's title "Map · This week" once that window is chosen. Drawn by
 `gui::tests::the_time_window_is_in_the_maps_menu`.
 
@@ -210,9 +211,24 @@ and its shell sets the profile's mailbox once at start without its reach.
 `gui-map-pins.png`: the window's map screen with two peers' pins (1451):
 Anna and Ben shared their positions in Florence's centre five and eight
 minutes ago, the frame drawn from `../../../leviculum-map/fixtures/firenze.lmr`
-(the region's extent, the theme's ground around it), Anna selected: her
-entry marked in the list and the view centred on her pin. Drawn by
-`gui::tests::two_pins_with_one_selected_are_the_windows_map_golden`,
+(the region's extent, the theme's ground around it), Anna selected: the
+view centred on her pin and, since 1430, her card at the map's bottom
+(avatar, name, "live · 5 min ago", Chat, Navigate, Share mine); the map
+takes the whole pane right of the rail, no column of peers beside it.
+Drawn by `gui::tests::two_pins_with_one_selected_are_the_windows_map_golden`,
+900 x 560, light, pixel for pixel. OpenStreetMap data as above.
+
+`gui-map-locations.png`: the same map with our own position near the two
+peers (1430) and the map menu's Locations list open over the map's left
+edge, a fixed 260 pixels wide: Anna then Ben, the newest fix first, each
+with its age and the distance from us. Drawn by
+`gui::tests::the_locations_list_opens_from_the_menu_and_a_row_selects`,
+900 x 560, light, pixel for pixel. OpenStreetMap data as above.
+
+`gui-map-long-name.png`: Anna named with forty letters, selected, the
+Locations list open (1430): her name in the list and on the card cut with
+an ellipsis at its box's edge, never past it. Drawn by
+`gui::tests::a_long_name_is_clipped_with_an_ellipsis_in_its_box`,
 900 x 560, light, pixel for pixel. OpenStreetMap data as above.
 
 `tui-reply-sent.txt`, `tui-reply-compose.txt`: the same chat of

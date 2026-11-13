@@ -45,6 +45,8 @@ pub struct Shown {
     pub name: alloc::string::String,
     /// The machine's name ([`super::about::host_word`]); empty for none.
     pub host: alloc::string::String,
+    /// When the daemon came up, unix seconds; 0 for unknown (1647).
+    pub started: i64,
 }
 
 impl Shown {
@@ -53,9 +55,14 @@ impl Shown {
         let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
             .or_else(|_| std::fs::read_to_string("/etc/hostname"))
             .unwrap_or_default();
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
         Self {
             name: alloc::string::String::from(name),
             host: super::about::host_word(&raw),
+            started,
         }
     }
 }
@@ -150,6 +157,18 @@ fn route(
     now: f64,
     now_secs: i64,
 ) -> Answer {
+    // The pairing is the door (1677, invariant 3 of
+    // `docs/src/concepts/loquax-mailbox-roles.md`): a device that is not
+    // admitted gets one refusal for every ask but `/join`, before its
+    // request is read, so it learns neither what the mailbox holds nor
+    // whether its request was well formed, and nothing it sent is kept.
+    // The handlers keep their own checks as a second line.
+    if path != super::JOIN_PATH {
+        let ask = ask_name(path);
+        if let Some(refused) = refuse_unless_admitted(store, &device, ask) {
+            return Answer::only(refused);
+        }
+    }
     match path {
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
@@ -171,6 +190,34 @@ fn route(
     }
 }
 
+/// The name a request is logged under: its path without the slash for
+/// the paths the mailbox serves, `unknown` for any other, so a path a
+/// stranger chose never reaches the log.
+fn ask_name(path: &str) -> &'static str {
+    const SERVED: [&str; 16] = [
+        super::JOIN_PATH,
+        super::SYNC_PATH,
+        super::SEND_PATH,
+        super::MARK_PATH,
+        super::PETNAME_PATH,
+        super::PEERSTATE_PATH,
+        super::WATCH_PATH,
+        super::KEY_PATH,
+        super::MOVE_PATH,
+        super::MOVED_PATH,
+        super::GROUP_PATH,
+        super::GROUP_ADD_PATH,
+        super::GROUP_DELETE_PATH,
+        super::PAGES_PATH,
+        super::BOOKMARK_PATH,
+        super::ABOUT_PATH,
+    ];
+    SERVED
+        .iter()
+        .find(|served| **served == path)
+        .map_or("unknown", |served| served.trim_start_matches('/'))
+}
+
 /// Whether `device` may ask: an answer to refuse it with, when not.
 fn refuse_unless_admitted(store: &Store, device: &[u8; 16], what: &str) -> Option<Vec<u8>> {
     match store.is_admitted(device) {
@@ -180,6 +227,7 @@ fn refuse_unless_admitted(store: &Store, device: &[u8; 16], what: &str) -> Optio
                 "HOME {what} refused device={} reason=not-admitted",
                 crate::address::to_hex(device)
             );
+            crate::events::home_refuse(device, what, "not-admitted");
             Some(wire::status_answer(Status::NotAdmitted))
         }
         Err(error) => {
@@ -1166,6 +1214,7 @@ fn join(
                 "HOME join refused device={} reason=token",
                 crate::address::to_hex(&device)
             );
+            crate::events::home_refuse(&device, "join", "token");
             wire::status_answer(Status::BadToken)
         }
         Ok(Redeemed::Expired { name }) => {
@@ -1173,6 +1222,7 @@ fn join(
                 "HOME join refused device={} reason=expired name={name:?}",
                 crate::address::to_hex(&device)
             );
+            crate::events::home_refuse(&device, "join", "expired");
             wire::status_answer(Status::BadToken)
         }
         Err(error) => {
@@ -1217,6 +1267,7 @@ fn about(store: &Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> Vec<u
                 last_seen: d.last_seen,
             })
             .collect(),
+        started: Some(home.shown.started).filter(|at| *at > 0),
     })
 }
 
@@ -1474,6 +1525,7 @@ mod tests {
             shown: Shown {
                 name: "Lew Palm".into(),
                 host: "miauhaus".into(),
+                started: 90,
             },
         }
     }
@@ -2539,6 +2591,88 @@ mod tests {
             .expect("new")
     }
 
+    /// 1677, invariant 3 of `docs/src/concepts/loquax-mailbox-roles.md`:
+    /// a device that never paired gets `NotAdmitted` for every ask but
+    /// `/join`, well formed, malformed and on a path the mailbox does not
+    /// serve alike, and the store is the same after as before; the paired
+    /// device, the control, gets its answers from the same store.
+    #[test]
+    fn an_unpaired_device_gets_nothing_whatever_it_asks() {
+        use crate::home::about::{about_request, read_about_answer};
+        use crate::home::{
+            ABOUT_PATH, BOOKMARK_PATH, GROUP_ADD_PATH, GROUP_DELETE_PATH, GROUP_PATH, KEY_PATH,
+            MARK_PATH, MOVED_PATH, MOVE_PATH, PAGES_PATH, PEERSTATE_PATH, PETNAME_PATH, WATCH_PATH,
+        };
+        const STRANGER: [u8; 16] = [0x77; 16];
+        let (_dir, mut store) = store();
+        let home = home();
+        admitted(&mut store);
+        archive(&mut store, 1);
+        let state = |store: &Store| {
+            (
+                store.archive_newest().expect("newest"),
+                store.devices().expect("devices"),
+                store.outbox_open().expect("outbox"),
+            )
+        };
+        let before = state(&store);
+
+        let well_formed: [(&str, Vec<u8>); 15] = [
+            (SYNC_PATH, sync_request(0)),
+            (SEND_PATH, wire::send_request(&submission(9))),
+            (ABOUT_PATH, about_request()),
+            (PAGES_PATH, crate::home::pages::pages_request(0, None)),
+            (WATCH_PATH, wire::watch_request(0)),
+            (KEY_PATH, wire::key_request(&[0x66; 16], &[0x55; 64])),
+            (MOVE_PATH, wire::move_request(&TOKEN, 0)),
+            (MOVED_PATH, wire::move_request(&TOKEN, 0)),
+            (MARK_PATH, Vec::new()),
+            (PETNAME_PATH, Vec::new()),
+            (PEERSTATE_PATH, Vec::new()),
+            (GROUP_PATH, Vec::new()),
+            (GROUP_ADD_PATH, Vec::new()),
+            (GROUP_DELETE_PATH, Vec::new()),
+            (BOOKMARK_PATH, Vec::new()),
+        ];
+        for (path, data) in &well_formed {
+            for data in [data.clone(), vec![0xc1], Vec::new()] {
+                let answer = answer(&mut store, &home, path, &data, Some(STRANGER), 200.0);
+                assert_eq!(
+                    read_status(&answer.bytes),
+                    Ok(Status::NotAdmitted),
+                    "{path} answered a stranger"
+                );
+                assert!(answer.accepted.is_empty(), "{path} accepted a message");
+                assert_eq!(answer.watching, None, "{path} watched for a stranger");
+                assert_eq!(answer.learned, None, "{path} learned a key");
+            }
+        }
+        let unknown = answer(&mut store, &home, "/secret", &[], Some(STRANGER), 200.0);
+        assert_eq!(read_status(&unknown.bytes), Ok(Status::NotAdmitted));
+        assert_eq!(state(&store), before, "a stranger changed the store");
+
+        // The control: the paired device is answered from the same store.
+        assert_eq!(
+            sync(&mut store, Some(LAPTOP), 0).map(|page| page.entries.len()),
+            Ok(1)
+        );
+        let about = answer(
+            &mut store,
+            &home,
+            ABOUT_PATH,
+            &about_request(),
+            Some(LAPTOP),
+            200.0,
+        );
+        assert!(matches!(read_about_answer(&about.bytes), Ok(Ok(_))));
+        assert!(pages_ask(&mut store, LAPTOP, 0, None).is_ok());
+        let (sent, accepted) = send(&mut store, &home, LAPTOP, &submission(9), 200.0);
+        assert!(sent.is_ok() && accepted.is_some());
+        // A malformed request of the paired device is still malformed.
+        let malformed = answer(&mut store, &home, SYNC_PATH, &[0xc1], Some(LAPTOP), 200.0);
+        assert_eq!(read_status(&malformed.bytes), Ok(Status::Malformed));
+    }
+
     /// 1642: `/about` names the mailbox, its machine and version, and
     /// every device with when it was last there; each request moves that,
     /// at most once a minute; a device not admitted is refused.
@@ -2563,6 +2697,7 @@ mod tests {
         assert_eq!(about.name, "Lew Palm");
         assert_eq!(about.host, "miauhaus");
         assert_eq!(about.version, crate::VERSION);
+        assert_eq!(about.started, Some(90), "when the daemon came up");
         assert_eq!(about.devices.len(), 1);
         assert_eq!(about.devices[0].name, "laptop");
         // Thirty seconds after the join: the minute has not passed.
@@ -2580,6 +2715,106 @@ mod tests {
             1,
             "a stranger's request is no device"
         );
+    }
+
+    /// 1647, walk 6, finding 29: after the schema 20 migration every
+    /// device the mailbox already held has no `last_seen`. Its `/about`
+    /// says so (0 on the wire), and the page says such a device was never
+    /// connected (1667, walk 11, finding 57: a bare name read as a broken
+    /// row); the asking device gets its time on its first request.
+    #[test]
+    fn a_migrated_mailbox_names_its_old_devices_as_never_connected() {
+        use crate::home::about::{about_request, read_about_answer};
+        use crate::ui::mailbox_page::{page, Told};
+        use crate::ui::profile::{Mailbox, ProfileFacts};
+        use crate::ui::strings::Lang;
+        const PHONE: [u8; 16] = [0x44; 16];
+        let (dir, mut store) = store();
+        store.issue_token(&TOKEN, "laptop", 90).expect("issue");
+        assert_eq!(join(&mut store, LAPTOP, TOKEN), Status::Ok);
+        store
+            .issue_token(&[0x34; 16], "Fairphone", 90)
+            .expect("issue");
+        assert_eq!(join(&mut store, PHONE, [0x34; 16]), Status::Ok);
+        drop(store);
+        // Back to schema 19, as Lew's miauhaus was before 1642.
+        let conn =
+            rusqlite::Connection::open(dir.path().join(crate::store::STORE_FILE)).expect("raw");
+        conn.execute_batch(
+            "ALTER TABLE home_devices DROP COLUMN last_seen; DROP TABLE owed_peer_states; \
+             DROP TABLE home_names; PRAGMA user_version = 19;",
+        )
+        .expect("made schema 19");
+        drop(conn);
+        let mut store = Store::open_in(dir.path(), HOME).expect("migrated");
+        let first = answer(
+            &mut store,
+            &home(),
+            crate::home::ABOUT_PATH,
+            &about_request(),
+            Some(PHONE),
+            1_000.0,
+        );
+        let about = read_about_answer(&first.bytes)
+            .expect("decodes")
+            .expect("answered");
+        assert!(
+            about.devices.iter().all(|d| d.last_seen.is_none()),
+            "{about:?}"
+        );
+        let mut model = crate::ui::UiModel::<crate::ui::tests::Field>::new(&[]);
+        model.address = Some(HOME);
+        model.now = Some(crate::when::WallTime {
+            unix_secs: 1_000,
+            offset_secs: 0,
+        });
+        model.profile = ProfileFacts {
+            mailbox: Mailbox::Away {
+                name: None,
+                rung: None,
+                word: None,
+            },
+            told: Told::Told(about),
+            device: Some(PHONE),
+            version: alloc::string::String::from(crate::VERSION),
+            ..ProfileFacts::default()
+        };
+        let shown = page(&model);
+        let said: Vec<_> = shown
+            .rows()
+            .iter()
+            .map(|row| match &row.value {
+                Some(value) => alloc::format!(
+                    "{}: {}",
+                    row.label.resolve(Lang::De),
+                    value.resolve(Lang::De)
+                ),
+                None => row.label.resolve(Lang::De),
+            })
+            .collect();
+        println!(
+            "MIGRATED mailboxpage:\n{}",
+            serde_json::to_string_pretty(&shown.to_json()).expect("json")
+        );
+        // Walk 11, finding 57 (1667): never heard says so.
+        assert!(
+            said.iter().any(|l| l == "laptop: noch nie verbunden"),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l == "Fairphone: dieses Gerät"),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.contains("noch nicht da")),
+            "{said:#?}"
+        );
+        // The asking device has its time once it asked.
+        let devices = store.devices().expect("devices");
+        let phone = devices.iter().find(|d| d.device == PHONE).expect("phone");
+        assert_eq!(phone.last_seen, Some(1_000));
+        let laptop = devices.iter().find(|d| d.device == LAPTOP).expect("laptop");
+        assert_eq!(laptop.last_seen, None, "the laptop has not asked");
     }
 
     #[test]

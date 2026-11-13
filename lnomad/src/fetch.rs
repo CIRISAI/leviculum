@@ -50,6 +50,30 @@ const PATH_BUDGET: Duration = Duration::from_secs(30);
 /// waiting. The first one it sends immediately, so this governs repeats only.
 const PATH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a fetch waits for its link: the caller's timeout, or the core's
+/// own establishment timeout for this link and half of it again, whichever is
+/// longer (order 1669).
+///
+/// The core sends a link request again, with fresh keys, once its
+/// establishment timeout passes (`link_management.rs::check_timeouts`). A
+/// relay that forwarded the first request on a path that no longer leads
+/// anywhere gives up on it after its proof window, `(hops + 2) x 6 s`
+/// (`transport.rs`, `LinkEntry::proof_timeout_ms`), and asks the path anew
+/// (`clean_link_table`); our request after that finds the mended path. On a
+/// phone four hops out behind its mailbox's relay the core's timeout is
+/// 43 s and more (the hop term plus the first hop's at the assumed bitrate),
+/// the relay's window 36 s: the second request is the one that gets
+/// through. A wait of the bare 30-s request timeout gave up before the core
+/// sent it, and the reader's second tap was that retry (walk 12, finding 69:
+/// STRUDEL and rns.moscow failed after 31 s, the next tap loaded in 2 s).
+/// Half a timeout again leaves the retry its round trip.
+fn link_budget(timeout: Duration, establishment_ms: Option<u64>) -> Duration {
+    let Some(ms) = establishment_ms else {
+        return timeout;
+    };
+    timeout.max(Duration::from_millis(ms.saturating_add(ms / 2)))
+}
+
 /// Extra slack added on top of the caller's request timeout when waiting for a
 /// response event, so the node's own `RequestTimedOut` fires first and surfaces
 /// as [`FetchError::Timeout`] rather than a bare deadline.
@@ -579,7 +603,11 @@ impl<N: NodeLend> Session<N> {
             ready: false,
         });
 
-        if let Err(err) = self.wait_for_link_established(link_id, timeout).await {
+        let budget = link_budget(
+            timeout,
+            self.node()?.link_establishment_timeout_ms(&link_id),
+        );
+        if let Err(err) = self.wait_for_link_established(link_id, budget).await {
             self.close_current_link().await;
             return Err(err);
         }
@@ -785,6 +813,23 @@ mod tests {
     }
 
     use super::*;
+
+    /// The link wait outlasts the core's own retry (order 1669): four hops
+    /// out at the assumed bitrate the core times a request out after
+    /// 43.3 s, past the bare 30-s request timeout.
+    #[test]
+    fn the_link_wait_outlasts_the_cores_first_timeout() {
+        let timeout = Duration::from_secs(30);
+        assert_eq!(
+            link_budget(timeout, Some(43_333)),
+            Duration::from_millis(64_999)
+        );
+        assert!(link_budget(timeout, Some(43_333)) > Duration::from_millis(43_333));
+        // A short path keeps the caller's timeout, and a link already gone
+        // has no timeout of its own to outlast.
+        assert_eq!(link_budget(timeout, Some(12_000)), timeout);
+        assert_eq!(link_budget(timeout, None), timeout);
+    }
 
     #[test]
     fn encode_fields_empty_is_none() {

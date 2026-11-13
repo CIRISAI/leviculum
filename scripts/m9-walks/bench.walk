@@ -58,8 +58,9 @@ dump 08-map-zoom-y
 key back
 wait page=chats
 
-# The house page (1532): the house key's tap opens the overview after
-# its 300 ms gap; Back leaves it for the list.
+# The house page (1532, 1561): the house key opens the settings at once
+# (no gap: the controller repeats no held key, so the 300 ms bar of 1532
+# went); Back leaves them for the list.
 key home
 wait page=house
 dump 09-house

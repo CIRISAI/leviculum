@@ -14,7 +14,7 @@
 use leviculum_rrc::LineKind;
 use loquax::ui::rooms::{self as model_rooms, RoomLineKind, RoomsEvent};
 use loquax::ui::scene::TabId;
-use loquax::ui::strings::{Lang, StrId, Text};
+use loquax::ui::strings::Lang;
 use loquax::ui::{UiEvent, UiModel};
 
 use crate::schema::{self, RoomsLine, RoomsRow, RoomsScreen, RoomsVerb};
@@ -35,7 +35,8 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
         v,
         enabled: true,
         open: rooms.showing(),
-        title: Text::key(StrId::TabRooms).resolve(lang),
+        // "Räume auf EuskalReticulum" with no room open (1659, walk 10, 52).
+        title: node.title.resolve(lang),
         status: node
             .status
             .as_ref()
@@ -61,8 +62,27 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
             .as_ref()
             .map(|e| e.resolve(lang))
             .unwrap_or_default(),
+        retry: node
+            .retry
+            .as_ref()
+            .map(|r| r.resolve(lang))
+            .unwrap_or_default(),
         ..RoomsScreen::default()
     };
+    if let Some(listed) = &node.listed {
+        shown.listed_title = listed.title.resolve(lang);
+        shown.listed.clone_from(&listed.rooms);
+        shown.listed_note = listed
+            .note
+            .as_ref()
+            .map(|n| n.resolve(lang))
+            .unwrap_or_default();
+        shown.other = listed
+            .other
+            .as_ref()
+            .map(|o| o.resolve(lang))
+            .unwrap_or_default();
+    }
     if let Some(open) = &node.open {
         shown.room = open.name.clone();
         shown.initials = open.avatar.initials.clone();
@@ -145,6 +165,11 @@ pub fn events(verb: &str, text: &str, index: i64) -> Result<Vec<UiEvent>, String
         // The open room's header and menu (1450).
         "people" => Vec::from([rooms(RoomsEvent::People(index != 0))]),
         "leave" => Vec::from([rooms(RoomsEvent::Leave)]),
+        // A room the hub names, tapped (1652): joined by its name as the
+        // hub spells it, and opened once the hub says we are in.
+        "join" => Vec::from([rooms(RoomsEvent::Join(text.to_string()))]),
+        // "Connect" or "Try again" under the link's state (1652).
+        "retry" => Vec::from([rooms(RoomsEvent::Retry)]),
         other => return Err(format!("no rooms verb {other:?}")),
     })
 }
@@ -180,8 +205,22 @@ mod tests {
     }
 
     #[test]
+    fn a_listed_room_joins_by_its_name_and_retry_links() {
+        assert_eq!(
+            events("join", "general chat", 0),
+            Ok(vec![UiEvent::Rooms(RoomsEvent::Join(
+                "general chat".to_string()
+            ))])
+        );
+        assert_eq!(
+            events("retry", "", 0),
+            Ok(vec![UiEvent::Rooms(RoomsEvent::Retry)])
+        );
+    }
+
+    #[test]
     fn a_verb_the_tab_does_not_know_is_refused() {
-        assert!(events("join", "#lab", 0).is_err());
+        assert!(events("list", "", 0).is_err());
         assert!(events("part", "", 0).is_err(), "the menu's verb is leave");
         assert!(events("", "", 0).is_err());
     }

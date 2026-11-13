@@ -22,6 +22,8 @@ import android.text.style.StyleSpan;
 import android.text.style.UnderlineSpan;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
@@ -31,11 +33,13 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -51,6 +55,13 @@ import java.util.Map;
  * in the address field, from the moment it is opened; the field shows the
  * node's address only while it is edited. Back is always there: at the
  * first page it gives the tab back to Explore.
+ *
+ * <p>1650: the page comes whole (up to the library's cap) and scrolls as
+ * any phone list does; the arrows are there only for a page past the cap,
+ * which comes as a window. The finger's line goes back as {@code at}, so
+ * a fresh copy, Back and the arrows start where the reader is. The bar's
+ * actions are a menu drawn from the library's list, its chips a line
+ * under the bar, and a field opens the editor its kind asks for.
  */
 final class BrowsePane {
     /** What the pane hands back to the Activity. */
@@ -67,6 +78,19 @@ final class BrowsePane {
     private final ImageButton back;
     private final EditText address;
     private final TextView page;
+    private final ScrollView pageScroll;
+    /**
+     * The page's sideways scroll (1667, walk 11, finding 60): a line of text
+     * art wider than the phone comes whole from the library and is scrolled
+     * across, as a terminal wider than the screen would show it, never cut
+     * at the right edge or broken.
+     */
+    private final android.widget.HorizontalScrollView pageSideways;
+    /** The bar's state under it: the key while identifying, cache, hops (1650). */
+    private final TextView chips;
+    private final View foot;
+    private final Button pageUp;
+    private final Button pageDown;
     private final LinearLayout rows;
     /**
      * The places sheet's own scroll, a layer over the page (1639, walk 5
@@ -167,9 +191,33 @@ final class BrowsePane {
             }
         });
         bar.addView(places);
+        // The library's actions, drawn as it lists them (1650): no word
+        // and no verb here of Java's own.
+        ImageButton more = new ImageButton(activity);
+        more.setBackground(null);
+        more.setImageDrawable(new Glyph(Glyph.Kind.MENU, activity.getColor(R.color.text)));
+        more.setContentDescription(activity.getString(R.string.menu));
+        more.setTag("browse_menu");
+        more.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                actions(v);
+            }
+        });
+        bar.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48)));
         column.addView(bar);
+        chips = new TextView(activity);
+        chips.setTextColor(activity.getColor(R.color.text_secondary));
+        chips.setSingleLine(true);
+        chips.setEllipsize(TextUtils.TruncateAt.END);
+        chips.setPadding(dp(16), 0, dp(16), dp(4));
+        chips.setTag("browse_chips");
+        chips.setVisibility(View.GONE);
+        column.addView(chips);
 
-        ScrollView scroll = new ScrollView(activity);
+        final ScrollView scroll = new ScrollView(activity);
+        pageScroll = scroll;
+        scroll.setTag("browse_page_scroll");
         LinearLayout body = new LinearLayout(activity);
         body.setOrientation(LinearLayout.VERTICAL);
         rows = new LinearLayout(activity);
@@ -192,7 +240,14 @@ final class BrowsePane {
         // which turned each long line into a long and a short one.
         page.setPadding(dp(16), dp(8), dp(16), dp(8));
         page.setHorizontallyScrolling(true);
-        body.addView(page);
+        pageSideways = new android.widget.HorizontalScrollView(activity);
+        pageSideways.setTag("browse_page_sideways");
+        pageSideways.setFillViewport(true);
+        pageSideways.setHorizontalScrollBarEnabled(false);
+        pageSideways.addView(page, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        body.addView(pageSideways, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(body);
         FrameLayout stage = new FrameLayout(activity);
         stage.addView(scroll, new FrameLayout.LayoutParams(
@@ -224,6 +279,7 @@ final class BrowsePane {
         column.addView(stage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         LinearLayout foot = new LinearLayout(activity);
+        this.foot = foot;
         foot.setGravity(Gravity.CENTER_VERTICAL);
         status = new TextView(activity);
         status.setTextColor(activity.getColor(R.color.text_secondary));
@@ -241,9 +297,20 @@ final class BrowsePane {
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         statusAt.setMargins(dp(8), dp(4), dp(4), dp(4));
         foot.addView(status, statusAt);
-        foot.addView(scrollButton("▲", "pageup", R.string.browse_page_up));
-        foot.addView(scrollButton("▼", "pagedown", R.string.browse_page_down));
+        pageUp = scrollButton("▲", "pageup", R.string.browse_page_up);
+        pageDown = scrollButton("▼", "pagedown", R.string.browse_page_down);
+        foot.addView(pageUp);
+        foot.addView(pageDown);
         column.addView(foot);
+
+        // The finger's line goes back once the page holds still (1650).
+        scroll.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+            @Override
+            public void onScrollChange(View v, int x, int y, int ox, int oy) {
+                page.removeCallbacks(report);
+                page.postDelayed(report, 250);
+            }
+        });
 
         // The page is laid out on the cells the view holds.
         page.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
@@ -276,6 +343,92 @@ final class BrowsePane {
         return button;
     }
 
+    /** The page view's top in the vertical scroll's content. */
+    private int pageTop() {
+        return pageSideways.getTop() + page.getTop();
+    }
+
+    /** The page line at the top of the view, absolute, or -1 before a layout. */
+    private int topLine() {
+        int height = page.getLineHeight();
+        if (height <= 0 || last == null) {
+            return -1;
+        }
+        int y = pageScroll.getScrollY() - pageTop() - page.getPaddingTop();
+        return (int) Core.num(last, "first") + Math.max(0, y) / height;
+    }
+
+    /** The line the finger left the page at, told to the library. */
+    private final Runnable report = new Runnable() {
+        @Override
+        public void run() {
+            final int line = topLine();
+            if (line < 0 || line == reported || line == shownAt) {
+                return;
+            }
+            reported = line;
+            final boolean windowed = windowed(last);
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.browse("at", "", String.valueOf(line));
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    // A whole page needs nothing drawn: the view is where
+                    // the library now says it is. A window moves with the line.
+                    if (windowed) {
+                        draw();
+                    }
+                }
+            });
+        }
+    };
+
+    /** The line Java last told the library, and the line the library last said. */
+    private int reported = -1;
+    private int shownAt = -1;
+    /** The page's lines as last drawn: the same lines are not drawn again. */
+    private List<Map<String, Object>> drawn;
+    private String drawnKey = "";
+    /** The page's fields by node (1650): which editor a tap opens. */
+    private final Map<String, Map<String, Object>> fields =
+            new HashMap<String, Map<String, Object>>();
+    private String focus = "";
+
+    /** A page longer than the library hands whole: a window, and the arrows. */
+    private static boolean windowed(Map<String, Object> shown) {
+        return shown != null
+                && Core.num(shown, "total") > Core.list(shown, "lines").size();
+    }
+
+    /** The bar's menu: the library's actions, in its words, as it enables them. */
+    private void actions(View anchor) {
+        if (last == null) {
+            return;
+        }
+        final List<Map<String, Object>> list = Core.list(last, "actions");
+        PopupMenu popup = new PopupMenu(screen, anchor);
+        Menu items = popup.getMenu();
+        for (int i = 0; i < list.size(); i++) {
+            Map<String, Object> action = list.get(i);
+            MenuItem item = items.add(0, i, i, Core.str(action, "label"));
+            item.setEnabled(Core.bool(action, "enabled"));
+        }
+        popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+            @Override
+            public boolean onMenuItemClick(MenuItem item) {
+                int at = item.getItemId();
+                if (at >= 0 && at < list.size()) {
+                    verb(Core.str(list.get(at), "verb"), "", "");
+                }
+                return true;
+            }
+        });
+        popup.show();
+    }
+
     /** The tab came to the front. */
     void show() {
         show("");
@@ -295,6 +448,8 @@ final class BrowsePane {
             loadingWords.setText(screen.getString(R.string.browse_loading, name));
             loadingState.setVisibility(View.VISIBLE);
             page.setText("");
+            drawn = null;
+            drawnKey = "";
             status.setVisibility(View.GONE);
         }
         verb("tab", "", "");
@@ -313,8 +468,10 @@ final class BrowsePane {
     private void size() {
         Paint paint = page.getPaint();
         float cell = paint.measureText("M");
-        int width = page.getWidth() - page.getPaddingLeft() - page.getPaddingRight();
-        View scroll = (View) page.getParent().getParent();
+        // The cells the screen shows, not the page's own width: inside the
+        // sideways scroll the page is as wide as its widest line (1667).
+        int width = pageSideways.getWidth() - page.getPaddingLeft() - page.getPaddingRight();
+        View scroll = pageScroll;
         int c = cell > 0 ? (int) (width / cell) : 0;
         int r = page.getLineHeight() > 0 ? scroll.getHeight() / page.getLineHeight() : 0;
         if (c > 0 && r > 0 && (c != cols || r != lines)) {
@@ -384,6 +541,15 @@ final class BrowsePane {
             address.setText(Core.str(shown, "address"));
         }
         host.titled(Core.str(shown, "title"));
+        StringBuilder chipLine = new StringBuilder();
+        for (String chip : Core.words(shown, "chips")) {
+            if (chipLine.length() > 0) {
+                chipLine.append(" · ");
+            }
+            chipLine.append(chip);
+        }
+        chips.setText(chipLine);
+        chips.setVisibility(chipLine.length() == 0 ? View.GONE : View.VISIBLE);
         address.setHint(Core.str(shown, "address_hint"));
         String loading = Core.str(shown, "loading_words");
         loadingWords.setText(loading);
@@ -393,6 +559,12 @@ final class BrowsePane {
         // The status line says what the loading state does not: a cached
         // copy standing while the fresh one comes, a download.
         status.setVisibility(said.isEmpty() || !loading.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+        // The arrows only for a page past the cap, which comes as a window;
+        // a whole page scrolls under the finger (1650).
+        boolean windowed = windowed(shown);
+        pageUp.setVisibility(windowed ? View.VISIBLE : View.GONE);
+        pageDown.setVisibility(windowed ? View.VISIBLE : View.GONE);
+        foot.setVisibility(windowed || !said.isEmpty() ? View.VISIBLE : View.GONE);
         // The seconds count while a page is on its way.
         page.removeCallbacks(redraw);
         if (Core.bool(shown, "loading")) {
@@ -436,9 +608,34 @@ final class BrowsePane {
             sheetScroll.scrollTo(0, 0);
         }
 
+        fields.clear();
+        for (Map<String, Object> field : Core.list(shown, "fields")) {
+            fields.put(Core.str(field, "node"), field);
+        }
+        List<Map<String, Object>> lines = Core.list(shown, "lines");
+        String focused = Core.str(shown, "focus");
+        int at = (int) (Core.num(shown, "at") - Core.num(shown, "first"));
+        boolean moved = Core.num(shown, "at") != shownAt && Core.num(shown, "at") != reported;
+        shownAt = (int) Core.num(shown, "at");
+        if (lines.equals(drawn) && focused.equals(focus)) {
+            // The same page: the view stays where the finger has it, unless
+            // the library moved the reader (an anchor, the arrows).
+            if (moved) {
+                scrollToLine(at);
+            }
+            return;
+        }
+        // A filled field or a moved focus redraws the same page; another
+        // page (another node, title or length) starts where the library says.
+        String key = Core.str(shown, "dest") + "|" + Core.str(shown, "title") + "|"
+                + Core.num(shown, "total");
+        boolean samePage = key.equals(drawnKey);
+        drawnKey = key;
+        drawn = lines;
+        focus = focused;
         SpannableStringBuilder text = new SpannableStringBuilder();
         int widest = 0;
-        for (Map<String, Object> line : Core.list(shown, "lines")) {
+        for (Map<String, Object> line : lines) {
             int start = text.length();
             for (Map<String, Object> run : Core.list(line, "runs")) {
                 append(text, run);
@@ -448,6 +645,15 @@ final class BrowsePane {
         }
         fitCells(text);
         page.setText(text);
+        // Another page starts where the library says (its top, an anchor,
+        // the line Back left it at); the same page redrawn for its focus
+        // keeps the finger's place.
+        if (!samePage || moved) {
+            scrollToLine(at);
+        }
+        if (!samePage) {
+            pageSideways.scrollTo(0, 0);
+        }
         // A page laid out wider than the view holds was laid out on cells
         // the library never heard of this view (a size said before the
         // session ran): say them again.
@@ -456,6 +662,18 @@ final class BrowsePane {
             cols = 0;
             size();
         }
+    }
+
+    /** The view's top at line {@code line} of the lines on screen, once laid out. */
+    private void scrollToLine(final int line) {
+        page.post(new Runnable() {
+            @Override
+            public void run() {
+                int y = pageTop() + page.getPaddingTop()
+                        + Math.max(0, line) * page.getLineHeight();
+                pageScroll.scrollTo(0, line <= 0 ? 0 : y);
+            }
+        });
     }
 
     /** What each character measures, in cells of the page's monospace font. */
@@ -583,9 +801,21 @@ final class BrowsePane {
         text.append(Core.str(run, "text"));
         int end = text.length();
         int flags = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
+        final String node = Core.str(run, "node");
+        // Reverse with the view's own inks swaps those (1650: a reversed
+        // run without inks drew as plain text), and the focused node is
+        // drawn as the terminal draws it, in the accent.
         boolean reverse = Core.bool(run, "reverse");
         Integer fg = ink(Core.str(run, reverse ? "bg" : "fg"));
         Integer bg = ink(Core.str(run, reverse ? "fg" : "bg"));
+        if (reverse) {
+            fg = fg != null ? fg : screen.getColor(R.color.background);
+            bg = bg != null ? bg : screen.getColor(R.color.text);
+        }
+        if (!node.isEmpty() && node.equals(focus)) {
+            fg = screen.getColor(R.color.background);
+            bg = screen.getColor(R.color.accent);
+        }
         if (fg != null) {
             text.setSpan(new ForegroundColorSpan(fg), start, end, flags);
         }
@@ -600,13 +830,15 @@ final class BrowsePane {
         if (Core.bool(run, "underline")) {
             text.setSpan(new UnderlineSpan(), start, end, flags);
         }
-        final String node = Core.str(run, "node");
         if (!node.isEmpty()) {
             text.setSpan(new ClickableSpan() {
                 @Override
                 public void onClick(View widget) {
-                    if (node.startsWith("field_")) {
-                        fill(node);
+                    // A text field opens the editor; a checkbox, a radio and
+                    // a link are the library's to act on (1650).
+                    Map<String, Object> field = fields.get(node);
+                    if (field != null && "text".equals(Core.str(field, "kind"))) {
+                        fill(node, field);
                     } else {
                         verb("activate", node, "");
                     }
@@ -620,12 +852,31 @@ final class BrowsePane {
         }
     }
 
-    /** A form field: the platform's editor, its text handed in whole. */
-    private void fill(final String node) {
+    /**
+     * A text field: the platform's editor, with what it holds and hiding it
+     * when the page masks it (1650), its text handed in whole. Titled
+     * "Input: <label>" with the page's own words before the field as its
+     * hint, and the keyboard up as it shows (1667, walk 11, finding 59: a
+     * title "q" and a keyboard that had to be asked for).
+     */
+    private void fill(final String node, Map<String, Object> shown) {
         verb("activate", node, "");
         final EditText field = new EditText(screen);
         field.setSingleLine(true);
-        new AlertDialog.Builder(screen)
+        field.setTag("browse_field_editor");
+        field.setInputType(Core.bool(shown, "masked")
+                ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
+                : InputType.TYPE_CLASS_TEXT);
+        field.setText(Core.str(shown, "value"));
+        field.setSelection(field.getText().length());
+        AlertDialog.Builder builder = new AlertDialog.Builder(screen)
+                .setTitle(screen.getString(R.string.browse_field_title, Core.str(shown, "label")));
+        String hint = FormField.hint(drawn, node);
+        if (!hint.isEmpty()) {
+            // The message stays above a prefilled field, where a hint would hide.
+            builder.setMessage(hint);
+        }
+        AlertDialog dialog = builder
                 .setView(field)
                 .setPositiveButton(android.R.string.ok, new android.content.DialogInterface.OnClickListener() {
                     @Override
@@ -634,7 +885,13 @@ final class BrowsePane {
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .create();
+        android.view.Window window = dialog.getWindow();
+        if (window != null) {
+            window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        }
+        dialog.show();
+        field.requestFocus();
     }
 
     private int dp(int value) {

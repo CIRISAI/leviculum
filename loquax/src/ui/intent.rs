@@ -26,6 +26,7 @@
 //! | `Request::React`, `UiEvent::React`, `Message::React`, `Command::React` | `React` |
 //! | `Request::Reply`, `UiEvent::Reply`, `Message::Reply` | `Reply` |
 //! | `Message::CancelReply` | `CancelReply` |
+//! | `Request::NoticeReply`, `UiEvent::NoticeReply` (1506) | `NoticeReply` |
 //! | `Request::Forward`, `UiEvent::Forward` | `Forward` |
 //! | `Request::SendAgain`, `UiEvent::SendAgain` (1232) | `SendAgain` |
 //! | `Request::Photo`, `UiEvent::SendPhoto` (1220) | `SendPhoto` |
@@ -245,6 +246,14 @@ pub enum Intent {
         body: Option<String>,
     },
     CancelReply,
+    /// A reply typed into the notification of `peer`'s messages (1506):
+    /// every message up to `key`, the newest the notification showed, is
+    /// read, and `body` goes to `peer` with the receipt on it.
+    NoticeReply {
+        peer: [u8; 16],
+        key: u64,
+        body: String,
+    },
     Forward {
         from: [u8; 16],
         key: u64,
@@ -578,6 +587,7 @@ impl Intent {
             Intent::React { .. } => StrId::React,
             Intent::Reply { .. } => StrId::ActionReply,
             Intent::CancelReply => StrId::CancelReply,
+            Intent::NoticeReply { .. } => StrId::ActionReply,
             Intent::Forward { .. } => StrId::ActionForward,
             Intent::SendAgain { .. } => StrId::SendAgain,
             Intent::ViewPhoto { .. } => StrId::ViewPhoto,

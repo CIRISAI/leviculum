@@ -63,8 +63,9 @@ pub const POLL_MS: u32 = 10;
 pub enum Role {
     /// Two speech bubbles: the chats list, from anywhere.
     Chats,
-    /// The house: the start screen, the mailbox's state in its top bar.
-    /// Until the overview screen exists that is the chats list.
+    /// The house: the settings page (`house`, 1532, 1561), the home's
+    /// state in its top bar. Its command is the chats list's, which the
+    /// page takes before it runs.
     Home,
     /// The square speech bubble: a new message, to the contact under the
     /// list's cursor, in its compose line.
