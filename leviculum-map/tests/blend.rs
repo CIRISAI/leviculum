@@ -300,18 +300,26 @@ fn the_zoom_ramp_moves_the_middle_third_gently() {
         );
         // The axis-corrected residual is what no scale about the centre
         // explains: the actual shape morph per tenth of a zoom, under a
-        // pixel for both shapes (measured 0.47 and 0.59). The raw
-        // residual also carries the axis scales sliding from the world
-        // projection's to Mercator's: the globe has none (0.59 measured),
-        // Equal Earth's anisotropy pays up to 2.82 at the 65 N centre.
+        // pixel for Equal Earth (measured 0.47). The raw residual also
+        // carries the axis scales sliding from the world projection's to
+        // Mercator's: Equal Earth's anisotropy pays up to 2.82 at the
+        // 65 N centre.
+        //
+        // The globe's radius at the world is the zoom's alone since 1762,
+        // wherever it is turned to, so at 65 N it still has Mercator's
+        // 1/cos 65° = 2.37 to grow through the handover on top of the
+        // zoom: a tenth of a zoom there is up to 0.18 of one in scale.
+        // That is the raw 5.52 px measured at z3.4, and the shape morph
+        // per step grows with the step to 1.29 px (0.59 before, when the
+        // globe was 2.37 times too large at the world instead).
+        let (shaped_bound, raw_bound) = match shape {
+            Shape::EqualEarth => (1.0, 3.5),
+            Shape::Globe => (1.5, 6.0),
+        };
         assert!(
-            worst_shaped < 1.0,
+            worst_shaped < shaped_bound,
             "{shape:?}: {worst_shaped} px of shape morph in one step"
         );
-        let raw_bound = match shape {
-            Shape::EqualEarth => 3.5,
-            Shape::Globe => 1.0,
-        };
         assert!(
             worst_raw.0 < raw_bound,
             "{shape:?}: {} px raw in one step",

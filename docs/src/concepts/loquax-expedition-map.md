@@ -148,7 +148,54 @@ Panning turns the central meridian with the view, so the world wraps
 and nothing jumps at the antimeridian; a land ring crossing the
 projection's cut (the meridian opposite the centre) is unwrapped and,
 where it overshoots one edge, drawn again a turn over, so both edges
-show their part.
+show their part (Equal Earth; the globe needs no second copy, it is
+periodic).
+
+#### The globe's horizon and ground (1762)
+
+Lew's phone test of the globe build (2026-11-12) found the far side
+drawn through the front, the space round the sphere painted as sea,
+and in the handover over the southern Indian Ocean the sea filled as
+land. The mechanism was one step: a point behind the horizon was
+pushed radially onto the limb (`Blend::shape_forward`), which closes a
+ring at `t = 0` only approximately and, once the Mercator term is
+blended in, spreads those limb points across the screen as long
+chords; and a ring overshooting the cut was drawn a second time a turn
+over, which on the periodic globe lies exactly on the first, so the
+even-odd fill cancelled both (half of Africa missing at some turns).
+
+Since 1762 the globe is clipped on the sphere (`Blend::globe_ring`): a
+ring is cut where its segments cross the horizon plane, the part
+behind is dropped, and each exit is joined to the next entry along the
+limb, the arc going the ring's own way round (its sense in Mercator
+terms, which every projection here keeps); when the arcs alone would
+have closed the outside, the whole limb is added once more and the
+even-odd fill flips it back. A ring whose box lies wholly behind the
+horizon is culled before a point is projected (`Blend::behind`, an
+upper bound of the cosine over the box). Lines are cut at the horizon
+point, not at their last near point. Mercator's edge rows are the
+poles on the sphere (`blend::ring_latitude`), so Antarctica closes
+through the pole instead of leaving the cap beyond 85° as a hole.
+
+The sphere stands on a ground (`outline::space`, a dark slate in the
+light table, near black in the dark one), the sea a disk on it with
+the limb antialiased by the frame's coverage. In the handover the disk
+is the blend's image of the horizon; the Mercator term has its seam on
+the far meridian, which the horizon crosses on the visible pole's
+side, so the limb, the arcs and every ring step across that meridian
+go over the pole instead of across the screen, and land and sea agree
+there. What remains near a pole in the handover is Mercator's own
+stretch of the polar cap into a band, visible as a tab below the disk
+while a pole is near the limb.
+
+The globe's radius at the world is the zoom's alone, wherever it is
+turned to: 1710 matched it to Mercator's local scale at every `t`,
+which made the globe sec φ larger at a high-latitude centre (2.4 times
+at 65 N, 5.8 times at 80 N), so turning it towards a pole swelled it
+off the screen. The factor now slides in with `t` (both terms drawn
+cos φ^(1−t) smaller), so the centre still matches and `t = 1` is
+Mercator exactly; at 65 N the globe grows through the handover
+instead, measured below.
 
 #### The scale match, and what it costs at high latitudes
 
@@ -169,10 +216,14 @@ Measured on the z1→z7 ramp at 0/0, Berlin, Merzouga, Singapore and
 of a 480×320 view; `leviculum-map/tests/blend.rs`, asserted):
 
 - Beyond the zoom and a per-axis scale about the centre, the middle
-  third moves at most **0.47 px (Equal Earth)** and **0.59 px
-  (globe)** per tenth of a zoom — the irreducible shape morph, under
-  the one-pixel bound.
-- Raw (beyond the uniform zoom alone) the globe stays at **0.59 px**;
+  third moves at most **0.47 px (Equal Earth)** per tenth of a zoom —
+  the irreducible shape morph, under the one-pixel bound. The globe
+  measured 0.59 px until 1762; since its radius at the world no longer
+  carries sec φ it grows by that factor through the handover at a
+  high-latitude centre, a tenth of a zoom there is up to 0.18 of one
+  in scale, and the morph per step is **1.29 px** at 65 N (bound 1.5).
+- Raw (beyond the uniform zoom alone) the globe paid 0.59 px before
+  1762 and **5.52 px** at 65 N z3.4 since (bound 6), the sec φ growth;
   Equal Earth pays its anisotropy with up to **2.82 px** per tenth of
   a zoom at the 65 N centre (1.1 px at Berlin-like latitudes), spread
   evenly across the thirty steps of the band. The one-pixel bound
@@ -233,7 +284,11 @@ budget moved.
 
 #### Pictures and cost
 
-Pinned: `leviculum-map/tests/golden/world-blend-{ee,globe}-480x320-{z2,z35}.png`.
+Pinned: `leviculum-map/tests/golden/world-blend-{ee,globe}-480x320-{z2,z35}.png`,
+and since 1762 the turned globe, `world-turned-*.png`: Africa with the
+Americas across the limb, the Pacific with Antarctica, the Arctic from
+80 N, and the 40 S 75 E handover view of Lew's screenshot in both
+shapes (`tests/globe.rs` holds the mechanism without pictures).
 The zoom strips (five centres, both shapes, z1→z7) and the two frame
 series at Berlin and Merzouga are the 1710 report's, rendered by
 `cargo run --release -p leviculum-map --example world_blend_pictures`.

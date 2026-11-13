@@ -46,6 +46,7 @@
 
 use crate::mercator::World;
 use crate::viewport::Viewport;
+use alloc::vec::Vec;
 
 /// Equal Earth's polynomial coefficients (Šavrič, Patterson, Jenny 2018,
 /// "The Equal Earth map projection", IJGIS 33(3), equations 2 and 3).
@@ -71,6 +72,12 @@ pub const MERCATOR_ZOOM: f64 = 5.0;
 
 /// Newton stops within this of the asked pixel.
 pub const INVERSE_EPS_PX: f64 = 0.03125;
+/// The limb is drawn as a polygon of this many corners all round.
+const LIMB_STEPS: u32 = 360;
+
+/// Mercator's latitude limit, radians: 85.0511°.
+const MERCATOR_LAT: f64 = 1.484_422_229_745_332_4;
+
 /// Newton gives up after this many steps.
 const INVERSE_STEPS: u32 = 24;
 
@@ -155,7 +162,17 @@ impl Blend {
         let lon0 = f64::from(centre.x) / WORLD_F * TAU - PI;
         let phi0 = gudermann(f64::from(centre.y));
         let (sin0, cos0) = (libm::sin(phi0), libm::cos(phi0));
-        let unit = libm::exp2(24.0 - zoom);
+        // The globe's size at the world is the zoom's alone, the same
+        // wherever it is turned to (1762): a drag towards a pole turns it
+        // and does not swell it by Mercator's 1/cos φ. Both terms are
+        // drawn that much smaller, so they still agree at the centre and
+        // morph no more than before; the factor slides to one with `t`,
+        // where the view is Mercator exactly.
+        let globe = match shape {
+            Shape::Globe => libm::pow(cos0.max(1e-9), 1.0 - t.clamp(0.0, 1.0)),
+            Shape::EqualEarth => 1.0,
+        };
+        let unit = libm::exp2(24.0 - zoom) / globe;
         // Pixels per radian of arc at the centre: 256·2^zoom pixels around
         // the world, over 2π, over the parallel's cos φ.
         let m = 256.0 * libm::exp2(zoom) / (TAU * cos0.max(1e-9));
@@ -175,7 +192,7 @@ impl Blend {
                 let slide = libm::pow(k, t);
                 (0.0, ey0, k * k, m / slide, m * slide)
             }
-            Shape::Globe => (0.0, 0.0, 1.0, m, m),
+            Shape::Globe => (0.0, 0.0, 1.0, m * globe, m * globe),
         };
         Self {
             shape,
@@ -253,7 +270,7 @@ impl Blend {
     /// wrapped to (-π, π]: the cut of the world projection is the far
     /// side of the view. A ring that crosses it is unwrapped by the
     /// drawer and placed through
-    /// [`to_screen_unwrapped`](Self::to_screen_unwrapped).
+    /// [`to_screen_angles`](Self::to_screen_angles).
     pub fn lam_rel(&self, x: u32) -> f64 {
         let lon = f64::from(x) / WORLD_F * TAU - PI;
         let mut lam = lon - self.lon0;
@@ -326,24 +343,52 @@ impl Blend {
         ((1.0 - t) * bx + t * mx, (1.0 - t) * by + t * my)
     }
 
-    /// [`to_screen`](Self::to_screen) of a point given as its unwrapped
-    /// relative longitude and its world y: `lam` may run past ±π, where a
-    /// ring crossed the projection's cut and the drawer kept it
-    /// continuous. The Mercator term follows the unwrapped longitude, so
-    /// the blend has no wrap jump either; Equal Earth clamps the
-    /// overshoot to its edge meridian (the globe is periodic and needs
-    /// none). For `lam` in (-π, π] this is `to_screen` to float
-    /// precision.
-    pub fn to_screen_unwrapped(&self, lam: f64, wy: u32) -> (f64, f64) {
+    /// Whether this is the orthographic globe, whose far half is hidden
+    /// behind the horizon and cut there (1762).
+    pub fn is_globe(&self) -> bool {
+        self.shape == Shape::Globe
+    }
+
+    /// The unit vector of `(λ, φ)` in the view's frame: x east and y north
+    /// at the centre, z towards the eye. `z` is the cosine of the angular
+    /// distance to the view centre; negative is behind the horizon.
+    fn frame(&self, lam: f64, phi: f64) -> [f64; 3] {
+        let (sp, cp) = (libm::sin(phi), libm::cos(phi));
+        let (sl, cl) = (libm::sin(lam), libm::cos(lam));
+        [
+            cp * sl,
+            self.cos0 * sp - self.sin0 * cp * cl,
+            self.sin0 * sp + self.cos0 * cp * cl,
+        ]
+    }
+
+    /// `(λ, φ)` of a view-frame vector, λ relative to the central meridian
+    /// in (-π, π].
+    fn angles_of(&self, v: [f64; 3]) -> (f64, f64) {
+        let [x, y, z] = v;
+        let sp = (y * self.cos0 + z * self.sin0).clamp(-1.0, 1.0);
+        let lam = libm::atan2(x, z * self.cos0 - y * self.sin0);
+        (lam, libm::asin(sp))
+    }
+
+    /// [`to_screen`](Self::to_screen) of a point given by its relative
+    /// longitude, which may run past ±π along a ring, and its latitude,
+    /// radians. The Mercator term flattens the overshoot onto the edge
+    /// meridian and holds the latitude to Mercator's ±85.05°; the world
+    /// term is the shape's own (Equal Earth's clamped to its edge
+    /// meridian, the globe periodic).
+    pub fn to_screen_angles(&self, lam: f64, phi: f64) -> (f64, f64) {
         let (cx, cy) = (f64::from(self.width) / 2.0, f64::from(self.height) / 2.0);
-        let mx = cx + lam * (WORLD_F / TAU) / self.unit;
-        let my = cy + (f64::from(wy) - f64::from(self.centre.y)) / self.unit;
+        let lm = lam.clamp(-PI, PI);
+        let pm = phi.clamp(-MERCATOR_LAT, MERCATOR_LAT);
+        let wy = WORLD_F / 2.0 * (1.0 - libm::asinh(libm::tan(pm)) / PI);
+        let mx = cx + lm * (WORLD_F / TAU) / self.unit;
+        let my = cy + (wy - f64::from(self.centre.y)) / self.unit;
         if self.t >= 1.0 {
             return (mx, my);
         }
-        let phi = gudermann(f64::from(wy));
         let shaped = match self.shape {
-            Shape::EqualEarth => lam.clamp(-PI, PI),
+            Shape::EqualEarth => lm,
             Shape::Globe => lam,
         };
         let (ex, ey) = self.shape_forward(shaped, phi);
@@ -353,16 +398,299 @@ impl Blend {
         ((1.0 - t) * bx + t * mx, (1.0 - t) * by + t * my)
     }
 
+    /// The horizon point at screen angle `alpha` (radians, measured as on
+    /// the screen: x right, y down), on the screen in sub-pixels. At
+    /// `t = 0` the limb circle; in the handover its image under the
+    /// blend. Its longitude is the plain relative one in (-π, π]: along
+    /// the horizon that jumps only at the seam ([`seam`](Self::seam)),
+    /// where an outline goes over the pole.
+    fn limb_at(&self, alpha: f64) -> (i64, i64) {
+        let (lam, phi) = self.angles_of([libm::cos(alpha), -libm::sin(alpha), 0.0]);
+        self.sub(lam, phi)
+    }
+
+    /// The seam of the handover on the horizon: the screen angle where the
+    /// horizon crosses the far meridian, on the side of the visible pole,
+    /// and that pole's latitude. The Mercator term jumps a world's width
+    /// there, so an outline passing it goes over the pole instead. `None`
+    /// at `t = 0`, where nothing jumps, and for a centre on the equator,
+    /// whose horizon meets the far meridian only at the poles.
+    fn seam(&self) -> Option<(f64, f64)> {
+        if self.t <= 0.0 {
+            return None;
+        }
+        match self.sin0 {
+            s if s > 1e-12 => Some((-PI / 2.0, PI / 2.0)),
+            s if s < -1e-12 => Some((PI / 2.0, -PI / 2.0)),
+            _ => None,
+        }
+    }
+
+    /// The detour over the pole at the seam `seam`, coming from the side
+    /// `sense` leaves: the pole on the far meridian's one side, then on
+    /// its other.
+    fn over_pole(&self, seam: f64, pole: f64, sense: f64, out: &mut Vec<(i64, i64)>) {
+        let side = |a: f64| self.angles_of([libm::cos(a), -libm::sin(a), 0.0]).0;
+        out.push(self.sub(side(seam - sense * 1e-6), pole));
+        out.push(self.sub(side(seam + sense * 1e-6), pole));
+    }
+
+    /// The globe's outline, the horizon all round, in sub-pixels: what
+    /// the sea is filled in and the ground is left around (1762). Empty
+    /// for Equal Earth, whose world has no horizon. The first `n` points
+    /// (the count returned) are the horizon itself; in the handover a
+    /// view off the equator closes over its visible pole after them
+    /// ([`seam`](Self::seam)). At `t = 0` there is no detour.
+    pub fn limb_sub(&self, out: &mut Vec<(i64, i64)>) -> usize {
+        out.clear();
+        if !self.is_globe() {
+            return 0;
+        }
+        let seam = self.seam();
+        let start = seam.map_or(0.0, |(a, _)| a);
+        // Start just past the seam and end just before it: the horizon's
+        // longitudes run from one side of the far meridian to the other
+        // without a jump.
+        let eps = 1e-6;
+        for k in 0..=LIMB_STEPS {
+            let f = f64::from(k) / f64::from(LIMB_STEPS);
+            out.push(self.limb_at(start + eps + f * (TAU - 2.0 * eps)));
+        }
+        let n = out.len();
+        if let Some((a, pole)) = seam {
+            self.over_pole(a, pole, 1.0, out);
+        }
+        n
+    }
+
+    /// Whether everything between the relative longitudes `lam0` and
+    /// `lam0 + width` and the latitudes `phi0..=phi1` (radians) lies
+    /// behind the globe's horizon: a bound, never wrong the other way, so
+    /// a ring culled by its box needs no projecting at all (1762). Never
+    /// under Equal Earth.
+    pub fn behind(&self, lam0: f64, width: f64, phi0: f64, phi1: f64) -> bool {
+        if !self.is_globe() {
+            return false;
+        }
+        // The largest cos λ over the span.
+        let next = libm::ceil(lam0 / TAU) * TAU;
+        let cmax = match next <= lam0 + width {
+            true => 1.0,
+            false => libm::cos(lam0).max(libm::cos(lam0 + width)),
+        };
+        // cos c ≤ sin φ₀ sin φ + cos φ₀ cos φ cmax, as cos φ₀ cos φ ≥ 0;
+        // its largest value over the latitudes, ends and stationary point.
+        let (a, b) = (self.sin0, self.cos0 * cmax);
+        let f = |phi: f64| a * libm::sin(phi) + b * libm::cos(phi);
+        let mut best = f(phi0).max(f(phi1));
+        let star = libm::atan2(a, b);
+        if (phi0..=phi1).contains(&star) {
+            best = best.max(libm::hypot(a, b));
+        }
+        best < 0.0
+    }
+
+    /// One ring of the globe, its points `(λ, φ)` (relative longitude,
+    /// latitude; radians), cut at the horizon (1762): the part behind it
+    /// is dropped, and where the ring leaves and comes back the limb
+    /// closes it, the arc going the ring's own way round. Rings for an
+    /// even-odd fill come out, in sub-pixels: the ring itself, or nothing
+    /// when it is wholly behind, or the near part and, where the arcs
+    /// alone close the outside instead of the inside, the whole limb as a
+    /// second ring. In the handover the ring goes over the visible pole
+    /// where it crosses the far meridian ([`seam`](Self::seam)), as the
+    /// limb does, so land and sea agree there.
+    pub fn globe_ring(&self, ring: &[(f64, f64)], out: &mut Vec<Vec<(i64, i64)>>) {
+        out.clear();
+        let n = ring.len();
+        if n < 3 {
+            return;
+        }
+        let v: Vec<[f64; 3]> = ring.iter().map(|&(l, p)| self.frame(l, p)).collect();
+        let mut path: Vec<(i64, i64)> = Vec::new();
+        let mut last: Option<([f64; 3], f64)> = None;
+        let Some(start) = v.iter().position(|p| p[2] < 0.0) else {
+            // Wholly in front; the closing step, too, may cross the seam.
+            for (i, &(l, p)) in ring.iter().enumerate() {
+                self.put(&mut path, &mut last, v[i], wrap(l), p);
+            }
+            let (l0, p0) = ring[0];
+            self.put(&mut path, &mut last, v[0], wrap(l0), p0);
+            path.pop();
+            out.push(path);
+            return;
+        };
+        if v.iter().all(|p| p[2] < 0.0) {
+            return;
+        }
+        // The ring's own sense on the screen (x right, y down, as east and
+        // south): every projection here keeps it. The longitudes are
+        // unwrapped along the ring for the area.
+        let mut area = 0.0;
+        let mut prev = ring[0].0;
+        for i in 0..n {
+            let (la, pa) = (prev, ring[i].1);
+            let (lb, pb) = (unwrap_near(ring[(i + 1) % n].0, prev), ring[(i + 1) % n].1);
+            area += la * -pb - lb * -pa;
+            prev = lb;
+        }
+        let sense = if area < 0.0 { -1.0 } else { 1.0 };
+        let mut arcs: Vec<(f64, f64)> = Vec::new();
+        let mut first_entry: Option<f64> = None;
+        let mut open: Option<f64> = None;
+        for k in 0..n {
+            let i = (start + k) % n;
+            let j = (i + 1) % n;
+            let (za, zb) = (v[i][2], v[j][2]);
+            if (za < 0.0) != (zb < 0.0) {
+                let f = za / (za - zb);
+                let x = v[i][0] + (v[j][0] - v[i][0]) * f;
+                let y = v[i][1] + (v[j][1] - v[i][1]) * f;
+                let r = libm::hypot(x, y).max(1e-12);
+                let c = [x / r, y / r, 0.0];
+                let alpha = libm::atan2(-c[1], c[0]);
+                let (lam, phi) = self.angles_of(c);
+                if za < 0.0 {
+                    // Coming back: the arc from where it left, which
+                    // passes the seam itself where it does.
+                    match open.take() {
+                        Some(from) => {
+                            self.arc(from, alpha, sense, &mut path);
+                            arcs.push((from, alpha));
+                        }
+                        None => first_entry = Some(alpha),
+                    }
+                    last = None;
+                }
+                self.put(&mut path, &mut last, c, lam, phi);
+                if za >= 0.0 {
+                    open = Some(alpha);
+                }
+            }
+            if zb >= 0.0 {
+                self.put(&mut path, &mut last, v[j], wrap(ring[j].0), ring[j].1);
+            }
+        }
+        // The last exit closes onto the first entry.
+        if let (Some(from), Some(to)) = (open, first_entry) {
+            self.arc(from, to, sense, &mut path);
+            arcs.push((from, to));
+        }
+        if path.len() >= 3 {
+            out.push(path);
+        }
+        // Just past an exit, the ring's own way round, the limb is inside
+        // the ring. When an even number of arcs covers that point the
+        // arcs closed the outside: the whole limb flips it back.
+        if let Some(&(exit, _)) = arcs.first() {
+            let probe = exit + sense * 1e-7;
+            let covered = arcs
+                .iter()
+                .filter(|&&(a, b)| {
+                    let at = match sense > 0.0 {
+                        true => turn(probe - a),
+                        false => turn(a - probe),
+                    };
+                    at < arc_span(a, b, sense)
+                })
+                .count();
+            if covered % 2 == 0 {
+                let mut limb = Vec::new();
+                self.limb_sub(&mut limb);
+                out.push(limb);
+            }
+        }
+    }
+
+    /// Push the near point `v` (`(λ, φ)`, λ in (-π, π]) onto `path`; in
+    /// the handover, when the step from the point before crosses the far
+    /// meridian, over the visible pole first.
+    fn put(
+        &self,
+        path: &mut Vec<(i64, i64)>,
+        last: &mut Option<([f64; 3], f64)>,
+        v: [f64; 3],
+        lam: f64,
+        phi: f64,
+    ) {
+        if let (Some((_, pole)), Some((u, l))) = (self.seam(), *last) {
+            if libm::fabs(lam - l) > PI {
+                // Where the step meets the far meridian: x = 0 in the
+                // frame.
+                let f = u[0] / (u[0] - v[0]);
+                let c = [
+                    u[0] + (v[0] - u[0]) * f,
+                    u[1] + (v[1] - u[1]) * f,
+                    u[2] + (v[2] - u[2]) * f,
+                ];
+                let r = libm::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).max(1e-12);
+                let (_, phc) = self.angles_of([c[0] / r, c[1] / r, c[2] / r]);
+                let side = if l > 0.0 { PI } else { -PI };
+                path.push(self.sub(side, phc));
+                path.push(self.sub(side, pole));
+                path.push(self.sub(-side, pole));
+                path.push(self.sub(-side, phc));
+            }
+        }
+        path.push(self.sub(lam, phi));
+        *last = Some((v, lam));
+    }
+
+    /// The limb from screen angle `from` to `to`, going `sense` round
+    /// (positive: increasing angle), its inner points pushed in
+    /// sub-pixels, over the pole where it passes the seam.
+    fn arc(&self, from: f64, to: f64, sense: f64, out: &mut Vec<(i64, i64)>) {
+        let span = arc_span(from, to, sense);
+        let steps = libm::ceil(span / (TAU / f64::from(LIMB_STEPS))) as u32;
+        let seam = self.seam();
+        // How far along the arc the seam lies, if it does.
+        let at_seam = seam
+            .map(|(a, _)| arc_span(from, a, sense))
+            .filter(|&d| d < span);
+        let mut passed = false;
+        for k in 1..steps {
+            let d = span * f64::from(k) / f64::from(steps);
+            if let (Some(ds), Some((a, pole)), false) = (at_seam, seam, passed) {
+                if d >= ds {
+                    self.over_pole(a, pole, sense, out);
+                    passed = true;
+                }
+            }
+            out.push(self.limb_at(from + sense * d));
+        }
+        if let (Some(_), Some((a, pole)), false) = (at_seam, seam, passed) {
+            self.over_pole(a, pole, sense, out);
+        }
+    }
+
+    /// [`to_screen_angles`](Self::to_screen_angles) in sub-pixels.
+    fn sub(&self, lam: f64, phi: f64) -> (i64, i64) {
+        let (x, y) = self.to_screen_angles(lam, phi);
+        (sub_px(x), sub_px(y))
+    }
+
+    /// Where the segment from `a` to `b` crosses the globe's horizon, in
+    /// sub-pixels, when one end is in front of it and the other behind: a
+    /// stroked line is cut there, not at its last near point (1762).
+    pub fn horizon_sub(&self, a: World, b: World) -> Option<(i64, i64)> {
+        if !self.is_globe() {
+            return None;
+        }
+        let (la, pa) = self.angles(a);
+        let (lb, pb) = self.angles(b);
+        let (va, vb) = (self.frame(la, pa), self.frame(lb, pb));
+        if (va[2] < 0.0) == (vb[2] < 0.0) {
+            return None;
+        }
+        let f = va[2] / (va[2] - vb[2]);
+        let c = [va[0] + (vb[0] - va[0]) * f, va[1] + (vb[1] - va[1]) * f];
+        Some(self.limb_at(libm::atan2(-c[1], c[0])))
+    }
+
     /// [`to_screen`](Self::to_screen) in sub-pixels (sixteenths), the
     /// drawers' unit, clamped to a range every later cast holds.
     pub fn to_screen_sub(&self, w: World) -> (i64, i64) {
         let (x, y) = self.to_screen(w);
-        (sub_px(x), sub_px(y))
-    }
-
-    /// [`to_screen_unwrapped`](Self::to_screen_unwrapped) in sub-pixels.
-    pub fn to_screen_sub_unwrapped(&self, lam: f64, wy: u32) -> (i64, i64) {
-        let (x, y) = self.to_screen_unwrapped(lam, wy);
         (sub_px(x), sub_px(y))
     }
 
@@ -411,11 +739,61 @@ impl Blend {
     }
 }
 
+/// `lam` brought into (-π, π].
+fn wrap(lam: f64) -> f64 {
+    let w = lam - libm::round(lam / TAU) * TAU;
+    if w <= -PI {
+        w + TAU
+    } else {
+        w
+    }
+}
+
+/// The longitude `lam` a whole number of turns over, within half a turn
+/// of `near`: continuous along a path.
+fn unwrap_near(lam: f64, near: f64) -> f64 {
+    lam - libm::round((lam - near) / TAU) * TAU
+}
+
+/// `v` brought into [0, 2π).
+fn turn(v: f64) -> f64 {
+    let r = v - libm::floor(v / TAU) * TAU;
+    if r >= TAU {
+        0.0
+    } else {
+        r
+    }
+}
+
+/// How far round from `from` to `to`, going `sense` round, in [0, 2π).
+fn arc_span(from: f64, to: f64, sense: f64) -> f64 {
+    match sense > 0.0 {
+        true => turn(to - from),
+        false => turn(from - to),
+    }
+}
+
 /// Pixels to sub-pixels (sixteenths), clamped to a range every later
 /// cast holds.
 fn sub_px(v: f64) -> i64 {
     libm::round((v * 16.0).clamp(-1e9, 1e9)) as i64
 }
+
+/// The latitude of a ring point at world y, radians, for the globe
+/// (1762): Mercator's edge rows are the poles. A ring that closes along
+/// the bottom of the world (Antarctica) closes through the pole on the
+/// sphere, so the cap south of 85° is land and not a hole.
+pub fn ring_latitude(wy: u32) -> f64 {
+    let phi = gudermann(f64::from(wy));
+    match phi {
+        p if p > EDGE_LAT => PI / 2.0,
+        p if p < -EDGE_LAT => -PI / 2.0,
+        p => p,
+    }
+}
+
+/// A latitude past this is on Mercator's edge row: 85.04°.
+const EDGE_LAT: f64 = 1.484_229_6;
 
 /// The latitude of a continuous Mercator world y, radians.
 fn gudermann(y: f64) -> f64 {

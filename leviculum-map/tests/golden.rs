@@ -488,6 +488,57 @@ fn the_blended_world_views_draw_their_goldens() {
     }
 }
 
+/// The globe turned (1762): the 1710 goldens all faced Europe, so the
+/// far side drawn through the front never showed. Three turns at the
+/// world (`t = 0`), the Americas across the western limb seen from
+/// Africa, the Pacific with Antarctica and both Americas across the
+/// horizon, and the Arctic from near the pole; and the view of Lew's
+/// second screenshot, 40 S 75 E in the handover (z3, phone portrait at
+/// half size), in both shapes.
+#[test]
+fn the_turned_globe_draws_its_goldens() {
+    use leviculum_map::blend::{Blend, Shape};
+    let views = [
+        (
+            "globe-africa",
+            Shape::Globe,
+            10.0,
+            20.0,
+            1.5,
+            480u32,
+            320u32,
+        ),
+        ("globe-pacific", Shape::Globe, -30.0, -140.0, 1.5, 480, 320),
+        ("globe-arctic", Shape::Globe, 80.0, 30.0, 1.5, 480, 320),
+        ("globe-indian-z3", Shape::Globe, -40.0, 75.0, 3.0, 306, 525),
+        (
+            "ee-indian-z3",
+            Shape::EqualEarth,
+            -40.0,
+            75.0,
+            3.0,
+            306,
+            525,
+        ),
+    ];
+    for (name, shape, lat, lon, zoom, w, h) in views {
+        let blend = Blend::new(shape, project(LatLon::from_degrees(lat, lon)), zoom, w, h);
+        let mut fb = vec![0u16; (w * h) as usize];
+        let mut frame = Frame::new(&mut fb, w, h).expect("frame");
+        let Ok(_) = leviculum_map::outline::draw_world_view(
+            &leviculum_map::outline::WORLD,
+            &blend,
+            Ink::Colour,
+            Style::SCREEN.theme,
+            &mut frame,
+        );
+        let mut rgb = Vec::with_capacity(fb.len() * 3);
+        let frame = Frame::new(&mut fb, w, h).expect("frame");
+        frame.rgb888_into(&mut rgb);
+        same_as(&format!("world-turned-{name}-{w}x{h}.png"), &rgb, w, h);
+    }
+}
+
 /// The world view before any region covers it (1683): `view` drawn from
 /// the outline's own tables — land, lakes, rivers, ice, the shelves, the
 /// country borders and the disputed lines dashed — in `style` and `ink`,

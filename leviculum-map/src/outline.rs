@@ -268,6 +268,16 @@ pub fn water(theme: MapTheme) -> Rgb565 {
     theme.palette().area(Class::Water)
 }
 
+/// The ground the globe stands on in `theme` (1762): a dark slate that
+/// reads as space round the sphere and is neither sea nor land, a step
+/// darker under the dark table.
+pub fn space(theme: MapTheme) -> Rgb565 {
+    match theme {
+        MapTheme::Light => Rgb565::new(46 >> 3, 52 >> 2, 64 >> 3),
+        MapTheme::Dark => Rgb565::new(10 >> 3, 12 >> 2, 18 >> 3),
+    }
+}
+
 /// The ice colour in `theme`: the snow and ice no region renderer draws,
 /// so the palette has none; a pale blue-white on the light table, a step
 /// paler than the land on the dark one.
@@ -532,6 +542,23 @@ impl Place<'_> {
         }
     }
 
+    /// Where the segment from `a` to `b` (table units) crosses the
+    /// globe's horizon, in view sub-pixels; `None` on a flat view, under
+    /// Equal Earth, or when it does not cross.
+    fn horizon(&self, bits: u32, a: (u32, u32), b: (u32, u32)) -> Option<(i64, i64)> {
+        match self {
+            Place::Flat(_) => None,
+            Place::Curved(blend) => {
+                let shift = 32 - bits;
+                let w = |p: (u32, u32)| Mercator {
+                    x: p.0 << shift,
+                    y: p.1 << shift,
+                };
+                blend.horizon_sub(w(a), w(b))
+            }
+        }
+    }
+
     /// Whether everything in the box `bbox` (table units, west north
     /// east south) lies outside the view on copy `k`: the flat test is
     /// exact, the curved one samples the box's corners, edge middles and
@@ -545,7 +572,15 @@ impl Place<'_> {
                 let (bx, by) = self.map(bits, x1, y1, k);
                 bx < -GUARD || ax > vw + GUARD || by < -GUARD || ay > vh + GUARD
             }
-            Place::Curved(_) => {
+            Place::Curved(blend) => {
+                let shift = 32 - bits;
+                let lam0 = blend.lam_rel(x0 << shift);
+                let width = f64::from(x1.saturating_sub(x0)) * TAU / libm::exp2(f64::from(bits));
+                let north = crate::blend::ring_latitude(y0 << shift);
+                let south = crate::blend::ring_latitude(y1 << shift);
+                if blend.behind(lam0, width, south, north) {
+                    return true;
+                }
                 let (mx, my) = (x0 / 2 + x1 / 2, y0 / 2 + y1 / 2);
                 let samples = [
                     (x0, y0),
@@ -562,6 +597,11 @@ impl Place<'_> {
                 let mut north = i64::MAX;
                 let mut east = i64::MIN;
                 let mut south = i64::MIN;
+                // A sample behind the globe's horizon has no place on
+                // the screen to bound the box by: keep the ring.
+                if samples.iter().any(|&(sx, sy)| self.hidden(bits, sx, sy)) {
+                    return false;
+                }
                 for (sx, sy) in samples {
                     let (px, py) = self.map(bits, sx, sy, k);
                     west = west.min(px);
@@ -697,9 +737,15 @@ where
     let mut st = OutlineStats::default();
     let palette = theme.palette();
     let land = palette.background;
-    target.clear(match ink {
-        Ink::Colour => water(theme),
-        Ink::Lines(_) => land,
+    let globe = match place {
+        Place::Curved(blend) if blend.is_globe() => Some(blend),
+        _ => None,
+    };
+    target.clear(match (ink, globe) {
+        // The globe stands on its ground, the sea a disk on it (1762).
+        (Ink::Colour, Some(_)) => space(theme),
+        (Ink::Colour, None) => water(theme),
+        (Ink::Lines(_), _) => land,
     })?;
     // The colour a layer fills in, or the ink it is stroked in.
     let shade = |fill: Rgb565| match ink {
@@ -730,14 +776,60 @@ where
         active: &mut active,
     };
     let mut filler = Filler::new(&mut scratch, target.bounding_box());
+    if let Some(blend) = globe {
+        let mut limb = Vec::new();
+        let n = blend.limb_sub(&mut limb);
+        let (w, h) = place.size();
+        let sub = i64::from(SUBPIXEL);
+        let mut clipped = Vec::new();
+        clip(
+            &limb,
+            -GUARD,
+            -GUARD,
+            i64::from(w) * sub + GUARD,
+            i64::from(h) * sub + GUARD,
+            &mut clipped,
+        );
+        let points: Vec<Point> = clipped
+            .iter()
+            .map(|&(x, y)| Point::new(x as i32, y as i32))
+            .collect();
+        if points.len() >= 3 {
+            match ink {
+                Ink::Colour => {
+                    if filler.ring(&points).is_ok() {
+                        st.fill += filler.fill(target, water(theme), FillRule::EvenOdd)?;
+                    } else {
+                        filler.clear();
+                        st.overflows += 1;
+                    }
+                }
+                Ink::Lines(colour) => {
+                    // The horizon alone, not the detour over the pole.
+                    let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
+                    for pair in limb[..n].windows(2) {
+                        if let Some((a, b)) =
+                            clip_segment(pair[0], pair[1], -GUARD, -GUARD, vw + GUARD, vh + GUARD)
+                        {
+                            let seg = [
+                                Point::new(a.0 as i32, a.1 as i32),
+                                Point::new(b.0 as i32, b.1 as i32),
+                            ];
+                            st.stroke += stroke(&mut filler, &seg, SUBPIXEL, target, colour)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let here = place.zoom() <= MAX_ZOOM;
     let landst = rings_into(world.land, place, ink, shade(land), &mut filler, target)?;
     st.rings = landst.rings;
     st.culled = landst.culled;
     st.vertices = landst.vertices;
-    st.fill = landst.fill;
-    st.stroke = landst.stroke;
-    st.overflows = landst.overflows;
+    st.fill += landst.fill;
+    st.stroke += landst.stroke;
+    st.overflows += landst.overflows;
     if here {
         let water = water(theme);
         let s = rings_into(world.lakes, place, ink, shade(water), &mut filler, target)?;
@@ -931,6 +1023,7 @@ where
     let mut ring = Vec::new();
     let mut copies: Vec<Vec<(i64, i64)>> = Vec::new();
     let mut raw: Vec<(f64, u32)> = Vec::new();
+    let mut angles: Vec<(f64, f64)> = Vec::new();
     let mut clipped = Vec::new();
     let mut points: Vec<Point> = Vec::new();
     for k in place.copies(vw) {
@@ -956,6 +1049,30 @@ where
                     ring.clear();
                     ring.extend(r.points().map(|(x, y)| place.map(bits, x, y, k)));
                     copies.push(core::mem::take(&mut ring));
+                }
+                Place::Curved(blend) if blend.is_globe() => {
+                    // The globe (1762): on the sphere, cut at the
+                    // horizon, the limb closing what the far side took.
+                    // Longitudes unwrapped along the ring; the globe is
+                    // periodic, so no second copy, which would cancel
+                    // the first under the even-odd fill.
+                    let shift = 32 - bits;
+                    angles.clear();
+                    let mut prev = f64::NAN;
+                    for (x, y) in r.points() {
+                        let mut lam = blend.lam_rel(x << shift);
+                        if prev.is_finite() {
+                            while lam - prev > PI {
+                                lam -= TAU;
+                            }
+                            while prev - lam > PI {
+                                lam += TAU;
+                            }
+                        }
+                        prev = lam;
+                        angles.push((lam, crate::blend::ring_latitude(y << shift)));
+                    }
+                    blend.globe_ring(&angles, &mut copies);
                 }
                 Place::Curved(blend) => {
                     let shift = 32 - bits;
@@ -987,7 +1104,15 @@ where
                     for turn in turns.into_iter().flatten() {
                         copies.push(
                             raw.iter()
-                                .map(|&(lam, wy)| blend.to_screen_sub_unwrapped(lam + turn, wy))
+                                .map(|&(lam, wy)| {
+                                    // Mercator's edge rows are the pole,
+                                    // Equal Earth's flat pole line (1762).
+                                    let (x, y) = blend.to_screen_angles(
+                                        lam + turn,
+                                        crate::blend::ring_latitude(wy),
+                                    );
+                                    (sub_px(x), sub_px(y))
+                                })
                                 .collect(),
                         );
                     }
@@ -1025,6 +1150,11 @@ where
     Ok(st)
 }
 
+/// Pixels to sub-pixels, clamped as [`Blend`]'s own.
+fn sub_px(v: f64) -> i64 {
+    libm::round((v * f64::from(SUBPIXEL)).clamp(-1e9, 1e9)) as i64
+}
+
 /// Stroke every line of `table` in `colour`, dashed when `dash` gives the
 /// lengths of a dash and its gap, for `view`, through `filler`: what the
 /// layer added. A segment is clipped to the box around the view first; runs
@@ -1059,21 +1189,33 @@ where
             // Runs of segments the clip keeps joined, stroked one by one.
             points.clear();
             let mut prev: Option<(i64, i64)> = None;
-            let mut prev_raw: Option<(u32, u32)> = None;
+            let mut prev_raw: Option<((u32, u32), bool)> = None;
             for (x, y) in l.points() {
-                if prev_raw
-                    .replace((x, y))
-                    .is_some_and(|a| place.cut(bits, a, (x, y)))
-                {
+                let hid = place.hidden(bits, x, y);
+                let before = prev_raw.replace(((x, y), hid));
+                let mut leaving = None;
+                if before.is_some_and(|(a, _)| place.cut(bits, a, (x, y))) {
                     // The segment crosses the curved view's cut: the run
                     // breaks, and this point starts the next one.
                     prev = None;
+                } else if let Some((a, was)) = before.filter(|&(_, was)| was != hid) {
+                    // Across the globe's horizon (1762): the line runs to
+                    // the limb, or starts there, not at its last near
+                    // point.
+                    let c = place.horizon(bits, a, (x, y));
+                    match was {
+                        true => prev = c,
+                        false => leaving = c,
+                    }
                 }
-                if place.hidden(bits, x, y) {
-                    prev = None;
-                    continue;
-                }
-                let p = place.map(bits, x, y, k);
+                let p = match (leaving, hid) {
+                    (Some(c), _) => c,
+                    (None, true) => {
+                        prev = None;
+                        continue;
+                    }
+                    (None, false) => place.map(bits, x, y, k),
+                };
                 let Some(a) = prev.replace(p) else {
                     continue;
                 };
