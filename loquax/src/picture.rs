@@ -545,33 +545,32 @@ impl Painter {
         }
     }
 
-    /// The blended world view drawn into opaque RGBA (1710): what a tile
-    /// cache shows for a frame the blend holds — drawn whole each time,
-    /// since no square tile of one step can compose a curved picture.
-    /// The outline alone (the blend holds only where no region reaches),
-    /// the time zone borders over it when that view is on; `smooth`
-    /// antialiases the coasts and the globe's limb.
-    pub fn draw_world_rgba(
+    /// The blended world view drawn into `rgba`, opaque RGBA of the
+    /// blend's size (1710): what a tile cache shows for a frame the blend
+    /// holds — drawn whole each time, since no square tile of one step
+    /// can compose a curved picture. The outline alone (the blend holds
+    /// only where no region reaches), the time zone borders over it when
+    /// that view is on; `smooth` antialiases the coasts and the globe's
+    /// limb. What `rgba` held does not matter: the outline clears it
+    /// first. Straight into the frontend's pixels (1797): a buffer of the
+    /// frame's own beside them, copied over, was 10.7 MB a frame for the
+    /// turning globe on a 1224 x 2197 screen and 24 MB for Equal Earth
+    /// with its margins. The credit and the tiles owed; `None` for a
+    /// buffer too short, left as it is (the tile cache sizes it).
+    pub fn draw_world_onto(
         &mut self,
         blend: &Blend,
         ink: Ink,
         style: Style,
         smooth: bool,
-    ) -> DrawnRgba {
+        rgba: &mut [u8],
+    ) -> Option<(String, usize)> {
         let (w, h) = blend.size();
-        let mut rgba = [0u8, 0, 0, 0xff].repeat((w as usize) * (h as usize));
-        let (attribution, pending) = match RgbaFrame::new(&mut rgba, w, h) {
-            Some(frame) => self.draw_world_into(blend, ink, style, &mut frame.smoothed(smooth)),
-            None => (outline::ATTRIBUTION.to_string(), 0),
-        };
-        DrawnRgba {
-            rgba,
-            attribution,
-            pending,
-        }
+        let frame = RgbaFrame::new(rgba, w, h)?;
+        Some(self.draw_world_into(blend, ink, style, &mut frame.smoothed(smooth)))
     }
 
-    /// [`draw_world_rgba`](Self::draw_world_rgba)'s picture into `frame`.
+    /// [`draw_world_onto`](Self::draw_world_onto)'s picture into `frame`.
     fn draw_world_into<D>(
         &mut self,
         blend: &Blend,

@@ -288,6 +288,7 @@ skip  loquax-android   m9_board_client            # the M9's core-node executor 
 skip  loquax-android   m9_join_cells              # the cells of the M9 joining its home (1415): the board's client over the M9's line against an in-process mailbox and transport node, a good, a wrong and an expired code, no home, a cut line, a second device; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   map_fills                  # the map frame drawn into a Bitmap of the size Java asks, and the world at its smallest, through the facade (1796); subject is the code
+skip  loquax-android   map_heap                   # the live heap of the map facade across zoom-outs to the world and back at 1224 x 2197 (1797), counted by the allocator shim; subject is the code, and it takes about a minute
 skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
 skip  loquax-android   profile                    # the profile's words through the facade in Java's bytes, and its golden (1443); subject is the code
 skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link

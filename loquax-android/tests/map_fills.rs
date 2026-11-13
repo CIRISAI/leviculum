@@ -22,6 +22,17 @@ use loquax_android::schema::{MapRequest, MapShown};
 const DENSITIES: [u32; 4] = [1000, 2000, 2750, 3000];
 const PHONE: (u32, u32) = (1224, 2197);
 
+/// The map frames of the render walk of 2026-11-13 (1797, finding 4) at
+/// their densities: the phone's tab and its map screen, and the tablet
+/// of 1600 x 2560 at 320 dpi, upright and turned, whose Equal Earth
+/// minimum showed the world smaller than the screen.
+const WALK_FRAMES: [(u32, (u32, u32)); 4] = [
+    (2750, (1224, 1702)),
+    (2750, (1224, 1878)),
+    (2000, (1600, 2184)),
+    (2000, (2184, 1600)),
+];
+
 /// The share of the screen Java asks as a margin on each side
 /// (`MapView.OVERSCAN`).
 const OVERSCAN: f64 = 0.25;
@@ -246,54 +257,57 @@ fn world_across(shape: Shape, shown: &MapShown, w: u32, h: u32) -> f64 {
 fn the_world_at_its_smallest_covers_the_view() {
     let home = home();
     let shape = loquax::picture::world_shape();
-    for density in DENSITIES {
-        for (w, h) in screens(density) {
-            let out = |from: Option<&MapShown>| {
-                let mut request = MapRequest {
-                    zoom_by_milli: -20_000,
-                    about_x: (w / 2) as i32,
-                    about_y: (h / 2) as i32,
-                    ..ask(home.path(), (w, h), density, 14_000)
-                };
-                if let Some(shown) = from {
-                    request.x = Some(shown.x);
-                    request.y = Some(shown.y);
-                    request.zoom_milli = Some(shown.zoom_milli);
-                    request.zoom_by_milli = -1_000;
-                }
-                let (mx, my) = margins(w, h, false);
-                draw(&MapRequest {
-                    margin_x: mx,
-                    margin_y: my,
-                    ..request
-                })
+    let mut cases: Vec<(u32, (u32, u32))> = DENSITIES
+        .iter()
+        .flat_map(|&d| screens(d).into_iter().map(move |s| (d, s)))
+        .collect();
+    cases.extend(WALK_FRAMES);
+    for (density, (w, h)) in cases {
+        let out = |from: Option<&MapShown>| {
+            let mut request = MapRequest {
+                zoom_by_milli: -20_000,
+                about_x: (w / 2) as i32,
+                about_y: (h / 2) as i32,
+                ..ask(home.path(), (w, h), density, 14_000)
             };
-            let smallest = out(None);
-            let across = world_across(shape, &smallest, w, h);
-            let side = match shape {
-                Shape::Globe => w.min(h),
-                Shape::EqualEarth => w,
-            };
-            assert!(
-                across >= f64::from(side) - 0.5,
-                "{w}x{h} at {density}: the world {across:.1} px across, the view {side}"
-            );
-            if shape == Shape::Globe && w < h {
-                assert!(
-                    across <= f64::from(side) + 2.0,
-                    "{w}x{h}: the globe's diameter is the view's width, not {across:.1}"
-                );
+            if let Some(shown) = from {
+                request.x = Some(shown.x);
+                request.y = Some(shown.y);
+                request.zoom_milli = Some(shown.zoom_milli);
+                request.zoom_by_milli = -1_000;
             }
-            assert_eq!(
-                smallest.zoom_milli, smallest.min_zoom_milli,
-                "{w}x{h}: Java is told the floor the pinch stops at"
+            let (mx, my) = margins(w, h, false);
+            draw(&MapRequest {
+                margin_x: mx,
+                margin_y: my,
+                ..request
+            })
+        };
+        let smallest = out(None);
+        let across = world_across(shape, &smallest, w, h);
+        let side = match shape {
+            Shape::Globe => w.min(h),
+            Shape::EqualEarth => w,
+        };
+        assert!(
+            across >= f64::from(side) - 0.5,
+            "{w}x{h} at {density}: the world {across:.1} px across, the view {side}"
+        );
+        if shape == Shape::Globe && w < h {
+            assert!(
+                across <= f64::from(side) + 2.0,
+                "{w}x{h}: the globe's diameter is the view's width, not {across:.1}"
             );
-            let again = out(Some(&smallest));
-            assert_eq!(
-                again.zoom_milli, smallest.zoom_milli,
-                "{w}x{h}: a step further out changes nothing"
-            );
-            assert_eq!((again.x, again.y), (smallest.x, smallest.y));
         }
+        assert_eq!(
+            smallest.zoom_milli, smallest.min_zoom_milli,
+            "{w}x{h}: Java is told the floor the pinch stops at"
+        );
+        let again = out(Some(&smallest));
+        assert_eq!(
+            again.zoom_milli, smallest.zoom_milli,
+            "{w}x{h}: a step further out changes nothing"
+        );
+        assert_eq!((again.x, again.y), (smallest.x, smallest.y));
     }
 }

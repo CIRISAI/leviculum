@@ -92,6 +92,14 @@ const MOTION_GAP_MS: u64 = 250;
 pub const COARSER_STEPS: u8 = 3;
 /// The finer steps likewise: two, 4x4 tiles scaled into one.
 pub const FINER_STEPS: u8 = 2;
+/// The steps from its own whose tiles a frame at rest that owes none
+/// keeps (1797): the step out and the step in, which the prefetch draws
+/// for the next pinch ([`plan`]). The others belong to views the user
+/// left. Held to the budget, they kept the phone's map 80 MB above its
+/// start after a zoom out to the world and back at Lew's 1224 x 2197
+/// (`loquax-android/tests/map_heap.rs`, on the host, 2026-11-13), on the
+/// day the low-memory killer ended Loquax in the foreground.
+pub const NEAR_STEPS: u8 = 1;
 
 /// What tells one tile from another: where it is, and what it was drawn
 /// in.
@@ -182,6 +190,9 @@ pub struct Stats {
     /// Provisional tiles dropped to be drawn again as a region arrived
     /// (1291).
     pub redrawn: u64,
+    /// Tiles a frame at rest dropped for being more than a step from its
+    /// zoom (1797, [`NEAR_STEPS`]).
+    pub left_behind: u64,
     /// Microseconds the workers spent drawing tiles, each worker's own
     /// time summed: on one worker the CPU a cold frame's tiles cost; on
     /// more it is that or above, as the workers share cores.
@@ -459,10 +470,14 @@ impl TileCache {
         // one step can compose the curved picture, and the outline is
         // cheap enough to draw each frame.
         if let Some(blend) = self.world_blend(&frame.view) {
+            // Straight into `rgba` (1797): no frame-sized buffer beside it.
             let smooth = frame.smooth || frame.resmooth;
-            let drawn = self.painters[0].draw_world_rgba(&blend, Ink::Colour, frame.style, smooth);
-            rgba.copy_from_slice(&drawn.rgba);
-            return Some((drawn.attribution, 0));
+            let drawn =
+                self.painters[0].draw_world_onto(&blend, Ink::Colour, frame.style, smooth, rgba);
+            if !frame.moving {
+                self.keep_near(frame.zoom);
+            }
+            return drawn;
         }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);
@@ -542,7 +557,12 @@ impl TileCache {
             .map(|(_, a)| a)
             .find(|a| a.as_ref() != outline::ATTRIBUTION)
             .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Some((attribution, left.len() + drafts_left.len()))
+        let owed = left.len() + drafts_left.len();
+        // At rest and whole, no tile of another step stands in any more.
+        if !frame.moving && owed == 0 {
+            self.keep_near(frame.zoom);
+        }
+        Some((attribution, owed))
     }
 
     /// The tiles `got` over `rgba`, the stand ins and the outline where
@@ -729,6 +749,24 @@ impl TileCache {
                 break;
             }
         }
+    }
+
+    /// Drop the tiles more than [`NEAR_STEPS`] from `zoom`, after a frame
+    /// at rest there that owes no tile (a world frame owes none): it needs
+    /// no stand in any more, the prefetch draws the steps next to it, and
+    /// the others only hold memory (1797).
+    fn keep_near(&mut self, zoom: u8) {
+        let before = self.entries.len();
+        let mut bytes = self.bytes;
+        self.entries.retain(|key, e| {
+            let near = key.zoom.abs_diff(zoom) <= NEAR_STEPS;
+            if !near {
+                bytes -= e.rgba.len();
+            }
+            near
+        });
+        self.bytes = bytes;
+        self.stats.left_behind += (before - self.entries.len()) as u64;
     }
 
     /// Drop the entry `may` allows that goes first: a prefetched one no
@@ -1772,6 +1810,38 @@ mod tests {
         let coarse = cache.compose(&frame(view, 14));
         let shown = owed(&mut cache, view, 15);
         assert!(shown.rgba == coarse.rgba, "the coarser step first");
+    }
+
+    /// A frame at rest that owes no tile keeps the tiles of its own step
+    /// and the steps next to it, and drops those of the views the user
+    /// left (1797); a moving frame, and one at rest that still owes tiles
+    /// and stands in for them, drop nothing.
+    #[test]
+    fn a_frame_at_rest_keeps_the_steps_next_to_its_own() {
+        let (_dir, maps) = maps();
+        let view = ExactView::new(duomo(), 14 * MILLI, 300, 300);
+        let mut cache = TileCache::new(maps, BUDGET_MB << 20);
+        let zooms = |cache: &TileCache| {
+            let mut z: Vec<u8> = cache.entries.keys().map(|k| k.zoom).collect();
+            z.sort_unstable();
+            z.dedup();
+            z
+        };
+        for z in [11, 12, 13, 15, 16] {
+            cache.compose(&Frame {
+                moving: true,
+                ..frame(view, z)
+            });
+        }
+        assert_eq!(zooms(&cache), vec![11, 12, 13, 15, 16], "moving: all kept");
+        owed(&mut cache, view, 14);
+        assert_eq!(cache.stats.left_behind, 0, "owing tiles: all kept");
+        let shown = cache.compose(&frame(view, 14));
+        assert_eq!(shown.missing, 0);
+        assert_eq!(zooms(&cache), vec![13, 14, 15]);
+        assert!(cache.stats.left_behind > 0);
+        let held: usize = cache.entries.values().map(|e| e.rgba.len()).sum();
+        assert_eq!(cache.bytes, held, "the count follows the tiles");
     }
 
     /// Part of a frame cached: the tiles held show, the stand ins fill
