@@ -440,7 +440,8 @@ impl Blend {
     /// for Equal Earth, whose world has no horizon. The first `n` points
     /// (the count returned) are the horizon itself; in the handover a
     /// view off the equator closes over its visible pole after them
-    /// ([`seam`](Self::seam)). At `t = 0` there is no detour.
+    /// (the seam, where the horizon crosses the far meridian). At
+    /// `t = 0` there is no detour.
     pub fn limb_sub(&self, out: &mut Vec<(i64, i64)>) -> usize {
         out.clear();
         if !self.is_globe() {
@@ -586,7 +587,7 @@ impl Blend {
     }
 
     /// Whether `w` faces the eye and where it lands in sub-pixels, from
-    /// one evaluation ([`globe_point`](Self::globe_point)): what a stroked
+    /// one evaluation of the point: what a stroked
     /// line on the globe asks of every point (1762).
     pub fn globe_seen(&self, w: World) -> (bool, (i64, i64)) {
         let p = self.globe_point(w, false);
@@ -602,7 +603,8 @@ impl Blend {
     /// inside, the whole limb as a second ring. Mercator's edge rows are
     /// the poles ([`ring_latitude`]). In the handover the ring goes over
     /// the visible pole where it crosses the far meridian
-    /// ([`seam`](Self::seam)), as the limb does, so land and sea agree
+    /// (the seam, where the Mercator term jumps), as the limb does, so
+    /// land and sea agree
     /// there.
     pub fn globe_ring(&self, ring: &[World], out: &mut Vec<Vec<(i64, i64)>>) {
         out.clear();
