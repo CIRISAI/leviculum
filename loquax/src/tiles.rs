@@ -262,6 +262,9 @@ pub struct TileCache {
     /// step can show a curved picture. The painters themselves keep
     /// drawing tiles Mercator-linear.
     world_shape: Option<Shape>,
+    /// The screen the frames are drawn for ([`set_screen`](Self::set_screen)):
+    /// a frame with margins blends at the screen's `t` (1796).
+    screen: Option<(u32, u32)>,
     pub stats: Stats,
     /// A frame's buffer handed back ([`recycle`](Self::recycle)), composed
     /// into next.
@@ -290,6 +293,7 @@ impl TileCache {
             painters: Vec::new(),
             workers,
             world_shape: None,
+            screen: None,
             stats: Stats::default(),
             spare: Vec::new(),
             #[cfg(test)]
@@ -313,17 +317,30 @@ impl TileCache {
         self.world_shape = shape;
     }
 
+    /// The screen the next frames are drawn for, `None` for frames that
+    /// are their screen. A frame with margins past the screen is larger
+    /// than it, and the blend's start follows the size
+    /// ([`world_floor`](leviculum_map::blend::world_floor), 1796): without
+    /// this a frame with margins would still curve where the screen's view
+    /// is Mercator already, and be placed as a flat one.
+    pub fn set_screen(&mut self, screen: Option<(u32, u32)>) {
+        self.screen = screen;
+    }
+
     /// The blended mapping of `view` when the blend holds there: the
     /// shape is set, `t` is below one at the view's exact zoom, and no
     /// region reaches into it (the painter's own check, so the frame and
     /// the whole-view drawers agree on the condition). The blend carries
-    /// the view's own size; the region check widens to the whole zoom
-    /// below, which only errs towards Mercator.
+    /// the view's own size and the screen's `t`
+    /// ([`set_screen`](Self::set_screen)); the region check widens to the
+    /// whole zoom below, which only errs towards Mercator.
     pub fn world_blend(&mut self, view: &ExactView) -> Option<Blend> {
         let shape = self.world_shape?;
         let zoom = view.zoom();
         let (w, h) = view.size();
-        let blend = Blend::new(shape, view.centre, zoom, w, h);
+        let (sw, sh) = self.screen.unwrap_or((w, h));
+        let t = Blend::new(shape, view.centre, zoom, sw, sh).t();
+        let blend = Blend::with_t(shape, view.centre, zoom, w, h, t);
         if blend.t() >= 1.0 {
             return None;
         }

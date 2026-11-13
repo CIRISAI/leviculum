@@ -45,7 +45,7 @@
 //! Earth's boundary, off the globe's limb) gets `None`.
 
 use crate::mercator::World;
-use crate::viewport::Viewport;
+use crate::viewport::{Viewport, MILLI};
 use alloc::vec::Vec;
 
 /// Equal Earth's polynomial coefficients (Šavrič, Patterson, Jenny 2018,
@@ -114,6 +114,40 @@ pub fn t_of_zoom(zoom: f64, lo: f64, hi: f64) -> f64 {
     u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
 }
 
+/// Equal Earth's world at zoom 0, pixels from edge meridian to edge
+/// meridian along the equator, the blend's world term at `t = 0`: 256
+/// pixels around the world over `2π`, times the projection's width `2π / (M
+/// A1)`.
+const EQUAL_EARTH_WORLD_PX: f64 = 256.0 / (M * A1);
+
+/// The shallowest zoom, fractional, at which the world `shape` draws
+/// fills a `width` x `height` view (1796): the globe's disk is the shorter
+/// side across, Equal Earth's equator the width, and never shallower than
+/// Mercator's one-world floor ([`Viewport::min_zoom`]). Before it a view
+/// zoomed out until the world was a small picture in the middle of an
+/// empty screen; every frontend holds its zoom here, and the blend starts
+/// here, so the smallest world is the shape itself.
+///
+/// The globe's radius is `256 · 2^zoom / 2π` wherever it is turned to
+/// ([`Blend::radius`] at `t = 0`); Equal Earth is widest at the equator,
+/// and a view off it only draws it wider.
+pub fn world_floor(shape: Shape, width: u32, height: u32) -> f64 {
+    f64::from(world_floor_milli(shape, width, height)) / f64::from(MILLI)
+}
+
+/// [`world_floor`] in thousandths of a zoom, rounded up: the zoom an
+/// [`ExactView`](crate::viewport::ExactView) holds to, whose
+/// [`zoom`](crate::viewport::ExactView::zoom) is then exactly the blend's
+/// lower bound, `t` exactly zero.
+pub fn world_floor_milli(shape: Shape, width: u32, height: u32) -> u32 {
+    let own = match shape {
+        Shape::Globe => libm::log2(PI * f64::from(width.min(height).max(1)) / 256.0),
+        Shape::EqualEarth => libm::log2(f64::from(width.max(1)) / EQUAL_EARTH_WORLD_PX),
+    };
+    let own = libm::ceil(own * f64::from(MILLI)).max(0.0) as u32;
+    own.max(u32::from(Viewport::min_zoom(width)) * MILLI)
+}
+
 /// A world view's blended mapping: Mercator world coordinates to screen
 /// pixels and back, at one centre, zoom and size.
 #[derive(Clone, Copy, Debug)]
@@ -146,11 +180,12 @@ pub struct Blend {
 
 impl Blend {
     /// The blend for a view: `t` from the zoom by [`t_of_zoom`], between
-    /// [`WORLD_ZOOM`] — or the width's [`Viewport::min_zoom`] where a wide
-    /// screen's world floor is deeper — and [`MERCATOR_ZOOM`], kept at
-    /// least one zoom above the lower bound.
+    /// [`WORLD_ZOOM`] — or the view's [`world_floor`] where a screen's
+    /// world floor is deeper, so the smallest world a frontend shows is
+    /// the shape itself (1796) — and [`MERCATOR_ZOOM`], kept at least one
+    /// zoom above the lower bound.
     pub fn new(shape: Shape, centre: World, zoom: f64, width: u32, height: u32) -> Self {
-        let lo = WORLD_ZOOM.max(f64::from(Viewport::min_zoom(width)));
+        let lo = WORLD_ZOOM.max(world_floor(shape, width, height));
         let hi = MERCATOR_ZOOM.max(lo + 1.0);
         let t = t_of_zoom(zoom, lo, hi);
         Self::with_t(shape, centre, zoom, width, height, t)

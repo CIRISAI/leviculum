@@ -18,12 +18,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use leviculum_map::blend::{world_floor_milli, Shape};
 use leviculum_map::choice::fit_ceiling;
 use leviculum_map::labels::{self as names, Candidate, LabelKind, ViewLabel};
 use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::pins::{self, Mark, Metrics, Pin, Side};
 use leviculum_map::region::{Bounds, Header};
-use leviculum_map::viewport::Viewport;
+use leviculum_map::viewport::{Viewport, MILLI};
 use leviculum_ui::Rect;
 
 use crate::telemetry;
@@ -537,12 +538,27 @@ pub fn picture_area(pane: Rect) -> Rect {
     )
 }
 
+/// The world projection the product ships (1710): Equal Earth, Lew's
+/// first decision; the orthographic globe behind the `globe-world` build
+/// switch until he has seen both on pictures.
+pub fn world_shape() -> Shape {
+    match cfg!(feature = "globe-world") {
+        true => Shape::Globe,
+        false => Shape::EqualEarth,
+    }
+}
+
 /// The view of `state` over `area` at `setup`'s cell size, as every
 /// frontend shows it: one world at most ([`Viewport::one_world`]), however
-/// far the state was zoomed out or panned north or south.
+/// far the state was zoomed out or panned north or south, and the world
+/// never smaller than the picture: the whole zoom at or past the
+/// [`world_floor_milli`] of the product's [`world_shape`] (1796), the
+/// window's and the phone's floor rounded up to the terminal's steps.
 pub fn viewport(state: &MapState, area: Rect, setup: &MapSetup) -> Viewport {
     let (w, h) = pixels(area, setup);
-    Viewport::new(state.centre, state.zoom, w, h).one_world()
+    let floor = world_floor_milli(world_shape(), w, h).div_ceil(MILLI);
+    let floor = u8::try_from(floor).unwrap_or(u8::MAX);
+    Viewport::new(state.centre, state.zoom.max(floor), w, h).one_world()
 }
 
 /// `state` moved to the view it shows ([`viewport`]): a zoom out past the
@@ -826,6 +842,8 @@ pub fn zoom_at(state: &mut MapState, area: Rect, setup: &MapSetup, col: u16, row
     let view = view.one_world();
     state.centre = view.centre;
     state.zoom = view.zoom();
+    // Past the world's floor (1796) the zoom stops there, about the centre.
+    settle(state, area, setup);
 }
 
 /// The pin drawn at a cell, its marker or its name, the topmost where
@@ -1203,6 +1221,49 @@ mod tests {
         assert_eq!(zoom_floor(phone, &bare), 3);
     }
 
+    /// The terminal's world at its smallest is as wide as its picture
+    /// (1796): settled from z0 the product's world (Equal Earth, the globe
+    /// in the globe build) spans at least the picture's width, the globe
+    /// its shorter side; a step further out settles to the same zoom.
+    #[test]
+    fn settle_keeps_the_smallest_world_as_wide_as_the_picture() {
+        use leviculum_map::blend::Blend;
+        let shape = world_shape();
+        let setup = MapSetup {
+            cell_px: (2, 4),
+            zooms: (0, 20),
+            ..MapSetup::default()
+        };
+        for (cols, rows) in [(495u16, 550u16), (200, 60), (80, 24), (612, 549)] {
+            let area = Rect::new(0, 0, cols, rows);
+            let (w, h) = (u32::from(cols) * 2, u32::from(rows) * 4);
+            let mut state = MapState {
+                centre: project(LatLon::from_degrees(43.77, 11.26)),
+                zoom: 0,
+                selected: None,
+            };
+            settle(&mut state, area, &setup);
+            let view = viewport(&state, area, &setup);
+            let blend = Blend::new(shape, view.centre, f64::from(view.zoom()), w, h);
+            let pi = core::f64::consts::PI;
+            let (across, side) = match shape {
+                Shape::Globe => (2.0 * blend.radius(), w.min(h)),
+                Shape::EqualEarth => (
+                    blend.to_screen_angles(pi, 0.0).0 - blend.to_screen_angles(-pi, 0.0).0,
+                    w,
+                ),
+            };
+            assert!(
+                across >= f64::from(side) - 0.5,
+                "{w}x{h}: the world {across:.1} across, the picture {side}"
+            );
+            let zoom = state.zoom;
+            state.zoom = zoom.saturating_sub(1);
+            settle(&mut state, area, &setup);
+            assert_eq!(state.zoom, zoom, "{w}x{h}: a step further out");
+        }
+    }
+
     /// A zoom out past the floor stops there, and a pan past the north
     /// edge stops at it: the state is what the reader sees.
     #[test]
@@ -1219,8 +1280,22 @@ mod tests {
             selected: None,
         };
         settle(&mut state, phone, &setup);
-        assert_eq!(state.zoom, 3);
-        assert_eq!(state.centre.y, 1 << 31, "shorter than the view: centred");
+        // Mercator's and Equal Earth's floor is z3 on 1080 pixels; the
+        // globe's disk needs z3.73 to be 1080 across (1796), z4 in whole
+        // steps.
+        let floor = match world_shape() {
+            Shape::Globe => 4,
+            Shape::EqualEarth => 3,
+        };
+        assert_eq!(state.zoom, floor);
+        match 256u32 << floor <= 2400 {
+            true => assert_eq!(state.centre.y, 1 << 31, "shorter than the view: centred"),
+            false => assert_eq!(
+                viewport(&state, phone, &setup).top_left_sub().1,
+                0,
+                "taller than the view: stopped at the north edge"
+            ),
+        }
         state.zoom = 6;
         state.centre = project(LatLon::from_degrees(84.0, 0.0));
         settle(&mut state, phone, &setup);

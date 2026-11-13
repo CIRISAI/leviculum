@@ -1080,7 +1080,7 @@ flashed, the board half is the rig's.
 (release build, the median of 50 runs after a warm-up, two views an
 eighth apart drawn in turn so that a redraw sees what a pan gives it).
 The tile set is a 2 km box of central Florence cut at the phone's zooms
-(`PLACE_ZOOMS`, z10 to z15, `loquax/src/ui/map.rs:119`) from the
+(`PLACE_ZOOMS`, z10 to z15, `loquax/src/ui/map.rs:120`) from the
 Protomaps sample archive the map core's fixture comes from:
 
 ```sh

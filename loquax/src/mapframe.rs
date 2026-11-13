@@ -585,6 +585,8 @@ impl Frames {
         self.trace.clear();
         let layers = self.layers(ask);
         let view = ask.view;
+        // The frame and its margins blend at the screen's `t` (1796).
+        self.tiles.set_screen(Some(view.size()));
         let rest_zoom = view.tile_zoom();
         // At a whole step the frame's centre sits on a whole pixel of it:
         // the tiles are that step's pixels shown one to one, so the pins
@@ -1423,13 +1425,33 @@ pub fn hold(view: ExactView, floor: u8, ceiling: u8) -> ExactView {
     hold_as(crate::picture::world_shape(), view, floor, ceiling)
 }
 
+/// The shallowest zoom in thousandths a `width` x `height` view of the
+/// product's world projection may show, `floor` (a whole zoom: the
+/// regions' shallowest, the one-world floor) or deeper where the world
+/// would draw smaller than the view (1796, [`floor_milli_as`]).
+pub fn floor_milli(width: u32, height: u32, floor: u8) -> u32 {
+    floor_milli_as(crate::picture::world_shape(), width, height, floor)
+}
+
+/// [`floor_milli`] for a world projection `shape`: the larger of `floor`
+/// and the shape's
+/// [`world_floor_milli`](leviculum_map::blend::world_floor_milli), so at the floor the globe's disk is the
+/// view's shorter side across and Equal Earth's equator its width.
+pub fn floor_milli_as(shape: Shape, width: u32, height: u32, floor: u8) -> u32 {
+    leviculum_map::blend::world_floor_milli(shape, width, height).max(u32::from(floor) * MILLI)
+}
+
 /// [`hold`] for a world projection `shape`. A view the globe turns
 /// ([`turns_as`]) keeps its centre's latitude (1762): `one_world` pins a
 /// world view on a screen taller than Mercator's world to its middle row,
 /// which on the phone in portrait kept the globe from ever turning north
-/// or south. Equal Earth and the flat map keep the rule.
+/// or south. Equal Earth and the flat map keep the rule. The zoom is never
+/// shallower than [`floor_milli_as`]: the world at its smallest fills the
+/// view (1796).
 pub fn hold_as(shape: Shape, view: ExactView, floor: u8, ceiling: u8) -> ExactView {
-    let (floor, ceiling) = (u32::from(floor) * MILLI, u32::from(ceiling) * MILLI);
+    let (w, h) = view.size();
+    let floor = floor_milli_as(shape, w, h, floor);
+    let ceiling = u32::from(ceiling) * MILLI;
     let mut v = view.one_world();
     let z = v.zoom_milli().clamp(floor, ceiling.max(floor));
     let (cx, cy) = (f64::from(v.size().0) / 2.0, f64::from(v.size().1) / 2.0);
@@ -1527,6 +1549,54 @@ mod tests {
             hold_as(Shape::Globe, deep, 0, 18),
             hold_as(Shape::EqualEarth, deep, 0, 18)
         );
+    }
+
+    /// The world at its smallest fills the view (1796): held from any zoom
+    /// out, the globe's disk is the shorter side across (the width in
+    /// portrait, to two pixels) and drawn as the globe itself, `t` zero;
+    /// Equal Earth's equator spans at least the view's width. Phones of
+    /// 360 x 800 dp at four densities, both orientations, and the window;
+    /// one more step out holds to the same view.
+    #[test]
+    fn the_hold_keeps_the_smallest_world_as_wide_as_the_view() {
+        use leviculum_map::blend::{Blend, Shape};
+        let at = project(LatLon::from_degrees(43.77, 11.26));
+        let mut screens = vec![(1224, 2197), (2197, 1224), (1280, 800), (990, 2200)];
+        for density in [1000u32, 2000, 2750, 3000] {
+            let (w, h) = (360 * density / 1000, 800 * density / 1000);
+            screens.push((w, h));
+            screens.push((h, w));
+        }
+        for (w, h) in screens {
+            for shape in [Shape::Globe, Shape::EqualEarth] {
+                let held = hold_as(shape, ExactView::new(at, 0, w, h), 0, 18);
+                let blend = Blend::new(shape, held.centre, held.zoom(), w, h);
+                let pi = core::f64::consts::PI;
+                match shape {
+                    Shape::Globe => {
+                        let across = 2.0 * blend.radius();
+                        let side = f64::from(w.min(h));
+                        assert_eq!(blend.t(), 0.0, "{w}x{h}: the globe itself");
+                        assert!(across >= side - 0.5, "{w}x{h}: disk {across:.1}");
+                        if w < h {
+                            assert!(across <= side + 2.0, "{w}x{h}: disk {across:.1}");
+                        }
+                    }
+                    Shape::EqualEarth => {
+                        let west = blend.to_screen_angles(-pi, 0.0).0;
+                        let east = blend.to_screen_angles(pi, 0.0).0;
+                        let across = east - west;
+                        assert!(across >= f64::from(w) - 0.5, "{w}x{h}: world {across:.1}");
+                    }
+                }
+                let further = ExactView::new(held.centre, held.zoom_milli() - 1000, w, h);
+                assert_eq!(
+                    hold_as(shape, further, 0, 18),
+                    held,
+                    "{w}x{h} {shape:?}: a step further out changes nothing"
+                );
+            }
+        }
     }
 
     /// A drag on a globe view turns it by the arcball amount and on the

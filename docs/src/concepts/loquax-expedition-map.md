@@ -105,7 +105,7 @@ not in the tree). Total about 166 KB beside today's 209 KB.
 - Desktop users never see Protomaps' own Natural Earth zooms, since the
   autoload starts at z7 at the earliest: nothing is asked for below
   `MIN_ZOOM` (`loquax/src/ui/viewload.rs:57`), z10, and a view loads
-  `VIEW_BELOW` (`loquax/src/ui/map.rs:126`), three zooms above its own.
+  `VIEW_BELOW` (`loquax/src/ui/map.rs:127`), three zooms above its own.
   The world view is ours alone.
 
 ### The world in Equal Earth, flowing into Mercator

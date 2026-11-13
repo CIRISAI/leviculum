@@ -99,17 +99,14 @@ pub const AUTO_PREFIX: &str = "auto-";
 /// file's modification time, which the eviction orders by.
 const VIEWED_EVERY: Duration = Duration::from_secs(60);
 
-/// Whether `name` is a region the autoload wrote.
-/// The world projection the product ships (1710): Equal Earth, Lew's
-/// first decision; the orthographic globe behind the `globe-world` build
-/// switch until he has seen both on pictures.
+/// The world projection the product ships (1710):
+/// [`crate::ui::map::world_shape`], where the terminal's core reaches it
+/// too.
 pub fn world_shape() -> Shape {
-    match cfg!(feature = "globe-world") {
-        true => Shape::Globe,
-        false => Shape::EqualEarth,
-    }
+    crate::ui::map::world_shape()
 }
 
+/// Whether `name` is a region the autoload wrote.
 pub fn is_auto(name: &str) -> bool {
     name.starts_with(AUTO_PREFIX)
 }
