@@ -613,7 +613,7 @@ impl<B> UiModel<B> {
             }
         }
         // A copy that came before the membership of its epoch was filed
-        // under nobody (`copy_writer`); with that membership here it is
+        // under the group (`copy_writer`); with that membership here it is
         // judged again (the second audit of 1787, decided in
         // loquax-expedition-map.md).
         if let (false, Some(was)) = (outbound, epoch_before) {
@@ -640,11 +640,12 @@ impl<B> UiModel<B> {
             if !late || !crate::telemetry::has_telemetry(&message.fields) {
                 continue;
             }
-            let Some(writer) = super::copy_writer(writers.groups, group, &message.fields) else {
+            let writer = super::copy_writer(writers.groups, group, &message.fields);
+            if writer == group {
                 continue;
-            };
+            }
             let received = message.at.map(|at| at.unix_secs);
-            let read = super::read_with(Some(writer), rows, group, &message.fields, received);
+            let read = super::read_with(writer, rows, group, &message.fields, received);
             fixes.extend(read.fixes.into_iter().map(|mut fix| {
                 fix.message = Some(message.activity);
                 fix

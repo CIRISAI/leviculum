@@ -196,9 +196,8 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
 
 /// The writer a group copy names (1687): `lev.group_copy`'s sender. Any
 /// sender can put any address there, so the name is worth what its signed
-/// source is: the caller files a fix under it only when the source is a
-/// group the reader has joined whose membership lists the writer, not as
-/// left (`ui::copy_writer`, the audit of 1757).
+/// source is: the caller files a fix under it only through
+/// `ui::copy_writer` (the audits of 1757), else under the source.
 pub fn claimed_writer(fields: &[Field]) -> Option<leviculum_lxmf::lev::GroupCopy> {
     Lev::from_fields(fields).and_then(|lev| lev.group_copy)
 }
@@ -846,7 +845,7 @@ mod tests {
     /// moved anyone's pin), [`read_as`] under the writer the caller
     /// established, the group as `via`.
     #[test]
-    fn a_group_copys_writer_is_a_claim_the_caller_checks() {
+    fn a_group_copys_position_belongs_to_its_writer() {
         use leviculum_lxmf::lev::{GroupCopy, Lev};
 
         const GROUP: [u8; 16] = [0x60; 16];
@@ -878,6 +877,60 @@ mod tests {
             "the writer measured it; the group delivered the copy"
         );
         assert_eq!(claimed_writer(&[]), None);
+    }
+
+    /// A stranger's message whose `lev` names VICTIM as a group copy's
+    /// writer, with a reading of its own: no fix is VICTIM's (the second
+    /// audit of 1757).
+    #[test]
+    fn audit_a_strangers_message_naming_a_writer_moves_nobody_elses_pin() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        const STRANGER: [u8; 16] = [0x5e; 16];
+        const VICTIM: [u8; 16] = [0x71; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: VICTIM,
+                sent_ms: 1_793_015_000_000,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let read = read(STRANGER, &fields, Some(NOW));
+        assert!(!read.fixes.is_empty(), "the stranger's reading is read");
+        assert!(read.fixes.iter().all(|f| f.peer != VICTIM), "{read:?}");
+    }
+
+    /// The same with a `lev` map that names another writer (1482) beside
+    /// the copy's: no fix is VICTIM's.
+    #[test]
+    fn audit_a_map_naming_another_writer_moves_nobody_elses_pin() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        const STRANGER: [u8; 16] = [0x5e; 16];
+        const VICTIM: [u8; 16] = [0x71; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: VICTIM,
+                sent_ms: 1_793_015_000_000,
+                epoch: 1,
+            }),
+            writer: Some([0x77; 16]),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let read = read(STRANGER, &fields, Some(NOW));
+        assert!(!read.fixes.is_empty(), "the stranger's reading is read");
+        assert!(read.fixes.iter().all(|f| f.peer != VICTIM), "{read:?}");
     }
 
     /// `fields` from `source`, a collector the reader chose: its rows are

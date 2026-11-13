@@ -639,6 +639,27 @@ impl Lev {
     pub fn said_by(&self, source: &[u8; 16]) -> bool {
         self.writer.is_none_or(|writer| writer == *source)
     }
+
+    /// Who measured the `FIELD_TELEMETRY` reading of a message `source`
+    /// signed (1687, the second audit of 1757): the writer a group copy
+    /// names, `group_copy.sender`, when the map is `source`'s own word
+    /// ([`Self::from_fields_of`]) and `lists(copy)` holds, which the
+    /// reader answers from its own knowledge: `source` is a group it has
+    /// joined, and that group's membership at the copy's epoch lists the
+    /// writer as a member who has not left. `source` in every other case:
+    /// any sender can name any writer, so a name nobody vouches for is the
+    /// sender's own reading. The one rule every reader of a copy's
+    /// position goes through (Loquax, the node helper).
+    pub fn reading_writer(
+        fields: &[Field],
+        source: &[u8; 16],
+        lists: impl FnOnce(&GroupCopy) -> bool,
+    ) -> [u8; 16] {
+        match Self::from_fields_of(fields, source).and_then(|lev| lev.group_copy) {
+            Some(copy) if lists(&copy) => copy.sender,
+            _ => *source,
+        }
+    }
 }
 
 fn receipt(d: &[u8]) -> Option<Receipt> {

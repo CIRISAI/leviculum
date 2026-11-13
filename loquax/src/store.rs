@@ -5232,6 +5232,34 @@ mod tests {
         assert!(other.shared(10).expect("shared").is_empty());
     }
 
+    /// The second audit of 1757: a message of ours whose `lev` names BOB
+    /// as a group copy's writer lists our position, not BOB's.
+    #[test]
+    fn a_position_we_shared_naming_a_writer_is_ours() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let place = Location::saturating(52_000_000, 13_000_000, 0, 0, 0, 0, 900);
+        let mut ours = message(1, true, "");
+        Lev {
+            group_copy: Some(GroupCopy {
+                sender: BOB,
+                sent_ms: 1,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }
+        .put_into(&mut ours.fields);
+        ours.fields.extend(crate::ui::position_fields(place));
+        put(&mut store, ALICE, ours);
+        let shared = store.shared(10).expect("shared");
+        let seen: Vec<([u8; 16], [u8; 16], i32)> = shared
+            .iter()
+            .map(|(fix, _)| (fix.peer, fix.via, fix.location.latitude_e6))
+            .collect();
+        assert_eq!(seen, [(US, ALICE, 52_000_000)]);
+    }
+
     #[test]
     fn deleting_a_message_keeps_its_position_and_a_conversation_takes_them() {
         let home = tempfile::tempdir().expect("home");

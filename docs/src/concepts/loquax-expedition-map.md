@@ -662,17 +662,23 @@ Additions (decided):
      that writer: one the reader joined itself, by its own Join from any
      of its devices or because it made the group, whose membership lists
      the writer, not as left (`copy_writer`, `loquax/src/ui.rs:6741`, the
-     audits of 1757 and 1787). A membership list never joins the reader,
+     audits of 1757 and 1787), and whose `lev` map is the group's own
+     word (`Lev::from_fields_of`, 1482). The rule is one function in
+     LXMF, `Lev::reading_writer`, which the node helper's telemetry
+     report goes through too. A membership list never joins the reader,
      an invitation to the sender's own address makes no group, and a copy
      is judged by the group state from before its own message. A copy
-     whose writer no such group vouches for files no position, and its
-     bubble, its Info and the sender's liveness show none either
-     (`Writers`, `loquax/src/ui.rs:6782`).
+     whose writer no such group vouches for is the source's own reading,
+     a stranger's on the stranger's pin and a group's on the group's, in
+     the pin, the store, the bubble and the Info (`Writers`,
+     `loquax/src/ui.rs:6782`; the second audit of 1757); the source's
+     liveness leaves every message that names a writer out
+     (`peers_own_fix`).
      A copy whose epoch is newer than the membership the reader holds is
-     kept and filed under its writer once that membership comes (the
-     pass of order 1792, 2026-11-13, answering the second audit of 1787:
-     a copy that outruns its list would otherwise lose a member's
-     position for good).
+     the group's reading when it comes, and filed under its writer once
+     that membership comes (the pass of order 1792, 2026-11-13,
+     answering the second audit of 1787: a copy that outruns its list
+     would otherwise lose a member's position for good).
      A collector's `FIELD_TELEMETRY_STREAM` row names its measurer, a
      claim of the same kind. It is filed under that measurer only when the
      deliverer is a collector the reader chose (`UiModel::collectors`).
