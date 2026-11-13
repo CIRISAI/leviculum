@@ -220,6 +220,11 @@ command:java loquax-android/fling a_form_fields_hint_is_the_pages_words_before_i
 command:javac loquax-android/fling the_phone_draws_nothing_while_nothing_changes
 command:java loquax-android/fling the_phone_draws_nothing_while_nothing_changes
 
+# The map frame's size and the pinch's floor (1796): MapFrame.java run with
+# its host test.
+command:javac loquax-android/fling the_map_bitmap_follows_the_frame_and_the_pinch_stops_at_the_world
+command:java loquax-android/fling the_map_bitmap_follows_the_frame_and_the_pinch_stops_at_the_world
+
 # The join screen's server field (1464): ServerField.java run with its host
 # test.
 command:javac loquax-android/fling the_server_field_follows_a_typed_code

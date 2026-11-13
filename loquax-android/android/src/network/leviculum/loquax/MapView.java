@@ -11,6 +11,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.Choreographer;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
@@ -99,14 +100,6 @@ final class MapView extends View {
     static final int PIN_DP = 40;
     /** How long a fly takes. */
     private static final long FLY_MS = 450;
-
-    /**
-     * The frame's margin past each edge, as a share of the screen: a
-     * quarter drew a 1080 x 2400 frame moving at 64 ms on the host, half
-     * at 111 ms (1131), and a smaller frame that lands sooner leaves less
-     * of a pan to cover.
-     */
-    private static final float OVERSCAN = 0.25f;
 
     /** x is free in a coast: the world goes round. */
     private static final int FREE = Integer.MAX_VALUE / 2;
@@ -216,6 +209,8 @@ final class MapView extends View {
     private int viewW;
     private int viewH;
     private long maxZoom = 20;
+    /** The shallowest zoom the view may show, thousandths (1796): a pinch stops there. */
+    private long minZoomMilli;
     /**
      * Where the frame is on screen: a pixel p of its view is at
      * scale * p + (offX, offY). The gestures change this at once; a frame
@@ -361,6 +356,11 @@ final class MapView extends View {
     /** Scale what is on screen by `by` about the screen point (fx, fy). */
     private void zoomAbout(float by, float fx, float fy) {
         synchronized (this) {
+            if (zoomMilli != null) {
+                // Never past the world's floor (1796): the world at its
+                // smallest fills the screen.
+                by = MapFrame.zoomBy(scale, by, zoomMilli, minZoomMilli);
+            }
             scale *= by;
             offX = by * (offX - fx) + fx;
             offY = by * (offY - fy) + fy;
@@ -951,7 +951,7 @@ final class MapView extends View {
         synchronized (this) {
             Bitmap reuse = spare;
             spare = null;
-            if (reuse != null && reuse.getWidth() == w && reuse.getHeight() == h) {
+            if (reuse != null && MapFrame.fits(reuse.getWidth(), reuse.getHeight(), w, h)) {
                 return reuse;
             }
         }
@@ -996,8 +996,11 @@ final class MapView extends View {
                 moving = touching || flying || coasting;
                 w = getWidth();
                 h = getHeight();
-                mx = Math.round(w * OVERSCAN);
-                my = Math.round(h * OVERSCAN);
+                // The margins are the frame's one source of size (1796):
+                // the Bitmap below is sized by them and the library draws
+                // them as asked. None while the globe turns (1762).
+                mx = MapFrame.margin(w, turns);
+                my = MapFrame.margin(h, turns);
                 // The frame's pixel under the screen's centre becomes the
                 // new frame's centre, at the scale's exact zoom.
                 float cx = w / 2f;
@@ -1055,7 +1058,9 @@ final class MapView extends View {
             // The frame is the view and the margins on both sides (the
             // margins are at most a quarter screen, within the library's
             // clamp of a screen): the library draws it straight into the
-            // bitmap, which nothing shows while it does (1155).
+            // bitmap, which nothing shows while it does (1155). A size that
+            // changed (a rotation, a frame that starts or stops turning)
+            // makes a new one.
             Bitmap next = canvasFor(w + 2 * mx, h + 2 * my);
             final Map<String, Object> shown = Core.renderMap(request, next);
             if (Core.bool(shown, "ok")) {
@@ -1078,6 +1083,8 @@ final class MapView extends View {
                     viewW = w;
                     viewH = h;
                     maxZoom = Core.num(shown, "max_zoom");
+                    minZoomMilli = shown.get("min_zoom_milli") instanceof Number
+                            ? Core.num(shown, "min_zoom_milli") : 0;
                     flingOn = Core.bool(shown, "fling");
                     turns = Core.bool(shown, "turns");
                     roomNorth = Core.num(shown, "room_north");
@@ -1086,8 +1093,11 @@ final class MapView extends View {
                     selected = chosen == null ? null : String.valueOf(chosen);
                 }
             } else {
+                // Not shown, and not the user's to read (1796): a line in
+                // the log; the next frame draws into it.
+                Log.w(PhotoView.TAG, "map frame " + next.getWidth() + "x" + next.getHeight()
+                        + " not drawn: " + Core.str(shown, "error"));
                 synchronized (this) {
-                    // Not shown: the next frame draws into it.
                     spare = next;
                 }
             }

@@ -436,7 +436,13 @@ impl Renderer {
             .selected
             .as_deref()
             .and_then(|hex| loquax::address::parse(hex).ok());
-        let floor = u32::from(zoom_floor(area, &setup)) * MILLI;
+        // The world at its smallest fills the screen (1796): the globe's
+        // disk its shorter side, Equal Earth its width.
+        let floor = loquax::mapframe::floor_milli(
+            area.width.into(),
+            area.height.into(),
+            zoom_floor(area, &setup),
+        );
         let ceiling = u32::from(setup.zooms.1) * MILLI;
         let zooms = (zoom_floor(area, &setup), setup.zooms.1);
         let asked = request
@@ -540,16 +546,18 @@ impl Renderer {
             view = held(view);
         }
         // At most a screen on each side: a frame of nine screens is as
-        // far as any gesture between two frames reaches.
-        // A globe the fingers turn is never slid to show a margin (1762):
-        // its frame is the screen alone, less than half the pixels.
-        let (mx, my) = match loquax::mapframe::turns_as(loquax::picture::world_shape(), &view) {
-            Some(_) => (0, 0),
-            None => (
-                request.margin_x.min(area.width.into()),
-                request.margin_y.min(area.height.into()),
-            ),
-        };
+        // far as any gesture between two frames reaches. The margins are
+        // the request's, never decided here (1796): Java sized the Bitmap
+        // by them before the call, so the frame is the Bitmap. A globe the
+        // fingers turn is never slid to show a margin (1762), and Java
+        // asks none while the last frame turned; a frame that starts or
+        // stops turning is drawn with what was asked, which only costs or
+        // saves pixels. Deciding them here broke every globe frame on
+        // 2026-11-13: "map: the bitmap is 1836x3295, the frame 1224x2197".
+        let (mx, my) = (
+            request.margin_x.min(area.width.into()),
+            request.margin_y.min(area.height.into()),
+        );
         let mut tapped = None;
         if let (Some(x), Some(y)) = (request.tap_x, request.tap_y) {
             // The pins were placed in the last frame, margins included.
@@ -705,6 +713,7 @@ impl Renderer {
             tile_zoom: shot.tile_zoom,
             pending: shot.missing > 0 || shot.fading,
             min_zoom: zoom_floor(area, &setup),
+            min_zoom_milli: floor,
             max_zoom: setup.zooms.1,
             selected: selected.map(|p| loquax::address::to_hex(&p)),
             attribution: shot.attribution,

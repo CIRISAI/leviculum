@@ -505,7 +505,8 @@ final class MapPane implements MapView.Listener {
     @Override
     public void onShown(Map<String, Object> shown) {
         if (!Core.bool(shown, "ok")) {
-            say(Core.str(shown, "error"));
+            // A frame that was not drawn is the library's to explain, not
+            // the user's (1796): MapView logged it, the next frame comes.
             return;
         }
         lastShown = shown;

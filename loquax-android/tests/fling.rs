@@ -528,3 +528,42 @@ fn a_form_fields_hint_is_the_pages_words_before_it() {
     );
     assert!(out.contains("5 checks passed"), "{out}");
 }
+
+/// The map frame's size and the pinch's floor (1796): `MapFrame.java`,
+/// the part of `MapView` that sizes the Bitmap, reuses it and stops a
+/// pinch, run on the host with `tests/java/MapFrameTest.java`. The phone of
+/// 2026-11-13 drew nothing past its first globe frame: the Bitmap kept the
+/// flat frame's margins while the globe's frame had none.
+#[test]
+fn the_map_bitmap_follows_the_frame_and_the_pinch_stops_at_the_world() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mapframe-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/MapFrame.java"))
+        .arg(manifest.join("tests/java/MapFrameTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.MapFrameTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}

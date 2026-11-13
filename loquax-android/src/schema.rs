@@ -3042,6 +3042,11 @@ pub struct MapShown {
     /// The shallowest and the deepest zoom the regions allow.
     pub min_zoom: u8,
     pub max_zoom: u8,
+    /// The shallowest zoom the view may show, thousandths (1796): where the
+    /// world at its smallest fills the screen, the globe's disk its
+    /// shorter side and Equal Earth its width. A pinch stops here.
+    #[serde(default)]
+    pub min_zoom_milli: u32,
     pub selected: Option<String>,
     /// The credit the frame carries.
     pub attribution: String,
