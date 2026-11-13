@@ -509,7 +509,7 @@ pub fn taken_px(taken: &[(u16, u16, u16)]) -> Vec<LabelRect> {
 /// only the places at z3: the world view's names ([`outline::NAMES_M9`],
 /// countries, seas, ranges, deserts and its places) join them (1683). A
 /// name both tables carry is placed once, by the map core's rule (see
-/// [`place_found`]). Without it a name
+/// `place_found`). Without it a name
 /// stays on the ground the region covers (1727): off it the picture is
 /// the background, and a name there would name nothing drawn.
 pub fn names(
@@ -710,7 +710,7 @@ fn nudged_in(
 }
 
 /// How far the board moves a place's name off its point to fit it in the
-/// picture whole ([`nudged_in`]): one cell, as far as the cell pass the
+/// picture whole (`nudged_in`): one cell, as far as the cell pass the
 /// board set its names on before the phone's (1531 to 1565) set a name
 /// off its point. At the phone's sizes times [`SCALE`] a name near the
 /// picture's edge is wider than the old 10 pixel cells made it; without
@@ -724,7 +724,7 @@ pub const NUDGE_PX: u16 = CELL_PX.0;
 /// and no further (1727; the margin reaching past the cell cost the z6
 /// overview its names, the audit of 1757).
 pub fn chip_boxes(scale: f32) -> Vec<LabelRect> {
-    let margin = (mapnames::MARGIN * scale).round() as i32;
+    let margin = libm::roundf(mapnames::MARGIN * scale) as i32;
     let chips: Vec<(u16, u16, u16)> = CHIP_ROWS.iter().map(|&r| (0, r, PICTURE.width)).collect();
     taken_px(&chips)
         .into_iter()
