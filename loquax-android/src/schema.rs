@@ -3104,6 +3104,12 @@ pub struct MapShown {
     /// `map_fling`, on when unset.
     #[serde(default)]
     pub fling: bool,
+    /// The frame is the globe, which a drag turns about its centre (1762):
+    /// the app keeps the frame where it is while a finger moves, instead
+    /// of sliding it with the finger, and the next frame shows the globe
+    /// turned. An older core sends none, false, and the app slides it.
+    #[serde(default)]
+    pub turns: bool,
     /// How many view pixels the view's centre may still move north, and
     /// south, before the view is held at the world's edge (1131, 1188):
     /// what a coast may travel. x has no edge, the world goes round.

@@ -45,6 +45,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use leviculum_map::blend::{Blend, Shape};
 use leviculum_map::labels::{LabelKind, Rect, ViewLabel, SUBPIXEL};
 use leviculum_map::ladder::{Ladder, Layers, Pass};
 use leviculum_map::viewport::{ExactView, Viewport, MILLI};
@@ -1416,14 +1417,54 @@ fn nanos(started: Instant) -> u64 {
 
 /// `view` as every frontend shows it: one world at most, the zoom between
 /// `floor` and `ceiling` (the regions' deepest, never above the floor's
-/// clamp) about the centre.
+/// clamp) about the centre. Through the product's world projection
+/// ([`hold_as`]).
 pub fn hold(view: ExactView, floor: u8, ceiling: u8) -> ExactView {
+    hold_as(crate::picture::world_shape(), view, floor, ceiling)
+}
+
+/// [`hold`] for a world projection `shape`. A view the globe turns
+/// ([`turns_as`]) keeps its centre's latitude (1762): `one_world` pins a
+/// world view on a screen taller than Mercator's world to its middle row,
+/// which on the phone in portrait kept the globe from ever turning north
+/// or south. Equal Earth and the flat map keep the rule.
+pub fn hold_as(shape: Shape, view: ExactView, floor: u8, ceiling: u8) -> ExactView {
     let (floor, ceiling) = (u32::from(floor) * MILLI, u32::from(ceiling) * MILLI);
     let mut v = view.one_world();
     let z = v.zoom_milli().clamp(floor, ceiling.max(floor));
     let (cx, cy) = (f64::from(v.size().0) / 2.0, f64::from(v.size().1) / 2.0);
     v.zoom_about(z, cx, cy);
-    v.one_world()
+    let mut held = v.one_world();
+    if turns_as(shape, &held).is_some() {
+        held.centre.y = view.centre.y;
+    }
+    held
+}
+
+/// The blend a drag on `view` turns, when the world projection `shape`
+/// is the globe and the view is not yet Mercator (1762); `None` where a
+/// drag pans.
+pub fn turns_as(shape: Shape, view: &ExactView) -> Option<Blend> {
+    let (w, h) = view.size();
+    let b = Blend::new(shape, view.centre, view.zoom(), w, h);
+    (b.is_globe() && b.t() < 1.0).then_some(b)
+}
+
+/// `view` dragged by `(dx, dy)` screen pixels in [`ExactView::pan`]'s
+/// sense, through the product's world projection ([`drag_as`]).
+pub fn drag(view: &mut ExactView, dx: i32, dy: i32) {
+    drag_as(crate::picture::world_shape(), view, dx, dy);
+}
+
+/// [`drag`] for a world projection `shape`: at globe zooms the drag turns
+/// the sphere about its centre, which stays in the middle of the screen
+/// ([`Blend::turned`], the grabbed middle following the finger, north up,
+/// no flip over a pole); elsewhere it pans as it always did.
+pub fn drag_as(shape: Shape, view: &mut ExactView, dx: i32, dy: i32) {
+    match turns_as(shape, view) {
+        Some(b) => view.centre = b.turned(f64::from(dx), f64::from(dy)),
+        None => view.pan(dx, dy),
+    }
 }
 
 /// Where the point `c` of the frame `rest` is in the frame `now`: the
@@ -1465,6 +1506,48 @@ mod tests {
     use leviculum_map::mercator::{project, LatLon};
     use leviculum_mapfill::style::{MapTheme, Style};
     use std::path::PathBuf;
+
+    /// A globe view is held at the zoom bounds but not pinned to the
+    /// equator (1762): `one_world` pins a world view on a screen taller
+    /// than Mercator's world to its middle row, so on the phone in
+    /// portrait the globe could never turn north or south; Equal Earth
+    /// and the flat map keep that rule.
+    #[test]
+    fn the_hold_lets_a_globe_turn_north_and_keeps_the_flat_rule() {
+        use leviculum_map::blend::Shape;
+        let at = project(LatLon::from_degrees(60.0, 10.0));
+        let view = ExactView::new(at, 2300, 1224, 2100);
+        let globe = hold_as(Shape::Globe, view, 0, 18);
+        assert_eq!(globe.centre, at, "the globe stays turned to 60 N");
+        let flat = hold_as(Shape::EqualEarth, view, 0, 18);
+        assert_eq!(flat.centre.y, 1 << 31, "Equal Earth keeps the middle row");
+        // From the Mercator end on the globe is held as the flat map.
+        let deep = ExactView::new(at, 6000, 1224, 2100);
+        assert_eq!(
+            hold_as(Shape::Globe, deep, 0, 18),
+            hold_as(Shape::EqualEarth, deep, 0, 18)
+        );
+    }
+
+    /// A drag on a globe view turns it by the arcball amount and on the
+    /// flat map pans, both in [`ExactView::pan`]'s sense (1762).
+    #[test]
+    fn a_drag_turns_a_globe_and_pans_the_flat_map() {
+        use leviculum_map::blend::{Blend, Shape};
+        let at = project(LatLon::from_degrees(0.0, 0.0));
+        let mut view = ExactView::new(at, 2000, 1224, 2100);
+        let r = Blend::new(Shape::Globe, at, 2.0, 1224, 2100).radius();
+        drag_as(Shape::Globe, &mut view, 0, -(r * 1.2) as i32);
+        let lat = f64::from(leviculum_map::mercator::unproject(view.centre).lat_e7) * 1e-7;
+        // 1.2 rad of arc north: 68.75 degrees, where a Mercator pan of the
+        // same pixels reaches 56.9.
+        assert!((lat - 68.75).abs() < 0.2, "turned to {lat}");
+        let mut flat = ExactView::new(at, 2000, 1224, 2100);
+        let mut panned = flat;
+        drag_as(Shape::EqualEarth, &mut flat, 30, -40);
+        panned.pan(30, -40);
+        assert_eq!(flat, panned);
+    }
 
     /// The frames over the committed Florence region, which carries its
     /// names.

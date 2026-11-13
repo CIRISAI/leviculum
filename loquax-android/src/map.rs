@@ -520,7 +520,9 @@ impl Renderer {
         if request.pan_x != 0 || request.pan_y != 0 {
             self.frames
                 .pan(f64::from(request.pan_x), f64::from(request.pan_y), now);
-            view.pan(request.pan_x, request.pan_y);
+            // At globe zooms the drag turns the sphere about its centre
+            // (1762); elsewhere it pans.
+            loquax::mapframe::drag(&mut view, request.pan_x, request.pan_y);
             view = held(view);
         }
         let by = i64::from(request.zoom_by) * i64::from(MILLI) + i64::from(request.zoom_by_milli);
@@ -539,10 +541,15 @@ impl Renderer {
         }
         // At most a screen on each side: a frame of nine screens is as
         // far as any gesture between two frames reaches.
-        let (mx, my) = (
-            request.margin_x.min(area.width.into()),
-            request.margin_y.min(area.height.into()),
-        );
+        // A globe the fingers turn is never slid to show a margin (1762):
+        // its frame is the screen alone, less than half the pixels.
+        let (mx, my) = match loquax::mapframe::turns_as(loquax::picture::world_shape(), &view) {
+            Some(_) => (0, 0),
+            None => (
+                request.margin_x.min(area.width.into()),
+                request.margin_y.min(area.height.into()),
+            ),
+        };
         let mut tapped = None;
         if let (Some(x), Some(y)) = (request.tap_x, request.tap_y) {
             // The pins were placed in the last frame, margins included.
@@ -673,7 +680,14 @@ impl Renderer {
             }
             _ => None,
         };
-        let (room_north, room_south) = room(&shot.shows);
+        // A globe turns where Mercator would stop at the world's edge: a
+        // coast has all the room it wants, the turn stops at the pole.
+        let turns =
+            loquax::mapframe::turns_as(loquax::picture::world_shape(), &shot.shows).is_some();
+        let (room_north, room_south) = match turns {
+            true => (u32::MAX >> 1, u32::MAX >> 1),
+            false => room(&shot.shows),
+        };
         let shown = MapShown {
             v: VERSION,
             ok: true,
@@ -703,7 +717,13 @@ impl Renderer {
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
-            ground: ground(table),
+            ground: match turns {
+                // Round the globe the ground is its space, as the frame's.
+                true => argb(leviculum_mapfill::frame::rgb888(
+                    leviculum_map::outline::space(table),
+                )),
+                false => ground(table),
+            },
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
             theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
@@ -715,6 +735,7 @@ impl Renderer {
             own_y: own.map(|o| o.1),
             autoload: self.autoload,
             fling: self.fling,
+            turns,
             room_north,
             room_south,
             track_window: window.word().to_string(),
@@ -902,7 +923,11 @@ pub fn fling(dir: &Path, set: Option<bool>) -> Result<MapFlingChoice, String> {
 /// The map's ground in `table` as Android's `0xAARRGGBB` (1441): the
 /// land a frame is cleared to, opaque.
 fn ground(table: MapTheme) -> u32 {
-    let [r, g, b] = leviculum_mapfill::frame::rgb888(table.palette().background);
+    argb(leviculum_mapfill::frame::rgb888(table.palette().background))
+}
+
+/// An RGB colour as Android's opaque `0xAARRGGBB`.
+fn argb([r, g, b]: [u8; 3]) -> u32 {
     0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
 }
 

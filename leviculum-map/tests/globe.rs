@@ -417,3 +417,55 @@ fn a_world_view_names_countries_and_seas_not_stations() {
         bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+/// A drag turns the globe (1762): the centre moves along the great
+/// circle the drag points, by the drag's length over the globe's radius
+/// at the centre (the grabbed middle follows the finger), north stays
+/// up, and the latitude stops at Mercator's edge instead of flipping
+/// over the pole. Before 1762 a drag was a Mercator pan, whose latitude
+/// step grows with the Mercator stretch, and the view's own hold pinned
+/// a world view's centre to the equator.
+#[test]
+fn a_drag_turns_the_globe_by_the_arcball_amount() {
+    use leviculum_map::mercator::unproject;
+    let deg = |p: Point| {
+        let l = unproject(p);
+        (f64::from(l.lat_e7) * 1e-7, f64::from(l.lon_e7) * 1e-7)
+    };
+    for (lat, lon) in [(0.0, 0.0), (40.0, 10.0), (-30.0, 150.0)] {
+        let blend = Blend::new(Shape::Globe, at(lat, lon), 2.0, 1224, 2100);
+        assert_eq!(blend.t(), 0.0);
+        let r = blend.radius();
+        // Straight up the screen by 0.8 of the radius: north by 0.8 rad.
+        let up = blend.turned(0.0, -0.8 * r);
+        let (la, lo) = deg(up);
+        let want = (lat + 0.8f64.to_degrees()).min(85.05);
+        assert!((la - want).abs() < 0.01, "{lat}/{lon} up: {la} want {want}");
+        assert!((lo - lon).abs() < 1e-6, "{lat}/{lon} up: lon {lo}");
+        // East along the equator from 0/0 by half the radius.
+        if lat == 0.0 {
+            let (la, lo) = deg(blend.turned(0.5 * r, 0.0));
+            assert!(la.abs() < 1e-6 && (lo - 0.5f64.to_degrees()).abs() < 1e-6);
+        }
+        // The drag's length is the arc, any direction.
+        let p = blend.turned(0.3 * r, 0.4 * r);
+        let (la2, lo2) = deg(p);
+        let (a, b) = (lat.to_radians(), la2.to_radians());
+        let dl = (lo2 - lon).to_radians();
+        let arc = (a.sin() * b.sin() + a.cos() * b.cos() * dl.cos())
+            .clamp(-1.0, 1.0)
+            .acos();
+        assert!((arc - 0.5).abs() < 1e-6, "{lat}/{lon}: arc {arc}");
+        // The turned view's centre is the screen's middle.
+        let next = Blend::new(Shape::Globe, p, 2.0, 1224, 2100);
+        let (x, y) = next.to_screen(p);
+        assert!((x - 612.0).abs() < 1e-6 && (y - 1050.0).abs() < 1e-6);
+    }
+    // Over the pole it stops at Mercator's edge, north still up.
+    let blend = Blend::new(Shape::Globe, at(70.0, 10.0), 2.0, 1224, 2100);
+    let (la, lo) = deg(blend.turned(0.0, -blend.radius()));
+    assert!(
+        (la - 85.05).abs() < 0.01 && (lo - 10.0).abs() < 1e-6,
+        "{la}/{lo}"
+    );
+}

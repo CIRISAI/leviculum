@@ -1949,7 +1949,7 @@ impl App {
             MapCmd::Pan(dx, dy) => {
                 let eighth =
                     |side: u32, by: i8| i32::from(by) * i32::try_from(side / 8).unwrap_or(0);
-                self.view.pan(eighth(w, dx), eighth(h, dy));
+                loquax::mapframe::drag(&mut self.view, eighth(w, dx), eighth(h, dy));
                 self.hold();
             }
             MapCmd::Fit => {
@@ -2888,7 +2888,8 @@ impl App {
                     (x - press.from.0).abs() >= far || (y - press.from.1).abs() >= far;
                 if press.dragging {
                     let (dx, dy) = (press.last.0 - x, press.last.1 - y);
-                    self.view.pan(dx, dy);
+                    // At globe zooms the drag turns the sphere (1762).
+                    loquax::mapframe::drag(&mut self.view, dx, dy);
                     self.motion.pan(f64::from(dx), f64::from(dy), self.now_ms());
                     press.last = (x, y);
                     self.hold();

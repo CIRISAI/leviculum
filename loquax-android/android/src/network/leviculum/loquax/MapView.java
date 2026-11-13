@@ -231,6 +231,15 @@ final class MapView extends View {
     private int ground;
     private float offX;
     private float offY;
+    /**
+     * The last frame is the globe, which a drag turns about its centre (1762):
+     * the frame is drawn in place, scaled about the screen's middle, and the
+     * fingers' offset goes to the core as the turn.
+     */
+    private boolean turns;
+    /** The offset the last request carried, which the frame it answers turned by. */
+    private float askedX;
+    private float askedY;
     /** A finger is on the map. */
     private boolean touching;
     /** A fling coasts (1188): frames are asked as while a finger moves. */
@@ -442,8 +451,8 @@ final class MapView extends View {
         float reach = PIN_DP * density / 2f + 6 * density;
         for (int i = marks.size() - 1; i >= 0; i--) {
             Map<String, Object> mark = marks.get(i);
-            float mx = offX + scale * Core.num(mark, "x");
-            float my = offY + scale * Core.num(mark, "y");
+            float mx = shownX() + scale * Core.num(mark, "x");
+            float my = shownY() + scale * Core.num(mark, "y");
             if (Math.hypot(mx - x, my - y) <= reach) {
                 return mark;
             }
@@ -453,7 +462,7 @@ final class MapView extends View {
 
     /** Where `mark` is on the screen now. */
     synchronized float[] onScreen(Map<String, Object> mark) {
-        return new float[] {offX + scale * Core.num(mark, "x"), offY + scale * Core.num(mark, "y")};
+        return new float[] {shownX() + scale * Core.num(mark, "x"), shownY() + scale * Core.num(mark, "y")};
     }
 
     /**
@@ -759,12 +768,22 @@ final class MapView extends View {
             canvas.drawColor(ground);
         }
         canvas.save();
-        canvas.translate(offX, offY);
+        canvas.translate(shownX(), shownY());
         canvas.scale(scale, scale);
         canvas.drawBitmap(bitmap, -marginX, -marginY, paint);
         canvas.restore();
         drawOwn(canvas);
         drawMarks(canvas);
+    }
+
+    /** Where the frame's left edge is drawn: the fingers' offset, or for a turning globe in place. */
+    private float shownX() {
+        return turns ? (1 - scale) * getWidth() / 2f : offX;
+    }
+
+    /** Where the frame's top edge is drawn, as {@link #shownX}. */
+    private float shownY() {
+        return turns ? (1 - scale) * getHeight() / 2f : offY;
     }
 
     /**
@@ -775,7 +794,7 @@ final class MapView extends View {
         if (ownX == null || ownY == null || ownLat == null) {
             return;
         }
-        dot(canvas, offX + scale * ownX, offY + scale * ownY);
+        dot(canvas, shownX() + scale * ownX, shownY() + scale * ownY);
     }
 
     /** The blue dot in a ring of the background at (cx, cy). */
@@ -807,8 +826,8 @@ final class MapView extends View {
         double phase = (uptime % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
         int pulse = pulses ? (int) (255 * (0.6 + 0.4 * Math.cos(phase))) : 255;
         for (Map<String, Object> mark : marks) {
-            float cx = offX + scale * Core.num(mark, "x");
-            float cy = offY + scale * Core.num(mark, "y");
+            float cx = shownX() + scale * Core.num(mark, "x");
+            float cy = shownY() + scale * Core.num(mark, "y");
             List<String> names = strings(mark.get("peers"));
             if (names.isEmpty()) {
                 continue;
@@ -985,6 +1004,8 @@ final class MapView extends View {
                 float cy = h / 2f;
                 int panX = Math.round((cx - offX) / scale - cx);
                 int panY = Math.round((cy - offY) / scale - cy);
+                askedX = offX;
+                askedY = offY;
                 long byMilli = Math.round(1000 * Math.log(scale) / Math.log(2));
                 request = Core.map("dir", dir,
                         "w", (long) w, "h", (long) h,
@@ -1058,6 +1079,7 @@ final class MapView extends View {
                     viewH = h;
                     maxZoom = Core.num(shown, "max_zoom");
                     flingOn = Core.bool(shown, "fling");
+                    turns = Core.bool(shown, "turns");
                     roomNorth = Core.num(shown, "room_north");
                     roomSouth = Core.num(shown, "room_south");
                     Object chosen = shown.get("selected");
@@ -1156,6 +1178,15 @@ final class MapView extends View {
         // one: a the ratio of their scales, b from their centres' distance
         // in the last view's pixels, x across the antimeridian the short way.
         double a = Math.pow(2, (zoomMilli - z1) / 1000.0);
+        if (Core.bool(shown, "turns")) {
+            // The globe turned by the offset the request carried (1762), not
+            // by the Mercator distance of the centres: what is left is what
+            // the fingers did since.
+            offX -= askedX;
+            offY -= askedY;
+            scale = (float) (scale * a);
+            return;
+        }
         double unit = Math.pow(2, 24 - zoomMilli / 1000.0);
         long dx = Core.num(shown, "x") - x;
         dx = ((dx + (1L << 31)) & 0xffffffffL) - (1L << 31);

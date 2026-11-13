@@ -463,6 +463,56 @@ impl Blend {
         n
     }
 
+    /// The globe's radius in pixels: its scale at the centre, pixels per
+    /// radian of arc (1762). The world term's for Equal Earth.
+    pub fn radius(&self) -> f64 {
+        libm::sqrt(self.sx * self.sy)
+    }
+
+    /// The view's centre after a drag of `(dx, dy)` screen pixels that
+    /// turns the globe (1762), in the sense of
+    /// [`Viewport::pan`](crate::viewport::Viewport::pan): the centre moves
+    /// to where `(dx, dy)` from the middle points, along the great circle
+    /// that way, by the drag's length over the [`radius`](Self::radius),
+    /// so the grabbed middle follows the finger and a drag of the radius
+    /// turns the globe a radian. North stays up; the latitude stops at
+    /// Mercator's edge instead of going over the pole, so the picture
+    /// never flips.
+    pub fn turned(&self, dx: f64, dy: f64) -> World {
+        let r = libm::hypot(dx, dy);
+        if r < 1e-12 {
+            return self.centre;
+        }
+        let mut d = r / self.radius().max(1e-12);
+        // Along the path sin φ(s) = a cos s + b sin s: it stops where that
+        // first reaches the edge latitude, north or south.
+        let (a, b) = (self.sin0, -self.cos0 * dy / r);
+        let amp = libm::hypot(a, b);
+        let star = libm::atan2(b, a);
+        let edge = libm::sin(MERCATOR_LAT);
+        for (peak, toward) in [(star, edge), (star + PI, -edge)] {
+            // The extreme of a cos s + b sin s on this side, and the first
+            // s before it where the edge is met.
+            let peak = turn(peak);
+            if amp > edge && peak <= d + PI {
+                let s = peak - libm::acos((toward / amp).clamp(-1.0, 1.0) * toward.signum());
+                if (0.0..d).contains(&s) {
+                    d = s;
+                }
+            }
+        }
+        let (s, c) = (libm::sin(d), libm::cos(d));
+        let v = [s * dx / r, -s * dy / r, c];
+        let (lam, phi) = self.angles_of(v);
+        let phi = phi.clamp(-MERCATOR_LAT, MERCATOR_LAT);
+        let lon = self.lon0 + lam;
+        let wy = WORLD_F / 2.0 * (1.0 - libm::asinh(libm::tan(phi)) / PI);
+        World {
+            x: wrap_world((lon + PI) / TAU * WORLD_F),
+            y: wy.clamp(0.0, WORLD_F - 1.0) as u32,
+        }
+    }
+
     /// Whether everything between the relative longitudes `lam0` and
     /// `lam0 + width` and the latitudes `phi0..=phi1` (radians) lies
     /// behind the globe's horizon: a bound, never wrong the other way, so
