@@ -1568,6 +1568,42 @@ mod names_1683 {
         let (placed, _) = place_found(&apart, &view, &[], &[], &mut glyphs, SCALE);
         assert_eq!(placed.len(), 2, "the control: both points have room");
     }
+
+    /// The second audit of 1757: the copy of a text already set is dropped
+    /// before its box is reserved, so a name whose only obstacle is that
+    /// copy's box is set. Served in rank order: both copies of "Punta
+    /// Arenas" (rank 2), then "Ushuaia" (rank 1) on the second copy's
+    /// point. The control: with that copy set first, Ushuaia is not.
+    #[test]
+    fn a_name_blocked_only_by_a_dropped_copy_is_set() {
+        let view = Viewport::new(
+            leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0)),
+            3,
+            320,
+            240,
+        );
+        let ranked = |text: &str, x, y, rank| ViewLabel {
+            rank,
+            ..point(text, x, y)
+        };
+        let mut glyphs = Glyphs::new().expect("font");
+        let three = [
+            ranked("Punta Arenas", 100, 60, 2),
+            ranked("Punta Arenas", 200, 160, 2),
+            ranked("Ushuaia", 205, 165, 1),
+        ];
+        let (placed, stats) = place_found(&three, &view, &[], &[], &mut glyphs, SCALE);
+        let texts: Vec<&str> = placed.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(stats.found, 3);
+        assert_eq!(texts, ["Punta Arenas", "Ushuaia"], "{texts:?}");
+        let blocked = [
+            ranked("Punta Arenas", 200, 160, 2),
+            ranked("Ushuaia", 205, 165, 1),
+        ];
+        let (placed, _) = place_found(&blocked, &view, &[], &[], &mut glyphs, SCALE);
+        let texts: Vec<&str> = placed.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["Punta Arenas"], "the control: {texts:?}");
+    }
 }
 
 #[cfg(test)]

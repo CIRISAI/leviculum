@@ -577,6 +577,56 @@ fn the_world_overview_draws_germany_at_z6() {
         "{:?}",
         free.iter().map(|n| n.text.as_str()).collect::<Vec<_>>()
     );
+    let span = |n: &loquax::mapnames::PlacedName| {
+        n.boxes
+            .iter()
+            .fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |s, b| {
+                (s.0.min(b.x0), s.1.min(b.y0), s.2.max(b.x1), s.3.max(b.y1))
+            })
+    };
+    // Measured, pinned here (the second audit of 1757), in the picture's
+    // pixels, x0, y0, x1, y1 over the name's boxes with their halo:
+    // - Frankfurt am Main is 213 px wide at SCALE 1.6, its point lies at
+    //   x 99, so centred on it the box would start at x -7, off the
+    //   320 px picture: it is set moved in by `nudged_in`, at x 1..214.
+    // - Deutschland's box is y 24..59. The overview's words own row 1,
+    //   y 20..40, so with them it is not set; without them it clears the
+    //   top chip row (y 0..20, `chip_boxes` 5..15 grown by the margin 5).
+    let mut found = Vec::new();
+    world
+        .view_labels(&painted, true, &mut found)
+        .expect("labels");
+    leviculum_map::outline::names(leviculum_map::outline::NAMES_M9, &painted, &mut found);
+    let point = found
+        .iter()
+        .find(|l| l.text == "Frankfurt am Main")
+        .map(|l| l.anchor.0 / leviculum_map::labels::SUBPIXEL);
+    assert_eq!(point, Some(99), "Frankfurt am Main's point, x");
+    let frankfurt = span(&names[0]);
+    assert_eq!(frankfurt, (1, 86, 214, 118));
+    let wide = frankfurt.2 - frankfurt.0;
+    assert_eq!(wide, 213);
+    assert!(99 - wide / 2 < 0 && frankfurt.2 <= WIDTH as i32);
+    let deutschland = span(&free[0]);
+    assert_eq!(deutschland, (67, 24, 223, 59));
+    let row = i32::from(CELL_PX.1);
+    let words = (
+        row * i32::from(words[0].1),
+        row * (i32::from(words[0].1) + 1),
+    );
+    assert_eq!(words, (20, 40), "the overview's words' row");
+    assert!(
+        deutschland.1 < words.1 && deutschland.3 > words.0,
+        "under the words"
+    );
+    let margin = libm::roundf(loquax::mapnames::MARGIN * map::SCALE) as i32;
+    let chip = map::chip_boxes(map::SCALE)[0];
+    assert_eq!(
+        (chip.y0 - margin, chip.y1 + margin),
+        (0, row),
+        "the top chip row"
+    );
+    assert!(deutschland.1 >= chip.y1 + margin, "clear of the chip row");
     if let Some(state) = model.map.as_mut() {
         state.zoom = 12;
     }

@@ -1182,13 +1182,17 @@ card; the rule keeps a name out of their cells and no further
 (`chip_boxes`, `loquax-m9/src/map.rs:729`, which shrinks each row by the
 rule's margin, since the rule grows every box it keeps clear by it). A
 region's names stay on the ground the region is drawn on (1727,
-`outside_of`, `loquax-m9/src/map.rs:557`). Parks and waters come from
+`outside_of`, `loquax-m9/src/map.rs:557`), except in the world
+overview, which is drawn over the whole picture. Parks and waters come from
 z15 (1531, `POI_ZOOM`, `loquax-m9/src/map.rs:455`). In the world
 overview the world table's names (`outline::NAMES_M9`: countries, seas,
 ranges, deserts and its places) join the overview region's (1683),
 anywhere on the picture and clear of the overview's two rows of words;
 a text both tables carry is set once by the core's own rule, a place's
-text once a view. A place's name that would leave the picture by at
+text once a view: the core drops the copy of a text it has set before it
+reserves the copy's box, so the copy blocks no other name (the second
+audit of 1757; the unit test `a_name_blocked_only_by_a_dropped_copy_is_set`
+goes red without that rule). A place's name that would leave the picture by at
 most one cell is moved in to fit (`NUDGE_PX`,
 `loquax-m9/src/map.rs:721`), as far as the cell pass set a name off its
 point: at 1.6 times "Frankfurt am Main" over Germany at z6 is 7 pixels
