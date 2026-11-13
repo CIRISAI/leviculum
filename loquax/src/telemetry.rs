@@ -7,7 +7,10 @@
 //! - `FIELD_TELEMETRY`, one node's own readings. Who measured is the
 //!   message's signed source, except in a group's copy of a member's
 //!   message: the home signs that with the group, and the writer travels in
-//!   `lev.group_copy` (1687).
+//!   `lev.group_copy` (1687). That name is a claim the signature does not
+//!   cover; [`read`] files under the source, and only the caller, who
+//!   knows the reader's groups, may file under the claimed writer
+//!   ([`read_as`], [`claimed_writer`]).
 //! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Who measured is the row's
 //!   source hash; the message's source only delivered it (`via`).
 //!
@@ -165,17 +168,31 @@ pub fn has_telemetry(fields: &[Field]) -> bool {
 }
 
 /// The positions in `fields`, from a message whose signed source is
-/// `source`, received at `received_at`.
+/// `source`, received at `received_at`: the message's own readings filed
+/// under `source`, whatever writer a `lev.group_copy` names.
 pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Read {
+    read_as(source, source, fields, received_at)
+}
+
+/// The writer a group copy names (1687): `lev.group_copy`'s sender. Any
+/// sender can put any address there, so the name is worth what its signed
+/// source is: the caller files a fix under it only when the source is a
+/// group the reader has joined whose membership lists the writer, not as
+/// left (`ui::copy_writer`, the audit of 1757).
+pub fn claimed_writer(fields: &[Field]) -> Option<leviculum_lxmf::lev::GroupCopy> {
+    Lev::from_fields(fields).and_then(|lev| lev.group_copy)
+}
+
+/// [`read`] with the message's own readings filed under `writer`, which
+/// the caller has established: the source itself, or the member of the
+/// source's group a checked group copy names. `via` stays `source`.
+pub fn read_as(
+    writer: [u8; 16],
+    source: [u8; 16],
+    fields: &[Field],
+    received_at: Option<i64>,
+) -> Read {
     let mut out = Read::default();
-    // 1687: the home sends a group's copy of a member's message under the
-    // group's own address, so the source is the group and the writer is in
-    // `lev.group_copy`. A position a member shared into a group belongs to
-    // that member: read under the source alone, every such pin landed on
-    // the group, a place nobody stands.
-    let writer = Lev::from_fields(fields)
-        .and_then(|lev| lev.group_copy)
-        .map_or(source, |copy| copy.sender);
     let fix = |peer: [u8; 16], location: Location, telemetry: &[u8]| Fix {
         peer,
         via: source,
@@ -781,11 +798,13 @@ mod tests {
 
     /// 1687: the home sends a group's copy of a member's message under the
     /// group's own address, so the message's signed source is the group and
-    /// the writer travels in `lev.group_copy`. Read under the source alone,
-    /// every position shared into a group landed on the group: a pin for a
-    /// place nobody stands, and the member who shared it went unmarked.
+    /// the writer travels in `lev.group_copy`. The claim is read out for
+    /// the caller, who knows the reader's groups; [`read`] alone files
+    /// under the signed source (the audit of 1757: a stranger's "copy"
+    /// moved anyone's pin), [`read_as`] under the writer the caller
+    /// established, the group as `via`.
     #[test]
-    fn a_group_copys_position_belongs_to_its_writer() {
+    fn a_group_copys_writer_is_a_claim_the_caller_checks() {
         use leviculum_lxmf::lev::{GroupCopy, Lev};
 
         const GROUP: [u8; 16] = [0x60; 16];
@@ -803,14 +822,20 @@ mod tests {
             FIELD_TELEMETRY,
             report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
         ));
+        let claim = claimed_writer(&fields).expect("a claim");
+        assert_eq!((claim.sender, claim.epoch), (BOB, 3));
         let read = read(GROUP, &fields, Some(NOW));
         assert!(read.unreadable.is_empty());
-        assert_eq!(read.fixes.len(), 1);
+        let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
+        assert_eq!(who, [(GROUP, GROUP)], "the signed source, not the claim");
+        let read = read_as(BOB, GROUP, &fields, Some(NOW));
+        let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
         assert_eq!(
-            (read.fixes[0].peer, read.fixes[0].via),
-            (BOB, GROUP),
+            who,
+            [(BOB, GROUP)],
             "the writer measured it; the group delivered the copy"
         );
+        assert_eq!(claimed_writer(&[]), None);
     }
 
     fn stream(rows: &[([u8; 16], Location)]) -> Vec<u8> {

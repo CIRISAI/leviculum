@@ -100,7 +100,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 39 | Move the phone | `ProfileActivity.java:433` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:685` | `loquax/src/gui.rs:1559`, `loquax/src/gui.rs:3184` (the shared overlay) (1371) | `loquax/src/ui.rs:5786` |
-| 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:191` | `loquax/src/gui/chat.rs:444` (gear) | `loquax/src/ui.rs:7934` (`S`, palette `settings`) |
+| 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:191` | `loquax/src/gui/chat.rs:444` (gear) | `loquax/src/ui.rs:7980` (`S`, palette `settings`) |
 | 43 | Browse tab | `BrowsePane.java:499` (behind `browse_tab`) | `loquax/src/gui.rs:3209`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1714`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:339` | `loquax/src/gui.rs:441`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:743`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:69` | `loquax/src/gui.rs:586` (1341) | n/a |

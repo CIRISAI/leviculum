@@ -656,9 +656,12 @@ Additions (decided):
      every field of the original but the custom ones verbatim, the
      telemetry field included (`copy` (`loquax/src/home/group.rs:1397`),
      the field loop at lines 1407 to 1426), and its LXMF source is the
-     group, so `read` (`loquax/src/telemetry.rs:169`) books a plain
-     telemetry field under the writer `lev.group_copy` names, not under
-     the group the copy came from (1687).
+     group, so the reader books a plain telemetry field under the writer
+     `lev.group_copy` names, not under the group the copy came from
+     (1687), where its group vouches for that writer: a group the reader
+     has joined whose membership lists the writer, not as left
+     (`copy_writer`, `loquax/src/ui.rs:6709`, the audit of 1757). Any
+     other named writer files nothing.
    - *Home out of reach* (the field): the position announce sealed
      under the group key. Announces travel several hops with no host,
      it is one transmission for all, and only members can read it. The

@@ -6675,7 +6675,15 @@ fn take_telemetry<B>(
     }
     let source = conversation.peer;
     let key = message.activity;
-    let read = telemetry::read(source, &message.fields, model.now.map(|now| now.unix_secs));
+    let received = model.now.map(|now| now.unix_secs);
+    // A group copy's writer only where the reader's group vouches for it
+    // (the audit of 1757); a claim that does not hold files no position,
+    // and a blob that did not decode is named all the same.
+    let writer = copy_writer(&model.groups, source, &message.fields);
+    let mut read = telemetry::read_as(writer.unwrap_or(source), source, &message.fields, received);
+    if writer.is_none() {
+        read.fixes.clear();
+    }
     let mut effects = Vec::new();
     for unreadable in &read.unreadable {
         effects.push(UiEffect::Log(telemetry::unreadable_line(
@@ -6691,10 +6699,37 @@ fn take_telemetry<B>(
     effects
 }
 
+/// Whose position the readings of a message from `source` with `fields`
+/// are (1687, the audit of 1757): the source's own, unless the fields name
+/// a group copy's writer. That name is the writer only when `source` is a
+/// group the reader has joined, the copy's epoch is one the reader knows
+/// (at most the group's newest), and that membership lists the writer and
+/// does not mark it as left. Any other named writer is a claim nobody
+/// vouches for: `None`, the readings are filed under no one.
+pub fn copy_writer(
+    groups: &groups::Groups,
+    source: [u8; 16],
+    fields: &[Field],
+) -> Option<[u8; 16]> {
+    let Some(copy) = telemetry::claimed_writer(fields) else {
+        return Some(source);
+    };
+    let group = groups.get(&source)?;
+    let listed = group
+        .members
+        .iter()
+        .any(|m| m.address == copy.sender && !m.left);
+    (group.standing == groups::Standing::Joined && copy.epoch <= group.epoch && listed)
+        .then_some(copy.sender)
+}
+
 /// The fix a message from `peer` carries, the one its position line names
 /// ([`telemetry::shown_fix`]): a report's, and a text's that came with a
-/// telemetry field. `None` for one of ours, which is our position and not
-/// the peer's, and for a message without a readable position.
+/// telemetry field, filed under `peer`, the message's signed source,
+/// whatever writer a group copy names: this knows no groups to check that
+/// name by (the model's [`UiModel::message_fix`] does, [`copy_writer`]).
+/// `None` for one of ours, which is our position and not the peer's, and
+/// for a message without a readable position.
 pub fn message_fix(peer: [u8; 16], message: &Message) -> Option<Fix> {
     if message.outbound || !telemetry::has_telemetry(&message.fields) {
         return None;
@@ -6790,7 +6825,18 @@ impl<B> UiModel<B> {
             // A position we shared (1201) is ours: its line shows where we
             // were, measured by us.
             true => self.address.and_then(|own| own_fix(own, message)),
-            false => message_fix(conversation.peer, message),
+            // A group copy's writer where the reader's group vouches for
+            // it, the source's own reading where no copy is claimed, and
+            // nothing for a claim that does not hold (the audit of 1757).
+            false => {
+                let writer = copy_writer(&self.groups, conversation.peer, &message.fields)?;
+                if !telemetry::has_telemetry(&message.fields) {
+                    return None;
+                }
+                let received = message.at.map(|at| at.unix_secs);
+                let read = telemetry::read_as(writer, conversation.peer, &message.fields, received);
+                telemetry::shown_fix(&read).cloned()
+            }
         }
     }
 
@@ -14767,6 +14813,272 @@ pub(crate) mod tests {
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
         model.delete_conversation(PEER, true);
         assert!(model.positions.is_empty());
+    }
+
+    // The writer a group copy names (1687, the audit of 1757): a
+    // position under `lev.group_copy.sender` only when the message's
+    // signed source is a group the reader has joined, that group's
+    // membership lists the writer and does not mark it as left.
+
+    const GROUP: [u8; 16] = [0x6f; 16];
+    const STRANGER: [u8; 16] = [0x5e; 16];
+    const READER: [u8; 16] = [0x0e; 16];
+
+    /// A group copy's fields: `writer` at `epoch`, with a fix at `lat`
+    /// taken `ago` seconds before 14:00.
+    fn copied_report(writer: [u8; 16], epoch: u64, lat: i32, ago: i64) -> Vec<(i64, Vec<u8>)> {
+        use leviculum_lxmf::lev::Lev;
+        let mut fields = Vec::new();
+        Lev {
+            group_copy: Some(leviculum_lxmf::lev::GroupCopy {
+                sender: writer,
+                sent_ms: 1,
+                epoch,
+            }),
+            ..Lev::default()
+        }
+        .put_into(&mut fields);
+        fields.extend(report_of(&fix_at(lat, 13_000_000, two_pm() - ago)));
+        fields
+    }
+
+    /// The reader in GROUP at epoch 1, its members as `(address, left)`.
+    fn in_group(
+        model: &mut UiModel<Field>,
+        standing: groups::Standing,
+        members: &[([u8; 16], bool)],
+    ) {
+        model.groups.insert(
+            GROUP,
+            groups::GroupInfo {
+                standing,
+                epoch: 1,
+                members: members
+                    .iter()
+                    .map(|&(address, left)| groups::GroupMember {
+                        address,
+                        name: String::new(),
+                        admin: false,
+                        joined: true,
+                        left,
+                    })
+                    .collect(),
+                ..groups::GroupInfo::new(GROUP)
+            },
+        );
+    }
+
+    /// The peers the model's store writes file a position under.
+    fn stored_under(model: &mut UiModel<Field>) -> Vec<[u8; 16]> {
+        model
+            .take_writes()
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Position(f) => Some(f.peer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A stranger, no group at all, sends a "group copy" that names PEER:
+    /// PEER's pin stays where PEER put it, and the store files nothing
+    /// under PEER.
+    #[test]
+    fn audit_a_strangers_group_copy_moves_no_ones_pin() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(52_000_000, 13_000_000, two_pm() - 600)),
+        );
+        let _ = model.take_writes();
+        arrive(
+            &mut model,
+            STRANGER,
+            2,
+            "",
+            copied_report(PEER, 1, 10_000_000, 60),
+        );
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
+        assert!(!stored_under(&mut model).contains(&PEER));
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == STRANGER)
+            .expect("row");
+        let m = model.conversations[c].messages.len() - 1;
+        assert_ne!(model.message_fix(c, m).map(|f| f.peer), Some(PEER));
+        let message = &model.conversations[c].messages[m];
+        assert_ne!(message_fix(STRANGER, message).map(|f| f.peer), Some(PEER));
+    }
+
+    /// A contact's message naming another contact as the writer of a
+    /// group copy does not overwrite that contact's pin, though its fix is
+    /// newer.
+    #[test]
+    fn audit_a_contacts_group_copy_cannot_overwrite_another_contacts_pin() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            OTHER,
+            1,
+            "",
+            report_of(&fix_at(48_000_000, 11_000_000, two_pm() - 600)),
+        );
+        let _ = model.take_writes();
+        arrive(
+            &mut model,
+            PEER,
+            2,
+            "",
+            copied_report(OTHER, 1, 10_000_000, 60),
+        );
+        assert_eq!(model.positions[&OTHER].location.latitude_e6, 48_000_000);
+        assert!(!stored_under(&mut model).contains(&OTHER));
+    }
+
+    /// A joined group's copy naming someone its membership does not list
+    /// is refused: no pin, no store row for them.
+    #[test]
+    fn a_joined_groups_copy_naming_a_non_member_is_refused() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        in_group(&mut model, groups::Standing::Joined, &[(PEER, false)]);
+        arrive(
+            &mut model,
+            GROUP,
+            1,
+            "",
+            copied_report(OTHER, 1, 10_000_000, 60),
+        );
+        assert!(!model.positions.contains_key(&OTHER));
+        assert!(!stored_under(&mut model).contains(&OTHER));
+    }
+
+    /// A joined group's copy naming a member the membership marks as left
+    /// is refused, and so is one from a newer epoch than the reader knows
+    /// and one from a group the reader has left.
+    #[test]
+    fn a_group_copy_naming_a_member_who_left_is_refused() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        in_group(
+            &mut model,
+            groups::Standing::Joined,
+            &[(PEER, false), (OTHER, true)],
+        );
+        arrive(
+            &mut model,
+            GROUP,
+            1,
+            "",
+            copied_report(OTHER, 1, 10_000_000, 60),
+        );
+        assert!(!model.positions.contains_key(&OTHER));
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            copied_report(PEER, 2, 10_000_000, 60),
+        );
+        assert!(
+            !model.positions.contains_key(&PEER),
+            "an epoch not known yet"
+        );
+        in_group(&mut model, groups::Standing::Left, &[(PEER, false)]);
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            copied_report(PEER, 1, 10_000_000, 60),
+        );
+        assert!(!model.positions.contains_key(&PEER), "a group left");
+        assert!(stored_under(&mut model).is_empty());
+    }
+
+    /// The positive control: a joined group's copy naming a current member
+    /// is filed under that member, in the model, in the store and on the
+    /// message.
+    #[test]
+    fn a_group_copy_naming_a_current_member_is_filed_under_them() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        in_group(
+            &mut model,
+            groups::Standing::Joined,
+            &[(PEER, false), (OTHER, false)],
+        );
+        let _ = model.take_writes();
+        arrive(
+            &mut model,
+            GROUP,
+            1,
+            "",
+            copied_report(OTHER, 1, 10_000_000, 60),
+        );
+        assert_eq!(model.positions[&OTHER].location.latitude_e6, 10_000_000);
+        assert_eq!(model.positions[&OTHER].via, GROUP);
+        assert!(!model.positions.contains_key(&GROUP));
+        assert_eq!(stored_under(&mut model), [OTHER]);
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == GROUP)
+            .expect("row");
+        let m = model.conversations[c].messages.len() - 1;
+        assert_eq!(model.message_fix(c, m).map(|f| f.peer), Some(OTHER));
+    }
+
+    /// A forged copy never reaches the store, so a restart brings back no
+    /// pin for the peer it named: the model rebuilt from the store has
+    /// PEER's own fix, not the forged one.
+    #[cfg(feature = "history")]
+    #[test]
+    fn a_forged_group_copy_is_not_stored_nor_restored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.db");
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            OTHER,
+            1,
+            "",
+            copied_report(PEER, 1, 10_000_000, 60),
+        );
+        arrive(
+            &mut model,
+            STRANGER,
+            2,
+            "",
+            copied_report(PEER, 1, 11_000_000, 30),
+        );
+        let writes = model.take_writes();
+        assert!(
+            !writes
+                .iter()
+                .any(|w| matches!(w, StoreWrite::Position(f) if f.peer == PEER)),
+            "{writes:?}"
+        );
+        {
+            let mut store = crate::store::Store::open(&path, READER).expect("store");
+            store.write(&writes).expect("write");
+        }
+        let store = crate::store::Store::open(&path, READER).expect("store again");
+        let mut again = UiModel::<Field>::new(&[]);
+        again.restore_positions(store.positions().expect("positions"));
+        assert!(
+            !again.positions.contains_key(&PEER),
+            "{:?}",
+            again.positions.keys()
+        );
+        assert!(again.map_pins().iter().all(|p| p.peer != PEER));
     }
 
     /// A node's `lev.position` announce at `lat`, fixed `ago` seconds

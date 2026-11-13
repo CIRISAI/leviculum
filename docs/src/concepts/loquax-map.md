@@ -30,8 +30,9 @@ fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 fields beside id, source, title, body and the verification
 (`loquax/src/engine.rs:525`, `loquax/src/outbox.rs:330`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
-`loquax/src/telemetry.rs:169`; a group's copy books its position under
-the writer, not the group), the screen model keeps each peer's latest
+`loquax/src/telemetry.rs:173`; a group's copy books its position under
+the writer, not the group, where the reader's group lists that writer,
+`copy_writer`, `loquax/src/ui.rs:6709`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
 `loquax/src/ui.rs:6661`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:3798`) and the positions in a table of
