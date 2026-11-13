@@ -1104,6 +1104,14 @@ async fn serial_reconnect_task(
                 // the bring-up, the queries and the data alike.
                 // Off until `serial_mux::bring_up` below has settled it.
                 let mut port = super::serial_mux::SerialMuxPort::new(port, false);
+                // Subscribed before the port is said to be online, and held
+                // through the bring-up below: a request made after that line
+                // is about this board, and the io task serves it once it
+                // runs. Subscribed later, inside the io task, a request in
+                // the two seconds of bring-up, or in the microseconds
+                // between the attach query and the subscription, met no
+                // receiver and was dropped (1769).
+                let firmware_requests = firmware_request_channel().subscribe();
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 counters.set_online(true);
@@ -1180,13 +1188,14 @@ async fn serial_reconnect_task(
                 // A write failure leaves the io task to find the port dead.
                 ask_duty_hold_state(&mut port, &name).await;
 
-                outgoing_rx = serial_io_task(
+                outgoing_rx = serial_io_task_subscribed(
                     name.clone(),
                     port,
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
                     config.test_drop_direct_ingress,
+                    firmware_requests,
                 )
                 .await;
                 counters.set_online(false);
@@ -1843,6 +1852,11 @@ fn log_serial_tx_drop(name: &str, pkt: &OutgoingPacket, reason: &str) {
 }
 
 /// Returns `outgoing_rx` on port loss for reconnect reuse.
+///
+/// Subscribes to the firmware requests itself, on entry; the reconnect
+/// loop uses [`serial_io_task_subscribed`] instead, because it has to be
+/// listening before the bring-up, not after it.
+#[cfg(test)]
 async fn serial_io_task<S>(
     name: String,
     port: S,
@@ -1854,6 +1868,32 @@ async fn serial_io_task<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    serial_io_task_subscribed(
+        name,
+        port,
+        incoming_tx,
+        outgoing_rx,
+        counters,
+        drop_direct_ingress,
+        firmware_request_channel().subscribe(),
+    )
+    .await
+}
+
+/// [`serial_io_task`] with the firmware-request receiver the caller took
+/// when the port opened, so nothing asked between then and now is lost.
+async fn serial_io_task_subscribed<S>(
+    name: String,
+    port: S,
+    incoming_tx: mpsc::Sender<IncomingPacket>,
+    outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+    counters: Arc<InterfaceCounters>,
+    drop_direct_ingress: bool,
+    firmware_requests: tokio::sync::broadcast::Receiver<FirmwareRequest>,
+) -> mpsc::Receiver<OutgoingPacket>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let outgoing_rx = serial_io_loop(
         name.clone(),
         port,
@@ -1861,6 +1901,7 @@ where
         outgoing_rx,
         Arc::clone(&counters),
         drop_direct_ingress,
+        firmware_requests,
     )
     .await;
     // Every way out of the loop is the interface going down.
@@ -1876,6 +1917,7 @@ async fn serial_io_loop<S>(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     drop_direct_ingress: bool,
+    mut firmware_requests: tokio::sync::broadcast::Receiver<FirmwareRequest>,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1885,11 +1927,10 @@ where
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
-    // Subscribed here rather than at spawn: a request made while the
-    // port was down was not made about the board that just came back,
-    // and acting on it would reboot (or announce from) a board nobody
-    // asked about.
-    let mut firmware_requests = firmware_request_channel().subscribe();
+    // The receiver was taken when the port opened, not at spawn: a request
+    // made while the port was down was not made about the board that just
+    // came back, and acting on it would reboot (or announce from) a board
+    // nobody asked about.
     // Borrowed once for the whole task: the read path and the media
     // verbs' wait hand frames on through the same one.
     let ingress = Ingress {
