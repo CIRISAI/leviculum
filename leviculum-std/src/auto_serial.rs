@@ -1557,13 +1557,24 @@ mod tests {
         fn pty() -> (std::fs::File, PathBuf) {
             let mut master = 0;
             let mut slave = 0;
-            // SAFETY: openpty writes two fds; the name pointer may be null.
+            // Raw from the start, as a UART is: a pty's line discipline
+            // starts cooked and echoes, so bytes the board side wrote
+            // before the probe set raw came back to it as `^@` and CR LF,
+            // and the chatter test read its own frame (1762's workspace
+            // run, 2026-11-13).
+            // SAFETY: a zeroed termios is a valid argument to cfmakeraw,
+            // which only sets its flags.
+            let mut raw: libc::termios = unsafe { std::mem::zeroed() };
+            // SAFETY: `raw` is a termios we own.
+            unsafe { libc::cfmakeraw(&mut raw) };
+            // SAFETY: openpty writes two fds; the name pointer may be null,
+            // the termios is ours.
             let rc = unsafe {
                 libc::openpty(
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
+                    &raw,
                     std::ptr::null(),
                 )
             };
