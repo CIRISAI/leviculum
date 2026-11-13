@@ -953,12 +953,16 @@ fn no_name_in_the_chip_rows_nor_off_the_region() {
     );
 }
 
-/// 1683: a name both the world table and the overview region carry is
-/// set once. Over Patagonia at z3 the overview region's places and the
-/// world table both hold "Punta Arenas"; the board's pass sets it once.
-/// The control: both tables are read, so the name is found twice.
+/// 1683: the board reads both the world table and the overview region,
+/// and one name comes of a text both carry. Over Patagonia at z3 both hold
+/// "Punta Arenas" (found twice, the control), and the pass sets one.
+/// Here the two copies lie on almost the same point, so the label rule's
+/// overlap test alone drops the second: this pins that both tables are
+/// read and one name is set, not the core's once-a-view rule. That rule
+/// is `place_found`'s unit test `a_text_on_two_points_is_set_once`, whose
+/// copies stand apart (the audits of 1787).
 #[test]
-fn a_name_both_tables_carry_is_set_once() {
+fn both_tables_are_read_and_one_shared_name_is_set() {
     use leviculum_map::mercator::{project, LatLon};
     use leviculum_map::viewport::Viewport;
 

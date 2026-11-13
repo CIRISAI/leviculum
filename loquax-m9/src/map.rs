@@ -683,7 +683,6 @@ fn nudged_in(
 ) -> Vec<(usize, ViewLabel)> {
     use mapnames::Shaper;
     let sub = leviculum_map::labels::SUBPIXEL;
-    let pad = libm::ceilf(mapnames::HALO * scale) as usize + 1;
     let w = i64::from(w) * sub;
     let reach = i64::from(NUDGE_PX) * sub;
     let mut out = Vec::new();
@@ -691,17 +690,21 @@ fn nudged_in(
         if l.kind.is_line() {
             continue;
         }
-        let (mw, _) = glyphs.extent(&l.text, mapnames::size_of(l.kind) * scale, pad, false);
-        // Half the text's width in sub-pixels, rounded up, so the box the
-        // rule makes (its edges rounded outward) starts at 0 at the least.
-        let half = i64::try_from(mw.saturating_sub(2 * pad)).unwrap_or(i64::MAX) * sub;
-        let half = half / 2 + half % 2 + sub;
+        // The inked width alone: the halo's pad is added on both sides by
+        // `extent` and would only be taken off again.
+        let (mw, _) = glyphs.extent(&l.text, mapnames::size_of(l.kind) * scale, 0, false);
+        // Half the text's width in sub-pixels (exact: `SUBPIXEL` is even)
+        // and one pixel more, so the box the rule makes (its edges rounded
+        // outward) starts at 0 at the least.
+        let half = i64::try_from(mw).unwrap_or(i64::MAX).saturating_mul(sub) / 2 + sub;
+        // The nearest anchor that keeps the text whole in the picture: the
+        // point itself where it fits, so no move; a text wider than the
+        // picture gets `half`, which the rule then refuses as outside.
         let x = l.anchor.0;
-        let to = match (x < half, x > w - half) {
-            (true, false) if half - x <= reach => half,
-            (false, true) if x - (w - half) <= reach => w - half,
-            _ => continue,
-        };
+        let to = x.min(w - half).max(half);
+        if to == x || (to - x).abs() > reach {
+            continue;
+        }
         let mut moved = l.clone();
         moved.anchor.0 = to;
         out.push((i, moved));
@@ -1564,5 +1567,171 @@ mod names_1683 {
         let apart = [point("Punta Arenas", 100, 80), point("Ushuaia", 200, 160)];
         let (placed, _) = place_found(&apart, &view, &[], &[], &mut glyphs, SCALE);
         assert_eq!(placed.len(), 2, "the control: both points have room");
+    }
+}
+
+#[cfg(test)]
+mod nudge_1787 {
+    use super::*;
+    use leviculum_map::labels::{LabelKind, SUBPIXEL};
+
+    /// The name the audit of 1757 lost over Germany at z6: 214 pixels
+    /// wide with its halo at [`SCALE`], so a point within 107 pixels of an
+    /// edge puts it partly outside.
+    const TEXT: &str = "Frankfurt am Main";
+
+    /// The picture's width and its two chip rows' inner edges, in pixels.
+    const W: i32 = 320;
+    const TOP_ROW_END: i32 = CELL_PX.1 as i32;
+    const BOTTOM_ROW_TOP: i32 = BOTTOM as i32 * CELL_PX.1 as i32;
+
+    /// `TEXT` set as a city with its anchor at `x` sub-pixels across and
+    /// `y` pixels down, alone in a 320 by 240 view; `None` where the pass
+    /// set nothing.
+    fn set_at_sub(glyphs: &mut Glyphs, x: i64, y: i64) -> Option<PlacedName> {
+        let view = Viewport::new(
+            leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(50.0, 8.7)),
+            6,
+            320,
+            240,
+        );
+        let label = ViewLabel {
+            kind: LabelKind::City,
+            rank: 0,
+            min_zoom: 6,
+            text: TEXT.into(),
+            local: TEXT.into(),
+            at: (
+                u32::try_from(x / SUBPIXEL).unwrap_or(0),
+                u32::try_from(y).unwrap_or(0),
+            ),
+            anchor: (x, y * SUBPIXEL),
+            line: Vec::new(),
+        };
+        let (placed, _) = place_found(&[label], &view, &[], &[], glyphs, SCALE);
+        placed.into_iter().next()
+    }
+
+    /// The anchor's sub-pixel the pass set the name's middle on.
+    fn middle(name: &PlacedName) -> i64 {
+        (name.centre.0 * SUBPIXEL as f64).round() as i64
+    }
+
+    /// The move is at most one cell, to the sub-pixel: the last anchor
+    /// past the right edge that is still set lies exactly [`NUDGE_PX`]
+    /// from where its name went, the next one is not set; and the same at
+    /// the left edge.
+    #[test]
+    fn a_name_moves_at_most_one_cell_to_the_sub_pixel() {
+        let mut glyphs = Glyphs::new().expect("font");
+        let reach = i64::from(NUDGE_PX) * SUBPIXEL;
+        let right = (215 * SUBPIXEL..230 * SUBPIXEL)
+            .filter(|&x| set_at_sub(&mut glyphs, x, 120).is_some())
+            .max()
+            .expect("set near the right edge");
+        let name = set_at_sub(&mut glyphs, right, 120).expect("set");
+        assert_eq!(right - middle(&name), reach, "right: {right}");
+        assert!(set_at_sub(&mut glyphs, right + 1, 120).is_none());
+        let left = (90 * SUBPIXEL..105 * SUBPIXEL)
+            .filter(|&x| set_at_sub(&mut glyphs, x, 120).is_some())
+            .min()
+            .expect("set near the left edge");
+        let name = set_at_sub(&mut glyphs, left, 120).expect("set");
+        assert_eq!(middle(&name) - left, reach, "left: {left}");
+        assert!(set_at_sub(&mut glyphs, left - 1, 120).is_none());
+    }
+
+    /// The boxes of `TEXT` set as a city on (`x`, `y`) in pixels.
+    fn set_at(glyphs: &mut Glyphs, x: i64, y: i64) -> Option<Vec<LabelRect>> {
+        set_at_sub(glyphs, x * SUBPIXEL, y).map(|name| name.boxes)
+    }
+
+    /// The chip rows as the rule's boxes: each row's cells, the whole
+    /// width, shrunk on every side by the rule's margin rounded at that
+    /// scale (5 pixels at [`SCALE`], 3 at the phone's 1.0, 6 at 2.0), so
+    /// the margin the rule grows them by ends on the cells' edges.
+    #[test]
+    fn the_chip_rows_are_their_cells_shrunk_by_the_margin() {
+        let rect = |x0, y0, x1, y1| LabelRect { x0, y0, x1, y1 };
+        assert_eq!(
+            chip_boxes(SCALE),
+            [rect(5, 5, 315, 15), rect(5, 225, 315, 235)]
+        );
+        assert_eq!(
+            chip_boxes(1.0),
+            [rect(3, 3, 317, 17), rect(3, 223, 317, 237)]
+        );
+        assert_eq!(
+            chip_boxes(2.0),
+            [rect(6, 6, 314, 14), rect(6, 226, 314, 234)]
+        );
+    }
+
+    fn inside(boxes: &[LabelRect]) -> bool {
+        boxes.iter().all(|b| b.x0 >= 0 && b.x1 <= W)
+    }
+
+    /// Centred on x 213 to 222 the name reaches 1 to 10 pixels past the
+    /// right edge, at most one cell ([`NUDGE_PX`]): it is moved in and
+    /// every box of it lies in the picture. The control: on x 212 it fits
+    /// unmoved, its box one pixel further left.
+    #[test]
+    fn a_place_name_within_a_cell_of_the_right_edge_is_moved_in_whole() {
+        let mut glyphs = Glyphs::new().expect("font");
+        let unmoved = set_at(&mut glyphs, 212, 120).expect("set unmoved");
+        assert_eq!((unmoved[0].x0, unmoved[0].x1), (105, 319));
+        for x in 213..=222 {
+            let boxes = set_at(&mut glyphs, x, 120).unwrap_or_else(|| panic!("x {x}: not set"));
+            assert!(inside(&boxes), "x {x}: {boxes:?}");
+            assert_eq!((boxes[0].x0, boxes[0].x1), (106, 319), "x {x}");
+        }
+    }
+
+    /// The same at the left edge: centred on x 98 to 107 the name is moved
+    /// in to start at the picture's first pixels.
+    #[test]
+    fn a_place_name_within_a_cell_of_the_left_edge_is_moved_in_whole() {
+        let mut glyphs = Glyphs::new().expect("font");
+        let unmoved = set_at(&mut glyphs, 108, 120).expect("set unmoved");
+        assert_eq!((unmoved[0].x0, unmoved[0].x1), (1, 215));
+        for x in 98..=107 {
+            let boxes = set_at(&mut glyphs, x, 120).unwrap_or_else(|| panic!("x {x}: not set"));
+            assert!(inside(&boxes), "x {x}: {boxes:?}");
+            assert_eq!((boxes[0].x0, boxes[0].x1), (1, 214), "x {x}");
+        }
+    }
+
+    /// A name that would reach more than one cell past an edge is not
+    /// moved and not set: x 223 and further right, x 97 and further left.
+    #[test]
+    fn a_place_name_more_than_a_cell_outside_is_not_set() {
+        let mut glyphs = Glyphs::new().expect("font");
+        for x in [223, 224, 233, 260, 319, 97, 96, 87, 60, 1] {
+            assert_eq!(set_at(&mut glyphs, x, 120), None, "x {x}");
+        }
+    }
+
+    /// The chip rows keep a name out of their own cells and no further: the
+    /// lowest point the name is set on puts its box's bottom exactly on the
+    /// bottom row's top edge, the highest its top exactly on the top row's
+    /// bottom edge, and no box of any point enters either row.
+    #[test]
+    fn a_name_just_beside_a_chip_row_is_set_and_none_enters_it() {
+        let mut glyphs = Glyphs::new().expect("font");
+        let set: Vec<(i64, Vec<LabelRect>)> = (0..240)
+            .filter_map(|y| set_at(&mut glyphs, 160, y).map(|b| (y, b)))
+            .collect();
+        for (y, boxes) in &set {
+            assert!(
+                boxes
+                    .iter()
+                    .all(|b| b.y0 >= TOP_ROW_END && b.y1 <= BOTTOM_ROW_TOP),
+                "y {y}: {boxes:?}"
+            );
+        }
+        let lowest = set.iter().map(|(_, b)| b[0].y1).max();
+        let highest = set.iter().map(|(_, b)| b[0].y0).min();
+        assert_eq!(lowest, Some(BOTTOM_ROW_TOP), "just above the bottom row");
+        assert_eq!(highest, Some(TOP_ROW_END), "just under the top row");
     }
 }
