@@ -54,6 +54,11 @@ NDKBIN=$(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
 ABIS?=arm64-v8a armeabi-v7a
 REPO=$(realpath $(PROJ)/../..)
 CARGO_TARGET_DIR?=$(REPO)/target
+# Cargo features for the native library, empty for the product: the globe
+# build (1710, 1762) is `make debug FEATURES=loquax/globe-world
+# APK_SUFFIX=-debug-globe`, the world view as the orthographic globe
+# instead of Equal Earth.
+FEATURES?=
 CARGO_HOME?=$(HOME)/.cargo
 LIBNAME=libloquax_android.so
 TRIPLE_arm64-v8a=aarch64-linux-android
@@ -182,7 +187,8 @@ $(BIN)/lib/%/$(LIBNAME): FORCE
 	CARGO_TARGET_$(ENV_$*)_RUSTFLAGS="$(RUSTFLAGS_ANDROID)" \
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
 	cargo build --manifest-path $(REPO)/Cargo.toml -p loquax-android \
-		--release --locked --target $(TRIPLE_$*)
+		--release --locked --target $(TRIPLE_$*) \
+		$(if $(strip $(FEATURES)),--features $(FEATURES))
 	mkdir -p $(@D)
 	cp $(CARGO_TARGET_DIR)/$(TRIPLE_$*)/release/$(LIBNAME) $@
 
