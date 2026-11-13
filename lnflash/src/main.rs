@@ -1545,6 +1545,34 @@ mod tests {
         assert!(parse(&["--wifi", "a", "--regions", "--port", "/dev/ttyUSB0"]).is_err());
     }
 
+    /// The audit of 1757 asked whether `--wifi` and the management flags go
+    /// together in one call. They are refused together, for a reason of the
+    /// boards, not of the flags: one call has one `--port`. `--wifi` needs it
+    /// to name the M9, and the management session narrows itself to the
+    /// LNode that owns it (`flow::set_mgmt`). The M9 keeps no management
+    /// allow-list (only the LNode firmware answers `TYPE_MGMT_ALLOW`,
+    /// `leviculum-nrf/src/usb.rs`), so both together would always name a
+    /// port no LNode owns. Each alone still parses.
+    #[test]
+    fn wifi_and_the_management_flags_name_different_boards() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        let port = "/dev/ttyUSB0";
+        for management in [
+            vec!["--management-identity", HASH_A],
+            vec!["--management-identity"],
+            vec!["--clear-management"],
+        ] {
+            let mut args = vec!["--wifi", "Heimnetz", "--port", port];
+            args.extend(&management);
+            assert!(parse(&args).is_err(), "{args:?}");
+            let mut alone = management.clone();
+            alone.extend(["--port", port]);
+            assert!(parse(&alone).is_ok(), "{alone:?}");
+        }
+    }
+
     fn plan(args: &[&str]) -> Result<RadioPlan, String> {
         let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
             .map_err(|err| err.to_string())?;
