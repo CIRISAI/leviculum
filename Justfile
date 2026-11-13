@@ -2962,8 +2962,9 @@ nrf-reproducible:
 # (loquax-android/src/render_walk.rs, docs/src/developer/render-walk.md).
 # Writes OUT/index.html (the contact sheet) and OUT/summary.tsv, default
 # target/render-walk; red on any failed rule. `--quick` is the per-batch
-# walk (70 s warm, measured 2026-11-13), `--selftest` the positive
-# controls (each injected fault red where the clean walk is green, 103 s),
+# walk (70 to 94 s warm, measured 2026-11-13), `--selftest` the positive
+# controls (each injected fault red where the clean walk is green, 103 to
+# 139 s),
 # `--m9` adds the M9 sim's walks. A measuring tool, never in `guards`.
 [doc('Render map zooms, gestures and screens; check every frame (1801)')]
 render-walk *ARGS:

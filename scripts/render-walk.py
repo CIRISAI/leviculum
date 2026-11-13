@@ -53,9 +53,9 @@ COLUMNS = [
 ]
 
 # Each injected fault and the rules it must turn red (render_walk.rs).
-# A rule some frame of the clean walk already fails is held to a measured
-# step instead: `slow-frame` adds 20 ms to every moving frame, so the
-# gesture's p95 must grow by 15 ms at least.
+# A rule the clean walk fails nearly everywhere may also pass by a measured
+# step: `slow-frame` adds 20 ms to every moving frame, so the gesture's p95
+# must grow by 15 ms at least where it does not turn red.
 CONTROLS = {
     "oversized-bitmap": ["bitmap_is_frame", "view_covered"],
     "blank-half": ["view_covered"],

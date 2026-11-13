@@ -9,9 +9,9 @@ same build drew a Bitmap half again the size of the frame, let the world
 shrink below the screen, and grew the native heap to 630 MB.
 
 ```sh
-just render-walk --quick              # per batch: about 70 s warm
+just render-walk --quick              # per batch: 70 to 95 s warm
 just render-walk                      # everything: about 260 s warm
-just render-walk --selftest           # the positive controls: about 100 s
+just render-walk --selftest           # the positive controls: 100 to 140 s
 just render-walk --out DIR --m9       # elsewhere, with the M9 sim's walks
 ```
 
@@ -29,7 +29,7 @@ directory:
   could not run.
 
 The measured times are from schneckenschreck on 2026-11-13, with a warm
-build: quick 70 s, full 259 s, selftest 103 s. A cold release build of the
+build: quick 70 s and 94 s, full 259 s, selftest 103 s and 139 s. A cold release build of the
 walk adds about two minutes for each projection.
 
 ## What it draws
@@ -144,9 +144,11 @@ turn its rules red on a frame or gesture where the clean walk is green.
 | `heap-kept` | `heap_returns`, `heap_peak` |
 | `view-lost` | `view_kept` |
 
-The clean walk already fails `frame_p95` on every gesture on the host. So
-for `frame_p95` the control asks for a step instead of a turn: the p95 must
-grow by at least 15 ms when 20 ms are added to every moving frame.
+On the host the clean walk fails `frame_p95` on nearly every gesture. The
+rotation sometimes passes, but its frames are at rest and the fault does
+not slow them. So for `frame_p95` the control asks for a step instead of a
+turn: the p95 must grow by at least 15 ms when 20 ms are added to every
+moving frame.
 
 Three rules have no injection in the selftest: `world_spans_view`,
 `no_map_chip_over_data` and `label_on_world`. Their unit tests in
