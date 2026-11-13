@@ -21,6 +21,13 @@ const LOQUAX: &str = env!("CARGO_BIN_EXE_loquax");
 /// The mailbox's line once its SIGUSR1 and SIGTERM handlers are installed.
 const SIGNALS_HANDLED: &str = "HOME signals SIGUSR1=census";
 
+/// The mailbox's line when it dials no public rendezvous (1785): an idle
+/// mailbox has no network beyond its own daemon. On a host without
+/// `/etc/leviculum/no-auto` (the forge runner) the shipped list was
+/// dialled, the mesh's announces arrived, and each one kept the pump at
+/// 20 ms for a second: 582 loop turns in 23 s against 180, CPU over the bar.
+const NO_RENDEZVOUS: &str = "HOME rendezvous list=none ";
+
 /// Wait until `stderr` holds `needle`, or panic with what it holds.
 fn wait_for(stderr: &Arc<Mutex<String>>, needle: &str, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -47,6 +54,8 @@ async fn sigusr1_prints_the_census_and_the_mailbox_lives_on() {
         .arg(daemon.config_dir.path())
         .args(["--sync-interval", "off"])
         .env("LNMSG_HOME", home.path())
+        // No public rendezvous on any host, marker or none (1785).
+        .env(leviculum_std::auto_layer::ENV_NO_AUTO, "1")
         .env_remove("LEVICULUM_EVENT_LOG")
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
@@ -306,6 +315,8 @@ async fn an_idle_mailbox_uses_almost_no_cpu() {
         .arg(daemon.config_dir.path())
         .args(["--sync-interval", "off"])
         .env("LNMSG_HOME", home.path())
+        // No public rendezvous on any host, marker or none (1785).
+        .env(leviculum_std::auto_layer::ENV_NO_AUTO, "1")
         .env_remove("LEVICULUM_EVENT_LOG")
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
@@ -336,6 +347,13 @@ async fn an_idle_mailbox_uses_almost_no_cpu() {
     tokio::task::spawn_blocking(move || wait_for(&stderr_, SIGNALS_HANDLED, 30))
         .await
         .expect("waited");
+    {
+        let held = stderr.lock().expect("stderr");
+        assert!(
+            held.contains(NO_RENDEZVOUS),
+            "the idle mailbox dials a rendezvous, so it is not idle; stderr:\n{held}"
+        );
+    }
     // The start's own work settles first.
     tokio::time::sleep(Duration::from_secs(3)).await;
     // The wakes before the window; the census's own busy second passes

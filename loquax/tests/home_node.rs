@@ -131,6 +131,9 @@ impl HomeNode {
         command
             .args(more)
             .env("LNMSG_HOME", home)
+            // The test's mesh only: on a host without the marker (the
+            // forge) the shipped rendezvous list was dialled (1785).
+            .env(leviculum_std::auto_layer::ENV_NO_AUTO, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(file));

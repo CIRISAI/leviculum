@@ -128,6 +128,9 @@ async fn the_mailbox_does_not_grow_with_uptime() {
         .arg(daemon.config_dir.path())
         .args(["--sync-interval", "off"])
         .env("LNMSG_HOME", home.path())
+        // No public rendezvous on any host, marker or none (1785): the
+        // mesh's announces would be growth the soak did not send.
+        .env(leviculum_std::auto_layer::ENV_NO_AUTO, "1")
         .env_remove("LEVICULUM_EVENT_LOG")
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
