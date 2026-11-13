@@ -6001,4 +6001,94 @@ mod tests {
         assert!(reader.is_some(), "the reader comes back");
         fanout.take_back(reader.expect("back"));
     }
+
+    /// 1801, the render walk: the terminal's screens (the empty list, a
+    /// chat with a late message, the settings) at the cells each of the
+    /// walk's frame sizes holds at eight by sixteen logical pixels a cell.
+    /// Each frame draws (text on at least a tenth of its rows) and is the
+    /// same again. With `LOQUAX_RENDER_WALK=DIR` each frame is written to
+    /// `DIR/screens/` as text, its verdicts in `DIR/rows-terminal.tsv`,
+    /// for `just render-walk`'s contact sheet.
+    #[test]
+    fn every_terminal_screen_draws_at_every_walk_size() {
+        let out = std::env::var_os("LOQUAX_RENDER_WALK").map(PathBuf::from);
+        let sizes = [
+            ("1224x2197", 55u16, 49u16),
+            ("1080x2400", 51, 57),
+            ("1600x2560", 100, 80),
+            ("900x560", 112, 35),
+            ("2197x1224", 99, 27),
+        ];
+        /// A screen of the terminal, its model made.
+        type Make = fn() -> Model;
+        let screens: [(&str, Make); 3] = [
+            ("list-empty", || Model::new(&[])),
+            ("late-message", || {
+                let mut model = Model::new(&[]);
+                model.address = Some([0x30; 16]);
+                late_message::late_message(&mut model, 1_799_971_200, 3600);
+                model.focus = loquax::ui::Pane::Messages;
+                model.toasts.clear();
+                model
+            }),
+            ("settings", || {
+                let mut model = Model::new(&[]);
+                update(
+                    &mut model,
+                    UiEvent::Key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE)),
+                );
+                model
+            }),
+        ];
+        let mut rows = String::new();
+        let mut failed = Vec::new();
+        for (screen, make) in screens {
+            for (size, cols, lines) in sizes {
+                let shoot = || {
+                    let mut model = make();
+                    update(
+                        &mut model,
+                        UiEvent::Resize {
+                            width: cols,
+                            height: lines,
+                        },
+                    );
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(cols, lines)).expect("terminal");
+                    let view = ui::view(&model);
+                    let drawn = terminal
+                        .draw(|frame| draw_screen(frame, &model, &view, None))
+                        .expect("draw");
+                    frame_text(drawn.buffer)
+                };
+                let text = shoot();
+                let written = text.lines().filter(|l| !l.trim().is_empty()).count();
+                let drawn = written * 10 >= usize::from(lines);
+                let same = shoot() == text;
+                let image = format!("terminal-{screen}-{size}");
+                for (rule, pass, note) in [
+                    ("screen_drawn", drawn, format!("{written} of {lines} rows")),
+                    ("screen_repeats", same, String::new()),
+                ] {
+                    if !pass {
+                        failed.push(format!("{image} {rule} {note}"));
+                    }
+                    rows.push_str(&format!(
+                        "terminal\tscreen\t{screen}\t{size}\t\t\t{image}\t{rule}\t{}\t1.000\t{}\t{note}\n",
+                        u8::from(pass),
+                        if pass { "pass" } else { "FAIL" }
+                    ));
+                }
+                if let Some(out) = &out {
+                    let dir = out.join("screens");
+                    std::fs::create_dir_all(&dir).expect("the screens directory");
+                    std::fs::write(dir.join(format!("{image}.txt")), &text).expect("the frame");
+                }
+            }
+        }
+        if let Some(out) = &out {
+            std::fs::write(out.join("rows-terminal.tsv"), &rows).expect("the rows");
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
 }

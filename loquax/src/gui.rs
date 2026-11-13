@@ -8333,4 +8333,134 @@ mod tests {
         let _ = app.update(Message::Seen(seen(&model, 1)));
         assert_eq!(app.screen, Screen::Browse);
     }
+
+    /// 1801, the render walk: the window's screens (the chats light and
+    /// dark, the settings, the first start, the map with two pins) at
+    /// each of the walk's frame sizes, the window being one of them and
+    /// the phones' and the tablet's taken at their density's logical size
+    /// (the software renderer draws at a density of one). Each picture
+    /// draws something (more than one colour in at least three of its
+    /// four quarters: a short page may leave a corner empty) and is the
+    /// same picture again. With
+    /// `LOQUAX_RENDER_WALK=DIR` each is written to `DIR/screens/` with
+    /// its verdicts in `DIR/rows-window.tsv`, for `just render-walk`'s
+    /// contact sheet.
+    #[test]
+    fn every_window_screen_draws_at_every_walk_size() {
+        let out = std::env::var_os("LOQUAX_RENDER_WALK").map(std::path::PathBuf::from);
+        let sizes = [
+            ("1224x2197", 445, 799),
+            ("1080x2400", 411, 914),
+            ("1600x2560", 800, 1280),
+            ("900x560", 900, 560),
+            ("2197x1224", 799, 445),
+        ];
+        /// A screen of the window, made for a size.
+        type Make = fn(u32, u32) -> App;
+        let screens: [(&str, Make); 5] = [
+            ("chats-light", |w, h| {
+                let (mut app, _rx) = chat_window();
+                app.window = Size::new(w as f32, h as f32);
+                app
+            }),
+            ("chats-dark", |w, h| {
+                let (mut app, _rx) = chat_window();
+                app.window = Size::new(w as f32, h as f32);
+                let _ = app.update(Message::Intent(Intent::Theme));
+                app
+            }),
+            ("settings", |w, h| {
+                let (mut app, _rx) = chat_window();
+                app.window = Size::new(w as f32, h as f32);
+                let _ = app.update(Message::Settings);
+                app
+            }),
+            ("first-start", |w, h| {
+                let model = first_start_model();
+                let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+                app.window = Size::new(w as f32, h as f32);
+                app.apply(Message::Seen(Box::new(seen_of(&model))));
+                app
+            }),
+            ("map-pins", |w, h| {
+                let (mut app, _rx) = florence_two("Anna", None, w, h);
+                // `map_pane` reads the wide layout (the rail first); a
+                // narrow window stacks the bar under the screen, so the
+                // map is the larger of the two first children's first.
+                use iced::advanced::Layout;
+                let node =
+                    leviculum_ui_iced::headless::layout(app.view(), w, h).expect("a renderer");
+                let pane = Layout::new(&node)
+                    .children()
+                    .filter_map(|c| c.children().next().map(|m| m.bounds()))
+                    .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+                    .expect("the map");
+                app.apply(Message::MapSize(pane.size()));
+                app.apply(Message::Select(ANNA));
+                let _ = run(&mut app);
+                app
+            }),
+        ];
+        let mut rows = String::new();
+        let mut failed = Vec::new();
+        for (screen, make) in screens {
+            for (size, w, h) in sizes {
+                let app = make(w, h);
+                let shot = shoot(&app, w, h);
+                let again = shoot(&app, w, h);
+                let colours = |x0: u32, y0: u32, x1: u32, y1: u32| {
+                    let mut seen = std::collections::HashSet::new();
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let i = ((y * w + x) * 3) as usize;
+                            seen.insert([shot[i], shot[i + 1], shot[i + 2]]);
+                        }
+                    }
+                    seen.len()
+                };
+                let quarters = [
+                    colours(0, 0, w / 2, h / 2),
+                    colours(w / 2, 0, w, h / 2),
+                    colours(0, h / 2, w / 2, h),
+                    colours(w / 2, h / 2, w, h),
+                ];
+                let drawn = quarters.iter().filter(|&&n| n > 1).count() >= 3;
+                let same = shot == again;
+                let image = format!("window-{screen}-{size}");
+                for (rule, pass, note) in [
+                    (
+                        "screen_drawn",
+                        drawn,
+                        format!("colours by quarter {quarters:?}"),
+                    ),
+                    ("screen_repeats", same, String::new()),
+                ] {
+                    if !pass {
+                        failed.push(format!("{image} {rule} {note}"));
+                    }
+                    rows.push_str(&format!(
+                        "window\tscreen\t{screen}\t{size}\t\t\t{image}\t{rule}\t{}\t1.000\t{}\t{note}\n",
+                        u8::from(pass),
+                        if pass { "pass" } else { "FAIL" }
+                    ));
+                }
+                if let Some(out) = &out {
+                    let dir = out.join("screens");
+                    std::fs::create_dir_all(&dir).expect("the screens directory");
+                    let mut png = Vec::new();
+                    let mut e = png::Encoder::new(&mut png, w, h);
+                    e.set_color(png::ColorType::Rgb);
+                    e.set_depth(png::BitDepth::Eight);
+                    let mut writer = e.write_header().expect("header");
+                    writer.write_image_data(&shot).expect("data");
+                    writer.finish().expect("finish");
+                    std::fs::write(dir.join(format!("{image}.png")), png).expect("the picture");
+                }
+            }
+        }
+        if let Some(out) = &out {
+            std::fs::write(out.join("rows-window.tsv"), &rows).expect("the rows");
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
 }
