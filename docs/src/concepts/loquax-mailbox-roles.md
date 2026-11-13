@@ -31,7 +31,7 @@ What enforces it today:
   takes `enable_transport(false)` before the shared instance, the TCP leaf
   and the own-node mode are chosen.
 - The Mailbox is a propagation client and nothing more:
-  `enable_propagation_client` (`loquax/src/engine.rs:1888`). Loquax does not
+  `enable_propagation_client` (`loquax/src/engine.rs:1893`). Loquax does not
   link the propagation node's crate, `leviculum-lxmf-node`, except as a
   dev-dependency for its tests (`loquax/Cargo.toml`, under
   `[dev-dependencies]`); the propagation node on a home host is `lnpnd`,
@@ -139,7 +139,7 @@ mail):
   receipts and positions. Pictures and files wait for a fast medium, and
   the client says so ("3 Bilder warten aufs Auto"). The core knows the
   path's next-hop bitrate, `next_hop_interface_bitrate`
-  (`leviculum-core/src/node/mod.rs:4384`).
+  (`leviculum-core/src/node/mod.rs:4386`).
 - **The Mailbox's announces over LoRa follow the slow cadence**: 5 minutes
   while moving, an hour while still ([announce cadence](announce-cadence.md)).
 

@@ -64,7 +64,7 @@ the tree on 2026-11-11; a statement the tree does not support carries
 Today the far zooms show Natural Earth land and country borders only
 (`leviculum-map/data/ne_50m_land.lwo`, 159,357 bytes, and the boundary
 lines `leviculum-map/data/ne_50m_admin_0_boundary_lines_land.lwl`,
-49,512 bytes), up to z10 (`MAX_ZOOM` (`leviculum-map/src/outline.rs:58`)).
+49,512 bytes), up to z10 (`MAX_ZOOM` (`leviculum-map/src/outline.rs:111`)).
 
 **Decided:** more Natural Earth on z0 to z9, public domain, version
 5.1.2, baked by the existing script (`scripts/bake-world-outline.py`).
@@ -104,7 +104,7 @@ not in the tree). Total about 166 KB beside today's 209 KB.
   the draw scratch in RAM is not measured.
 - Desktop users never see Protomaps' own Natural Earth zooms, since the
   autoload starts at z7 at the earliest: nothing is asked for below
-  `MIN_ZOOM` (`loquax/src/ui/viewload.rs:53`), z10, and a view loads
+  `MIN_ZOOM` (`loquax/src/ui/viewload.rs:57`), z10, and a view loads
   `VIEW_BELOW` (`loquax/src/ui/map.rs:126`), three zooms above its own.
   The world view is ours alone.
 

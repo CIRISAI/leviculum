@@ -80,7 +80,7 @@ word-wise conversion, `loquax/tests/window_bench.baseline:25`) — about
 **The label layer** is the one GPU-drawn map element: tiles rasterised
 *without* names, the placed names set by the GPU at screen resolution,
 crisp at every zoom. Today the names are CPU-blitted sprites
-(`Sprite::draw_faded`, `loquax/src/mapnames.rs:1143`), up to 17.08 ms
+(`Sprite::draw_faded`, `loquax/src/mapnames.rs:1383`), up to 17.08 ms
 a phone frame (`loquax/examples/map_eye_bench.baseline:5`); on GPU
 targets they move into the UI track's glyph drawing, elsewhere the
 sprite blit stays. A GPU vector map — continuous zoom, rotation, tilt,
@@ -115,7 +115,7 @@ Profiled for this page: `perf record` on the map bench
 8119 samples, host, 2026-11-06). The three hottest loops:
 
 1. **The name-sprite blit** — `Sprite::of` and `Sprite::draw_faded`
-   (`loquax/src/mapnames.rs:1143`), 16.9 % of cycles. Not SIMD first:
+   (`loquax/src/mapnames.rs:1383`), 16.9 % of cycles. Not SIMD first:
    on GPU targets the label layer removes this loop from the CPU frame
    entirely. Where it stays (M9, terminal, software window),
    `std::simd` over a sprite row's u8 alpha blend; expected 2–4x on

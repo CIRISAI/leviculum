@@ -54,7 +54,7 @@ not read is skipped while the rest are still read.
 | A stock Python propagation node (lxmd) | 256 KB a message | `PROPAGATION_LIMIT`, `reference/LXMF/LXMF/LXMRouter.py:55`; lxmd's `propagation_transfer_max_accepted_size` default, `reference/LXMF/LXMF/Utilities/lxmd.py:165-177` |
 | lnpnd | 256 KB a message, with or without a config, as lxmd; up to 1000 KB stored local only, above it refused | `DEFAULT_TRANSFER_LIMIT_KB` and `DEFAULT_DELIVERY_LIMIT_KB`, `lnpnd/src/config.rs` (256 since 1294, 4 before); pinned by `a_node_without_a_config_takes_a_sixty_kb_voice_message_and_refuses_one_over_the_delivery_limit` (1663) |
 | A board's propagation node | 4 KB a message | `BOARD_TRANSFER_LIMIT_KB`, `leviculum-nrf/heap-budget`; its heap, see [the board's node](propagation-node-on-a-board.md), section 6 |
-| A Loquax Mailbox's archive | 1024 MB in all, oldest first out | `DEFAULT_ARCHIVE_CAP_MB`, `loquax/src/home.rs:362`, `archive_cap_mb` in the config |
+| A Loquax Mailbox's archive | 1024 MB in all, oldest first out | `DEFAULT_ARCHIVE_CAP_MB`, `loquax/src/home.rs:364`, `archive_cap_mb` in the config |
 | Columba | none of its own | `MAX_SINGLE_FILE_SIZE = Int.MAX_VALUE`, `columba/app/src/main/java/network/columba/app/util/FileUtils.kt:37`; its receiver defaults to 1 MB (`columba/app/src/main/java/network/columba/app/repository/SettingsRepository.kt:1849`) |
 
 So a file up to 990 KB goes to a peer that is online, and to a peer that
