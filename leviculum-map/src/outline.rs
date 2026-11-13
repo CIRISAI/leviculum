@@ -525,6 +525,26 @@ impl Place<'_> {
         }
     }
 
+    /// Whether a name of `kind` belongs on the view (1762). A flat view
+    /// takes every kind its zoom shows. A blended world view, globe or
+    /// Equal Earth, names what a world map names: the countries and the
+    /// seas, and from the middle of the handover on ([`Blend::t`] at
+    /// least a half) the largest cities too, the kind the bake gives a
+    /// scale rank of two or less; never a town, a village, a research
+    /// station, a range or a desert, which crowded Lew's world view with
+    /// Lagos, Chengdu and Casey Station. What is left is thinned by the
+    /// placement's collisions and the names' ranks as anywhere.
+    pub(crate) fn names(&self, kind: LabelKind) -> bool {
+        match self {
+            Place::Flat(_) => true,
+            Place::Curved(blend) => match kind {
+                LabelKind::Country | LabelKind::Sea => true,
+                LabelKind::City => blend.t() >= 0.5,
+                _ => false,
+            },
+        }
+    }
+
     /// Whether a table point is on the view's far side (the globe's far
     /// half): a stroked line breaks there instead of chording along the
     /// limb, and a name is not set there. A filled ring keeps its far
@@ -1420,7 +1440,7 @@ fn read_names(table: &[u8], place: Place<'_>, out: &mut Vec<ViewLabel>) -> Optio
         let Some(kind) = LabelKind::from_wire(kind) else {
             continue;
         };
-        if min_zoom > place.zoom() {
+        if min_zoom > place.zoom() || !place.names(kind) {
             continue;
         }
         let Some(local) = string(string_at) else {

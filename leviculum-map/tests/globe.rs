@@ -370,3 +370,50 @@ fn a_ring_across_the_far_meridian_is_filled_once() {
         }
     }
 }
+
+/// A world view names what a world map names (1762): Lew's globe on the
+/// phone showed Lagos, Chengdu, Bangkok and Casey Station in large type,
+/// and in the handover over the southern Indian Ocean Mirny, Casey,
+/// Dumont-d'Urville, McMurdo and Esperanza. While the blend holds, only
+/// countries and seas are named, and from the middle of the handover on
+/// the largest cities as well; never a town, a village or a station, in
+/// either shape.
+#[test]
+fn a_world_view_names_countries_and_seas_not_stations() {
+    use leviculum_map::labels::LabelKind;
+    let mut bad = Vec::new();
+    for shape in [Shape::Globe, Shape::EqualEarth] {
+        for (lat, lon) in [(10.0, 20.0), (-40.0, 75.0), (-70.0, 100.0), (50.0, 10.0)] {
+            for zoom in [1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5] {
+                let blend = Blend::new(shape, at(lat, lon), zoom, 1224, 2100);
+                if blend.t() >= 1.0 {
+                    continue;
+                }
+                let mut out = Vec::new();
+                outline::names_view(outline::NAMES_50M, &blend, &mut out);
+                for l in &out {
+                    let ok = match l.kind {
+                        LabelKind::Country | LabelKind::Sea => true,
+                        LabelKind::City => blend.t() >= 0.5,
+                        _ => false,
+                    };
+                    if !ok {
+                        bad.push(format!(
+                            "{shape:?} {lat}/{lon} z{zoom} t{:.2}: {:?} {}",
+                            blend.t(),
+                            l.kind,
+                            l.text
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    bad.dedup();
+    assert!(
+        bad.is_empty(),
+        "{} names below the world view's cut, the first:\n{}",
+        bad.len(),
+        bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
