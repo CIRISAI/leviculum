@@ -1110,7 +1110,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:844`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:923`); the
   whole screen adds the bar's and the legend's cells and the pins
   (`Renderer::show`, `loquax-m9/src/render.rs:260`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
@@ -1129,7 +1129,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 210,647 B (profile 2, 1707; 197,972 B before) | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:796`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:875`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1152,7 +1152,7 @@ renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
 **The screen** (`lines`, `loquax-m9/src/map.rs:253`; `pins`,
-`loquax-m9/src/map.rs:950`), as 1531 left it after Lew's evening at
+`loquax-m9/src/map.rs:1029`), as 1531 left it after Lew's evening at
 the board on 2026-11-07: the map is in the light table; the UI around it
 keeps its dark tokens. Since 1565 the picture is the phone's
 (`Style::SCREEN`: casings, round joins, buildings from z16), its edges
@@ -1167,19 +1167,44 @@ it does not know, the pins' page for three more when there is a pin;
 then the chosen pin's card, its age and the data's credit, "©
 OpenStreetMap", at the right end; and the credit for five seconds in the
 picture's top right corner the first time the map opens after a boot.
-The names (`names`, `loquax-m9/src/map.rs:510`) are set after the
+The names (`names`, `loquax-m9/src/map.rs:515`) are set after the
 picture and before the pins by the phone's label pass
 (`loquax::mapnames`, `no_std` under its `mapnames` feature since 1565):
-one round of the map core's rule, places centred on their point,
-streets and rivers along a straight run of their line at its angle,
-each with a halo, in Fira Sans at 1.6 times the phone's logical sizes
-(a street's x-height 9.3 px), kept off the pins and the bottom row. The
-board shapes and rasterises the face with ab_glyph
-(`loquax-m9/src/glyphs.rs`), since cosmic-text needs `std`. 1531 set
-them in the cell atlas, horizontal, in three rounds, at most eight. On
-the 320 x 240 picture few straight runs are long enough for a name at
-that size: over the fixture the pass sets none at z15 and one at z16,
-where 1.0 times the phone's sizes sets three and four (the 1565 report,
+one round of the map core's rule (`place_found`,
+`loquax-m9/src/map.rs:640`), places centred on their point, streets and
+rivers along a straight run of their line at its angle, each with a
+halo, in Fira Sans at 1.6 times the phone's logical sizes (a street's
+x-height 9.3 px), kept off the pins. On that pass the board keeps what
+master's orders pinned for its cell pass. Both chip rows stay clear
+(1727, `CHIP_ROWS`, `loquax-m9/src/map.rs:451`): the top row with the
+receiver's words and the credit, the bottom row with the hint and the
+card; the rule keeps a name out of their cells and no further
+(`chip_boxes`, `loquax-m9/src/map.rs:726`, which shrinks each row by the
+rule's margin, since the rule grows every box it keeps clear by it). A
+region's names stay on the ground the region is drawn on (1727,
+`outside_of`, `loquax-m9/src/map.rs:557`). Parks and waters come from
+z15 (1531, `POI_ZOOM`, `loquax-m9/src/map.rs:455`). In the world
+overview the world table's names (`outline::NAMES_M9`: countries, seas,
+ranges, deserts and its places) join the overview region's (1683),
+anywhere on the picture and clear of the overview's two rows of words;
+a text both tables carry is set once by the core's own rule, a place's
+text once a view. A place's name that would leave the picture by at
+most one cell is moved in to fit (`NUDGE_PX`,
+`loquax-m9/src/map.rs:718`), as far as the cell pass set a name off its
+point: at 1.6 times "Frankfurt am Main" over Germany at z6 is 7 pixels
+wider than its point leaves it on the left, and without the move the
+overview there named nothing (the audit of 1757; decided by the
+reviewer on 2026-11-13: names at z6 again, the scale kept). The time
+zone view (1684) sets its clocks through the same pass (`zone_names`,
+`loquax-m9/src/map.rs:602`) and strokes its borders over the picture
+(`Painter::zone_borders`, `loquax-m9/src/map.rs:996`). The board shapes
+and rasterises the face with ab_glyph (`loquax-m9/src/glyphs.rs`),
+since cosmic-text needs `std`. 1531 set them in the cell atlas,
+horizontal, in three rounds, at most eight; 1565 dropped the rounds and
+the cap, and the z15 rule above is all that is left of them. On the
+320 x 240 picture few straight runs are long enough for a name at that
+size: over the fixture the pass sets none at z15 and one at z16, where
+1.0 times the phone's sizes sets three and four (the 1565 report,
 `examples/map_zooms.rs`); the size is Lew's call. A draw is the
 cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
@@ -1986,7 +2011,7 @@ words, and the picture was the shorter one while the bottom row had
 words. Now the picture always takes the bottom row and its names keep
 clear of the pins only; the hint, the pin's card and the credit are
 drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:260`;
-`Kept`, `loquax-m9/src/map.rs:1188`), so a word that goes uncovers the
+`Kept`, `loquax-m9/src/map.rs:1267`), so a word that goes uncovers the
 picture kept under it. A name under a word stays hidden while the word
 stands. `the_words_over_the_map_never_draw_its_picture_again`
 (`loquax-m9/tests/map.rs:219`) walks the board's chrome clock: open with

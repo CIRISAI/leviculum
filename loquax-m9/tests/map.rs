@@ -522,7 +522,8 @@ const HEIGHT_PICTURE: u32 = (PICTURE.height as u32) * (CELL_PX.1 as u32);
 /// the world outline's borders over it (`outline::bounds`) and sets the
 /// world table's names with the region's. Deutschland is served first,
 /// but its label lies under the overview's words ("Nur Übersicht"), so
-/// the picture names Frankfurt am Main alone. Pinned as a golden; the
+/// the picture names Frankfurt am Main alone (1683, kept under the
+/// phone's label pass of 1565 and the chip rows of 1727). Pinned as a golden; the
 /// border ink is on the picture, and the control: the same view at z12,
 /// past the overzoom, draws no border.
 #[test]
@@ -561,16 +562,21 @@ fn the_world_overview_draws_germany_at_z6() {
     let (names, stats) = map::names(world, &painted, &words, &mut glyphs, true);
     let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
     // Both tables are read (1683): the region's Frankfurt am Main and the
-    // world table's Deutschland. Since the phone's label pass (1565) sets
-    // the names at 1.6 times the phone's sizes, neither is set here:
-    // "Frankfurt am Main" at the picture's middle is wider than the
-    // picture leaves it, so no candidate, and Deutschland's box (its label
-    // point on row 2) reaches with the rule's margin into the top chip
-    // row, which no name takes (1727), words or not.
-    assert!(texts.is_empty(), "{texts:?}");
+    // world table's Deutschland. On the board Frankfurt am Main is set:
+    // Deutschland is served first, but its label lies under the overview's
+    // words ("Nur Übersicht"), the overview's second row.
+    assert_eq!(texts, ["Frankfurt am Main"], "{names:?}");
     assert_eq!(stats.found, 2, "{stats:?}");
+    // Without the words, Deutschland is served first: its label point lies
+    // on row 2, next to the top chip row, which keeps the name out of the
+    // row's cells and no further (1727).
     let (free, _) = map::names(world, &painted, &[], &mut glyphs, true);
-    assert!(free.is_empty(), "{free:?}");
+    assert_eq!(
+        free.first().map(|n| (n.text.as_str(), n.kind)),
+        Some(("Deutschland", leviculum_map::labels::LabelKind::Country)),
+        "{:?}",
+        free.iter().map(|n| n.text.as_str()).collect::<Vec<_>>()
+    );
     if let Some(state) = model.map.as_mut() {
         state.zoom = 12;
     }
@@ -743,6 +749,23 @@ fn the_phones_rule_sets_berlin_on_its_ground() {
     };
     assert!(parks(15), "z15 sets a park");
     assert!(!parks(12), "the control: z12 sets none");
+    // 1531: parks and waters from z15 on. With the Lustgarten 100 pixels
+    // left of the middle Berlin's point lies off the picture, so the park
+    // has room at z14 as at z15, and the rule alone keeps it off at z14.
+    let mut park_at = |zoom| {
+        let east = match zoom {
+            14 => 13_407_900,
+            _ => 13_403_600,
+        };
+        let view = Viewport::new(project(LatLon::from_e6(52_519_000, east)), zoom, 320, 240);
+        let (names, _) = map::names(&region, &view, &[], &mut glyphs, true);
+        let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+        println!("east z{zoom}: {texts:?}");
+        assert!(!texts.contains(&"Berlin"), "z{zoom}: {texts:?}");
+        names.iter().any(|n| n.kind == LabelKind::Park)
+    };
+    assert!(park_at(15), "the control: z15 sets the park there");
+    assert!(!park_at(14), "z14 sets no park (1531, parks from z15)");
 }
 
 /// 1531: the map's chrome. No title row and no legend: the picture
@@ -852,40 +875,157 @@ fn the_time_zone_view_writes_the_boards_clocks() {
 /// hint, the card), whose words would cut it; and no name of the region
 /// on ground the region does not cover, where it stood over blank paper
 /// ("Viale Giacomo Matteotti" in the top row, west of the Florence cut).
-/// Over the fixture at every zoom it names.
+/// Over the fixture at every zoom it names, with its pins and, at z15,
+/// without them; and over Berlin's Mitte (the map core's second fixture)
+/// from z14, where "Berlin" fits its ground.
 #[test]
 fn no_name_in_the_chip_rows_nor_off_the_region() {
-    let mut region = Map::new(FIXTURE).expect("region");
-    let mut checked = 0;
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::region::Region;
+    use leviculum_map::viewport::Viewport;
+
+    let mut florence = Map::new(FIXTURE).expect("region");
+    let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
+    let berlin = Region::from_bytes(bytes).expect("region");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
     let ch = i32::from(CELL_PX.1);
     let bottom = i32::from(map::BOTTOM) * ch;
+    // What, the view, the cells taken, whether it is over Florence.
+    type Seen = (String, Viewport, Vec<(u16, u16, u16)>, bool);
+    let mut views: Vec<Seen> = Vec::new();
     for zoom in 13..=18 {
         let model = at_zoom(zoom);
         let (view, pins) = map::view(&model).expect("map");
-        let tall = map::with_bottom(&view);
-        let taken = map::pin_cells(&pins);
-        let (names, _) = map::names(&region.region, &tall, &taken, &mut region.glyphs, false);
-        let area = tall.area_of(&region.region.header().bounds);
+        views.push((
+            format!("florence z{zoom}"),
+            map::with_bottom(&view),
+            map::pin_cells(&pins),
+            true,
+        ));
+    }
+    let mut bare = at_zoom(15);
+    if let Some(state) = bare.map.as_mut() {
+        state.selected = None;
+    }
+    let (view, _) = map::view(&bare).expect("map");
+    views.push((
+        "florence z15, no pins".into(),
+        map::with_bottom(&view),
+        Vec::new(),
+        true,
+    ));
+    let at = project(LatLon::from_e6(52_517_500, 13_395_000));
+    for zoom in 14..=16 {
+        let view = map::with_bottom(&Viewport::new(at, zoom, 320, 220));
+        views.push((format!("berlin z{zoom}"), view, Vec::new(), false));
+    }
+    let mut checked = Vec::new();
+    for (what, tall, taken, in_florence) in &views {
+        let (region, glyphs) = match in_florence {
+            true => (&florence.region, &mut florence.glyphs),
+            false => (&berlin, &mut glyphs),
+        };
+        let (names, _) = map::names(region, tall, taken, glyphs, false);
+        let area = tall.area_of(&region.header().bounds);
         let (ax, ay) = (area.top_left.x, area.top_left.y);
         let (aw, ah) = (area.size.width as i32, area.size.height as i32);
         for name in &names {
-            checked += 1;
+            checked.push(format!("{what}: {}", name.text));
             for b in &name.boxes {
                 assert!(
                     b.y0 >= ch && b.y1 <= bottom,
-                    "z{zoom}: {} {b:?} in a chip row",
+                    "{what}: {} {b:?} in a chip row",
                     name.text
                 );
                 assert!(
                     b.x0 >= ax && b.y0 >= ay && b.x1 <= ax + aw && b.y1 <= ay + ah,
-                    "z{zoom}: {} {b:?} off the region drawn at {area:?}",
+                    "{what}: {} {b:?} off the region drawn at {area:?}",
                     name.text
                 );
             }
         }
     }
+    println!("{checked:#?}");
     assert!(
-        checked >= 3,
-        "only {checked} names checked (3 on 2026-11-13 under the phone's pass, 1565)"
+        checked.len() >= 5,
+        "only {} names checked: {checked:?}",
+        checked.len()
     );
+}
+
+/// 1683: a name both the world table and the overview region carry is
+/// set once. Over Patagonia at z3 the overview region's places and the
+/// world table both hold "Punta Arenas"; the board's pass sets it once.
+/// The control: both tables are read, so the name is found twice.
+#[test]
+fn a_name_both_tables_carry_is_set_once() {
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::viewport::Viewport;
+
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let world = board.of(map::Drawn::Overview).expect("the overview");
+    let view = Viewport::new(
+        project(LatLon::from_e6(-55_000_000, -75_000_000)),
+        3,
+        320,
+        240,
+    );
+    let mut found = Vec::new();
+    world.view_labels(&view, true, &mut found).expect("labels");
+    leviculum_map::outline::names(leviculum_map::outline::NAMES_M9, &view, &mut found);
+    let twice = |t: &str| found.iter().filter(|l| l.text == t).count();
+    assert_eq!(twice("Punta Arenas"), 2, "the control: both tables hold it");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, _) = map::names(world, &view, &[], &mut glyphs, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(
+        texts.iter().filter(|&&t| t == "Punta Arenas").count(),
+        1,
+        "{texts:?}"
+    );
+}
+
+/// 1684: the time zone view draws its borders, through the kept picture
+/// (`Kept::draw`) and without it, in the zones' violet
+/// ([`map::ZONE_LINE`]), over the world overview at z3. The control: the
+/// same view with the time zone view off has no pixel of that violet.
+#[test]
+fn the_time_zone_view_draws_its_borders() {
+    use embedded_graphics::pixelcolor::IntoStorage;
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 3;
+        state.selected = None;
+        state.centre =
+            leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0));
+    }
+    assert!(model.now.is_some(), "the fixture's board knows the time");
+    let violet = map::ZONE_LINE.into_storage();
+    let lines = |model: &UiModel<Field>, keep: bool| {
+        let mut frame = Frame::new();
+        let mut map = Map::board(FIXTURE, &[]).expect("regions");
+        if keep {
+            map.keep_pictures();
+        }
+        Renderer::new(&mut frame)
+            .expect("renderer")
+            .show(model, &Look::of(model), &mut map)
+            .expect("draw");
+        if keep {
+            assert_eq!(map.kept.as_ref().map(|k| k.drawn), Some(1), "Kept::draw");
+        }
+        (0..HEIGHT_PICTURE)
+            .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.pixel(x, y) == violet)
+            .count()
+    };
+    for keep in [false, true] {
+        assert_eq!(lines(&model, keep), 0, "the control: off, kept {keep}");
+    }
+    model.time_zones = true;
+    assert!(map::zones(&model).is_some());
+    for keep in [false, true] {
+        let n = lines(&model, keep);
+        assert!(n > 50, "{n} zone border pixels, kept {keep}");
+    }
 }

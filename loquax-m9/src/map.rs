@@ -43,7 +43,7 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::{Baseline, Text};
 use leviculum_map::draw::{draw_in_scaled, draws_buildings, Ink};
-use leviculum_map::labels::{Rect as LabelRect, ViewLabel};
+use leviculum_map::labels::{LabelKind, Rect as LabelRect, ViewLabel};
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, RegionError};
 use leviculum_map::timezones;
@@ -450,6 +450,10 @@ pub fn bottom<B: InputBuffer>(
 /// they come.
 pub const CHIP_ROWS: [u16; 2] = [0, BOTTOM];
 
+/// From this zoom on the names of parks and waters are set too (1531):
+/// below it the board's few names are the places and the streets.
+pub const POI_ZOOM: u8 = 15;
+
 /// The phone's logical pixel on the panel (1565): the label pass's sizes,
 /// halo, margin and repeat ([`loquax::mapnames`]) are the phone's times
 /// this, so a street's name is 11 x 1.6 = 17.6 px to the em, Fira Sans's
@@ -504,7 +508,8 @@ pub fn taken_px(taken: &[(u16, u16, u16)]) -> Vec<LabelRect> {
 /// With `overview` the world region is what is shown, whose own names are
 /// only the places at z3: the world view's names ([`outline::NAMES_M9`],
 /// countries, seas, ranges, deserts and its places) join them (1683). A
-/// name both tables carry is placed once, by its text. Without it a name
+/// name both tables carry is placed once, by the map core's rule (see
+/// [`place_found`]). Without it a name
 /// stays on the ground the region covers (1727): off it the picture is
 /// the background, and a name there would name nothing drawn.
 pub fn names(
@@ -534,6 +539,9 @@ pub fn names_scaled(
     if overview {
         outline::names(outline::NAMES_M9, view, &mut found);
     }
+    // Parks and waters from POI_ZOOM on (1531).
+    let poi = |k: LabelKind| matches!(k, LabelKind::Park | LabelKind::Water);
+    found.retain(|l| view.zoom() >= POI_ZOOM || !poi(l.kind));
     // The region's names on the ground it covers (1727), the world's
     // anywhere: the world region covers every view.
     let outside = match overview {
@@ -622,9 +630,13 @@ pub fn zones<B>(model: &UiModel<B>) -> Option<i64> {
 
 /// `found` placed by the phone's label pass on the picture of `view`,
 /// clear of `taken`, of the chip rows ([`CHIP_ROWS`]) and of `outside`
-/// (pixel boxes), at `scale`. A text placed twice keeps its first spot
-/// (1683: the world's names and the overview region's places share
-/// some).
+/// (pixel boxes), at `scale`. A chip row is kept clear to its own cells:
+/// the rule's margin keeps names apart, and grown by it the rows would
+/// take a strip of the picture next to them too ([`chip_boxes`]). A text
+/// both the world table and the overview region carry (1683) is set
+/// once by the map core's rule itself (`leviculum_map::labels::place`: a
+/// place's text once a view, a line's no nearer than its `repeat`, which
+/// the phone's pass sets from [`mapnames::REPEAT`]).
 fn place_found(
     found: &[ViewLabel],
     view: &Viewport,
@@ -638,24 +650,91 @@ fn place_found(
     let px = |v: (i64, i64)| (v.0 as f64 / sub, v.1 as f64 / sub);
     let made = glyphs.made;
     let mut boxes = taken_px(taken);
-    let chips: Vec<(u16, u16, u16)> = CHIP_ROWS.iter().map(|&r| (0, r, PICTURE.width)).collect();
-    boxes.extend(taken_px(&chips));
+    boxes.extend(chip_boxes(scale));
     boxes.extend_from_slice(outside);
-    let mut placed = mapnames::place(w, h, found, px, &boxes, scale, glyphs);
-    let mut seen: Vec<String> = Vec::new();
-    placed.retain(|p| match seen.contains(&p.text) {
-        true => false,
-        false => {
-            seen.push(p.text.clone());
-            true
-        }
-    });
+    let nudged = nudged_in(found, w, scale, glyphs);
+    let labels =
+        found
+            .iter()
+            .enumerate()
+            .map(|(i, l)| match nudged.iter().find(|(at, _)| *at == i) {
+                Some((_, moved)) => moved,
+                None => l,
+            });
+    let placed = mapnames::place(w, h, labels, px, &boxes, scale, glyphs);
     let stats = NameStats {
         found: found.len(),
         drawn: placed.len(),
         glyphs: glyphs.made.saturating_sub(made),
     };
     (placed, stats)
+}
+
+/// The point names of `found` whose text, centred on its point, would
+/// leave a picture `w` pixels wide by at most [`NUDGE_PX`] on one side,
+/// each moved in just far enough to lie in it, by its index in `found`.
+/// The rest are left as they are: a street's name keeps to its line, and
+/// a place further out is no candidate (the phone's rule).
+fn nudged_in(
+    found: &[ViewLabel],
+    w: u32,
+    scale: f32,
+    glyphs: &mut Glyphs,
+) -> Vec<(usize, ViewLabel)> {
+    use mapnames::Shaper;
+    let sub = leviculum_map::labels::SUBPIXEL;
+    let pad = libm::ceilf(mapnames::HALO * scale) as usize + 1;
+    let w = i64::from(w) * sub;
+    let reach = i64::from(NUDGE_PX) * sub;
+    let mut out = Vec::new();
+    for (i, l) in found.iter().enumerate() {
+        if l.kind.is_line() {
+            continue;
+        }
+        let (mw, _) = glyphs.extent(&l.text, mapnames::size_of(l.kind) * scale, pad, false);
+        // Half the text's width in sub-pixels, rounded up, so the box the
+        // rule makes (its edges rounded outward) starts at 0 at the least.
+        let half = i64::try_from(mw.saturating_sub(2 * pad)).unwrap_or(i64::MAX) * sub;
+        let half = half / 2 + half % 2 + sub;
+        let x = l.anchor.0;
+        let to = match (x < half, x > w - half) {
+            (true, false) if half - x <= reach => half,
+            (false, true) if x - (w - half) <= reach => w - half,
+            _ => continue,
+        };
+        let mut moved = l.clone();
+        moved.anchor.0 = to;
+        out.push((i, moved));
+    }
+    out
+}
+
+/// How far the board moves a place's name off its point to fit it in the
+/// picture whole ([`nudged_in`]): one cell, as far as the cell pass the
+/// board set its names on before the phone's (1531 to 1565) set a name
+/// off its point. At the phone's sizes times [`SCALE`] a name near the
+/// picture's edge is wider than the old 10 pixel cells made it; without
+/// this the z6 overview over Germany set no name (the audit of 1757).
+pub const NUDGE_PX: u16 = CELL_PX.0;
+
+/// The chip rows ([`CHIP_ROWS`]) as boxes for the label rule at `scale`:
+/// each row's cells shrunk by the rule's margin
+/// ([`mapnames::MARGIN`] times `scale`), so the rule, which grows every
+/// box it keeps clear by that margin, keeps a name out of the row's cells
+/// and no further (1727; the margin reaching past the cell cost the z6
+/// overview its names, the audit of 1757).
+pub fn chip_boxes(scale: f32) -> Vec<LabelRect> {
+    let margin = (mapnames::MARGIN * scale).round() as i32;
+    let chips: Vec<(u16, u16, u16)> = CHIP_ROWS.iter().map(|&r| (0, r, PICTURE.width)).collect();
+    taken_px(&chips)
+        .into_iter()
+        .map(|b| LabelRect {
+            x0: b.x0 + margin,
+            y0: b.y0 + margin,
+            x1: b.x1 - margin,
+            y1: b.y1 - margin,
+        })
+        .collect()
 }
 
 /// The cells `pins` cover, for [`names`]: each marker's text and each
@@ -1439,5 +1518,51 @@ mod words_1531 {
         chrome.seen(true, 20_000);
         assert_eq!(at(&chrome, 20_000, true).hint, Some(StrId::MapKeys));
         assert!(!at(&chrome, 20_000, true).credit, "once a boot");
+    }
+}
+
+#[cfg(test)]
+mod names_1683 {
+    use super::*;
+    use leviculum_map::labels::{LabelKind, SUBPIXEL};
+
+    fn point(text: &str, x: i64, y: i64) -> ViewLabel {
+        ViewLabel {
+            kind: LabelKind::City,
+            rank: 0,
+            min_zoom: 3,
+            text: text.into(),
+            local: text.into(),
+            at: (u32::try_from(x).unwrap_or(0), u32::try_from(y).unwrap_or(0)),
+            anchor: (x * SUBPIXEL, y * SUBPIXEL),
+            line: Vec::new(),
+        }
+    }
+
+    /// 1683, the audit of 1757: a text the world table and the overview
+    /// region both carry is set once, though the two tables put it on
+    /// points far enough apart that both would fit. `place_found` keeps no
+    /// text dedup of its own: the map core's rule sets a place's text once
+    /// a view. The control: a second text at the far point is set.
+    #[test]
+    fn a_text_on_two_points_is_set_once() {
+        let view = Viewport::new(
+            leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0)),
+            3,
+            320,
+            240,
+        );
+        let mut glyphs = Glyphs::new().expect("font");
+        let twice = [
+            point("Punta Arenas", 100, 80),
+            point("Punta Arenas", 200, 160),
+        ];
+        let (placed, stats) = place_found(&twice, &view, &[], &[], &mut glyphs, SCALE);
+        let texts: Vec<&str> = placed.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(stats.found, 2);
+        assert_eq!(texts, ["Punta Arenas"], "{texts:?}");
+        let apart = [point("Punta Arenas", 100, 80), point("Ushuaia", 200, 160)];
+        let (placed, _) = place_found(&apart, &view, &[], &[], &mut glyphs, SCALE);
+        assert_eq!(placed.len(), 2, "the control: both points have room");
     }
 }
