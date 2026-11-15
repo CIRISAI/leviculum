@@ -251,8 +251,8 @@ fn an_upgrade_moves_the_link_and_a_lost_interface_moves_it_back() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
 
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(&mut pair, &session, a_direct, b_direct);
 
     assert!(pair.a_events.iter().any(|e| matches!(
@@ -468,7 +468,7 @@ fn closing_the_link_retires_its_direct_interface() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
     b_commits_first(&mut pair, &session);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
     let _ = pair.a.take_direct_link_jobs();
 
@@ -490,7 +490,7 @@ fn a_punch_that_lands_after_the_link_closed_hands_its_interface_back() {
         pair.a.take_direct_link_jobs(),
         [DirectLinkJob::Release { session }]
     );
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
     assert_eq!(
         pair.a.take_direct_link_jobs(),
@@ -535,7 +535,7 @@ fn punch_both(
 /// leviculum#89). B is left waiting on A's COMPLETE, which these tests do
 /// not deliver.
 fn b_commits_first(pair: &mut Pair, session: &crate::direct_link::SessionId) {
-    let b_direct = add_iface(&mut pair.b, "B_direct_first");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct_first");
     let out = pair.b.direct_link_punched(session, Some(b_direct));
     let mut to_a = packets(&out);
     for _ in 0..10 {
@@ -553,8 +553,8 @@ fn b_commits_first(pair: &mut Pair, session: &crate::direct_link::SessionId) {
 
 fn established(pair: &mut Pair) -> (usize, usize) {
     let (session, _) = to_punch(pair);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(pair, &session, a_direct, b_direct);
     (a_direct, b_direct)
 }
@@ -988,8 +988,8 @@ fn a_link_that_went_stale_during_the_punch_is_live_again_when_it_lands() {
         .get_mut(&pair.link)
         .unwrap()
         .set_state(crate::link::LinkState::Stale);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(&mut pair, &session, a_direct, b_direct);
     assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
     assert!(pair
@@ -1095,7 +1095,7 @@ fn a_channel_message_too_big_for_udp_holds_the_link_on_the_relay() {
     pair.a.transport.clock().advance(1_000);
     let big = std::vec![9u8; 4_000];
     let out = pair.a.send_on_link(&pair.link, &big).expect("send");
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let punched = pair.a.direct_link_punched(&session, Some(a_direct));
     assert!(
         !punched
@@ -1191,7 +1191,7 @@ fn a_fallback_that_died_before_the_move_is_no_fallback() {
     b_commits_first(&mut pair, &session);
     // The relay goes while the punch runs.
     let _ = pair.a.handle_interface_down(InterfaceId(pair.a_mesh));
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
     assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
     // So losing the direct path closes the link rather than repointing it
@@ -1217,7 +1217,7 @@ fn a_pending_resource_advertisement_holds_the_link_on_the_relay() {
         .unwrap();
     let _ = deliver(&mut pair.b, pair.b_mesh, packets(&tick));
     assert!(pair.b.links.get(&pair.link).unwrap().has_pending_resource());
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     let _ = pair.b.direct_link_punched(&session, Some(b_direct));
     assert_eq!(
         pair.b.direct_link_interface(&pair.link),
@@ -1370,8 +1370,8 @@ fn retire_moves_a_direct_link_back_and_the_peer_follows() {
         "not direct: an error, nothing changes"
     );
     let (session, _) = to_punch(&mut pair);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(&mut pair, &session, a_direct, b_direct);
     assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
     pair.a_events.clear();
@@ -1441,7 +1441,7 @@ fn retire_moves_a_direct_link_back_and_the_peer_follows() {
 fn a_punch_that_succeeds_on_one_side_only_moves_neither() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let out = pair.a.direct_link_punched(&session, Some(a_direct));
     pair.a_events.extend(out.events.clone());
     assert_eq!(
@@ -1485,7 +1485,7 @@ fn a_punch_that_succeeds_on_one_side_only_moves_neither() {
 fn a_silent_peer_after_the_punch_moves_nothing() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
     for _ in 0..14 {
         pair.a.transport.clock().advance(1_000);
@@ -1509,8 +1509,8 @@ fn both_sides_move_whichever_punch_finishes_first() {
     for b_first in [false, true] {
         let mut pair = Pair::new();
         let (session, _) = to_punch(&mut pair);
-        let a_direct = add_iface(&mut pair.a, "A_direct");
-        let b_direct = add_iface(&mut pair.b, "B_direct");
+        let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+        let b_direct = add_direct_iface(&mut pair.b, "B_direct");
         if b_first {
             let out = pair.b.direct_link_punched(&session, Some(b_direct));
             let _ = deliver(&mut pair.a, pair.a_mesh, packets(&out));
@@ -1754,8 +1754,8 @@ fn only_as_session_proceeds(pair: &mut Pair, session: &[u8; 16]) {
     pair.pump_from_b(packets(&out));
     pair.advance(1_000);
     assert_eq!(only_punch(&pair.a.take_direct_link_jobs()).0, *session);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(pair, session, a_direct, b_direct);
     assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
     assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
@@ -2018,8 +2018,8 @@ struct Paths {
 impl Paths {
     fn add(pair: &mut Pair) -> Self {
         Paths {
-            a_direct: add_iface(&mut pair.a, "A_direct"),
-            b_direct: add_iface(&mut pair.b, "B_direct"),
+            a_direct: add_direct_iface(&mut pair.a, "A_direct"),
+            b_direct: add_direct_iface(&mut pair.b, "B_direct"),
         }
     }
 
@@ -2336,8 +2336,8 @@ fn a_derived_link_after_an_upgrade_runs_at_the_direct_mtu() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
     let a_udp = add_iface(&mut pair.a, "A_udp");
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     // What the std driver registers for a DirectPeer interface.
     pair.a.set_interface_hw_mtu(a_direct, DIRECT_LINK_MTU);
     pair.b.set_interface_hw_mtu(b_direct, DIRECT_LINK_MTU);
@@ -2414,8 +2414,8 @@ fn a_replayed_relay_datagram_does_not_pull_the_link_back() {
     let _ = deliver(&mut pair.b, pair.b_mesh, captured.clone());
 
     let (session, _) = to_punch(&mut pair);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
     punch_both(&mut pair, &session, a_direct, b_direct);
     assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
     pair.advance(crate::node::FALLBACK_GRACE_MS + 1_000);
@@ -2438,4 +2438,136 @@ fn a_replayed_relay_datagram_does_not_pull_the_link_back() {
         "the link stays on its direct path"
     );
     assert_eq!(pair.b.link_datagram_stats(&pair.link).unwrap().replayed, 1);
+}
+
+/// A punched interface, registered with the MTU the driver's probe found on
+/// a path that carries `DIRECT_LINK_MTU` (+ciris, leviculum#104/#107).
+fn add_direct_iface(node: &mut Node, name: &'static str) -> usize {
+    add_direct_iface_at(node, name, Some(crate::direct_link::DIRECT_LINK_MTU))
+}
+
+/// [`add_direct_iface`] on a path the probe found carrying `mtu`; `None`
+/// when no probe step was acked, so the interface signals no MTU.
+fn add_direct_iface_at(node: &mut Node, name: &'static str, mtu: Option<u32>) -> usize {
+    let idx = add_iface(node, name);
+    if let Some(mtu) = mtu {
+        node.set_interface_hw_mtu(idx, mtu);
+    }
+    idx
+}
+
+/// +ciris (leviculum#107): a link whose relayed leg negotiated far more
+/// than UDP carries, upgraded over direct interfaces whose probes found
+/// `a_mtu` and `b_mtu`. Returns both ends' MTU after the move.
+fn upgraded_at(pair: &mut Pair, a_mtu: Option<u32>, b_mtu: Option<u32>) -> (u32, u32) {
+    for node in [&mut pair.a, &mut pair.b] {
+        let link = node.links.get_mut(&pair.link).unwrap();
+        link.set_negotiated_mtu_for_test(16_384);
+    }
+    let (session, _) = to_punch(pair);
+    let a_direct = add_direct_iface_at(&mut pair.a, "A_direct", a_mtu);
+    let b_direct = add_direct_iface_at(&mut pair.b, "B_direct", b_mtu);
+    punch_both(pair, &session, a_direct, b_direct);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    let a = pair.a.links.get(&pair.link).unwrap();
+    let b = pair.b.links.get(&pair.link).unwrap();
+    assert_eq!(a.mdu(), b.mdu(), "both ends agree on the MDU");
+    (a.negotiated_mtu(), b.negotiated_mtu())
+}
+
+/// +ciris (leviculum#107): a message of the full channel MDU leaves A on the
+/// direct interface in datagrams no larger than `path_mtu`, and B delivers
+/// it; one byte more is refused rather than sent.
+fn full_mdu_crosses(pair: &mut Pair, path_mtu: u32) {
+    use crate::constants::CHANNEL_ENVELOPE_HEADER_SIZE;
+    let a_direct = pair.a.direct_link_interface(&pair.link).unwrap();
+    let b_direct = pair.b.direct_link_interface(&pair.link).unwrap();
+    let mdu = pair.a.links.get(&pair.link).unwrap().mdu() - CHANNEL_ENVELOPE_HEADER_SIZE;
+    pair.a.transport.clock().advance(1_000);
+    assert!(
+        pair.a
+            .send_on_link(&pair.link, &std::vec![0x5A; mdu + 1])
+            .is_err(),
+        "past the channel MDU"
+    );
+    let payload = std::vec![0xA5; mdu];
+    let out = pair.a.send_on_link(&pair.link, &payload).unwrap();
+    let wire = sent(&out);
+    assert!(!wire.is_empty());
+    for (iface, data) in &wire {
+        assert_eq!(*iface, Some(a_direct), "on the direct interface");
+        assert!(
+            data.len() <= path_mtu as usize,
+            "{} > {path_mtu}",
+            data.len()
+        );
+    }
+    let (_, ev) = deliver(
+        &mut pair.b,
+        b_direct,
+        wire.into_iter().map(|(_, d)| d).collect(),
+    );
+    assert!(
+        ev.iter().any(|e| matches!(
+            e,
+            NodeEvent::MessageReceived { data, .. } if *data == payload
+        )),
+        "B delivers the full-MDU message"
+    );
+}
+
+/// +ciris (leviculum#107): both ends' COMPLETEs carry their probe's find, and
+/// the link moves at the smaller, whichever side found it. Before, both
+/// ends lowered to 1400 whatever the probes found, and on a 1280 path the
+/// link's large frames were lost.
+#[test]
+fn an_upgrade_moves_at_the_smaller_probed_path_mtu() {
+    for (a_mtu, b_mtu) in [(1280, 1400), (1400, 1280), (1280, 1280)] {
+        let mut pair = Pair::new();
+        assert_eq!(
+            upgraded_at(&mut pair, Some(a_mtu), Some(b_mtu)),
+            (1280, 1280),
+            "A found {a_mtu}, B found {b_mtu}"
+        );
+        full_mdu_crosses(&mut pair, 1280);
+    }
+    let mut pair = Pair::new();
+    assert_eq!(upgraded_at(&mut pair, Some(1400), Some(1400)), (1400, 1400));
+    full_mdu_crosses(&mut pair, 1400);
+}
+
+/// +ciris (leviculum#107): a side whose probe had no step acked registers
+/// its interface with no MTU; its COMPLETE says 500 and the link moves at
+/// the base MTU.
+#[test]
+fn an_upgrade_over_a_path_no_probe_step_crossed_moves_at_the_base() {
+    let base = crate::constants::MTU as u32;
+    for (a_mtu, b_mtu) in [(None, Some(1400)), (Some(1280), None), (None, None)] {
+        let mut pair = Pair::new();
+        assert_eq!(upgraded_at(&mut pair, a_mtu, b_mtu), (base, base));
+        full_mdu_crosses(&mut pair, base);
+    }
+}
+
+/// +ciris (leviculum#107): a peer from before the field sends COMPLETE
+/// without `"m"` and lowers to 1400 whatever it found. This side does the
+/// same, so the two still agree on the MDU, and the link works.
+#[test]
+fn an_upgrade_with_a_peer_that_sends_no_path_mtu_moves_at_1400() {
+    use crate::direct_link::DIRECT_LINK_MTU;
+    for legacy_a in [false, true] {
+        let mut pair = Pair::new();
+        if legacy_a {
+            pair.a.direct_links.legacy_complete = true;
+        } else {
+            pair.b.direct_links.legacy_complete = true;
+        }
+        assert_eq!(
+            upgraded_at(&mut pair, Some(1280), Some(1280)),
+            (DIRECT_LINK_MTU, DIRECT_LINK_MTU),
+            "legacy A: {legacy_a}"
+        );
+        full_mdu_crosses(&mut pair, DIRECT_LINK_MTU);
+    }
 }

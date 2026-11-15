@@ -179,6 +179,11 @@ pub struct Session {
     /// +ciris (leviculum#88): opaque bytes the REQUEST carries for the
     /// responder's host.
     host_payload: Option<Vec<u8>>,
+    /// +ciris (leviculum#107): the path MTU this side's COMPLETE carried.
+    own_mtu: Option<u32>,
+    /// +ciris (leviculum#107): the path MTU the peer's COMPLETE carried;
+    /// `None` from a peer that predates the field.
+    peer_mtu: Option<u32>,
 }
 
 impl Session {
@@ -204,6 +209,8 @@ impl Session {
             commit: true,
             peer_committed: false,
             host_payload: None,
+            own_mtu: None,
+            peer_mtu: None,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -241,6 +248,8 @@ impl Session {
             commit: false,
             peer_committed: false,
             host_payload: None,
+            own_mtu: None,
+            peer_mtu: None,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -438,11 +447,13 @@ impl Session {
                 }]
             }
             // +ciris (leviculum#89): the peer's half of the two-sided commit.
-            (_, Phase::Punching, Signal::Complete { .. }) if self.commit => {
+            (_, Phase::Punching, Signal::Complete { mtu, .. }) if self.commit => {
                 self.peer_committed = true;
+                self.peer_mtu = *mtu;
                 Vec::new()
             }
-            (_, Phase::Committing, Signal::Complete { .. }) => {
+            (_, Phase::Committing, Signal::Complete { mtu, .. }) => {
+                self.peer_mtu = *mtu;
                 self.enter(Phase::Connected, now_ms);
                 alloc::vec![Step::Established]
             }
@@ -455,8 +466,14 @@ impl Session {
         }
     }
 
-    /// The driver's verdict on the punch.
-    pub fn punched(&mut self, succeeded: bool, now_ms: u64) -> Vec<Step> {
+    /// The driver's verdict on the punch, and (+ciris, leviculum#107) the
+    /// path MTU its probe found, which this side's COMPLETE carries.
+    pub fn punched_with_mtu(
+        &mut self,
+        succeeded: bool,
+        path_mtu: Option<u32>,
+        now_ms: u64,
+    ) -> Vec<Step> {
         if self.phase != Phase::Punching {
             return Vec::new();
         }
@@ -474,7 +491,11 @@ impl Session {
         // the other had already released. So each side tells the other its
         // verdict, and moves only when both succeeded.
         if succeeded {
-            let complete = Step::Send(Signal::Complete { session: self.id });
+            self.own_mtu = path_mtu;
+            let complete = Step::Send(Signal::Complete {
+                session: self.id,
+                mtu: path_mtu,
+            });
             if self.peer_committed {
                 self.enter(Phase::Connected, now_ms);
                 alloc::vec![complete, Step::Established]
@@ -510,6 +531,24 @@ impl Session {
                 alloc::vec![Step::Failed(failure)]
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// The driver's verdict on the punch, with no path MTU: the COMPLETE
+    /// goes without `"m"`, as every peer before leviculum#107 sends it.
+    pub fn punched(&mut self, succeeded: bool, now_ms: u64) -> Vec<Step> {
+        self.punched_with_mtu(succeeded, None, now_ms)
+    }
+
+    /// +ciris (leviculum#107): the MTU the link moves at. Both ends' COMPLETEs
+    /// carried a probed path MTU: the smaller, so it fits both directions and
+    /// both ends compute the same number. Otherwise (the one-sided rule with
+    /// rns-rs, or a peer that predates the field)
+    /// [`super::DIRECT_LINK_MTU`], which is what such a peer lowers to.
+    pub fn move_mtu(&self) -> u32 {
+        match (self.commit, self.own_mtu, self.peer_mtu) {
+            (true, Some(own), Some(peer)) => own.min(peer).min(super::DIRECT_LINK_MTU),
+            _ => super::DIRECT_LINK_MTU,
         }
     }
 }

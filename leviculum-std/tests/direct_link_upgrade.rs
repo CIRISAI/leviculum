@@ -805,3 +805,151 @@ fn hex_bytes(s: &str) -> Vec<u8> {
 fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// +ciris (leviculum#107): a facilitator that puts each prober behind a
+/// path dropping every datagram over `path_mtu` bytes. It answers a probe
+/// with a proxy socket's address in place of the prober's own, so the peers
+/// punch, probe and carry the link through the proxies: what reaches proxy
+/// X from peer Y leaves Y's proxy for X's owner, as a NAT pair would carry
+/// it, unless it is too large for the path. Returns the facilitator's port.
+async fn narrow_path_facilitator(path_mtu: usize) -> u16 {
+    use leviculum_core::direct_link::wire;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::UdpSocket;
+
+    type Owners = Arc<Mutex<HashMap<SocketAddr, Arc<UdpSocket>>>>;
+    async fn carry(proxy: Arc<UdpSocket>, owner: SocketAddr, owners: Owners, path_mtu: usize) {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok((len, from)) = proxy.recv_from(&mut buf).await {
+            if len > path_mtu {
+                continue; // the path drops it
+            }
+            let via = owners.lock().unwrap().get(&from).cloned();
+            if let Some(via) = via {
+                let _ = via.send_to(&buf[..len], owner).await;
+            }
+        }
+    }
+
+    let facilitator = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = facilitator.local_addr().unwrap().port();
+    let owners: Owners = Arc::default();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 576];
+        while let Ok((len, src)) = facilitator.recv_from(&mut buf).await {
+            let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) else {
+                continue;
+            };
+            let known = owners.lock().unwrap().get(&src).cloned();
+            let proxy = match known {
+                Some(proxy) => proxy,
+                None => {
+                    let proxy = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                    owners.lock().unwrap().insert(src, Arc::clone(&proxy));
+                    tokio::spawn(carry(
+                        Arc::clone(&proxy),
+                        src,
+                        Arc::clone(&owners),
+                        path_mtu,
+                    ));
+                    proxy
+                }
+            };
+            let answer = wire::rnsp_response(&nonce, &proxy.local_addr().unwrap());
+            let _ = facilitator.send_to(&answer, src).await;
+        }
+    });
+    port
+}
+
+/// Whether this host has a global IPv6 address. Each end then offers it as
+/// a host candidate, which the punch may take straight past the proxies of
+/// [`narrow_path_facilitator`].
+fn has_global_ipv6() -> bool {
+    let Ok(socket) = StdUdpSocket::bind("[::]:0") else {
+        return false;
+    };
+    socket.connect("[2001:4860:4860::8888]:53").is_ok()
+        && socket.local_addr().is_ok_and(|a| match a.ip() {
+            std::net::IpAddr::V6(ip) => ip.segments()[0] & 0xe000 == 0x2000,
+            std::net::IpAddr::V4(_) => false,
+        })
+}
+
+/// +ciris (leviculum#107): upgrade a relayed link over a path that carries
+/// `path_mtu`-byte datagrams, drop the relay, and check the link moved at
+/// `expect` on both ends and carries a message of its full channel MDU each
+/// way. `None` when the host's global IPv6 would bypass the narrow path.
+async fn upgrade_over_a_narrow_path(path_mtu: usize, expect: u32) -> Option<()> {
+    use leviculum_core::constants::CHANNEL_ENVELOPE_HEADER_SIZE;
+    if has_global_ipv6() {
+        eprintln!("skipped: a global IPv6 host candidate would bypass the narrow path");
+        return None;
+    }
+    let tcp_port = next_port();
+    let mut t = transport_node(tcp_port, next_port()).await;
+    let facilitator = narrow_path_facilitator(path_mtu).await;
+    let (_, mut a, mut b, link_id, handle, hash) =
+        linked_through_relay(accepter(), Some((tcp_port, facilitator))).await;
+    upgrade(&mut a, &mut b, &link_id, &hash).await;
+    assert_eq!(b.node.link_negotiated_mtu(&link_id), Some(expect), "B");
+    assert_eq!(a.node.link_negotiated_mtu(&link_id), Some(expect), "A");
+    t.node.stop().await.ok();
+
+    let mdu = b.node.link_mdu(&link_id).expect("B's link") - CHANNEL_ENVELOPE_HEADER_SIZE;
+    assert_eq!(a.node.link_mdu(&link_id), b.node.link_mdu(&link_id));
+    let past = handle.send(&vec![0x5A; mdu + 1]).await;
+    assert!(
+        matches!(
+            past,
+            Err(leviculum_std::Error::Send(
+                leviculum_core::node::SendError::TooLarge
+            ))
+        ),
+        "past the channel MDU: {past:?}"
+    );
+    let full = vec![0xA5u8; mdu];
+    handle.send(&full).await.expect("send the full MDU");
+    assert!(
+        next_event(&mut a.rx, Duration::from_secs(8), |ev| matches!(
+            ev,
+            NodeEvent::MessageReceived { data, .. } if *data == full
+        ))
+        .await
+        .is_some(),
+        "B's full-MDU message reaches A over the {path_mtu}-byte path"
+    );
+    let back = vec![0x3Cu8; mdu];
+    a.node
+        .link_handle(&link_id)
+        .send(&back)
+        .await
+        .expect("send back");
+    assert!(
+        next_event(&mut b.rx, Duration::from_secs(8), |ev| matches!(
+            ev,
+            NodeEvent::MessageReceived { data, .. } if *data == back
+        ))
+        .await
+        .is_some(),
+        "and A's reaches B"
+    );
+    Some(())
+}
+
+/// +ciris (leviculum#107): a link that moves onto a path the probe found
+/// carrying 1280 runs at 1280 on both ends, and its largest frames cross.
+/// Before, both ends lowered it to 1400 whatever the probe found, and
+/// frames over 1280 bytes were silently lost while small ones passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upgrade_over_a_1280_path_moves_at_1280() {
+    upgrade_over_a_narrow_path(1300, 1280).await;
+}
+
+/// +ciris (leviculum#107): a path that carries no probe step moves the link
+/// at the base 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upgrade_over_a_path_under_every_probe_step_moves_at_500() {
+    upgrade_over_a_narrow_path(1000, 500).await;
+}
