@@ -99,3 +99,10 @@ linker = "aarch64-linux-gnu-gcc"
 # curve25519-dalek SIMD backends crash LLVM; use their software ones.
 [target.x86_64-unknown-uefi]
 rustflags = ["--cfg", "aes_force_soft", "--cfg", 'curve25519_dalek_backend="serial"']
+
+# +ciris (leviculum#108): core's lib tests run on WASI under wasmtime,
+#   cargo test -p leviculum-core --lib --target wasm32-wasip1
+# A panic aborts the module there (no unwinding), so `should_panic` and
+# thread tests carry `cfg_attr(target_family = "wasm", ignore)`.
+[target.wasm32-wasip1]
+runner = "wasmtime"
