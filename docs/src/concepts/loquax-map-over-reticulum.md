@@ -96,8 +96,8 @@ signed and are never shared.
 
 **The request API**, over a Link on `lev.maps`, with handlers
 registered per path (`register_request_handler`,
-`leviculum-core/src/node/mod.rs:1548`) and every answer a Resource
-(`send_response_resource`, `leviculum-core/src/node/mod.rs:2030`):
+`leviculum-core/src/node/mod.rs:1664`) and every answer a Resource
+(`send_response_resource`, `leviculum-core/src/node/mod.rs:2266`):
 
 - `/index` — no request data; the signed index as msgpack: per piece
   its id, bounds, zoom range, bytes and SHA-256 hash; the server's

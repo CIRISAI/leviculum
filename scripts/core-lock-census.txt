@@ -27,8 +27,9 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 63
+TOTAL 94
 
+driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
 driver::ReticulumNode::announce_destination
@@ -38,21 +39,31 @@ driver::ReticulumNode::connect_awaited
 driver::ReticulumNode::deregister_request_handler
 driver::ReticulumNode::destination_ratchet_public
 driver::ReticulumNode::diagnostic_dump
+driver::ReticulumNode::direct_link_interface
 driver::ReticulumNode::drop_all_paths_via
 driver::ReticulumNode::get_identity
 driver::ReticulumNode::get_path_clone
 driver::ReticulumNode::get_remote_identity
 driver::ReticulumNode::has_path
+driver::ReticulumNode::heap_census
 driver::ReticulumNode::hops_to
 driver::ReticulumNode::identify_link
 driver::ReticulumNode::identity_hash
+driver::ReticulumNode::ifac_activate_next
+driver::ReticulumNode::ifac_install_next
+driver::ReticulumNode::ifac_seal_rotation
 driver::ReticulumNode::interface_stats
 driver::ReticulumNode::is_transport_enabled
+driver::ReticulumNode::known_destination_evictions
 driver::ReticulumNode::known_remote_ratchet
+driver::ReticulumNode::link_census
+driver::ReticulumNode::link_count_check
 driver::ReticulumNode::link_destination
 driver::ReticulumNode::link_establishment_timeout_ms
 driver::ReticulumNode::link_is_established
 driver::ReticulumNode::link_keepalive
+driver::ReticulumNode::link_lifecycle
+driver::ReticulumNode::link_list
 driver::ReticulumNode::link_mdu
 driver::ReticulumNode::link_negotiated_mtu
 driver::ReticulumNode::link_outgoing_resource_progress
@@ -62,13 +73,17 @@ driver::ReticulumNode::now_ms
 driver::ReticulumNode::path_count
 driver::ReticulumNode::path_table_entries
 driver::ReticulumNode::pending_link_count
+driver::ReticulumNode::propose_direct_link_with
+driver::ReticulumNode::publish_metrics
 driver::ReticulumNode::rate_table_entries
 driver::ReticulumNode::register_destination
 driver::ReticulumNode::register_request_handler
+driver::ReticulumNode::reject_direct_link
 driver::ReticulumNode::reject_resource
 driver::ReticulumNode::remember_identity
 driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
+driver::ReticulumNode::retire_direct_link
 driver::ReticulumNode::send_file_response
 driver::ReticulumNode::send_link_packet
 driver::ReticulumNode::send_proof
@@ -80,6 +95,7 @@ driver::ReticulumNode::send_response
 driver::ReticulumNode::send_response_resource_with
 driver::ReticulumNode::send_single_packet
 driver::ReticulumNode::set_announce_control
+driver::ReticulumNode::set_direct_link_retry
 driver::ReticulumNode::set_interface_announce_cap
 driver::ReticulumNode::set_link_keepalive
 driver::ReticulumNode::set_resource_strategy
@@ -87,8 +103,23 @@ driver::ReticulumNode::start_shared
 driver::ReticulumNode::transport_stats
 driver::ReticulumNode::tunnel_ids
 driver::ReticulumNode::unregister_destination
+driver::relay_route::ReticulumNode::connect_via
+driver::relay_route::ReticulumNode::forward_refusals
+driver::relay_route::ReticulumNode::forwarded_links
+driver::relay_route::ReticulumNode::relay_routes
+driver::relay_route::ReticulumNode::request_path_on
+driver::relay_route::ReticulumNode::set_forward_admission
+driver::relay_route::ReticulumNode::set_relay_route_bounds
 driver::sender::PacketSender::send
 driver::sender::PacketSender::send_measured
+driver::seq_stats::ReticulumNode::link_seq_stats
 driver::stream::LinkHandle::close
 driver::stream::LinkHandle::send
 driver::stream::LinkHandle::try_send
+driver::stream::datagram::LinkHandle::send_unordered
+driver::stream::datagram::LinkHandle::try_send_unordered
+driver::stream::datagram::ReticulumNode::link_datagram_mdu
+driver::stream::datagram::ReticulumNode::link_datagram_stats
+driver::stream::send_seq::LinkHandle::try_send_seq
+driver::stream::timed::LinkHandle::try_send_timed
+driver::wire_id::ReticulumNode::wire_link_id

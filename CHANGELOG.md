@@ -9,7 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased]
+
+## [0.35.0+ciris.1] — CIRIS fork
+
+The fork carried onto current upstream master (+1,366 since the Oct 30 base).
+
+### Changed
+
+- Known destinations: upstream's bounded flush and load (order 1585/1749:
+  memory keeps the newest `identity_cap`, the file is bounded by the cull)
+  replace the fork's #49 file pruning. One fork rule stays: a pinned entry
+  (`KnownDestUseState::Retained`) is kept in memory whatever its age, inside
+  the cap, so CIRISEdge can still recall a pinned contact after a restart.
+  Upstream keeps such an entry on disk only.
+- Apple TCP sockets (leviculum#85) now take upstream's per-interface liveness
+  keys (`tcp_keepalive_idle_secs`, `tcp_keepalive_interval_secs`,
+  `tcp_keepalive_probes`, `tcp_user_timeout_secs`): the user timeout becomes
+  `TCP_RXT_CONNDROPTIME` there, as it becomes `TCP_USER_TIMEOUT` on Linux.
+  The defaults are unchanged.
+- The reconnect kick (leviculum#84) and upstream's TCP server admission
+  control (per-source and total caps, silent-client timeouts) share the
+  connection task.
+- Fork entry points that dispatch work (`propose_direct_link_with`,
+  `accept_direct_link`, `reject_direct_link`, `retire_direct_link`,
+  `try_send_unordered`) now commit through upstream's gated `ActionTx`
+  (order 1656), so none can land between a new interface's drain and its
+  interface-up.
+- `rusqlite` stays at 0.41.1 (RUSTSEC-2026-0459) under upstream's loquax
+  `hooks` feature.
+
+### Consumer notes
+
+- Upstream changes are listed in its own sections below.
+- `deny.toml` allows `LGPL-2.1-only` for upstream's `codec2`, and ignores
+  RUSTSEC-2026-0370/0371/0372 (`zvariant`, `zbus_names`, unmaintained, no fix),
+  reached only through upstream's iced GUI.
 
 ## [0.34.0+ciris.3] — CIRIS fork
 

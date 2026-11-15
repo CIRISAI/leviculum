@@ -155,6 +155,7 @@ pub(crate) fn spawn_direct_udp_interface(
             kind: leviculum_core::traits::InterfaceKind::Udp,
             ingress_control: Some(false),
             transit: false,
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

@@ -718,7 +718,7 @@ impl Store {
     /// The store over an open connection, its commits counted where the
     /// counters are on ([`crate::ui::counters`]): every commit, a
     /// transaction's and a lone statement's alike, is one sync to the disk.
-    fn over(conn: Connection, path: &Path, identity: [u8; 16]) -> Self {
+    fn over(mut conn: Connection, path: &Path, identity: [u8; 16]) -> Self {
         let ops = std::sync::Arc::new(Ops::new());
         if crate::ui::counters::ON {
             let counting = std::sync::Arc::clone(&ops);

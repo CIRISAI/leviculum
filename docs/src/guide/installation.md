@@ -108,7 +108,7 @@ quickstart point here. Without `--config`, the daemon and every client
 tool (`lnstatus`, `lnpath`, `lnprobe`, `lncp`, `lnmgmt`, `lnstest`)
 take the first of these, in the same order as Python Reticulum
 (`configdir`, `RNS/Reticulum.py:231`), implemented in
-`default_config_dir` (`leviculum-std/src/config.rs:1611`):
+`default_config_dir` (`leviculum-std/src/config.rs:1624`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists. This is what
    the `.deb` package sets up.

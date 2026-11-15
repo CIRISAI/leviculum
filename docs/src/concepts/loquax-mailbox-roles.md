@@ -139,7 +139,7 @@ mail):
   receipts and positions. Pictures and files wait for a fast medium, and
   the client says so ("3 Bilder warten aufs Auto"). The core knows the
   path's next-hop bitrate, `next_hop_interface_bitrate`
-  (`leviculum-core/src/node/mod.rs:4386`).
+  (`leviculum-core/src/node/mod.rs:4680`).
 - **The Mailbox's announces over LoRa follow the slow cadence**: 5 minutes
   while moving, an hour while still ([announce cadence](announce-cadence.md)).
 

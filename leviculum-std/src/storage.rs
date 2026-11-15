@@ -343,49 +343,6 @@ fn wallclock_secs_to_mono_ms(secs: f64, mono_offset_ms: u64) -> u64 {
     wallclock_ms.saturating_sub(mono_offset_ms)
 }
 
-/// When a known destination was last in evidence: its last use when that is
-/// later than when it was remembered (leviculum#49).
-fn known_dest_recency(entry: &KnownDestEntry) -> f64 {
-    match entry.use_state {
-        KnownDestUseState::Used(used) => used.max(entry.timestamp),
-        _ => entry.timestamp,
-    }
-}
-
-/// Hold a known-destinations map to `cap` (leviculum#49) and return how many
-/// entries were pruned.
-///
-/// Capacity pressure falls on the unretained population only. A retained
-/// entry is the application's word that the destination is load-bearing
-/// (Python's `-1` use-state), so it is never pruned, even past the cap. The
-/// rest are ranked with `preferred` entries first (the destinations the node
-/// holds live right now), then most recent, and the tail beyond the room left
-/// is dropped. Recency, not hash order and not a clock-based expiry: nothing
-/// is pruned while the map fits.
-fn prune_known_destinations(
-    entries: &mut BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>,
-    cap: usize,
-    preferred: impl Fn(&[u8; TRUNCATED_HASHBYTES]) -> bool,
-) -> usize {
-    if entries.len() <= cap {
-        return 0;
-    }
-    let is_retained = |e: &KnownDestEntry| matches!(e.use_state, KnownDestUseState::Retained);
-    let retained = entries.values().filter(|e| is_retained(e)).count();
-    let room = cap.saturating_sub(retained);
-    let mut ranked: Vec<([u8; TRUNCATED_HASHBYTES], bool, f64)> = entries
-        .iter()
-        .filter(|(_, e)| !is_retained(e))
-        .map(|(hash, e)| (*hash, preferred(hash), known_dest_recency(e)))
-        .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
-    let before = entries.len();
-    for (hash, _, _) in ranked.into_iter().skip(room) {
-        entries.remove(&hash);
-    }
-    before - entries.len()
-}
-
 /// Atomic write: write to .tmp then rename into place.
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let temp_path = path.with_extension("tmp");
@@ -583,7 +540,26 @@ type KnownDestTable = BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>;
 /// and dropped none, so without this the table grew with uptime while the
 /// identity table beside it stayed at its ceiling. What goes here stays in
 /// the file: the next flush merges it back from disk.
+///
+/// +ciris (leviculum#49): a pinned entry (`KnownDestUseState::Retained`) is
+/// kept whatever its age, beside the newest `cap` of the rest. A pin is the
+/// application's word that it needs the identity recallable now (CIRISEdge
+/// encrypts to pinned contacts), so leaving it on disk only is not enough.
+/// Pins count against `cap`, as they do in the core's identity table, so the
+/// two stay in step; pins alone past `cap` are all kept.
 fn newest_known_destinations(table: KnownDestTable, cap: usize) -> KnownDestTable {
+    let pinned = |e: &KnownDestEntry| matches!(e.use_state, KnownDestUseState::Retained);
+    if table.values().any(pinned) {
+        let (pins, rest): (KnownDestTable, KnownDestTable) =
+            table.into_iter().partition(|(_, e)| pinned(e));
+        let mut kept = newest_unpinned(rest, cap.saturating_sub(pins.len()));
+        kept.extend(pins);
+        return kept;
+    }
+    newest_unpinned(table, cap)
+}
+
+fn newest_unpinned(table: KnownDestTable, cap: usize) -> KnownDestTable {
     if table.len() <= cap {
         return table;
     }
@@ -1655,11 +1631,6 @@ mod tests {
         }
     }
 
-    fn read_kd_file(path: &Path) -> BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry> {
-        let bytes = std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).expect("file written");
-        decode_known_destinations(&bytes).expect("file decodes")
-    }
-
     #[test]
     fn identity_evictions_counts_cap_evictions_through_the_std_storage() {
         let path =
@@ -1677,39 +1648,6 @@ mod tests {
             "two pushed out of a cap of one"
         );
         let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn pruning_keeps_retained_then_live_then_most_recent() {
-        let mut m = BTreeMap::new();
-        m.insert(kd_hash(1), kd_entry(1.0, KnownDestUseState::Retained));
-        for n in 2..=6u8 {
-            m.insert(
-                kd_hash(n),
-                kd_entry(f64::from(n), KnownDestUseState::NeverUsed),
-            );
-        }
-        // An old entry used recently ranks by its use, not its age.
-        m.insert(kd_hash(7), kd_entry(0.5, KnownDestUseState::Used(100.0)));
-
-        // Nothing is pruned while the map fits.
-        let mut fits = m.clone();
-        assert_eq!(prune_known_destinations(&mut fits, 7, |_| false), 0);
-
-        // Cap 4: the pin, the live entry, then the two most recent.
-        let pruned = prune_known_destinations(&mut m, 4, |h| *h == kd_hash(2));
-        assert_eq!(pruned, 3);
-        let kept: std::collections::BTreeSet<_> = m.keys().copied().collect();
-        let want: std::collections::BTreeSet<_> =
-            [kd_hash(1), kd_hash(2), kd_hash(7), kd_hash(6)].into();
-        assert_eq!(kept, want);
-
-        // A pin is never pruned, even when pins alone exceed the cap.
-        let mut pins = BTreeMap::new();
-        for n in 1..=3u8 {
-            pins.insert(kd_hash(n), kd_entry(1.0, KnownDestUseState::Retained));
-        }
-        assert_eq!(prune_known_destinations(&mut pins, 1, |_| false), 0);
     }
 
     #[test]
@@ -1741,62 +1679,6 @@ mod tests {
             !known(2) && !known(3) && !known(4),
             "the oldest unpinned go"
         );
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn a_flush_holds_the_file_to_the_cap_and_evictions_stay_evicted() {
-        let path =
-            std::env::temp_dir().join(format!("reticulum_test_49_flush_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        let mut m = BTreeMap::new();
-        m.insert(kd_hash(1), kd_entry(1.0, KnownDestUseState::Retained));
-        for n in 2..=6u8 {
-            m.insert(
-                kd_hash(n),
-                kd_entry(f64::from(n), KnownDestUseState::NeverUsed),
-            );
-        }
-        std::fs::write(
-            path.join(KNOWN_DESTINATIONS_FILE),
-            encode_known_destinations(&m).unwrap(),
-        )
-        .unwrap();
-
-        {
-            let mut storage = Storage::new_with_caps(&path, caps_with_identity_cap(3)).unwrap();
-            // Two fresh announces push two more out of the runtime cap.
-            for n in [0x70u8, 0x71] {
-                let id = Identity::generate(&mut rand_core::OsRng);
-                CoreStorage::set_identity(&mut storage, kd_hash(n), id);
-            }
-            CoreStorage::flush(&mut storage);
-            let file = read_kd_file(&path);
-            assert_eq!(
-                file.len(),
-                3,
-                "the file is held to the cap: {:?}",
-                file.keys()
-            );
-            assert!(file.contains_key(&kd_hash(1)), "the pin is written back");
-            assert!(matches!(
-                file[&kd_hash(1)].use_state,
-                KnownDestUseState::Retained
-            ));
-            assert!(file.contains_key(&kd_hash(0x70)) && file.contains_key(&kd_hash(0x71)));
-
-            // A second flush does not bring the evicted back from the file.
-            let id = Identity::generate(&mut rand_core::OsRng);
-            CoreStorage::set_identity(&mut storage, kd_hash(0x71), id);
-            CoreStorage::flush(&mut storage);
-            let again = read_kd_file(&path);
-            assert_eq!(again.len(), 3);
-            assert!(
-                !again.contains_key(&kd_hash(6)),
-                "an evicted entry stays evicted"
-            );
-        }
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2186,7 +2068,8 @@ mod tests {
         }
         let mut storage = Storage::new_with_caps(&path, caps).unwrap();
         let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
-        assert_eq!(kept, [2, 3, 4], "the three newest stay in memory");
+        // +ciris (leviculum#49): the pin stays in memory too, inside the cap.
+        assert_eq!(kept, [0, 3, 4], "the pin and the two newest stay in memory");
         // Three fresh identities in a run, then a flush: still three.
         for n in 10..13u8 {
             CoreStorage::set_identity(
@@ -2198,16 +2081,22 @@ mod tests {
         CoreStorage::flush(&mut storage);
         assert_eq!(storage.known_dest_entries.len(), 3);
         let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
-        assert_eq!(kept, [10, 11, 12], "the fresh ones replace the old");
-        // The file: the six the flush held (memory let go of three of them
-        // after the write), and the pinned one only the file had.
+        assert_eq!(
+            kept,
+            [0, 11, 12],
+            "the fresh ones replace the old; the pin stays"
+        );
+        // The file: what the flush held, the pin among them. +ciris
+        // (leviculum#49): the pin takes a slot of the cap, so 2 never comes
+        // back into memory and the cull drops it as never used, and 10 is
+        // evicted from the identity table before the flush folds it.
         let on_disk = FileKnownDestinationsStore::new(path.path())
             .load_all()
             .unwrap();
         let on_disk: Vec<u8> = on_disk.keys().map(|k| k[0]).collect();
         assert_eq!(
             on_disk,
-            [0, 2, 3, 4, 10, 11, 12],
+            [0, 3, 4, 11, 12],
             "the pinned entry stays, the stale never-used one goes"
         );
     }

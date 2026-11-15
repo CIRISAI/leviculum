@@ -1552,6 +1552,7 @@ async fn socks5_connect(
 /// Returns the `outgoing_rx` when the connection is lost, enabling the
 /// reconnect wrapper to reuse the channel with a new stream. Packets
 /// queued during disconnect are sent on the new connection.
+#[allow(clippy::too_many_arguments)]
 async fn tcp_interface_task(
     name: String,
     stream: tokio::net::TcpStream,
@@ -2652,6 +2653,8 @@ mod tests {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: None,
+            liveness: TcpLiveness::default(),
+            failover: None,
         })
     }
 
@@ -2734,6 +2737,7 @@ mod tests {
             "accepted".to_string(),
             accepted,
             16,
+            None,
             None,
         );
         assert!(

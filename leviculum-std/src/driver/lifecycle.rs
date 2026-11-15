@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-use super::{InterfaceHandle, InterfaceId, ReticulumNode, TickOutput};
+use super::{InterfaceHandle, InterfaceId, ReticulumNode};
 use crate::error::Error;
 use crate::sync_ext::MutexRecover;
 

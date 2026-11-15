@@ -2864,7 +2864,7 @@ impl ReticulumNode {
         // it: the waits below are awaits (leviculum#90).
         let run = {
             let mut guard = self.run.lock_recover();
-            let dispatch = mpsc::channel(1).0;
+            let dispatch = ActionTx::detached(mpsc::channel(1).0);
             std::mem::replace(&mut *guard, lifecycle::RunState::new(dispatch))
         };
 
@@ -2888,7 +2888,7 @@ impl ReticulumNode {
         // The wait runs on the node's own runtime: the host's may have no
         // timer (an embedder's IO-only runtime), and a node without radios
         // asks no timer at all.
-        if let Some(runtime) = self.runtime.as_ref() {
+        if let Some(runtime) = run.runtime.as_ref() {
             if self.goodbyes.outstanding() > 0 {
                 let goodbyes = self.goodbyes.clone();
                 let waited = runtime
@@ -4356,7 +4356,7 @@ impl ReticulumNode {
     /// Takes the core lock while it builds the packet: a task beside the
     /// node calls it, never a `CoreProcessor` hook.
     pub async fn send_link_packet(&self, link_id: &LinkId, data: &[u8]) -> Result<[u8; 32], Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(inner.send_packet_on_link(link_id, data)?)
         })
@@ -4411,18 +4411,14 @@ impl ReticulumNode {
                 leviculum_core::node::DirectLinkError::NoFacilitator,
             ))?;
         let facilitator = crate::direct_link::resolve_facilitator(&addr).await?;
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut core = self.inner.lock_recover();
             let mut config = core.direct_link_config();
             config.facilitator = Some(facilitator);
             core.set_direct_link_config(config);
-            core.propose_direct_link_with(link_id, host_payload)?
-        };
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), core.propose_direct_link_with(link_id, host_payload)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#70): the direct interface a link travels over, if
@@ -4436,22 +4432,20 @@ impl ReticulumNode {
     /// `NodeEvent::DirectLinkRequested`). The establishment flow starts; its
     /// outcome arrives as `DirectLinkEstablished` or `DirectLinkFailed`.
     pub async fn accept_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().accept_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().accept_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#82): refuse the peer's held upgrade request on
     /// `link_id`. The peer's proposal ends `Rejected`; this node probed and
     /// sent nothing about its address.
     pub async fn reject_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().reject_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().reject_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#83): move `link_id` off its direct interface and back
@@ -4461,11 +4455,10 @@ impl ReticulumNode {
     /// re-proposal cooldown applies. A link that is not direct is an error and
     /// nothing changes.
     pub async fn retire_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().retire_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().retire_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// Turn the background retry of this node's failed direct-link
@@ -6476,6 +6469,9 @@ async fn run_event_loop(
                         discovery_network_identity.as_deref(),
                         &mut discovery_heard_ifac,
                         &completions,
+                        &mut assembler,
+                        &plane_counters,
+                        &mut breakers,
                         core_processor.as_mut(),
                     );
                     tighten_next_poll(&mut next_poll, processor_delay);
@@ -8316,6 +8312,13 @@ impl ActionTx {
 
     /// A sender with a gate of its own: the placeholder before `start()`,
     /// and tests that drive the channel without an event loop.
+    /// Hold the gate for a commit and its enqueue, as
+    /// [`dispatch_committed`] does, for a caller that reserved a slot itself
+    /// (`LinkHandle::try_send_unordered`, which must not wait).
+    pub(crate) fn lock_gate(&self) -> crate::sync_ext::TrackedGuard<'_, ()> {
+        self.gate.lock_recover()
+    }
+
     pub(crate) fn detached(tx: mpsc::Sender<TickOutput>) -> Self {
         Self::new(tx, Arc::new(Mutex::new(())))
     }
@@ -8593,7 +8596,6 @@ mod tests {
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
-                transit: true,
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
                 path_choice: leviculum_core::transport::PathChoice::Hops,
@@ -12879,6 +12881,7 @@ mod tests {
             next_tag: None,
             info: InterfaceInfo {
                 transit: false,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
                 id: InterfaceId(9),
                 name: "punched".into(),
                 hw_mtu: Some(1400),
@@ -13711,7 +13714,10 @@ mod tests {
                     }
                 }
             }
-            harness.shutdown_tx.send(true).expect("loop is live");
+            harness
+                .shutdown_tx
+                .send(lifecycle::StopSignal::Stop)
+                .expect("loop is live");
             harness.loop_handle.await.expect("loop exits cleanly");
             assert_eq!(
                 count, 1,

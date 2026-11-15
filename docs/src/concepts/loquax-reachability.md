@@ -122,8 +122,8 @@ path's interface changes. Nothing medium-aware enters transport
 - **Mechanism.** The mailbox is a board or a computer with Bluetooth in
   range. Our Columba mesh link is the shortest way there is: one BLE
   hop. The BLE interface reports a peer's arrival and departure to the
-  driver (`report_peer_up`, `leviculum-std/src/interfaces/ble/mod.rs:1804`;
-  `report_peer_lost`, `leviculum-std/src/interfaces/ble/mod.rs:1780`).
+  driver (`report_peer_up`, `leviculum-std/src/interfaces/ble/mod.rs:1807`;
+  `report_peer_lost`, `leviculum-std/src/interfaces/ble/mod.rs:1783`).
   When the path to `loquax.home` stands on the BLE interface, the race
   names the way Bluetooth and drops the rendezvous. The device needs no
   list of the mailbox's BLE identity: the path's interface tells it.
@@ -328,9 +328,9 @@ holds no path and has no local clients, re-originates nothing: the
 reference gates the search on the receiving interface's mode
 (`reference/Reticulum/RNS/Transport.py:2918`), and so does lnsd
 (`discovers_paths`, `leviculum-core/src/traits.rs:115`;
-`leviculum-core/src/transport.rs:12958`). lnsd widens the gate only for
+`leviculum-core/src/transport.rs:13242`). lnsd widens the gate only for
 interfaces that report live peers, and today only BLE does
-(`leviculum-std/src/interfaces/ble/mod.rs:1812`). Without an announce of
+(`leviculum-std/src/interfaces/ble/mod.rs:1815`). Without an announce of
 `loquax.home` no relay holds its path either. So A worked only when the
 mailbox's own daemon was node A's direct neighbour, and failed when a
 third relay stood between them. 1196 closes it by announcing

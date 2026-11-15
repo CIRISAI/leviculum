@@ -319,7 +319,7 @@ fn a_home_opens_what_a_sender_encrypted_to_the_other_homes_ratchet() {
 /// home LAN or the internet side, where the always-on home lives) hears the
 /// always-on home A on one interface and the phone home B on another. The
 /// path table follows the newest emission at any hop count
-/// (`leviculum-core/src/transport.rs:7690-7692` for equal or fewer hops,
+/// (`leviculum-core/src/transport.rs:7759-7761` for equal or fewer hops,
 /// `:7379-7382` for more; `RNS/Transport.py:1765`, `:1809-1810`), so every
 /// announce of the other home moves it: A, B, A gives three different
 /// interfaces in a row, a flap at the announce cadence.
@@ -327,7 +327,7 @@ fn a_home_opens_what_a_sender_encrypted_to_the_other_homes_ratchet() {
 /// The design's rule is that a phone home with an always-on home announces
 /// the identity on its mesh interfaces only, through
 /// `NodeCore::announce_destination_on_interface`
-/// (`leviculum-core/src/node/mod.rs:1024`); then this segment never hears
+/// (`leviculum-core/src/node/mod.rs:1140`); then this segment never hears
 /// B and the path stays on A. Today the home announces on every interface.
 #[test]
 #[ignore = "red until H3 (study 2.3): mesh-only announcing for a phone home beside an always-on home"]

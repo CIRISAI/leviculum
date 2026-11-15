@@ -229,7 +229,7 @@ The replay is lnsd answering from its cache: a path request from a local
 client for a destination the path table holds is answered with the cached
 announce, sent to the requesting interface alone, and the handler returns
 without forwarding the request (`handle_path_request`,
-`leviculum-core/src/transport.rs:12536`, the local-client arm at
+`leviculum-core/src/transport.rs:12820`, the local-client arm at
 `:12157-12202`, the send at `:12195`; pinned by
 `test_path_request_from_local_client_returns_cached_announce`, `:30745`,
 which asserts no send to the network interface and no
@@ -505,7 +505,7 @@ census column.
   local client of its shared instance, and so is every hosted group's
   engine: one node more per group. A local client keeps at most
   `TableCaps::local_client` (`leviculum-core/src/memory_storage.rs:194`,
-  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1345`):
+  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1502`):
   2 048 identities and destinations, 1 024 paths, 10 000 packet hashes,
   about 10 MB at the ceiling where the desktop profile allows 339 MB. The
   instance holds the network's tables and answers a client's path
@@ -513,7 +513,7 @@ census column.
   builds through the same place.
 - **Known destinations in memory.** The newest `identity_cap` by announce
   time, at load and after every flush (`newest_known_destinations`,
-  `leviculum-std/src/storage.rs:529`). The file keeps those, and of the
+  `leviculum-std/src/storage.rs:550`). The file keeps those, and of the
   entries only the file holds what the reference's cull would keep
   (pinned, used within 8.75 days, never used but announced within six
   minutes), at most `identity_cap` of them (order 1749,
@@ -522,7 +522,7 @@ census column.
   and a load stream the file entry by entry, so neither holds more than
   the caps in memory, where they held 6.3 times the file. The
   remember stamps a flush folds are held to what the identity table still
-  holds (`leviculum-std/src/storage.rs:1204`): the growth soak found them
+  holds (`leviculum-std/src/storage.rs:1253`): the growth soak found them
   rising 111 kB/min at 40 announces a second, cleared only by the hourly
   flush.
 - **Names heard from strangers.** The newest 4 096 (`HEARD_CAP`,

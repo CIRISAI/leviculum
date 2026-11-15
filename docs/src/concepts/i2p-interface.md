@@ -187,7 +187,7 @@ since 1576, the third and fourth since 1588:
    the file, so an rnsd user who switched to lnsd on the same config
    directory got a new address. Since 1576 the key file is named as the
    reference names it, old format first (`resolve_keyfile`,
-   `leviculum-std/src/interfaces/i2p/mod.rs:845`), and an existing
+   `leviculum-std/src/interfaces/i2p/mod.rs:847`), and an existing
    `i2p_iface_<index>.i2p` is renamed to the new name once, logged, so no
    lnsd user loses an address either. Measured on the bed: a DSA key left
    as `i2p_iface_0.i2p` was adopted (`I2P key adopted: .../i2p_iface_0.i2p

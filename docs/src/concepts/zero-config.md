@@ -22,12 +22,12 @@ with lnsd started as `lnsd -c` on an empty directory:
 - **No interface.** Without a file lnsd took `Config::default()`, whose
   interface map is empty. It logged `Node started with 0 interface(s)`.
 - **No shared instance.** The default is `shared_instance: false`
-  (`shared_instance`, `leviculum-std/src/config.rs:654`), where rnsd
+  (`shared_instance`, `leviculum-std/src/config.rs:657`), where rnsd
   defaults to yes. No client could attach, so lnomad, lnstatus and the
   Python tools saw nothing at all. Every cell line therefore states
   `shared_instance=` first.
 - **Transport on.** The default is `enable_transport: true`
-  (`enable_transport`, `leviculum-std/src/config.rs:649`), and lnsd said
+  (`enable_transport`, `leviculum-std/src/config.rs:652`), and lnsd said
   so in its `CONFIG_DEFAULT` line (`value=true rnsd=false`). The stock
   file rnsd writes on its first start says `enable_transport = False`
   (`Reticulum.py:1879`).
@@ -43,15 +43,15 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1582`). The
-text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:757`): not
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1595`). The
+text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:761`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
 last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1568`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1581`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
@@ -60,9 +60,9 @@ transport off, a shared instance named `default`, log level 4,
 - `lnsd --writeconfig` writes the same text to `<dir>/config` and exits;
   it never replaces an existing file.
 - Every interface section carries an origin, `configured` or `default`
-  (`InterfaceOrigin`, `leviculum-std/src/config.rs:700`). lnsd logs one
+  (`InterfaceOrigin`, `leviculum-std/src/config.rs:704`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2487`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2662`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:229`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:694`), and `lnstatus` prints it,
@@ -286,11 +286,11 @@ marked one not, is the reviewer's.
 
 A start without a file opens two TCP connections to entries drawn at
 random from a list shipped in the binary, each marked `bootstrap_only`
-(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:665`): it exists
+(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:749`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
-`leviculum-std/src/config.rs:606`); autoconnect is not
-(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:675`),
+`leviculum-std/src/config.rs:609`); autoconnect is not
+(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:678`),
 and the automatic layer raises it to a ceiling of two or three. The
 ceiling and the entry count are constants in the code (step 3 as built,
 above), changed after a measurement, not before. Transport stays off
@@ -364,7 +364,7 @@ clear log line, not a silent skip.
 An attached LNode, and the M9, gets `interface_mode = gateway` on its
 interface: the board behind the line asks paths for itself and only a
 discovering mode looks for them onwards
-(`leviculum-core/src/transport.rs:12958`); in full mode a board's join
+(`leviculum-core/src/transport.rs:13242`); in full mode a board's join
 to its home ends in `NoPath` (1439, measured on the bench).
 
 All found boards are attached. Two RNodes on one frequency in one room
