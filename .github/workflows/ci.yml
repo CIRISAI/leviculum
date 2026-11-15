@@ -168,6 +168,9 @@ jobs:
         include:
           - { target: thumbv7em-none-eabihf, args: "" }
           - { target: thumbv6m-none-eabi, args: "--no-default-features" }
+          # +ciris (leviculum#108): WebAssembly and UEFI hosts.
+          - { target: wasm32-unknown-unknown, args: "" }
+          - { target: x86_64-unknown-uefi, args: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

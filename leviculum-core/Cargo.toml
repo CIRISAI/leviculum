@@ -34,6 +34,13 @@ tracing = { workspace = true, optional = true }
 heapless = { version = "0.8", default-features = false }
 libbz2-rs-sys = { workspace = true, optional = true }
 
+# +ciris (leviculum#108): UEFI is a soft-float target, and sha2's SIMD path
+# does not compile there. The aes and curve25519-dalek software backends are
+# cfgs, set for this target in .cargo/config.toml (a downstream UEFI build
+# sets the same two).
+[target.'cfg(target_os = "uefi")'.dependencies]
+sha2 = { workspace = true, features = ["force-soft"] }
+
 [dev-dependencies]
 proptest.workspace = true
 serde = { version = "1.0", features = ["derive"] }

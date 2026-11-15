@@ -88,6 +88,14 @@ check-nrf52 = "build -p leviculum-core --target thumbv7em-none-eabihf"
 check-rp2040 = "build -p leviculum-core --target thumbv6m-none-eabi"
 check-esp32s3 = "build -p leviculum-core --target xtensa-esp32s3-none-elf"
 check-embedded = "build -p leviculum-core --target thumbv7em-none-eabihf --target thumbv6m-none-eabi"
+# +ciris (leviculum#108): core on WebAssembly and UEFI.
+check-wasm = "build -p leviculum-core --target wasm32-unknown-unknown"
+check-uefi = "build -p leviculum-core --target x86_64-unknown-uefi"
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+# +ciris (leviculum#108): UEFI is a soft-float target, where the aes and
+# curve25519-dalek SIMD backends crash LLVM; use their software ones.
+[target.x86_64-unknown-uefi]
+rustflags = ["--cfg", "aes_force_soft", "--cfg", 'curve25519_dalek_backend="serial"']

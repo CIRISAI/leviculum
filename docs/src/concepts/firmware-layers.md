@@ -34,7 +34,7 @@ lists ble-tx, channel-access, announce-policy, queue-budget and
 heap-budget (`leviculum-std/Cargo.toml:101`, `:95`, `:99`, `:103`, `:164`),
 and lnpnd takes announce-policy, one of the five
 (`lnpnd/Cargo.toml:171`). `leviculum-core` itself depends on
-telemetry-policy (`leviculum-core/Cargo.toml:55`). So "nRF" in their
+telemetry-policy (`leviculum-core/Cargo.toml:62`). So "nRF" in their
 path is a misstatement of ownership, not a description.
 
 Above them, `leviculum-nrf/src` (32,740 lines with the binaries at 961) glues
