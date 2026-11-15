@@ -22,6 +22,17 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
   (the two `should_panic` tests) and WASI has no threads
   (`capture_is_thread_local`). The runner is set in `.cargo/config.toml`:
   `cargo test -p leviculum-core --lib --target wasm32-wasip1`.
+- WebSocket interfaces (leviculum#109): `WebSocketServerInterface` and
+  `WebSocketClientInterface` in `leviculum-std`, behind the default-on
+  `websocket` feature, so a browser node can reach the mesh. One Reticulum
+  packet per binary message; a text message closes with 1003. The server
+  runs under the TCP server's admission control and serves plain `ws://`
+  (TLS goes in a reverse proxy in front of it). The client dials `ws://` or
+  `wss://` (rustls on ring, webpki roots) and redials with the TCP client's
+  backoff. Builder methods `add_websocket_server`,
+  `add_websocket_server_listener`, `add_websocket_client`, and
+  `ReticulumNode::websocket_listen_addrs`; config keys `path` and `tls`.
+  `leviculum-core` is unchanged. See `docs/src/concepts/websocket-interface.md`.
 
 ### Changed
 
