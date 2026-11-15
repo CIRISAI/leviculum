@@ -14,6 +14,15 @@ git tag, not the version string. -->
 
 The fork carried onto current upstream master (+1,366 since the Oct 30 base).
 
+### Added
+
+- Core's lib tests run on `wasm32-wasip1` under wasmtime (leviculum#108),
+  and a CI lane, `wasi-test`, keeps them running there. All 2642 pass.
+  Three tests are ignored on wasm only, because a panic aborts the module
+  (the two `should_panic` tests) and WASI has no threads
+  (`capture_is_thread_local`). The runner is set in `.cargo/config.toml`:
+  `cargo test -p leviculum-core --lib --target wasm32-wasip1`.
+
 ### Changed
 
 - Known destinations: upstream's bounded flush and load (order 1585/1749:
