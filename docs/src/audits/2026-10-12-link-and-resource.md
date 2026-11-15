@@ -534,8 +534,8 @@ at `reference/Reticulum/RNS/Resource.py:88`), and shrinks window *and*
 window_max on every receiver timeout
 (`reference/Reticulum/RNS/Resource.py:616-621`). A faithful mirror
 exists (`round_complete_pythonlike`,
-`leviculum-core/src/resource/window.rs:281`;
-`timeout_pythonlike`, `leviculum-core/src/resource/window.rs:310`) and
+`leviculum-core/src/resource/window.rs:283`;
+`timeout_pythonlike`, `leviculum-core/src/resource/window.rs:312`) and
 is selectable per daemon via `LEVICULUM_RESOURCE_WINDOW_POLICY`. The
 window is receiver-private — the sender serves whatever the REQ lists
 — so this is wire-compatible by construction; what a peer sees is only

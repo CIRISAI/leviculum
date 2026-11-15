@@ -84,7 +84,7 @@ makes a board a relay between two of its own links: a broadcast the
 core is re-sending carries the peer it ARRIVED from
 (`exclude_peer`, `leviculum-core/src/transport.rs:640`), and the
 interface serves every link but that one
-(`try_send_excluding_peer`, `leviculum-core/src/traits.rs:441`). The
+(`try_send_excluding_peer`, `leviculum-core/src/traits.rs:443`). The
 default implementation sends nothing, which is exactly what excluding
 the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its

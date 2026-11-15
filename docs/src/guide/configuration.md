@@ -65,7 +65,7 @@ by content, not just extension (`config.rs:662-689`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is an
-error naming the key, as in rnsd (`ini_config.rs:1172-1192`).
+error naming the key, as in rnsd (`ini_config.rs:1174-1194`).
 
 ## A file with a syntax error is refused
 
@@ -159,7 +159,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1698`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1710`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -339,7 +339,7 @@ supported-type filter (`interface_type` (`ini_config.rs:335-361`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:1114-1151`)). An interface of any other type is skipped
+(`ini_config.rs:1116-1153`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:351-356`)), not an
 error.
 

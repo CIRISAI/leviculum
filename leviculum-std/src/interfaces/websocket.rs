@@ -8,15 +8,23 @@
 //!
 //! # Wire framing
 //!
-//! One Reticulum packet (as the transport hands it to an interface, IFAC
-//! included when configured) is one **binary** WebSocket message, unchanged.
-//! There is no HDLC or KISS framing inside: WebSocket already delimits
-//! messages. A message longer than [`WS_HW_MTU`] is a protocol violation and
-//! ends the connection (the WebSocket layer refuses it as too large). A
-//! **text** message ends the connection with close code 1003 (unsupported
-//! data): a peer that sends text is not speaking this protocol, and a close
-//! says so where silently dropping it would not. Ping and pong are answered
-//! and count as liveness, never as traffic.
+//! Two framings, chosen per connection by WebSocket subprotocol
+//! (`Sec-WebSocket-Protocol`); the server offers both, and a client that
+//! asks for none gets `rns.raw`:
+//!
+//! - [`SUBPROTOCOL_RAW`] (`rns.raw`): one Reticulum packet (as the transport
+//!   hands it to an interface, IFAC included when configured) is one
+//!   **binary** message, unchanged, with no HDLC or KISS inside. A message
+//!   longer than [`WS_HW_MTU`] ends the connection (close code 1009).
+//! - [`SUBPROTOCOL_HDLC`] (`rns.hdlc`): the binary messages are a byte
+//!   stream carrying the TCP interface's HDLC framing. Message boundaries
+//!   mean nothing: a frame may span messages and a message may hold several
+//!   frames. A frame longer than [`WS_HW_MTU`] is discarded, as on TCP.
+//!
+//! In both, a **text** message ends the connection with close code 1003
+//! (unsupported data): a peer that sends text is not speaking this protocol,
+//! and a close says so where silently dropping it would not. Ping and pong
+//! are answered and count as liveness, never as traffic.
 //!
 //! # Structure
 //!
@@ -57,6 +65,7 @@ use super::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, ReadySignal,
 };
 use crate::sync_ext::MutexRecover;
+use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::transport::InterfaceId;
 
 /// The hardware MTU a WebSocket interface signals, and the largest message
@@ -75,11 +84,67 @@ pub(crate) const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Bound on the opening handshake (the HTTP upgrade, and TLS for `wss://`).
 pub(crate) const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The WebSocket layer's limits: one message, one frame, at most one packet.
+/// The subprotocol of one packet per binary message.
+pub const SUBPROTOCOL_RAW: &str = "rns.raw";
+/// The subprotocol of an HDLC byte stream over binary messages.
+pub const SUBPROTOCOL_HDLC: &str = "rns.hdlc";
+
+/// The largest message the WebSocket layer takes. Raw framing checks its own
+/// bound ([`WS_HW_MTU`]) on top; an HDLC message is stream bytes and may
+/// carry several escaped frames, so the layer's bound is wider.
+const WS_MAX_MESSAGE: usize = 4 * WS_HW_MTU as usize;
+
+/// How packets sit in the binary messages of one connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WsFraming {
+    /// `rns.raw`: one packet per message.
+    #[default]
+    Raw,
+    /// `rns.hdlc`: an HDLC byte stream, boundaries not significant.
+    Hdlc,
+}
+
+impl WsFraming {
+    /// The subprotocol name.
+    pub fn subprotocol(self) -> &'static str {
+        match self {
+            WsFraming::Raw => SUBPROTOCOL_RAW,
+            WsFraming::Hdlc => SUBPROTOCOL_HDLC,
+        }
+    }
+
+    /// The framing a subprotocol name selects, `None` for any other name.
+    pub fn from_subprotocol(name: &str) -> Option<Self> {
+        match name.trim() {
+            SUBPROTOCOL_RAW => Some(WsFraming::Raw),
+            SUBPROTOCOL_HDLC => Some(WsFraming::Hdlc),
+            _ => None,
+        }
+    }
+
+    /// The config value (`framing = raw | hdlc`).
+    pub(crate) fn from_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "raw" => Some(WsFraming::Raw),
+            "hdlc" => Some(WsFraming::Hdlc),
+            _ => None,
+        }
+    }
+}
+
+/// The server's pick from the client's `Sec-WebSocket-Protocol` offer: the
+/// first name it knows, in the client's order; `None` when the client asked
+/// for none or for none it knows, which is served as raw with no protocol
+/// header in the answer.
+fn pick_framing(offer: Option<&str>) -> Option<WsFraming> {
+    offer?.split(',').find_map(WsFraming::from_subprotocol)
+}
+
+/// The WebSocket layer's limits.
 fn ws_config() -> WebSocketConfig {
     WebSocketConfig::default()
-        .max_message_size(Some(WS_HW_MTU as usize))
-        .max_frame_size(Some(WS_HW_MTU as usize))
+        .max_message_size(Some(WS_MAX_MESSAGE))
+        .max_frame_size(Some(WS_MAX_MESSAGE))
 }
 
 fn interface_info(id: InterfaceId, name: String) -> InterfaceInfo {
@@ -97,9 +162,7 @@ fn interface_info(id: InterfaceId, name: String) -> InterfaceInfo {
         frame_turnaround_ms: None,
         ifac: None,
         mode: leviculum_core::traits::InterfaceMode::default(),
-        // The core has no WebSocket medium, and none is needed: the carrier
-        // is a TCP stream, fast and duplex, which is what the kind decides.
-        kind: leviculum_core::traits::InterfaceKind::Tcp,
+        kind: leviculum_core::traits::InterfaceKind::WebSocket,
         ingress_control: None,
         path_choice: leviculum_core::transport::PathChoice::Hops,
     }
@@ -128,6 +191,53 @@ impl WsTarget {
             path,
             tls,
         }
+    }
+
+    /// Parse `ws://host[:port][/path]` or `wss://...`. The port defaults to
+    /// 80 or 443, the path to `/`; an IPv6 host is written in brackets.
+    pub(crate) fn parse_url(url: &str) -> Result<Self, String> {
+        let url = url.trim();
+        let (tls, rest) = if let Some(rest) = url.strip_prefix("wss://") {
+            (true, rest)
+        } else if let Some(rest) = url.strip_prefix("ws://") {
+            (false, rest)
+        } else {
+            return Err(format!("{url:?} is not a ws:// or wss:// URL"));
+        };
+        let (authority, path) = match rest.find(['/', '?']) {
+            Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], &rest[i..]),
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        let path = if path.starts_with('?') {
+            format!("/{path}")
+        } else {
+            path.to_string()
+        };
+        let default_port = if tls { 443 } else { 80 };
+        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+            let (host, tail) = v6
+                .split_once(']')
+                .ok_or_else(|| format!("{url:?}: unclosed '[' in the host"))?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => p.parse().map_err(|_| format!("{url:?}: bad port {p:?}"))?,
+                None if tail.is_empty() => default_port,
+                None => return Err(format!("{url:?}: junk after the host")),
+            };
+            (host.to_string(), port)
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, p)) => (
+                    h.to_string(),
+                    p.parse().map_err(|_| format!("{url:?}: bad port {p:?}"))?,
+                ),
+                None => (authority.to_string(), default_port),
+            }
+        };
+        if host.is_empty() || host.contains('@') {
+            return Err(format!("{url:?}: no host (or credentials in it)"));
+        }
+        Ok(Self::new(host, port, &path, tls))
     }
 
     /// The URL the opening handshake requests.
@@ -201,12 +311,18 @@ async fn ws_interface_task<S>(
     honour_kick: bool,
     lease: Option<WsLease>,
     mut close: Option<oneshot::Receiver<()>>,
+    framing: WsFraming,
 ) -> (mpsc::Receiver<OutgoingPacket>, ServeEnd)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut sink, mut stream) = ws.split();
     let mut spoken = false;
+    // `rns.hdlc` only: the TCP interface's deframer, bounded the same way,
+    // and the buffer each outgoing frame is built in.
+    let mut deframer =
+        (framing == WsFraming::Hdlc).then(|| Deframer::with_max_frame(WS_HW_MTU as usize));
+    let mut frame_buf = Vec::new();
     let mut last_rx = Instant::now();
     let mut ping = tokio::time::interval_at(
         tokio::time::Instant::now() + WS_PING_INTERVAL,
@@ -261,14 +377,39 @@ where
                 match msg {
                     Message::Binary(data) => {
                         counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                        if let Some(l) = lease.as_ref().filter(|_| !spoken) {
-                            // Spoken once is spoken for good, as on TCP.
-                            l.tracker.lock_recover().mark_spoken(l.id);
-                            spoken = true;
+                        let packets: Vec<Vec<u8>> = match deframer.as_mut() {
+                            None if data.len() > WS_HW_MTU as usize => {
+                                tracing::debug!(
+                                    "WebSocket interface {}: {} byte message exceeds HW_MTU, closing",
+                                    name, data.len());
+                                let _ = sink.send(Message::Close(Some(CloseFrame {
+                                    code: CloseCode::Size,
+                                    reason: "message exceeds HW_MTU".into(),
+                                }))).await;
+                                return (outgoing_rx, ServeEnd::Lost);
+                            }
+                            None => vec![data.to_vec()],
+                            Some(d) => d
+                                .process(&data)
+                                .into_iter()
+                                .filter_map(|r| match r {
+                                    DeframeResult::Frame(f) => Some(f),
+                                    _ => None,
+                                })
+                                .collect(),
+                        };
+                        if !packets.is_empty() {
+                            if let Some(l) = lease.as_ref().filter(|_| !spoken) {
+                                // Spoken once is spoken for good, as on TCP.
+                                l.tracker.lock_recover().mark_spoken(l.id);
+                                spoken = true;
+                            }
                         }
-                        let packet = IncomingPacket { data: data.to_vec(), peer: None, radio: None };
-                        if incoming_tx.send(packet).await.is_err() {
-                            return (outgoing_rx, ServeEnd::Lost);
+                        for data in packets {
+                            let packet = IncomingPacket { data, peer: None, radio: None };
+                            if incoming_tx.send(packet).await.is_err() {
+                                return (outgoing_rx, ServeEnd::Lost);
+                            }
                         }
                     }
                     Message::Text(_) => {
@@ -295,9 +436,16 @@ where
                     let _ = sink.close().await;
                     return (outgoing_rx, ServeEnd::Lost);
                 };
+                let bytes = match framing {
+                    WsFraming::Raw => Bytes::copy_from_slice(&pkt.data),
+                    WsFraming::Hdlc => {
+                        frame(&pkt.data, &mut frame_buf);
+                        Bytes::copy_from_slice(&frame_buf)
+                    }
+                };
                 // Counted before the write, as on TCP (Codeberg #389).
-                counters.tx_bytes.fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
-                if let Err(e) = sink.send(Message::Binary(Bytes::copy_from_slice(&pkt.data))).await {
+                counters.tx_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                if let Err(e) = sink.send(Message::Binary(bytes)).await {
                     tracing::debug!("WebSocket interface {} write error: {}", name, e);
                     return (outgoing_rx, ServeEnd::Lost);
                 }
@@ -510,9 +658,31 @@ async fn serve_accepted(
     lease: WsLease,
     mut close: oneshot::Receiver<()>,
 ) {
+    // The subprotocol the client asked for decides the framing; the answer
+    // names the one picked, and no protocol when the client named none it
+    // knows (served raw).
+    let picked = Arc::new(Mutex::new(WsFraming::Raw));
+    let pick = Arc::clone(&picked);
+    // The error type is tungstenite's `Callback` contract, not ours.
+    #[allow(clippy::result_large_err)]
+    let callback =
+        move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+              mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let offer = req
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|v| v.to_str().ok());
+            if let Some(framing) = pick_framing(offer) {
+                *pick.lock_recover() = framing;
+                if let Ok(value) = framing.subprotocol().parse() {
+                    resp.headers_mut().insert("Sec-WebSocket-Protocol", value);
+                }
+            }
+            Ok(resp)
+        };
     let handshake = tokio::time::timeout(
         WS_HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())),
+        tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(ws_config())),
     );
     let ws = tokio::select! {
         result = handshake => match result {
@@ -528,6 +698,7 @@ async fn serve_accepted(
         },
         _ = &mut close => return,
     };
+    let framing = *picked.lock_recover();
 
     let id = InterfaceId(child.next_id.fetch_add(1, Ordering::Relaxed));
     // The driver's name carries the source's daily pseudonym, not its
@@ -568,10 +739,11 @@ async fn serve_accepted(
         teardown: None,
     };
     tracing::info!(
-        "Accepted WebSocket connection: {} ({}) src={}",
+        "Accepted WebSocket connection: {} ({}) src={} framing={}",
         name,
         id,
-        shown
+        shown,
+        framing.subprotocol()
     );
     if child.new_interface_tx.send(handle).await.is_err() {
         return;
@@ -585,6 +757,7 @@ async fn serve_accepted(
         false,
         Some(lease),
         Some(close),
+        framing,
     )
     .await;
 }
@@ -652,6 +825,8 @@ pub(crate) struct WsClientConfig {
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     pub liveness: TcpLiveness,
+    /// The framing this client asks for; it names it in the handshake.
+    pub framing: WsFraming,
 }
 
 /// Spawn a WebSocket client that dials in the background and redials when
@@ -730,10 +905,20 @@ async fn ws_dial(
     };
     stream.set_nodelay(true).ok();
     apply_liveness_options(&stream, &config.liveness).ok();
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+            target.url(),
+        )
+        .map_err(io::Error::other)?;
+    if let Ok(value) = config.framing.subprotocol().parse() {
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", value);
+    }
     let (ws, _response) = tokio::time::timeout(
         WS_HANDSHAKE_TIMEOUT,
         tokio_tungstenite::client_async_tls_with_config(
-            target.url(),
+            request,
             stream,
             Some(ws_config()),
             Some(connector.clone()),
@@ -791,6 +976,7 @@ async fn ws_client_reconnect_loop(
                     true,
                     None,
                     None,
+                    config.framing,
                 )
                 .await;
                 outgoing_rx = rx;
@@ -861,6 +1047,50 @@ mod tests {
             WsTarget::new("[::1]", 80, "/", false).url(),
             "ws://[::1]:80/"
         );
+    }
+
+    #[test]
+    fn a_url_parses_into_a_target() {
+        let t = |u| WsTarget::parse_url(u).expect(u);
+        assert_eq!(
+            t("wss://mesh.example.org/rns"),
+            WsTarget::new("mesh.example.org", 443, "/rns", true)
+        );
+        assert_eq!(
+            t("ws://127.0.0.1:8765"),
+            WsTarget::new("127.0.0.1", 8765, "/", false)
+        );
+        assert_eq!(
+            t("ws://[::1]:9/a/b?x=1"),
+            WsTarget::new("::1", 9, "/a/b?x=1", false)
+        );
+        assert_eq!(
+            t("wss://[2001:db8::1]"),
+            WsTarget::new("2001:db8::1", 443, "/", true)
+        );
+        assert_eq!(t("ws://h?q"), WsTarget::new("h", 80, "/?q", false));
+        for bad in [
+            "http://h/",
+            "ws://",
+            "ws://h:port/",
+            "ws://[::1/",
+            "ws://u@h/",
+        ] {
+            assert!(WsTarget::parse_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_server_picks_the_first_subprotocol_it_knows() {
+        assert_eq!(pick_framing(None), None);
+        assert_eq!(pick_framing(Some("chat, other")), None);
+        assert_eq!(pick_framing(Some("rns.hdlc")), Some(WsFraming::Hdlc));
+        assert_eq!(
+            pick_framing(Some("x, rns.raw, rns.hdlc")),
+            Some(WsFraming::Raw)
+        );
+        assert_eq!(WsFraming::from_config("HDLC"), Some(WsFraming::Hdlc));
+        assert_eq!(WsFraming::from_config("kiss"), None);
     }
 
     #[test]

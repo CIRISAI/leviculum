@@ -26,7 +26,16 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
   backoff. Builder methods `add_websocket_server`,
   `add_websocket_server_listener`, `add_websocket_client`, and
   `ReticulumNode::websocket_listen_addrs`; config keys `path` and `tls`.
-  `leviculum-core` is unchanged. See `docs/src/concepts/websocket-interface.md`.
+  See `docs/src/concepts/websocket-interface.md`.
+- Two WebSocket framings, chosen per connection by subprotocol: `rns.raw`
+  (one packet per binary message, the default, also for a client that
+  names none) and `rns.hdlc` (the TCP interface's HDLC as a byte stream,
+  message boundaries not significant). Client key `framing = raw | hdlc`;
+  client key `url` and `ReticulumNodeBuilder::add_websocket_interface(url)`
+  take a whole `ws://` or `wss://` URL.
+- `InterfaceKind::WebSocket` (`websocket`) in `leviculum-core`, reported by
+  both WebSocket interfaces; the by-medium resource window treats it as
+  TCP.
 
 ### Changed
 

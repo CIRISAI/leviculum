@@ -1059,6 +1059,8 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // +ciris (#109): a WebSocket client's handshake path and TLS.
         "path" => iface.websocket_path = Some(value.to_string()),
         "tls" => iface.websocket_tls = Some(parse_bool(key, value)?),
+        "framing" => iface.websocket_framing = Some(value.to_string()),
+        "url" => iface.websocket_url = Some(value.to_string()),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an

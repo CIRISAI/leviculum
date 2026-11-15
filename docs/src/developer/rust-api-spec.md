@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1636` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1645` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1648` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1657` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 
@@ -258,11 +258,11 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:531` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:533` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
-| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:359` |
+| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:361` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:1072`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:1074`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`, `heapless`-backed

@@ -43,7 +43,7 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1607`). The
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1619`). The
 text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:761`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
@@ -51,7 +51,7 @@ last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1593`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1605`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
