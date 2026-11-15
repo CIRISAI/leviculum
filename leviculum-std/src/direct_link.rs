@@ -434,9 +434,13 @@ pub(crate) async fn probe_path_mtu(
     let mut buf = vec![0u8; 65_535];
     let send_to = on_socket(socket, peer);
     let mut early_bytes: usize = early.iter().map(Vec::len).sum();
+    let fragmenting = pmtu::dont_fragment(socket);
     loop {
         tokio::select! {
-            _ = tokio::time::sleep_until(start + MTU_PROBE_WINDOW) => return acked,
+            _ = tokio::time::sleep_until(start + MTU_PROBE_WINDOW) => {
+                pmtu::restore(socket, fragmenting);
+                return acked;
+            }
             _ = tick.tick() => {
                 if start.elapsed() < MTU_PROBE_SEND && acked != Some(largest) {
                     for size in wire::MTU_PROBE_STEPS {
@@ -933,6 +937,101 @@ impl Drop for DirectLinkRuntime {
     }
 }
 
+/// +ciris (leviculum#107): the Don't Fragment bit for the path-MTU probe.
+/// Without it a path that fragments carries a 1400-byte probe in pieces, and
+/// Linux, once an ICMP "fragmentation needed" has lowered its cached path
+/// MTU, fragments the next probe itself: either way the probe measures 1400
+/// on a path that does not carry it. `IP_PMTUDISC_PROBE` sets DF and sends at
+/// the requested size whatever the cache says, so an oversized probe is
+/// dropped on the way and never acked. The socket's own setting comes back
+/// afterwards, so the interface's datagrams (no larger than what the probe
+/// found) may still fragment if the path shrinks later. Linux and Android
+/// only; elsewhere the probe runs as before.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod pmtu {
+    use std::os::fd::AsRawFd;
+
+    /// The socket's settings before the probe, for each family it carries.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct Previous {
+        v4: Option<libc::c_int>,
+        v6: Option<libc::c_int>,
+    }
+
+    fn get(fd: libc::c_int, level: libc::c_int, name: libc::c_int) -> Option<libc::c_int> {
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `value` and `len` are valid for writes of the sizes given.
+        let rc =
+            unsafe { libc::getsockopt(fd, level, name, (&raw mut value).cast(), &raw mut len) };
+        (rc == 0).then_some(value)
+    }
+
+    fn set(fd: libc::c_int, level: libc::c_int, name: libc::c_int, value: libc::c_int) -> bool {
+        let len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `value` is valid for reads of `len` bytes.
+        let rc = unsafe { libc::setsockopt(fd, level, name, (&raw const value).cast(), len) };
+        rc == 0
+    }
+
+    /// Set DF on `socket` (IPv4, and IPv6 on a dual-stack socket, whose
+    /// IPv4-mapped traffic takes the IPv4 setting). A failure leaves that
+    /// family as it was.
+    pub(super) fn dont_fragment(socket: &tokio::net::UdpSocket) -> Previous {
+        let fd = socket.as_raw_fd();
+        let swap =
+            |level, name, probe| get(fd, level, name).filter(|_| set(fd, level, name, probe));
+        let v4 = swap(
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            libc::IP_PMTUDISC_PROBE,
+        );
+        let v6 = if socket.local_addr().is_ok_and(|a| a.is_ipv6()) {
+            swap(
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MTU_DISCOVER,
+                libc::IPV6_PMTUDISC_PROBE,
+            )
+        } else {
+            None
+        };
+        Previous { v4, v6 }
+    }
+
+    /// Put back what [`dont_fragment`] changed.
+    pub(super) fn restore(socket: &tokio::net::UdpSocket, previous: Previous) {
+        let fd = socket.as_raw_fd();
+        if let Some(v4) = previous.v4 {
+            set(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, v4);
+        }
+        if let Some(v6) = previous.v6 {
+            set(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, v6);
+        }
+    }
+
+    /// The socket's current IPv4 and IPv6 settings, for tests.
+    #[cfg(test)]
+    pub(super) fn current(socket: &tokio::net::UdpSocket) -> (Option<i32>, Option<i32>) {
+        let fd = socket.as_raw_fd();
+        (
+            get(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER),
+            get(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER),
+        )
+    }
+}
+
+/// No DF control here: the probe runs as it did before leviculum#107.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+mod pmtu {
+    pub(super) struct Previous;
+
+    pub(super) fn dont_fragment(_: &tokio::net::UdpSocket) -> Previous {
+        Previous
+    }
+
+    pub(super) fn restore(_: &tokio::net::UdpSocket, _: Previous) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,7 +1137,10 @@ mod tests {
         assert_eq!(probe_through(1400).await, Some(1400));
         assert_eq!(probe_through(1399).await, Some(1280));
         assert_eq!(probe_through(1300).await, Some(1280));
-        assert_eq!(probe_through(1279).await, None);
+        // +ciris (leviculum#107): an IPv6 path of exactly 1280 carries 1232.
+        assert_eq!(probe_through(1279).await, Some(1232));
+        assert_eq!(probe_through(1232).await, Some(1232));
+        assert_eq!(probe_through(1231).await, None);
         assert_eq!(probe_through(100).await, None);
     }
 
@@ -1289,5 +1391,32 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
         assert!(DirectLinkSettings::from_config(&reticulum(&[("probe_protocol", "ice")])).is_err());
+    }
+
+    /// +ciris (leviculum#107): the probe sends with DF set whatever the
+    /// cached path MTU says, and gives the socket its own setting back.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn the_probe_sets_dont_fragment_and_puts_it_back() {
+        let dual = bind_session_socket("127.0.0.1:9".parse().unwrap())
+            .and_then(UdpSocket::from_std)
+            .unwrap();
+        let before = pmtu::current(&dual);
+        let previous = pmtu::dont_fragment(&dual);
+        assert_eq!(pmtu::current(&dual).0, Some(libc::IP_PMTUDISC_PROBE));
+        if dual.local_addr().unwrap().is_ipv6() {
+            assert_eq!(pmtu::current(&dual).1, Some(libc::IPV6_PMTUDISC_PROBE));
+        }
+        pmtu::restore(&dual, previous);
+        assert_eq!(pmtu::current(&dual), before);
+        // And around a whole probe, answered or not.
+        assert_eq!(probe_through(1300).await, Some(1280));
+        let mut early = Vec::new();
+        let nobody = loopback().await.local_addr().unwrap();
+        assert_eq!(
+            probe_path_mtu(&dual, nobody, &[7; 16], &[8; 32], &mut early).await,
+            None
+        );
+        assert_eq!(pmtu::current(&dual), before);
     }
 }
