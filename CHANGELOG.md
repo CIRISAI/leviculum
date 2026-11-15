@@ -40,6 +40,27 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
 - 0.34.1+ciris.1's host-set direct-link keepalive (#99,
   `ReticulumNodeBuilder::direct_link_keepalive`) is carried, so 0.35 keeps it.
 
+### Fixed
+
+- A link upgraded onto a punched path moves at the path's probed MTU, not
+  always 1400 (leviculum#107). On a path that carries less (WireGuard,
+  IPsec, cellular APNs, 464XLAT), its large frames were silently lost while
+  keepalives passed. **Wire addition:** the two-sided commit's COMPLETE
+  (`0xFE04`) carries an optional `"m"`, the path MTU this side's probe found
+  (msgpack uint, 500 when no step was acked). Both ends move at the smaller
+  of the two. A peer that sends no `"m"` (leviculum before this release)
+  skips the key, as its decoder skips every unknown key, and both ends keep
+  1400. rns-rs never runs the two-sided commit, so it never receives a
+  COMPLETE and its upgrades stay at 1400 as before.
+- The path-MTU probe sets Don't Fragment on Linux and Android
+  (`IP_PMTUDISC_PROBE`, and its IPv6 twin on a dual-stack socket), so a path
+  that fragments no longer measures 1400. The socket's own setting is
+  restored after the probe.
+- The probe has a third step, 1232 bytes, which is what an IPv6 path of
+  exactly 1280 carries once the IPv6 and UDP headers are paid. Such a path
+  fell back to 500. Peers that answer probes ack any size, so the new step
+  needs nothing new from them.
+
 ### Consumer notes
 
 - Upstream changes are listed in its own sections below.
