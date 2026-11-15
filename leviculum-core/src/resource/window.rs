@@ -130,6 +130,8 @@ impl WindowPolicy {
                     | InterfaceKind::Udp
                     | InterfaceKind::Auto
                     | InterfaceKind::Local
+                    // A WebSocket runs over one TCP stream: treated as Tcp.
+                    | InterfaceKind::WebSocket
             )
         );
         if fast_medium && rtt_ms > 0 && rtt_ms < BY_MEDIUM_RTT_LIMIT_MS {

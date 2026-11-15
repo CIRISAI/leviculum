@@ -8245,7 +8245,7 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "AutoInterface" => InterfaceKind::Auto,
         "BLEInterface" => InterfaceKind::Ble,
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
-        "WebSocketClientInterface" | "WebSocketServerInterface" => InterfaceKind::Tcp,
+        "WebSocketClientInterface" | "WebSocketServerInterface" => InterfaceKind::WebSocket,
         _ => InterfaceKind::Unknown,
     }
 }
