@@ -1765,6 +1765,9 @@ pub struct ReticulumNode {
     pub(crate) metrics_baseline: Mutex<crate::telemetry::CounterBaseline>, // leviculum#77
     /// Direct-link upgrade settings (+ciris, leviculum#70).
     pub(crate) direct_link: crate::direct_link::DirectLinkSettings,
+    /// +ciris (leviculum#99): the direct-link keepalive interval and silence
+    /// bound, when the host set them.
+    pub(crate) direct_link_keepalive: Option<(Duration, Duration)>,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1969,6 +1972,7 @@ impl ReticulumNode {
             max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             metrics_baseline: Mutex::default(),
             direct_link: crate::direct_link::DirectLinkSettings::default(),
+            direct_link_keepalive: None,
             event_rx,
             run: Mutex::new(lifecycle::RunState::new(action_dispatch_tx)),
             corrupt_every,
@@ -2537,6 +2541,7 @@ impl ReticulumNode {
         let max_assembled_resource_size = self.max_assembled_resource_size;
         let plane_counters = Arc::clone(&self.plane_counters);
         let direct_link = self.direct_link.clone();
+        let direct_link_keepalive = self.direct_link_keepalive;
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -2579,6 +2584,7 @@ impl ReticulumNode {
                 max_assembled_resource_size,
                 plane_counters,
                 direct_link,
+                direct_link_keepalive,
             )
             .await;
         });
@@ -5425,6 +5431,7 @@ async fn run_event_loop(
     max_assembled_resource_size: usize,
     plane_counters: Arc<PlaneCounters>,
     direct_link: crate::direct_link::DirectLinkSettings,
+    direct_link_keepalive: Option<(Duration, Duration)>,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -5473,6 +5480,9 @@ async fn run_event_loop(
     let (direct_outcome_tx, mut direct_outcome_rx) =
         mpsc::channel::<crate::direct_link::Outcome>(64);
     let mut direct_links = crate::direct_link::DirectLinkRuntime::new(direct_outcome_tx);
+    if let Some((keepalive, inactivity)) = direct_link_keepalive {
+        direct_links.set_fast_timing(keepalive, inactivity);
+    }
     let _facilitator = match direct_link.facilitator_port {
         Some(port) => match crate::direct_link::spawn_facilitator(port).await {
             Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),
@@ -12231,6 +12241,7 @@ mod tests {
             segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             Arc::new(PlaneCounters::default()),
             crate::direct_link::DirectLinkSettings::default(),
+            None,
         ));
 
         FlushLoopHarness {
