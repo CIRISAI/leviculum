@@ -2195,6 +2195,15 @@ fn interface_type(kind: InterfaceKind, name: &str) -> String {
         // The Columba ble-reticulum protocol; the reference package's own
         // RNS interface class carries the same name.
         InterfaceKind::Ble => "BLEInterface",
+        // +ciris (#109): no reference class; the config type names, split
+        // server/client the way the Tcp arm splits them.
+        InterfaceKind::WebSocket => {
+            if name.starts_with("ws_server") {
+                "WebSocketServerInterface"
+            } else {
+                "WebSocketClientInterface"
+            }
+        }
         InterfaceKind::Unknown => return interface_type_from_name(name),
     }
     .to_string()
