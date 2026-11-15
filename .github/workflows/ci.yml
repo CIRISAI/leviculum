@@ -224,6 +224,30 @@ jobs:
       - name: cargo check -p leviculum-core --target ${{ matrix.target }}
         run: cargo check -p leviculum-core --target ${{ matrix.target }}
 
+  # ─── wasi-test: core's lib tests on wasm32-wasip1 under wasmtime ────
+  # +ciris (leviculum#108 step 3): run, not just build. The runner is set
+  # in .cargo/config.toml; a panic aborts the whole module there, so the
+  # `should_panic` and thread tests are ignored on wasm (cfg_attr).
+  wasi-test:
+    name: test leviculum-core (wasm32-wasip1, wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      # The pinned toolchain needs the target too (see the embedded lane).
+      - name: rustup target add wasm32-wasip1 (on the pinned toolchain)
+        run: rustup target add wasm32-wasip1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasi-test
+      - name: cargo test -p leviculum-core --lib --target wasm32-wasip1
+        run: cargo test -p leviculum-core --lib --target wasm32-wasip1
+
   # ─── license-audit: cargo-deny (licenses + advisories) ──────────────
   # Leviculum is AGPL-3.0-or-later; this flags incompatible dependency licenses
   # and RUSTSEC advisories.

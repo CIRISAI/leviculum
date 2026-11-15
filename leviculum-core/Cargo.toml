@@ -42,7 +42,7 @@ libbz2-rs-sys = { workspace = true, optional = true }
 sha2 = { workspace = true, features = ["force-soft"] }
 
 [dev-dependencies]
-proptest.workspace = true
+# proptest: per target, at the end of this file (+ciris leviculum#108).
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
@@ -60,3 +60,12 @@ critical-section = { version = "1", features = ["std"] }
 # report-drop mvr against real NodeCores instead of mirrored in the test.
 # Dev-only and dependency-free: no cycle, and nothing core ships links it.
 leviculum-telemetry-policy = { path = "../leviculum-nrf/telemetry-policy" }
+
+# +ciris (leviculum#108): core's tests run on wasm32-wasip1 under wasmtime.
+# proptest's default `fork`/`timeout` features spawn processes through
+# wait-timeout, which does not build for WASI; the wasm lane takes it
+# without them. Resolver 2 keeps the two feature sets apart per target.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+proptest.workspace = true
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }

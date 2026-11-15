@@ -274,6 +274,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "envelope data length")]
+    #[cfg_attr(
+        target_family = "wasm",
+        ignore = "+ciris #108: panics abort on wasm32-wasip1"
+    )]
     fn test_envelope_data_too_large() {
         // Creating envelope with data > u16::MAX should panic
         let large_data = vec![0; 65536];
