@@ -1254,6 +1254,15 @@ pub struct InterfaceConfig {
     /// listener above; `None` for every configured section.
     #[serde(skip)]
     pub server_slot: Option<crate::auto_servers::ServerSlot>,
+    /// +ciris (#109): the path a `WebSocketClientInterface` requests in its
+    /// opening handshake, config key `path`. Absent is `/`. No reference key.
+    #[serde(default, alias = "path")]
+    pub websocket_path: Option<String>,
+    /// +ciris (#109): whether a `WebSocketClientInterface` dials `wss://`
+    /// (TLS, rustls with the webpki roots), config key `tls`. Absent is no,
+    /// plain `ws://`. No reference key.
+    #[serde(default, alias = "tls")]
+    pub websocket_tls: Option<bool>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1421,6 +1430,8 @@ impl Default for InterfaceConfig {
             tcp_user_timeout_secs: None,
             prebound_tcp_listener: None,
             server_slot: None,
+            websocket_path: None,
+            websocket_tls: None,
         }
     }
 }
@@ -1452,7 +1463,8 @@ pub fn ingress_control_default_for_type(interface_type: &str) -> bool {
     let dial_out_point_to_point = interface_type == "TCPClientInterface"
         || interface_type == "BackboneClientInterface"
         || interface_type == "UDPInterface"
-        || interface_type.starts_with("I2P");
+        || interface_type.starts_with("I2P")
+        || interface_type == "WebSocketClientInterface";
     !dial_out_point_to_point
 }
 

@@ -348,6 +348,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             | "AX25KISSInterface"
             | "I2PInterface"
             | "BLEInterface" => true,
+            "WebSocketServerInterface" | "WebSocketClientInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -1055,6 +1056,9 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         "tcp_keepalive_interval_secs" => iface.tcp_keepalive_interval_secs = value.parse().ok(),
         "tcp_keepalive_probes" => iface.tcp_keepalive_probes = value.parse().ok(),
         "tcp_user_timeout_secs" => iface.tcp_user_timeout_secs = value.parse().ok(),
+        // +ciris (#109): a WebSocket client's handshake path and TLS.
+        "path" => iface.websocket_path = Some(value.to_string()),
+        "tls" => iface.websocket_tls = Some(parse_bool(key, value)?),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an

@@ -249,7 +249,7 @@ fn rxt_conndroptime(sock: &socket2::SockRef<'_>) -> io::Result<Duration> {
 /// the options still works, it just falls back to kernel default
 /// dead-peer detection.
 #[cfg(unix)]
-fn apply_liveness_options<S: std::os::fd::AsFd>(
+pub(crate) fn apply_liveness_options<S: std::os::fd::AsFd>(
     stream: &S,
     liveness: &TcpLiveness,
 ) -> io::Result<()> {
@@ -257,7 +257,7 @@ fn apply_liveness_options<S: std::os::fd::AsFd>(
 }
 
 #[cfg(windows)]
-fn apply_liveness_options<S: std::os::windows::io::AsSocket>(
+pub(crate) fn apply_liveness_options<S: std::os::windows::io::AsSocket>(
     stream: &S,
     liveness: &TcpLiveness,
 ) -> io::Result<()> {
@@ -1022,7 +1022,7 @@ impl TcpClientHandle {
 /// Python peer would (see the deviation note on [`tcp_client_reconnect_task`]).
 /// From attempt 4 on the delay doubles each attempt, clamped at `max`. The
 /// result is monotonically non-decreasing in `attempt` and never exceeds `max`.
-fn backoff_delay(attempt: u64, base: Duration, max: Duration) -> Duration {
+pub(crate) fn backoff_delay(attempt: u64, base: Duration, max: Duration) -> Duration {
     if attempt <= 3 {
         return base.min(max);
     }
@@ -1043,7 +1043,7 @@ fn backoff_delay(attempt: u64, base: Duration, max: Duration) -> Duration {
 /// attempt. No RNG (so it is unit-testable), and two differently-named
 /// interfaces retrying the same dead peer draw different offsets, so a fleet of
 /// nodes does not reconnect in lockstep.
-fn backoff_jitter(name: &str, attempt: u64, delay: Duration) -> Duration {
+pub(crate) fn backoff_jitter(name: &str, attempt: u64, delay: Duration) -> Duration {
     // FNV-1a over the name bytes followed by the attempt number.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in name.as_bytes() {
@@ -1068,7 +1068,7 @@ fn backoff_jitter(name: &str, attempt: u64, delay: Duration) -> Duration {
 /// backoff delay gets at most one line, and once the delay caps the spacing
 /// keeps widening, so a permanently-dead peer logs at most once per capped
 /// interval instead of twice every `reconnect_interval`.
-fn should_log_failure(attempt: u64) -> bool {
+pub(crate) fn should_log_failure(attempt: u64) -> bool {
     attempt <= 3 || attempt.is_power_of_two()
 }
 

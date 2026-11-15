@@ -177,6 +177,14 @@ pub(super) fn build_interface(
         "BLEInterface" => Err(crate::Error::Config(
             "BLEInterface is supported on Linux only (it requires BlueZ over D-Bus)".to_string(),
         )),
+        #[cfg(feature = "websocket")]
+        "WebSocketServerInterface" => websocket::build_server(idx, config, ctx),
+        #[cfg(feature = "websocket")]
+        "WebSocketClientInterface" => websocket::build_client(idx, config, ctx),
+        #[cfg(not(feature = "websocket"))]
+        kind @ ("WebSocketServerInterface" | "WebSocketClientInterface") => {
+            Err(feature_off(config, kind, "websocket"))
+        }
         other => {
             tracing::warn!("Unknown interface type: {}", other);
             Ok(Built::SelfManaged)
@@ -188,7 +196,8 @@ pub(super) fn build_interface(
 #[cfg(any(
     not(feature = "serial"),
     not(feature = "i2p"),
-    all(not(feature = "ble"), target_os = "linux")
+    all(not(feature = "ble"), target_os = "linux"),
+    not(feature = "websocket")
 ))]
 fn feature_off(config: &InterfaceConfig, kind: &str, feature: &str) -> Error {
     Error::Config(format!(
@@ -1612,3 +1621,7 @@ mod tests {
         assert!(err.to_string().contains("max_peers_per_source"), "{err}");
     }
 }
+
+// +ciris (#109): the WebSocket server and client builders.
+#[cfg(feature = "websocket")]
+pub(crate) mod websocket;

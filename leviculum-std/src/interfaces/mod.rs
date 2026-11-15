@@ -1584,3 +1584,7 @@ mod tests {
         assert!(matches!(err, InterfaceError::BufferFull));
     }
 }
+
+// +ciris (#109): WebSocket interfaces, server and client.
+#[cfg(feature = "websocket")]
+pub(crate) mod websocket;

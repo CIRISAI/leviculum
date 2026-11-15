@@ -33,16 +33,16 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,
 lnmgmt, lnomad, lblogd, lnpnd, loquax and lnflash. Built for
 x86_64-unknown-linux-musl and aarch64-unknown-linux-musl.
 
-543 third-party crates, by licence:
+555 third-party crates, by licence:
 
-  Apache-2.0                   354
+  Apache-2.0                   365
   BSD-2-Clause                 5
   BSD-3-Clause                 12
   CC0-1.0                      1
   CDLA-Permissive-2.0          2
   ISC                          7
   LGPL-2.1-only                1
-  MIT                          161
+  MIT                          162
   MPL-2.0                      2
   Unicode-3.0                  1
   Zlib                         3
@@ -94,6 +94,7 @@ Applies to:
   proc-macro2 1.0.105
   quantette 0.5.1
   quote 1.0.43
+  rand 0.10.4
   rand 0.8.6
   rand 0.9.4
   rand_xoshiro 0.7.0
@@ -337,6 +338,7 @@ Applies to:
   tempfile 3.24.0
   thread_local 1.1.9
   ttf-parser 0.25.1
+  tungstenite 0.30.0
   unicase 2.9.0
   unicode-bidi 0.3.18
   unicode-segmentation 1.13.3
@@ -767,14 +769,22 @@ Apache-2.0 — Apache License 2.0
 Applies to:
   aes 0.8.4
   block-buffer 0.10.4
+  block-buffer 0.12.1
   cbc 0.1.2
+  chacha20 0.10.2
   cipher 0.4.4
+  const-oid 0.10.3
   cpufeatures 0.2.17
+  cpufeatures 0.3.1
   crypto-common 0.1.7
+  crypto-common 0.2.2
   digest 0.10.7
+  digest 0.11.3
   hmac 0.12.1
+  hybrid-array 0.4.10
   inout 0.1.4
   md-5 0.10.6
+  sha1 0.11.0
   sha2 0.10.9
   signature 2.2.0
 
@@ -8168,6 +8178,7 @@ Apache-2.0 — Apache License 2.0
 ------------------------------------------------------------------------
 
 Applies to:
+  rand_core 0.10.1
   rand_core 0.6.4
   rand_core 0.9.5
 
@@ -16129,6 +16140,34 @@ Applies to:
   tokio-serial 5.4.5
 
 Copyright (c) 2017 Zac Berkowitz and other tokio-serial contributors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+------------------------------------------------------------------------
+MIT — MIT License
+------------------------------------------------------------------------
+
+Applies to:
+  tokio-tungstenite 0.30.0
+
+Copyright (c) 2017 Daniel Abramov
+Copyright (c) 2017 Alexey Galakhov
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

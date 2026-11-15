@@ -70,11 +70,11 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2844` | Stop and flush |
 | `fn is_running(&self) -> bool` — `driver/mod.rs:2984` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:3137` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4321` | Announce a registered destination |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4322` | Announce a registered destination |
 | `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3477` | Open a link; returns a pending handle |
 | `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3579` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4796` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4751` | Send one unreliable datagram |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4797` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4752` | Send one unreliable datagram |
 | `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3591` | Take the event stream, once |
 | `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3724` | The node's own identity hash |
 | `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3909` | Whether a path is known |
@@ -82,7 +82,7 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3940` | Send a PATH_REQUEST; result arrives as `PathFound` |
 | `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3918` | Identity learned from an announce (its signing key feeds `connect`) |
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:4170` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4835` | Relay mode flag |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4836` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:245`) — re-projects this surface with core internals
@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1624` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1633` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1636` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1645` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 
