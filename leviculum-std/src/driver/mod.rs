@@ -4287,6 +4287,7 @@ impl ReticulumNode {
         let inv = self.inventory.lock_recover();
         inv.listeners()
             .filter(|(_, row)| row.identity.type_name != "LocalServerInterface")
+            .filter(|(_, row)| row.identity.type_name != "WebSocketServerInterface")
             .filter_map(|(_, row)| row.bound_addr)
             .collect()
     }
@@ -8244,6 +8245,7 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "AutoInterface" => InterfaceKind::Auto,
         "BLEInterface" => InterfaceKind::Ble,
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
+        "WebSocketClientInterface" | "WebSocketServerInterface" => InterfaceKind::Tcp,
         _ => InterfaceKind::Unknown,
     }
 }
