@@ -43,21 +43,21 @@ returns `self`.
 | Signature | Purpose |
 |-----------|---------|
 | `fn new() -> Self` — `builder.rs:102` | Builder with defaults |
-| `fn identity(self, identity: Identity) -> Self` — `builder.rs:237` | Pin an explicit identity (else one is generated/persisted) |
+| `fn identity(self, identity: Identity) -> Self` — `builder.rs:249` | Pin an explicit identity (else one is generated/persisted) |
 | `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:307` | Connect outward to a Reticulum node |
-| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:354` | Listen for inbound connections |
-| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:503` | One datagram per packet |
+| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:364` | Listen for inbound connections |
+| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:513` | One datagram per packet |
 | `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:551` | LoRa interface; required radio settings |
 | `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:611` | KISS over raw serial |
-| `fn add_auto_interface(self) -> Self` — `builder.rs:731` | IPv6 multicast LAN discovery |
-| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:800` | Act as a relay/forwarder |
-| `fn config(self, config: Config) -> Self` — `builder.rs:262` | Use a pre-loaded `Config` |
+| `fn add_auto_interface(self) -> Self` — `builder.rs:733` | IPv6 multicast LAN discovery |
+| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:802` | Act as a relay/forwarder |
+| `fn config(self, config: Config) -> Self` — `builder.rs:276` | Use a pre-loaded `Config` |
 | `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:284` | Load an INI config file |
-| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:284` | Identity / known-destinations / ratchet store dir |
-| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:865` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
+| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:294` | Identity / known-destinations / ratchet store dir |
+| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:867` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:233` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1359` | Build the node (not yet running) |
-| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:1032` | Same as `build`, outside an async context |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1387` | Build the node (not yet running) |
+| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:1052` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
 
@@ -66,23 +66,23 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:2040` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2690` | Stop and flush |
-| `fn is_running(&self) -> bool` — `driver/mod.rs:2806` | Loop state |
-| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2959` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4093` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3295` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3397` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4535` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4499` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3409` | Take the event stream, once |
-| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3542` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3693` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3839` | Hop count to a destination |
+| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:2044` | Spawn the event loop, bring interfaces up |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2696` | Stop and flush |
+| `fn is_running(&self) -> bool` — `driver/mod.rs:2812` | Loop state |
+| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2965` | Make a local destination reachable (consumes it) |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4099` | Announce a registered destination |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3301` | Open a link; returns a pending handle |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3403` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4541` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4505` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3415` | Take the event stream, once |
+| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3548` | The node's own identity hash |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3699` | Whether a path is known |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3845` | Hop count to a destination |
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3724` | Send a PATH_REQUEST; result arrives as `PathFound` |
 | `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3702` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3954` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4574` | Relay mode flag |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3960` | `rnstatus`-style counters |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4580` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:245`) — re-projects this surface with core internals

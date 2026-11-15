@@ -61,7 +61,7 @@ transport off, a shared instance named `default`, log level 4,
 - Every interface section carries an origin, `configured` or `default`
   (`InterfaceOrigin`, `leviculum-std/src/config.rs:676`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2509`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2515`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:672`), and `lnstatus` prints it,
@@ -223,7 +223,7 @@ join the room.
 
 A start without a file opens two TCP connections to entries drawn at
 random from a list shipped in the binary, each marked `bootstrap_only`
-(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:727`): it exists
+(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:729`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
 `leviculum-std/src/config.rs:582`); autoconnect is not

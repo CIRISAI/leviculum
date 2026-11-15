@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 83
+TOTAL 89
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -81,7 +81,6 @@ driver::ReticulumNode::remember_identity
 driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
 driver::ReticulumNode::retire_direct_link
-driver::ReticulumNode::set_direct_link_retry
 driver::ReticulumNode::send_file_response
 driver::ReticulumNode::send_proof
 driver::ReticulumNode::send_request
@@ -92,6 +91,7 @@ driver::ReticulumNode::send_response
 driver::ReticulumNode::send_response_resource
 driver::ReticulumNode::send_single_packet
 driver::ReticulumNode::set_announce_control
+driver::ReticulumNode::set_direct_link_retry
 driver::ReticulumNode::set_interface_announce_cap
 driver::ReticulumNode::set_resource_strategy
 driver::ReticulumNode::start_shared
@@ -107,8 +107,14 @@ driver::relay_route::ReticulumNode::set_forward_admission
 driver::relay_route::ReticulumNode::set_relay_route_bounds
 driver::sender::PacketSender::send
 driver::sender::PacketSender::send_measured
+driver::seq_stats::ReticulumNode::link_seq_stats
 driver::stream::LinkHandle::close
 driver::stream::LinkHandle::send
 driver::stream::LinkHandle::try_send
+driver::stream::datagram::LinkHandle::send_unordered
+driver::stream::datagram::LinkHandle::try_send_unordered
+driver::stream::datagram::ReticulumNode::link_datagram_mdu
+driver::stream::datagram::ReticulumNode::link_datagram_stats
+driver::stream::send_seq::LinkHandle::try_send_seq
 driver::stream::timed::LinkHandle::try_send_timed
 driver::wire_id::ReticulumNode::wire_link_id
