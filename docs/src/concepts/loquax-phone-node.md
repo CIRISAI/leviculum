@@ -59,7 +59,7 @@ that ladder.
 ## 2. One interface per medium, behind the host seam
 
 The seam is the core's `Interface` trait
-(`leviculum-core/src/traits.rs:321`) as the std driver implements it,
+(`leviculum-core/src/traits.rs:323`) as the std driver implements it,
 one tokio task per interface. The rule is
 [Interface isolation](interface-isolation.md): only the interface knows
 its medium. For the phone that means the following:

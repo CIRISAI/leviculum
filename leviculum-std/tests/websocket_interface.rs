@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::config::InterfaceConfig;
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
@@ -135,6 +136,18 @@ async fn announce_until_heard(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_websocket_pair_carries_an_announce_a_link_and_data_both_ways() {
+    pair_round_trip(None).await;
+}
+
+/// The same over `rns.hdlc`: the client asks for it, the server serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_hdlc_framed_pair_carries_an_announce_a_link_and_data_both_ways() {
+    pair_round_trip(Some("hdlc")).await;
+}
+
+/// `framing`: `None` is the client's default (raw), otherwise the config
+/// value.
+async fn pair_round_trip(framing: Option<&str>) {
     let mut server = start(
         ReticulumNodeBuilder::new()
             .enable_transport(false)
@@ -149,7 +162,15 @@ async fn a_websocket_pair_carries_an_announce_a_link_and_data_both_ways() {
     let mut client = start(
         ReticulumNodeBuilder::new()
             .enable_transport(false)
-            .add_websocket_client(addr.ip().to_string(), addr.port(), "/rns", false),
+            .add_interface_config(InterfaceConfig {
+                name: "Pair".to_string(),
+                interface_type: "WebSocketClientInterface".to_string(),
+                target_host: Some(addr.ip().to_string()),
+                target_port: Some(addr.port()),
+                websocket_path: Some("/rns".to_string()),
+                websocket_framing: framing.map(str::to_string),
+                ..Default::default()
+            }),
     )
     .await;
 
@@ -299,7 +320,7 @@ async fn a_client_reconnects_after_the_server_restarts() {
     let mut client = start(
         ReticulumNodeBuilder::new()
             .enable_transport(false)
-            .add_websocket_client("127.0.0.1", port, "/", false),
+            .add_websocket_interface(format!("ws://127.0.0.1:{port}/")),
     )
     .await;
     let (_, hash) = register_dest(&server.node, "before");
@@ -362,4 +383,140 @@ async fn both_websocket_sections_come_from_a_config_file() {
     let _ = server.rx.try_recv();
     client.node.stop().await.expect("client stop");
     server.node.stop().await.expect("server stop");
+}
+
+/// Dial with a subprotocol offer; the answer's protocol header comes back.
+async fn raw_dial_offering(
+    addr: SocketAddr,
+    offer: Option<&str>,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Option<String>,
+) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{addr}/").into_client_request().unwrap();
+    if let Some(offer) = offer {
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", offer.parse().unwrap());
+    }
+    let (ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("dial does not hang")
+    .expect("handshake");
+    let picked = response
+        .headers()
+        .get("Sec-WebSocket-Protocol")
+        .map(|v| v.to_str().unwrap().to_string());
+    (ws, picked)
+}
+
+/// Read HDLC frames off an `rns.hdlc` connection until `n` arrived.
+async fn read_frames(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    n: usize,
+) -> Vec<Vec<u8>> {
+    let mut deframer = Deframer::new();
+    let mut frames = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while frames.len() < n {
+            match ws.next().await {
+                Some(Ok(Message::Binary(data))) => {
+                    for r in deframer.process(&data) {
+                        if let DeframeResult::Frame(f) = r {
+                            frames.push(f);
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+                other => panic!("connection ended: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("frames arrive");
+    frames
+}
+
+/// The negotiation, and `rns.hdlc` with boundaries that mean nothing: two
+/// announces the first server framed are fed to a second server as one
+/// frame split across two messages, the second frame riding in the same
+/// message as the first one's tail. Both arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hdlc_frames_may_span_messages_and_share_them() {
+    let first = start(
+        ReticulumNodeBuilder::new()
+            .enable_transport(false)
+            .add_websocket_server(ports::LOOPBACK_ANY_PORT),
+    )
+    .await;
+    let first_addr = ws_addr(&first.node);
+
+    // No offer: raw, and no protocol named in the answer.
+    let (_plain, picked) = raw_dial_offering(first_addr, None).await;
+    assert_eq!(picked, None);
+    // An offer is answered with the first name the server knows.
+    let (_raw, picked) = raw_dial_offering(first_addr, Some("chat, rns.raw")).await;
+    assert_eq!(picked.as_deref(), Some("rns.raw"));
+    let (mut tap, picked) = raw_dial_offering(first_addr, Some("rns.hdlc, rns.raw")).await;
+    assert_eq!(picked.as_deref(), Some("rns.hdlc"));
+
+    // Two announces, as the first server frames them.
+    let (_, one) = register_dest(&first.node, "one");
+    let (_, two) = register_dest(&first.node, "two");
+    // Whatever else rides the connection, keep reading until both are in.
+    first.node.announce_destination(&one, None).await.unwrap();
+    first.node.announce_destination(&two, None).await.unwrap();
+    let mut frames = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let carries = |f: &Vec<u8>, h: &leviculum_core::DestinationHash| {
+        f.windows(h.as_bytes().len()).any(|w| w == h.as_bytes())
+    };
+    while !(frames.iter().any(|f| carries(f, &one)) && frames.iter().any(|f| carries(f, &two))) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both announces framed"
+        );
+        frames.extend(read_frames(&mut tap, 1).await);
+    }
+    let p1 = frames.iter().find(|f| carries(f, &one)).unwrap().clone();
+    let p2 = frames.iter().find(|f| carries(f, &two)).unwrap().clone();
+
+    let mut second = start(
+        ReticulumNodeBuilder::new()
+            .enable_transport(false)
+            .add_websocket_server(ports::LOOPBACK_ANY_PORT),
+    )
+    .await;
+    let (mut feed, picked) = raw_dial_offering(ws_addr(&second.node), Some("rns.hdlc")).await;
+    assert_eq!(picked.as_deref(), Some("rns.hdlc"));
+    let (mut f1, mut f2) = (Vec::new(), Vec::new());
+    frame(&p1, &mut f1);
+    frame(&p2, &mut f2);
+    let cut = f1.len() / 2;
+    feed.send(Message::Binary(f1[..cut].to_vec().into()))
+        .await
+        .unwrap();
+    let mut tail = f1[cut..].to_vec();
+    tail.extend_from_slice(&f2);
+    feed.send(Message::Binary(tail.into())).await.unwrap();
+
+    let mut heard = Vec::new();
+    while heard.len() < 2 {
+        let Some(NodeEvent::AnnounceReceived { announce, .. }) =
+            next_event(&mut second.rx, Duration::from_secs(10), |ev| {
+                matches!(ev, NodeEvent::AnnounceReceived { .. })
+            })
+            .await
+        else {
+            panic!("the second server hears both announces, heard {heard:?}");
+        };
+        heard.push(*announce.destination_hash());
+    }
+    assert!(heard.contains(&one) && heard.contains(&two), "{heard:?}");
 }

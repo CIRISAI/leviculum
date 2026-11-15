@@ -1263,6 +1263,16 @@ pub struct InterfaceConfig {
     /// plain `ws://`. No reference key.
     #[serde(default, alias = "tls")]
     pub websocket_tls: Option<bool>,
+    /// +ciris (#109): a `WebSocketClientInterface`'s framing, config key
+    /// `framing`: `raw` (subprotocol `rns.raw`, the default) or `hdlc`
+    /// (`rns.hdlc`). No reference key.
+    #[serde(default, alias = "framing")]
+    pub websocket_framing: Option<String>,
+    /// +ciris (#109): a `WebSocketClientInterface`'s whole target as one
+    /// `ws://` or `wss://` URL, config key `url`; it takes the place of
+    /// `target_host`, `target_port`, `path` and `tls`. No reference key.
+    #[serde(default, alias = "url")]
+    pub websocket_url: Option<String>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1432,6 +1442,8 @@ impl Default for InterfaceConfig {
             server_slot: None,
             websocket_path: None,
             websocket_tls: None,
+            websocket_framing: None,
+            websocket_url: None,
         }
     }
 }

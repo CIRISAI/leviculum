@@ -74,7 +74,7 @@ A node runs two clocks with disjoint jobs, and no time correction
 ever crosses from one to the other.
 
 **The stopwatch** is the monotonic tick counter, `Clock::now_ms`
-(`leviculum-core/src/traits.rs:479`). All timeout and deadline
+(`leviculum-core/src/traits.rs:481`). All timeout and deadline
 arithmetic stays on it — retries, link timeouts, announce cadences.
 No anchor change, GNSS fix, or healing step ever stretches or
 shrinks a protocol timer.
@@ -404,7 +404,7 @@ serial channel (the radio-config envelope of
 
 ### Arm 3: Platform clock passing sanity
 
-`Clock::wall_unix_secs` (`leviculum-core/src/traits.rs:550`). On std
+`Clock::wall_unix_secs` (`leviculum-core/src/traits.rs:552`). On std
 platforms `SystemClock` answers from `SystemTime`
 (`leviculum-std/src/clock.rs:50`) — effectively the OS's NTP-managed
 clock. On a board it is a battery-backed RTC, which under this model
@@ -422,7 +422,7 @@ also carries anchors *back*: see
   only when its value passes the sanity window; below the build
   floor it is a dead cell, not a time source. Note the trait
   contract: this is *not* a timer source; all timeout and deadline
-  arithmetic stays on the monotonic `now_ms` (`traits.rs:479`).
+  arithmetic stays on the monotonic `now_ms` (`traits.rs:481`).
 - **Status:** the implementation consults this arm first when it
   answers (`emission_secs`, `leviculum-core/src/transport.rs:5920`).
   No current platform offers both a platform clock and GNSS or

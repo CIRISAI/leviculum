@@ -13,15 +13,31 @@ interface bridges between them like it does for any two interfaces.
 
 ## Wire framing
 
-One Reticulum packet is one **binary** WebSocket message. The message
-holds the packet exactly as the transport hands it to an interface, IFAC
-included when it is configured. There is no HDLC or KISS framing inside the
-message, because WebSocket already marks where each message starts and
-ends.
+Each connection uses one of two framings. The client chooses it with the
+WebSocket subprotocol (`Sec-WebSocket-Protocol`) in its opening handshake.
+The two names are a public contract, and other implementations (a browser
+host, a server in another language) build against them:
 
-- A message longer than the interface's hardware MTU (16384 bytes, the
-  TCP interface's) is refused by the WebSocket layer, and the connection
-  ends.
+| Subprotocol | Binary messages carry |
+|---|---|
+| `rns.raw` | One Reticulum packet per message, exactly as the transport hands it to an interface, IFAC included when configured. No HDLC or KISS framing inside. A message longer than the hardware MTU (16384 bytes, the TCP interface's) ends the connection with close code 1009. |
+| `rns.hdlc` | A byte stream with the same HDLC framing as the TCP interface (flag `0x7E`, escape `0x7D`, no CRC). Message boundaries are not significant: a frame may span messages, and a message may hold several frames. A frame longer than the hardware MTU is discarded, as on TCP. |
+
+Negotiation:
+
+- The server offers both, and accepts the first name in the client's offer
+  that it knows. Its answer names that subprotocol.
+- A client that offers no subprotocol, or none the server knows, gets
+  `rns.raw`. The answer then names no subprotocol.
+- A leviculum client always names its framing: `framing = raw` (the
+  default) or `framing = hdlc`.
+
+Raw suits a peer that has a message API (a browser's `WebSocket`, with
+`binaryType = "arraybuffer"`). HDLC suits a peer that treats the
+WebSocket as one more byte stream behind a generic stream interface.
+
+The rest applies to both framings:
+
 - A **text** message ends the connection with close code 1003 (unsupported
   data). A peer that sends text is not speaking this protocol. Closing
   tells it so, where silently dropping the message would not.
@@ -34,10 +50,9 @@ ends.
   `path`.
 
 The hardware MTU and bitrate are the TCP interface's: 16384 bytes, and the
-10 Mbps guess. A WebSocket runs over one TCP stream, so its link MTU
-negotiation and resource windows behave the same as on TCP. The interface
-reports the TCP medium kind for that reason. The core has no separate
-WebSocket kind, and does not need one.
+10 Mbps guess. Both sides report the medium kind `InterfaceKind::WebSocket`
+(`websocket`). A WebSocket runs over one TCP stream, so the resource
+window's by-medium policy treats it as it treats TCP.
 
 ## Configuration
 
@@ -60,10 +75,12 @@ WebSocket kind, and does not need one.
 |---|---|---|---|
 | `listen_ip`, `listen_port`, `device`, `prefer_ipv6` | server | `0.0.0.0`; port required | The bind address, as on a `TCPServerInterface`. Port 0 binds a port the kernel picks; `ReticulumNode::websocket_listen_addrs` reports it. |
 | `max_connections_per_source`, `max_connections`, `silent_timeout_secs`, `silent_timeout_pressure_secs`, `pressure_fraction` | server | 16, 4096, 120, 10, 0.8 | Admission, the same tracker and the same defaults as the TCP server (see below). |
-| `target_host` | client | required | Host name or IP literal. The name is looked up again on every dial. |
+| `url` | client | none | The whole target as `ws://host[:port][/path]` or `wss://...`. Replaces `target_host`, `target_port`, `path` and `tls`. |
+| `target_host` | client | required without `url` | Host name or IP literal. The name is looked up again on every dial. |
 | `target_port` | client | 80, or 443 with `tls` | The port. |
 | `path` | client | `/` | The path of the opening handshake request. |
 | `tls` | client | `no` | `yes` dials `wss://`. A value that is not a boolean is a config error. |
+| `framing` | client | `raw` | `raw` asks for `rns.raw`, `hdlc` for `rns.hdlc`. Any other value is a config error. |
 | `reconnect_interval_secs`, `max_reconnect_tries` | client | 5, never give up | Redial pacing, as on a TCP client. |
 | `tcp_keepalive_*`, `tcp_user_timeout_secs` | both | TCP's | Keepalive and user timeout of the TCP socket underneath. |
 | `mode`, `transit`, `ingress_control`, `networkname`/`passphrase`, `announce_rate_*`, `buffer_size` | both | as TCP | Every accepted connection inherits the listener's values, as a TCP server's do. |
@@ -74,7 +91,12 @@ follows the TCP pair.
 
 From code, `ReticulumNodeBuilder` has `add_websocket_server(addr)`,
 `add_websocket_server_listener(listener)` (on a listener the caller already
-bound), and `add_websocket_client(host, port, path, tls)`. With the feature
+bound), `add_websocket_client(host, port, path, tls)`, and
+`add_websocket_interface(url)`, which dials one `ws://` or `wss://` URL with
+raw framing. A browser driver will offer the same `add_websocket_interface`
+signature. A URL that does not parse is an error when the node builds. For
+`framing = hdlc` from code, pass an `InterfaceConfig` to
+`add_interface_config`. With the feature
 off, a WebSocket section is a configuration error that names the feature.
 
 ## Admission

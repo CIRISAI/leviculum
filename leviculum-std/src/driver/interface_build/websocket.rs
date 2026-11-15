@@ -13,7 +13,8 @@ use crate::interfaces::tcp::{
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::websocket::{
-    spawn_ws_client_with_reconnect, spawn_ws_server, WsClientConfig, WsServerConfig, WsTarget,
+    spawn_ws_client_with_reconnect, spawn_ws_server, WsClientConfig, WsFraming, WsServerConfig,
+    WsTarget,
 };
 use crate::sync_ext::MutexRecover;
 use leviculum_core::transport::InterfaceId;
@@ -32,14 +33,28 @@ pub(super) fn build_client(
     config: &InterfaceConfig,
     ctx: &InterfaceBuildCtx<'_>,
 ) -> Result<Built, Error> {
-    let target_host = config
-        .target_host
-        .as_ref()
-        .ok_or_else(|| Error::Config(format!("{WS_CLIENT_TYPE} requires target_host")))?;
-    let tls = config.websocket_tls.unwrap_or(false);
-    let target_port = config.target_port.unwrap_or(if tls { 443 } else { 80 });
-    let path = config.websocket_path.as_deref().unwrap_or("/");
-    let target = WsTarget::new(target_host.clone(), target_port, path, tls);
+    let target = match config.websocket_url.as_deref() {
+        Some(url) => WsTarget::parse_url(url)
+            .map_err(|e| Error::Config(format!("interface '{}': url {e}", config.name)))?,
+        None => {
+            let target_host = config.target_host.as_ref().ok_or_else(|| {
+                Error::Config(format!("{WS_CLIENT_TYPE} requires target_host or url"))
+            })?;
+            let tls = config.websocket_tls.unwrap_or(false);
+            let target_port = config.target_port.unwrap_or(if tls { 443 } else { 80 });
+            let path = config.websocket_path.as_deref().unwrap_or("/");
+            WsTarget::new(target_host.clone(), target_port, path, tls)
+        }
+    };
+    let framing = match config.websocket_framing.as_deref() {
+        None => WsFraming::Raw,
+        Some(value) => WsFraming::from_config(value).ok_or_else(|| {
+            Error::Config(format!(
+                "interface '{}': framing = '{value}' is neither raw nor hdlc",
+                config.name
+            ))
+        })?,
+    };
 
     let handle = spawn_ws_client_with_reconnect(WsClientConfig {
         id: InterfaceId(idx),
@@ -54,6 +69,7 @@ pub(super) fn build_client(
         reconnect_notify: Some(ctx.reconnect_tx.clone()),
         outbound_socket_hook: ctx.outbound_socket_hook.clone(),
         liveness: liveness_config(config)?,
+        framing,
     });
     if !config.name.is_empty() {
         ctx.inventory.lock_recover().add_spawned(
@@ -179,6 +195,21 @@ impl crate::driver::ReticulumNodeBuilder {
     }
 }
 
+impl crate::driver::ReticulumNodeBuilder {
+    /// Add a WebSocket client from one URL, `ws://host[:port][/path]` or
+    /// `wss://...` (port 80 or 443 by default, path `/`), with the default
+    /// `rns.raw` framing (#109). A future browser driver offers the same
+    /// call. A URL that does not parse is an error when the node builds.
+    pub fn add_websocket_interface(self, url: impl Into<String>) -> Self {
+        self.add_interface_config(InterfaceConfig {
+            name: "WebSocket Client".to_string(),
+            interface_type: WS_CLIENT_TYPE.to_string(),
+            websocket_url: Some(url.into()),
+            ..Default::default()
+        })
+    }
+}
+
 impl ReticulumNode {
     /// The addresses this node's WebSocket servers listen on, port 0
     /// resolved to the port the kernel gave (#109). The WebSocket twin of
@@ -210,7 +241,8 @@ mod tests {
                     listen_ip = 127.0.0.1\n    listen_port = 8765\n    \
                     max_connections_per_source = 4\n  [[Canonical]]\n    \
                     type = WebSocketClientInterface\n    target_host = mesh.example.org\n    \
-                    target_port = 443\n    path = /rns\n    tls = yes\n";
+                    target_port = 443\n    path = /rns\n    tls = yes\n    framing = hdlc\n  [[ByUrl]]\n    \
+                    type = WebSocketClientInterface\n    url = wss://[2001:db8::1]/rns\n";
         let server = section(text, "Browsers");
         assert_eq!(server.interface_type, WS_SERVER_TYPE);
         assert_eq!(server.listen_ip.as_deref(), Some("127.0.0.1"));
@@ -230,6 +262,12 @@ mod tests {
         assert_eq!(client.websocket_path.as_deref(), Some("/rns"));
         assert_eq!(client.websocket_tls, Some(true));
         assert!(!client.resolve_ingress_control());
+        assert_eq!(client.websocket_framing.as_deref(), Some("hdlc"));
+        let by_url = section(text, "ByUrl");
+        assert_eq!(
+            WsTarget::parse_url(by_url.websocket_url.as_deref().expect("url")),
+            Ok(WsTarget::new("2001:db8::1", 443, "/rns", true))
+        );
 
         // The serde form (what the builder and the TOML path read) keeps
         // the WebSocket keys too.

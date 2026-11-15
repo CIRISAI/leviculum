@@ -1588,3 +1588,5 @@ mod tests {
 // +ciris (#109): WebSocket interfaces, server and client.
 #[cfg(feature = "websocket")]
 pub(crate) mod websocket;
+#[cfg(feature = "websocket")]
+pub use websocket::{WsFraming, SUBPROTOCOL_HDLC, SUBPROTOCOL_RAW};
