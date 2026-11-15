@@ -665,6 +665,9 @@ mod tests {
         Config::load(&file).expect("load")
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn a_default_instance_is_asked_on_unix_then_on_37428() {
         let got = candidates(None, "default");
@@ -829,5 +832,15 @@ mod tests {
             args,
             format!("-c\n{}\n--instance-name\n{name}\n", dir.path().display())
         );
+    }
+
+    // CIRIS fork: with no Unix socket, a default instance is asked on 37428 only.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_default_instance_is_asked_on_37428_only_off_unix() {
+        let got = candidates(None, "default");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, Via::Tcp);
+        assert_eq!(describe(&got, "default"), "tcp 127.0.0.1:37428");
     }
 }
