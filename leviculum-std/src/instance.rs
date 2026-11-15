@@ -677,6 +677,9 @@ mod tests {
         );
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn a_named_instance_without_a_port_is_asked_on_unix_only() {
         let got = candidates(None, "alpha");
@@ -684,6 +687,9 @@ mod tests {
         assert_eq!(got[0].0, Via::Unix);
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn a_configured_port_is_the_tcp_fallback() {
         let c = config("[reticulum]\n  share_instance = Yes\n  shared_instance_port = 37500\n");
@@ -715,6 +721,9 @@ mod tests {
         assert_eq!(started.line(), "INSTANCE started=yes via=tcp pid=42");
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn no_start_fails_instead_of_starting() {
         let dir = tempfile::tempdir().expect("temp dir");

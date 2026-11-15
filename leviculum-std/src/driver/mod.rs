@@ -14044,6 +14044,8 @@ mod first_hop_timeout_tests {
     /// client's link carries Python's initiator timeout for that answer on a
     /// 2-hop path: 2276 + 6000 * 3 = 20 276 ms before jitter. Before #480
     /// the client never asked and priced the hop at 300 bit/s, 31 333 ms.
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
     #[tokio::test]
     async fn shared_instance_client_takes_the_daemons_first_hop_timeout() {
         let (timeout, jitter) = client_timeout("answer", true).await;

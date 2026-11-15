@@ -156,6 +156,9 @@ fn parse(text: &str) -> (Option<String>, Option<u32>) {
 mod tests {
     use super::*;
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn a_second_holder_on_one_storage_is_refused_with_the_first_ones_name_and_pid() {
         let dir = tempfile::tempdir().expect("temp dir");

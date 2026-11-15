@@ -1588,6 +1588,8 @@ mod tests {
     /// Before, `lnpath` on a host with another user's `/etc/reticulum`
     /// printed "failed to load identity: Operation not permitted" and no
     /// file. A missing file stands in for the EPERM: same `?`, same wrap.
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
     #[test]
     fn narrow_secret_mode_errors_name_the_file() {
         let dir = tempfile::tempdir().expect("tempdir");

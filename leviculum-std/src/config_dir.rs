@@ -183,6 +183,8 @@ mod tests {
     /// The hamster layout of 2026-11-11: the package's system config and the
     /// user's own daemon on `~/.reticulum`. The order takes the system
     /// directory; the hint names it, says why, and points at the other.
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
     #[test]
     fn both_candidates_present_names_the_choice_and_the_other() {
         let c = choice(
@@ -201,6 +203,9 @@ mod tests {
         );
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn xdg_reason_names_both_files() {
         let c = choice(None, &["/home/alice/.config/reticulum/config"]);
@@ -213,6 +218,9 @@ mod tests {
         );
     }
 
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+
+    #[cfg(unix)]
     #[test]
     fn fallback_lists_no_others_when_none_hold_a_config() {
         let c = choice(None, &[]);
