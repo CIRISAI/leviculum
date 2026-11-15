@@ -723,10 +723,13 @@ const MTU_PROBE_MAGIC: &[u8; 4] = b"RNSM";
 
 /// +ciris (leviculum#104): the probe sizes, largest first. Each is the size
 /// of the UDP payload, which is what a Reticulum packet at that MTU fills:
-/// `DIRECT_LINK_MTU`, then the IPv6 minimum link MTU. A path that carries
-/// neither (a tunnel, an APN or 464XLAT clamping below it) signals no MTU,
-/// so links over it hold the base 500.
-pub const MTU_PROBE_STEPS: [u32; 2] = [super::DIRECT_LINK_MTU, 1280];
+/// `DIRECT_LINK_MTU`, then the IPv6 minimum link MTU, then (leviculum#107)
+/// what an IPv6 path of exactly that minimum carries once its 40-byte IPv6
+/// and 8-byte UDP headers are paid. A path that carries none (a tunnel, an
+/// APN or 464XLAT clamping below it) signals no MTU, so links over it hold
+/// the base 500. A peer that answers probes acks any size it receives
+/// whole, so a step added here needs nothing new from it.
+pub const MTU_PROBE_STEPS: [u32; 3] = [super::DIRECT_LINK_MTU, 1280, 1232];
 
 /// The high half of the sequence number a probe carries, and its ack echoes.
 const MTU_PROBE_SEQ_TAG: u32 = 0xFFFE_0000;
