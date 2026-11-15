@@ -3390,6 +3390,26 @@ fn hex_lower_bytes(bytes: &[u8]) -> String {
     s
 }
 
+/// +ciris (leviculum#107): interface byte counters, for tests that must show
+/// a medium carried something.
+impl TestDaemon {
+    /// Bytes received so far on the daemon's interface whose name contains
+    /// `name` (Python `interface.rxb`), or `None` when there is none.
+    pub async fn interface_rx_bytes(&self, name: &str) -> Result<Option<u64>, HarnessError> {
+        let result = self.query("get_interfaces", serde_json::json!({})).await?;
+        Ok(result.as_array().and_then(|interfaces| {
+            interfaces
+                .iter()
+                .find(|i| {
+                    i.get("name")
+                        .and_then(|n| n.as_str())
+                        .is_some_and(|n| n.contains(name))
+                })
+                .and_then(|i| i.get("rxb").and_then(|v| v.as_u64()))
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
