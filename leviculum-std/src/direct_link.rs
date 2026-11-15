@@ -684,6 +684,9 @@ pub(crate) struct DirectLinkRuntime {
     /// that is not a punch frame (Codex review on #74).
     reannounce: Vec<(std::time::Instant, usize)>,
     timing: DirectUdpTiming,
+    /// +ciris (leviculum#99): the timing of an interface whose peer acks
+    /// sequenced keepalives.
+    fast_timing: DirectUdpTiming,
     /// +ciris: sessions whose peer acks sequenced keepalives (both ends run
     /// the two-sided commit), so their interface uses the fast liveness.
     fast_liveness: HashMap<SessionId, bool>,
@@ -700,8 +703,15 @@ impl DirectLinkRuntime {
             interfaces: HashMap::new(),
             reannounce: Vec::new(),
             timing: DirectUdpTiming::default(),
+            fast_timing: DirectUdpTiming::fast(),
             fast_liveness: HashMap::new(),
         }
+    }
+
+    /// +ciris (leviculum#99): the keepalive interval and silence bound of a
+    /// direct interface whose peer acks sequenced keepalives.
+    pub(crate) fn set_fast_timing(&mut self, keepalive: Duration, inactivity: Duration) {
+        self.fast_timing = DirectUdpTiming::fast_with(keepalive, inactivity);
     }
 
     /// Start (or stop) whatever a node job asks for.
@@ -869,7 +879,7 @@ impl DirectLinkRuntime {
         let socket = self.sockets.remove(&session)?;
         let token = self.tokens.remove(&session)?;
         let timing = if self.fast_liveness.remove(&session).unwrap_or(false) {
-            DirectUdpTiming::fast()
+            self.fast_timing
         } else {
             self.timing
         };
@@ -929,6 +939,20 @@ mod tests {
 
     async fn loopback() -> UdpSocket {
         UdpSocket::bind("127.0.0.1:0").await.unwrap()
+    }
+
+    /// leviculum#99: a host-set keepalive is the timing a fast-liveness
+    /// interface gets; the default stays 5 s and 15 s.
+    #[test]
+    fn a_host_set_keepalive_is_the_fast_timing() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut runtime = DirectLinkRuntime::new(tx);
+        assert_eq!(runtime.fast_timing.keepalive, Duration::from_secs(5));
+        assert_eq!(runtime.fast_timing.inactivity, Duration::from_secs(15));
+        runtime.set_fast_timing(Duration::from_secs(25), Duration::from_secs(80));
+        assert_eq!(runtime.fast_timing.keepalive, Duration::from_secs(25));
+        assert_eq!(runtime.fast_timing.inactivity, Duration::from_secs(80));
+        assert!(runtime.fast_timing.sequenced);
     }
 
     #[tokio::test]

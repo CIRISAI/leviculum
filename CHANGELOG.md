@@ -37,6 +37,8 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
   interface-up.
 - `rusqlite` stays at 0.41.1 (RUSTSEC-2026-0459) under upstream's loquax
   `hooks` feature.
+- 0.34.1+ciris.1's host-set direct-link keepalive (#99,
+  `ReticulumNodeBuilder::direct_link_keepalive`) is carried, so 0.35 keeps it.
 
 ### Consumer notes
 
@@ -44,6 +46,34 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
 - `deny.toml` allows `LGPL-2.1-only` for upstream's `codec2`, and ignores
   RUSTSEC-2026-0370/0371/0372 (`zvariant`, `zbus_names`, unmaintained, no fix),
   reached only through upstream's iced GUI.
+
+## [0.34.1+ciris.1] — CIRIS fork
+
+A patch for CIRISEdge's 45.1.x line, on v0.34.0+ciris.3. No API or wire break.
+
+### Added
+
+- `ReticulumNodeBuilder::direct_link_keepalive(interval, dead_after)`
+  (leviculum#99): the acked keepalive of a direct link between two nodes on the
+  two-sided commit, and the silence after which the path is given up. The
+  default stays 5 s and 15 s. A probe every 5 s keeps a cellular modem out of
+  its idle state, so a phone can trade detection time for battery, within the
+  NAT's mapping lifetime (often 30 s on carrier NATs). `build` refuses an
+  interval of zero or a `dead_after` not above it. Peers that do not ack
+  keepalives (rns-rs) keep 30 s and 120 s.
+
+### Fixed
+
+- The core-lock census pins the six lock-taking methods v0.34.0+ciris.2 and
+  .3 added (`send_unordered`, `try_send_unordered`, `link_datagram_mdu`,
+  `link_datagram_stats`, `try_send_seq`, `link_seq_stats`): 89 in all. Their
+  docs already say they take the core lock; never call them from a
+  `CoreProcessor` hook.
+
+### Consumer notes
+
+- For #103, set `resource_window_policy(WindowPolicy::ByMedium)` on the
+  builder; it shipped opt-in in v0.34.0+ciris.1 and needs no new release.
 
 ## [0.34.0+ciris.3] — CIRIS fork
 

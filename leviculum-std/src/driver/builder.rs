@@ -67,6 +67,7 @@ pub struct ReticulumNodeBuilder {
     assemble_resources_off_lock: bool,
     /// leviculum#70: direct-link settings (takes priority over config).
     direct_link_explicit: Option<crate::direct_link::DirectLinkSettings>,
+    direct_link_keepalive: Option<(std::time::Duration, std::time::Duration)>,
     /// Explicit control-channel capacity override (takes priority over config)
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
@@ -136,6 +137,7 @@ impl ReticulumNodeBuilder {
             max_assembled_resource_size_explicit: None,
             assemble_resources_off_lock: true,
             direct_link_explicit: None,
+            direct_link_keepalive: None,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
@@ -984,6 +986,24 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// +ciris (leviculum#99): the keepalive of a direct link between two
+    /// nodes on the two-sided commit: a sequenced probe the peer acks every
+    /// `interval`, and the path given up after `dead_after` of silence. The
+    /// default is 5 s and 15 s: quick to notice a dead path, but a probe
+    /// every 5 s keeps a cellular modem out of its idle state. A phone can
+    /// trade detection time for battery, within the NAT's mapping lifetime
+    /// (often 30 s on carrier NATs). `build` refuses an `interval` of zero or
+    /// a `dead_after` not longer than it. Peers that do not ack keepalives
+    /// (rns-rs) keep 30 s and 120 s.
+    pub fn direct_link_keepalive(
+        mut self,
+        interval: std::time::Duration,
+        dead_after: std::time::Duration,
+    ) -> Self {
+        self.direct_link_keepalive = Some((interval, dead_after));
+        self
+    }
+
     pub fn flush_interval_secs(mut self, secs: u64) -> Self {
         self.flush_interval_secs_explicit = Some(secs);
         self
@@ -1362,6 +1382,14 @@ impl ReticulumNodeBuilder {
             node.max_assembled_resource_size = bytes;
         }
         node.direct_link = direct_link;
+        if let Some((interval, dead_after)) = self.direct_link_keepalive {
+            if interval.is_zero() || dead_after <= interval {
+                return Err(Error::Config(format!(
+                    "direct_link_keepalive: interval {interval:?} must be above zero and below dead_after {dead_after:?}"
+                )));
+            }
+            node.direct_link_keepalive = Some((interval, dead_after));
+        }
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
         node.host_resolver = self.host_resolver.clone();
         // Where both shared-instance channels live (D2 of the 2026-10-11
@@ -1644,6 +1672,39 @@ mod tests {
         let builder = ReticulumNodeBuilder::new();
         assert!(builder.config_path.is_none());
         assert!(builder.interfaces.is_empty());
+    }
+
+    /// leviculum#99: a host-set direct-link keepalive reaches the node, and
+    /// an interval of zero or a silence bound not above it is refused.
+    #[tokio::test]
+    async fn a_direct_link_keepalive_is_kept_and_a_bad_one_refused() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let node = ReticulumNodeBuilder::new()
+            .storage_path(dir.path().to_path_buf())
+            .direct_link_keepalive(Duration::from_secs(25), Duration::from_secs(80))
+            .build()
+            .await
+            .expect("a sound keepalive builds");
+        assert_eq!(
+            node.direct_link_keepalive,
+            Some((Duration::from_secs(25), Duration::from_secs(80)))
+        );
+        for (interval, dead_after) in [(0, 10), (20, 20), (30, 10)] {
+            let dir = tempfile::tempdir().unwrap();
+            let built = ReticulumNodeBuilder::new()
+                .storage_path(dir.path().to_path_buf())
+                .direct_link_keepalive(
+                    Duration::from_secs(interval),
+                    Duration::from_secs(dead_after),
+                )
+                .build()
+                .await;
+            assert!(
+                matches!(built, Err(Error::Config(_))),
+                "{interval}/{dead_after} is refused"
+            );
+        }
     }
 
     #[test]

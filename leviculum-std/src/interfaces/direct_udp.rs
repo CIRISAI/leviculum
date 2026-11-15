@@ -70,9 +70,15 @@ pub(crate) struct DirectUdpTiming {
 impl DirectUdpTiming {
     /// +ciris: acked probes, for a peer that runs the two-sided commit.
     pub(crate) fn fast() -> Self {
+        Self::fast_with(FAST_KEEPALIVE_INTERVAL, FAST_INACTIVITY_TIMEOUT)
+    }
+
+    /// +ciris (leviculum#99): the acked probes at a host-chosen interval and
+    /// silence bound (`ReticulumNodeBuilder::direct_link_keepalive`).
+    pub(crate) fn fast_with(keepalive: Duration, inactivity: Duration) -> Self {
         DirectUdpTiming {
-            keepalive: FAST_KEEPALIVE_INTERVAL,
-            inactivity: FAST_INACTIVITY_TIMEOUT,
+            keepalive,
+            inactivity,
             sequenced: true,
         }
     }
