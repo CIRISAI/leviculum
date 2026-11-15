@@ -50,7 +50,10 @@ The fork carried onto current upstream master (+1,366 since the Oct 30 base).
   replace the fork's #49 file pruning. One fork rule stays: a pinned entry
   (`KnownDestUseState::Retained`) is kept in memory whatever its age, inside
   the cap, so CIRISEdge can still recall a pinned contact after a restart.
-  Upstream keeps such an entry on disk only.
+  Upstream keeps such an entry on disk only. A pin takes one of the cap's
+  slots, so a full node holds one unpinned entry fewer; pins alone past the
+  cap keep the newest of them in memory and the rest on disk, as the core's
+  identity table does.
 - Apple TCP sockets (leviculum#85) now take upstream's per-interface liveness
   keys (`tcp_keepalive_idle_secs`, `tcp_keepalive_interval_secs`,
   `tcp_keepalive_probes`, `tcp_user_timeout_secs`): the user timeout becomes

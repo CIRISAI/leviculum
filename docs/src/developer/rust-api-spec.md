@@ -70,11 +70,11 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2850` | Stop and flush |
 | `fn is_running(&self) -> bool` — `driver/mod.rs:2990` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:3143` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4327` | Announce a registered destination |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4328` | Announce a registered destination |
 | `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3483` | Open a link; returns a pending handle |
 | `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3585` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4802` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4757` | Send one unreliable datagram |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4803` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4758` | Send one unreliable datagram |
 | `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3597` | Take the event stream, once |
 | `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3730` | The node's own identity hash |
 | `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3915` | Whether a path is known |
@@ -82,7 +82,7 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3946` | Send a PATH_REQUEST; result arrives as `PathFound` |
 | `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3924` | Identity learned from an announce (its signing key feeds `connect`) |
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:4176` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4841` | Relay mode flag |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4842` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:245`) — re-projects this surface with core internals
@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1624` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1633` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1648` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1657` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 
@@ -258,11 +258,11 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:531` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:533` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
-| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:359` |
+| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:361` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:1072`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:1074`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`, `heapless`-backed
