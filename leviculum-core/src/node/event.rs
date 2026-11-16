@@ -756,6 +756,24 @@ pub enum NodeEvent {
         /// The payload
         data: Vec<u8>,
     },
+
+    /// +ciris (leviculum#101): a router port mapping for one of this node's
+    /// listeners was gained, changed or lost. The core never raises it; the
+    /// std driver's port-mapping task does, and its
+    /// `ReticulumNode::port_mappings` holds the detail (lease, state, why a
+    /// mapping failed). A mapping is not proof of reachability.
+    PortMappingChanged {
+        /// The node's own port the mapping forwards to.
+        internal_port: u16,
+        /// `true` for a UDP mapping, `false` for TCP.
+        udp: bool,
+        /// The address the router forwards from, or `None` when the mapping
+        /// was lost, refused or removed. Its port may differ from
+        /// `internal_port`: the router chooses.
+        external: Option<core::net::SocketAddr>,
+        /// How the mapping was made: `"pcp"`, `"nat-pmp"` or `"upnp-igd"`.
+        method: &'static str,
+    },
 }
 
 /// Delivery plane a [`NodeEvent`] belongs to.
@@ -837,6 +855,7 @@ impl NodeEvent {
             | NodeEvent::AnnounceTransmitted { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
+            | NodeEvent::PortMappingChanged { .. }
             | NodeEvent::PeerCongested { .. }
             | NodeEvent::InterfaceDown(_)
             | NodeEvent::FramesDropped { .. } => None,
@@ -1002,6 +1021,10 @@ impl NodeEvent {
             | NodeEvent::FramesDropped { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. } => EventClass::Control,
+
+            // +ciris (leviculum#101): a handful per run, and a host that
+            // advertises its reachability must not miss one.
+            NodeEvent::PortMappingChanged { .. } => EventClass::Control,
         }
     }
 
@@ -1060,6 +1083,7 @@ impl NodeEvent {
             NodeEvent::FramesDropped { .. } => "FramesDropped",
             NodeEvent::ControlPlaneOverflow { .. } => "ControlPlaneOverflow",
             NodeEvent::CoreProcessorPanicked { .. } => "CoreProcessorPanicked",
+            NodeEvent::PortMappingChanged { .. } => "PortMappingChanged",
         }
     }
 }
