@@ -13970,12 +13970,13 @@ mod first_hop_timeout_tests {
     ) -> (u64, u16) {
         let identity = Identity::generate(&mut OsRng);
         let instance = format!("firsthop_{tag}_{}", std::process::id());
+        let ports = free_port_pair(); // +ciris: see free_port_pair
         let daemon_storage = tempfile::tempdir().expect("daemon storage");
         let daemon_storage_path = match &config_dir {
             Some(dir) => dir.join("storage"),
             None => daemon_storage.path().to_path_buf(),
         };
-        let mut daemon = ReticulumNodeBuilder::new()
+        let mut daemon = on_ports(ReticulumNodeBuilder::new(), ports)
             .identity(identity.clone())
             .enable_transport(true)
             .share_instance(true)
@@ -13995,7 +13996,7 @@ mod first_hop_timeout_tests {
         // Without a directory of its own the client is pointed at an empty
         // one, never the host's default, whose key is no test's business.
         let client_config_dir = config_dir.unwrap_or_else(|| client_storage.path().join("rns"));
-        let mut client = ReticulumNodeBuilder::new()
+        let mut client = on_ports(ReticulumNodeBuilder::new(), ports)
             .identity(client_identity)
             .enable_transport(false)
             .connect_to_shared_instance(&instance)
@@ -14125,6 +14126,37 @@ mod first_hop_timeout_tests {
             jittered(31_333, jitter),
             "jitter {jitter} permille"
         );
+    }
+
+    // +ciris: on Windows a named shared instance listens on a port hashed
+    // from its name, which can fall in one of the host's excluded port
+    // ranges, and the daemon's bind then fails with 10013 (WSAEACCES). There
+    // both ends take TCP on two ports the OS has just handed out, so neither
+    // is excluded. Elsewhere the builders are left as they were.
+    #[cfg(unix)]
+    fn free_port_pair() -> Option<(u16, u16)> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn free_port_pair() -> Option<(u16, u16)> {
+        let bind = || std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let (data, control) = (bind(), bind());
+        let port = |l: &std::net::TcpListener| l.local_addr().expect("local addr").port();
+        Some((port(&data), port(&control)))
+    }
+
+    fn on_ports(builder: ReticulumNodeBuilder, ports: Option<(u16, u16)>) -> ReticulumNodeBuilder {
+        match ports {
+            Some((data, control)) => {
+                builder.shared_instance_transport(crate::interfaces::SharedInstanceTransport {
+                    tcp: true,
+                    data_port: Some(data),
+                    control_port: Some(control),
+                })
+            }
+            None => builder,
+        }
     }
 }
 
