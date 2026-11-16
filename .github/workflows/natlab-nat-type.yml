@@ -1,0 +1,51 @@
+# +ciris NAT lab, real nodes (leviculum#100): the leviculum-std example
+# `natlab_node` in network namespaces behind simulated cone and symmetric
+# NATs (scripts/natlab/nat_type.py). The witness is the NAT classification
+# from two probe servers; the punch outcomes are reported beside it. Needs
+# root, which a hosted runner has; runs when the code it exercises changes,
+# or on demand.
+name: natlab-nat-type
+on:
+  workflow_dispatch:
+    inputs:
+      trials:
+        default: "3"
+  push:
+    paths:
+      - scripts/natlab/nat_type.py
+      - leviculum-std/examples/natlab_node.rs
+      - leviculum-std/src/direct_link.rs
+      - leviculum-core/src/direct_link/**
+      - leviculum-core/src/node/direct_link.rs
+      - leviculum-core/src/node/nat_report.rs
+      - .github/workflows/natlab-nat-type.yml
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # leviculum-std's dev-dependencies (lnomad) include_str! from it.
+      - run: git submodule update --init reference/Reticulum
+      - run: sudo apt-get update -q && sudo apt-get install -yq musl-tools conntrack iptables iproute2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: build natlab_node
+        run: cargo build --release -p leviculum-std --example natlab_node
+      - name: lab
+        run: |
+          set -o pipefail
+          sudo python3 scripts/natlab/nat_type.py \
+            --bin target/x86_64-unknown-linux-musl/release/examples/natlab_node \
+            --trials "${{ inputs.trials || '3' }}" | tee natlab-nat-type.log
+          sed -n '/^| NAT A\/B/,$p' natlab-nat-type.log >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: natlab-nat-type
+          path: |
+            natlab-nat-type.json
+            natlab-nat-type.log
+            natlab-logs/
