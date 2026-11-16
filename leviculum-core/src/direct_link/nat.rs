@@ -320,7 +320,41 @@ pub struct DirectLinkRecord {
     pub at_ms: u64,
 }
 
+/// Outcome counters, for all attempts or for one NAT class.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutcomeCounts {
+    pub established: u64,
+    pub punch_failed: u64,
+    pub timed_out: u64,
+    pub refused: u64,
+    pub probe_failed: u64,
+    pub fell_back: u64,
+    pub superseded: u64,
+    pub lost: u64,
+}
+
+impl OutcomeCounts {
+    fn count(&mut self, outcome: DirectLinkOutcome) {
+        let counter = match outcome {
+            DirectLinkOutcome::Established => &mut self.established,
+            DirectLinkOutcome::PunchFailed => &mut self.punch_failed,
+            DirectLinkOutcome::TimedOut => &mut self.timed_out,
+            DirectLinkOutcome::Refused(_) => &mut self.refused,
+            DirectLinkOutcome::ProbeFailed => &mut self.probe_failed,
+            DirectLinkOutcome::FellBack(_) => &mut self.fell_back,
+            DirectLinkOutcome::Superseded => &mut self.superseded,
+            DirectLinkOutcome::Lost => &mut self.lost,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
 /// Direct-link outcomes since the node started, and the latest few in full.
+///
+/// The totals, the same counts per NAT class of the session's socket
+/// (`by_nat`, `None` for a session with no report), and how many NAT
+/// reports of each class the node has recorded (`reports`): counts by
+/// class, with no address, are what a host can export as they are.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectLinkOutcomes {
     pub established: u64,
@@ -333,6 +367,11 @@ pub struct DirectLinkOutcomes {
     pub lost: u64,
     /// The latest [`OUTCOME_RECORDS`] outcomes, oldest first.
     pub recent: Vec<DirectLinkRecord>,
+    /// The outcome counts per NAT class of the session's socket.
+    pub by_nat: alloc::collections::BTreeMap<Option<NatMapping>, OutcomeCounts>,
+    /// NAT reports recorded, per class (session probes, re-probes and the
+    /// host's `probe_nat` alike).
+    pub reports: alloc::collections::BTreeMap<NatMapping, u64>,
 }
 
 /// How many [`DirectLinkRecord`]s a node keeps.
@@ -342,21 +381,49 @@ impl DirectLinkOutcomes {
     /// Count `record` and keep it, dropping the oldest past
     /// [`OUTCOME_RECORDS`].
     pub fn push(&mut self, record: DirectLinkRecord) {
-        let counter = match record.outcome {
-            DirectLinkOutcome::Established => &mut self.established,
-            DirectLinkOutcome::PunchFailed => &mut self.punch_failed,
-            DirectLinkOutcome::TimedOut => &mut self.timed_out,
-            DirectLinkOutcome::Refused(_) => &mut self.refused,
-            DirectLinkOutcome::ProbeFailed => &mut self.probe_failed,
-            DirectLinkOutcome::FellBack(_) => &mut self.fell_back,
-            DirectLinkOutcome::Superseded => &mut self.superseded,
-            DirectLinkOutcome::Lost => &mut self.lost,
-        };
-        *counter = counter.saturating_add(1);
+        let mut total = self.totals();
+        total.count(record.outcome);
+        self.set_totals(total);
+        self.by_nat
+            .entry(record.nat)
+            .or_default()
+            .count(record.outcome);
         if self.recent.len() >= OUTCOME_RECORDS {
             self.recent.remove(0);
         }
         self.recent.push(record);
+    }
+
+    /// Count one NAT report of class `mapping`.
+    pub fn count_report(&mut self, mapping: NatMapping) {
+        let n = self.reports.entry(mapping).or_default();
+        *n = n.saturating_add(1);
+    }
+
+    /// The totals as one [`OutcomeCounts`].
+    #[must_use]
+    pub fn totals(&self) -> OutcomeCounts {
+        OutcomeCounts {
+            established: self.established,
+            punch_failed: self.punch_failed,
+            timed_out: self.timed_out,
+            refused: self.refused,
+            probe_failed: self.probe_failed,
+            fell_back: self.fell_back,
+            superseded: self.superseded,
+            lost: self.lost,
+        }
+    }
+
+    fn set_totals(&mut self, t: OutcomeCounts) {
+        self.established = t.established;
+        self.punch_failed = t.punch_failed;
+        self.timed_out = t.timed_out;
+        self.refused = t.refused;
+        self.probe_failed = t.probe_failed;
+        self.fell_back = t.fell_back;
+        self.superseded = t.superseded;
+        self.lost = t.lost;
     }
 }
 
@@ -566,6 +633,12 @@ mod tests {
         assert_eq!(outcomes.punch_failed, 17);
         assert_eq!(outcomes.recent.len(), OUTCOME_RECORDS);
         assert_eq!(outcomes.recent[0].at_ms, 3);
+        let sym = outcomes.by_nat[&Some(NatMapping::EndpointDependent)];
+        assert_eq!((sym.established, sym.punch_failed), (18, 17));
+        assert_eq!(outcomes.by_nat.len(), 1);
+        outcomes.count_report(NatMapping::EndpointIndependent);
+        outcomes.count_report(NatMapping::EndpointIndependent);
+        assert_eq!(outcomes.reports[&NatMapping::EndpointIndependent], 2);
     }
 
     /// The NAT lab's first run (leviculum#100) recorded the side whose peer

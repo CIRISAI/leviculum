@@ -244,6 +244,14 @@ async fn peer(args: &[String]) -> Result<(), BoxError> {
                 "refused": outcomes.refused,
                 "probe_failed": outcomes.probe_failed,
             },
+            "by_nat": outcomes.by_nat.iter().map(|(nat, c)| serde_json::json!({
+                "nat": nat.map(|m| m.name()),
+                "established": c.established,
+                "punch_failed": c.punch_failed,
+            })).collect::<Vec<_>>(),
+            "reports": outcomes.reports.iter()
+                .map(|(m, n)| (m.name().to_string(), serde_json::json!(n)))
+                .collect::<serde_json::Map<_, _>>(),
             "records": outcomes.recent.iter().map(|r| serde_json::json!({
                 "outcome": r.outcome.name(),
                 "nat": r.nat.map(|m| m.name()),

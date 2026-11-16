@@ -81,6 +81,8 @@ impl NatState {
         use crate::heap_census as hc;
         hc::vec_deque_bytes(&self.notes)
             + self.outcomes.recent.capacity() * core::mem::size_of::<DirectLinkRecord>()
+            + hc::btree_map_bytes(&self.outcomes.by_nat)
+            + hc::btree_map_bytes(&self.outcomes.reports)
             + self.latest.as_ref().map_or(0, |r| {
                 r.probes.capacity() * core::mem::size_of::<NatProbe>()
                     + r.host_candidates.capacity() * core::mem::size_of::<SocketAddr>()
@@ -154,6 +156,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             "direct link: NAT probe answers"
         );
         let state = &mut self.direct_links.nat;
+        state.outcomes.count_report(report.mapping);
         if let Some(session) = session {
             state.note(session).nat = Some(report.mapping);
         }
