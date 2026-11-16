@@ -5880,7 +5880,7 @@ async fn run_event_loop(
                     // the facilitator, its NAT type. The node records the
                     // type, then takes the address; one output carries both,
                     // the type's event first.
-                    probed @ Outcome::Probed { .. } => {
+                    probed @ (Outcome::Probed { .. } | Outcome::NatProbed { .. }) => {
                         Some(crate::direct_link::probed(&mut inner.lock_recover(), probed))
                     }
                     // A punch that got through, or one that did not.

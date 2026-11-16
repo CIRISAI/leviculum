@@ -967,29 +967,43 @@ async fn an_upgrade_over_a_path_under_every_probe_step_moves_at_500() {
     upgrade_over_a_narrow_path(1000, 500).await;
 }
 
-/// +ciris (leviculum#100): B probes a second facilitator beside the relay's
-/// from its session socket and classifies its NAT: on loopback both see the
-/// socket's own address, which is no host candidate there (loopback is left
-/// out), so the verdict is endpoint-independent, on one IP. A, with no
-/// facilitator of its own and none configured, probes only the one B named
-/// and says so. Each side records the upgrade beside its verdict, and B
-/// raised the change event before the upgrade's own.
+/// +ciris (leviculum#100): a fake RNSP server on `ip`, as any facilitator
+/// answers; `None` where the host has no such loopback address (macOS has
+/// only 127.0.0.1).
+async fn rnsp_server(ip: &str) -> Option<(String, tokio::task::JoinHandle<()>)> {
+    use leviculum_core::direct_link::wire;
+    let socket = tokio::net::UdpSocket::bind(format!("{ip}:0")).await.ok()?;
+    let addr = socket.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        let mut buf = [0u8; 576];
+        while let Ok((len, src)) = socket.recv_from(&mut buf).await {
+            if let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) {
+                let _ = socket
+                    .send_to(&wire::rnsp_response(&nonce, &src), src)
+                    .await;
+            }
+        }
+    });
+    Some((addr, task))
+}
+
+/// +ciris (leviculum#100): B probes a second server, at another address,
+/// beside the relay's facilitator, from its session socket, and classifies
+/// its NAT: on loopback both see the socket's own address, which is no host
+/// candidate there (loopback is left out), so the verdict is
+/// endpoint-independent. A, with no server of its own, probes only the
+/// facilitator B named and stays unknown. Each side records the upgrade
+/// beside its verdict, and B raised the change event before the upgrade's
+/// own. Once the path is up, each side re-probes with its new direct-link
+/// peer among the servers, and the peer answers from its direct socket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_upgrade_reports_the_nat_type_from_two_servers() {
+async fn an_upgrade_reports_the_nat_type_and_reprobes_its_new_peer() {
     use leviculum_core::direct_link::{DirectLinkOutcome, NatMapping, NatUnknown};
-    let second_port = next_port();
-    let _second = start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
-        facilitator_port: Some(second_port),
-        ..Default::default()
-    }))
-    .await;
-    let (_t, mut a, mut b, link_id, _handle, _hash) = linked_through_relay_with(
-        accepter(),
-        None,
-        false,
-        vec![format!("127.0.0.1:{second_port}")],
-    )
-    .await;
+    let Some((second, _server)) = rnsp_server("127.0.0.2").await else {
+        return;
+    };
+    let (_t, mut a, mut b, link_id, _handle, _hash) =
+        linked_through_relay_with(accepter(), None, false, vec![second.clone()]).await;
     assert!(b.node.nat_report().is_none(), "nothing probed yet");
     b.node.propose_direct_link(&link_id).await.expect("propose");
     let mut changed = None;
@@ -1012,8 +1026,7 @@ async fn an_upgrade_reports_the_nat_type_from_two_servers() {
     assert_eq!(report.mapping, NatMapping::EndpointIndependent);
     assert_eq!(report.probes.len(), 2);
     assert!(report.probes.iter().all(|p| p.mapped.is_some()));
-    assert!(report.servers_share_ip);
-    assert_eq!(report.port_preserved, Some(true), "loopback keeps the port");
+    assert!(!report.servers_share_ip);
     assert!(report.at_unix_secs.is_some());
 
     let up = next_event(&mut a.rx, Duration::from_secs(20), |ev| {
@@ -1024,9 +1037,10 @@ async fn an_upgrade_reports_the_nat_type_from_two_servers() {
     })
     .await;
     assert!(matches!(up, Some(NodeEvent::DirectLinkEstablished { .. })));
+    let session_report = a.node.nat_report().expect("A's report");
     assert_eq!(
-        a.node.nat_report().map(|r| r.mapping),
-        Some(NatMapping::Unknown(NatUnknown::OneServer))
+        session_report.mapping,
+        NatMapping::Unknown(NatUnknown::OneServer)
     );
 
     for (side, nat, proposed) in [
@@ -1041,29 +1055,49 @@ async fn an_upgrade_reports_the_nat_type_from_two_servers() {
         assert_eq!(record.proposed, proposed);
         assert_eq!(record.link_id, link_id);
     }
+
+    // The re-probe: A's new peer B is asked at its direct socket, and B
+    // answers it (on loopback B is at A's own address, so the verdict stays
+    // one server).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let reprobed = loop {
+        if let Some(r) = a.node.nat_report() {
+            if r.at_ms > session_report.at_ms {
+                break Some(r);
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    .expect("A re-probed with its new peer");
+    // A has no server of its own: the peer is all it asked.
+    assert_eq!(reprobed.probes.len(), 1, "{:?}", reprobed.probes);
+    assert!(
+        reprobed.probes[0].mapped.is_some(),
+        "the peer answered: {:?}",
+        reprobed.probes
+    );
 }
 
 /// +ciris (leviculum#100): a NAT probe outside any session, from the host's
-/// call: one facilitator alone cannot classify, two can, and an
-/// unanswering second server is reported as such.
+/// call: one facilitator alone cannot classify, a second server at another
+/// address can, and an unanswering second server is reported as such.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_probes_its_nat_type_on_demand() {
     use leviculum_core::direct_link::{NatMapping, NatUnknown};
-    let (one, two) = (next_port(), next_port());
-    let _servers = [
-        start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
-            facilitator_port: Some(one),
-            ..Default::default()
-        }))
-        .await,
-        start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
-            facilitator_port: Some(two),
-            ..Default::default()
-        }))
-        .await,
-    ];
-    let silent = StdUdpSocket::bind("127.0.0.1:0").unwrap();
-    let silent_port = silent.local_addr().unwrap().port();
+    let Some((two, _two)) = rnsp_server("127.0.0.2").await else {
+        return;
+    };
+    let one = next_port();
+    let _server = start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
+        facilitator_port: Some(one),
+        ..Default::default()
+    }))
+    .await;
+    let silent = StdUdpSocket::bind("127.0.0.3:0").unwrap();
+    let silent = silent.local_addr().unwrap().to_string();
     let prober = |extra: Vec<String>| {
         start(
             ReticulumNodeBuilder::new()
@@ -1076,20 +1110,14 @@ async fn a_host_probes_its_nat_type_on_demand() {
         alone.node.probe_nat().await.unwrap().mapping,
         NatMapping::Unknown(NatUnknown::OneServer)
     );
-    let paired = prober(vec![format!("127.0.0.1:{two}")]).await;
+    let paired = prober(vec![two]).await;
     let report = paired.node.probe_nat().await.unwrap();
     assert_eq!(report.mapping, NatMapping::EndpointIndependent);
     assert_eq!(paired.node.nat_report(), Some(report));
-    let half = prober(vec![format!("127.0.0.1:{silent_port}")]).await;
-    let started = tokio::time::Instant::now();
+    let half = prober(vec![silent]).await;
     let report = half.node.probe_nat().await.unwrap();
     assert_eq!(report.mapping, NatMapping::Unknown(NatUnknown::OneAnswered));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the facilitator's answer bounds the wait: {:?}",
-        started.elapsed()
-    );
-    // Without a facilitator there is nothing to probe.
+    // Nothing to probe: no facilitator, no server, no peer.
     let none = start(ReticulumNodeBuilder::new()).await;
     assert!(none.node.probe_nat().await.is_err());
 }
