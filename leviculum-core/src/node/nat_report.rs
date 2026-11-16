@@ -38,7 +38,11 @@ const SESSION_NOTES: usize = 32;
 struct SessionNote {
     session: SessionId,
     nat: Option<NatMapping>,
+    /// The peer's reflexive address: debug lines only.
     peer: Option<SocketAddr>,
+    /// The peer's identity hash (or, before it identified, the destination
+    /// this node dialled): what info lines name the peer by.
+    peer_hash: Option<[u8; 16]>,
 }
 
 /// The node's NAT reports and direct-link outcomes.
@@ -63,6 +67,7 @@ impl NatState {
             session: *session,
             nat: None,
             peer: None,
+            peer_hash: None,
         });
         self.notes.back_mut().expect("just pushed")
     }
@@ -127,17 +132,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         report.at_ms = self.transport.clock().now_ms();
         report.at_unix_secs = self.transport.clock().wall_unix_secs();
         let link = session.and_then(|s| self.direct_links.link_of_session(s));
+        let answered = report.probes.iter().filter(|p| p.mapped.is_some()).count();
+        // Addresses stay off info lines (leviculum#100): the verdict and
+        // its shape there, what each server saw at debug.
         crate::tracing::info!(
             link = %Short(link.as_ref().map(|l| &l.as_bytes()[..])),
             session = %Short(session.map(|s| &s[..])),
             nat = report.mapping.name(),
-            mapped = %Peer(report.mapped()),
-            probes = %Probes(&report.probes),
-            local_port = report.local_port,
+            probed = report.probes.len(),
+            answered,
             port_preserved = ?report.port_preserved,
             servers_share_ip = report.servers_share_ip,
             global_ipv6 = report.global_ipv6,
             "direct link: NAT type"
+        );
+        crate::tracing::debug!(
+            session = %Short(session.map(|s| &s[..])),
+            mapped = %Peer(report.mapped()),
+            probes = %Probes(&report.probes),
+            local_port = report.local_port,
+            "direct link: NAT probe answers"
         );
         let state = &mut self.direct_links.nat;
         if let Some(session) = session {
@@ -177,6 +191,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.link_of_session(session)
     }
 
+    /// +ciris (leviculum#100): the hash a log line names `link_id`'s peer
+    /// by: its identity hash once it identified, else (on the initiator)
+    /// the destination this node dialled. Never an address.
+    pub fn direct_link_peer_hash(&self, link_id: &LinkId) -> Option<[u8; 16]> {
+        let link = self.links.get(link_id)?;
+        match link.remote_identity() {
+            Some(identity) => Some(*identity.hash()),
+            None if link.is_initiator() => Some(*link.destination_hash().as_bytes()),
+            None => None,
+        }
+    }
+
     /// Log a session's signal on one info line, and note the peer.
     pub(super) fn log_direct_link_signal(&mut self, link_id: &LinkId, signal: &Signal, sent: bool) {
         let session = *signal.session();
@@ -194,18 +220,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             Signal::Accept { .. } => ("ACCEPT", known),
             Signal::Reject { .. } | Signal::Request { .. } => return,
         };
+        let hash = self.direct_link_peer_hash(link_id);
         let note = self.direct_links.nat.note(&session);
         if peer.is_some() {
             note.peer = peer;
         }
-        let peer = note.peer;
+        if hash.is_some() {
+            note.peer_hash = hash;
+        }
+        let (peer, hash) = (note.peer, note.peer_hash);
+        let verb = if sent { "sent" } else { "received" };
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session),
-            peer = %Peer(peer),
+            peer = %Short(hash.as_ref().map(|h| &h[..])),
             "direct link: {} {}",
             name,
-            if sent { "sent" } else { "received" }
+            verb
+        );
+        crate::tracing::debug!(
+            session = %HexShort(&session),
+            peer_addr = %Peer(peer),
+            "direct link: {} {} (peer address)",
+            name,
+            verb
         );
     }
 
@@ -223,14 +261,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .get(&link_id)
             .copied()
             .unwrap_or(link_id);
+        let current = self.direct_link_peer_hash(&link_id);
         let state = &mut self.direct_links.nat;
-        let (nat, peer) = state
+        let (nat, peer, hash) = state
             .noted(&session)
-            .map_or((None, None), |n| (n.nat, n.peer));
+            .map_or((None, None, None), |n| (n.nat, n.peer, n.peer_hash));
+        let hash = hash.or(current);
+        crate::tracing::debug!(
+            session = %HexShort(&session),
+            peer_addr = %Peer(peer),
+            "direct link: outcome (peer address)"
+        );
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session),
-            peer = %Peer(peer),
+            peer = %Short(hash.as_ref().map(|h| &h[..])),
             proposed,
             nat = nat.map_or("-", |m| m.name()),
             outcome = outcome.name(),

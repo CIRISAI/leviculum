@@ -491,9 +491,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session_id),
-            %facilitator,
             "direct link: proposing"
         );
+        // +ciris (leviculum#100): addresses at debug only.
+        crate::tracing::debug!(session = %HexShort(&session_id), %facilitator, "direct link: proposing via");
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
@@ -1061,9 +1062,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&request.session),
+            "direct link: accepting a peer's proposal"
+        );
+        // +ciris (leviculum#100): addresses at debug only.
+        crate::tracing::debug!(
+            session = %HexShort(&request.session),
             facilitator = %request.facilitator,
             peer = %request.initiator_public,
-            "direct link: accepting a peer's proposal"
+            "direct link: the proposal's addresses"
         );
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
         let token = wire::punch_token(&link_key, &request.session);
