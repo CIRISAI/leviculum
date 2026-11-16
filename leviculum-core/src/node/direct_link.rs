@@ -235,6 +235,8 @@ struct Attachment {
     previous: Option<usize>,
     /// When the link moved onto the direct interface.
     attached_at_ms: u64,
+    /// +ciris (leviculum#100): this node proposed the upgrade.
+    proposed: bool,
 }
 
 /// A punched link waiting on the relay for a transfer to finish before it
@@ -288,6 +290,8 @@ pub(crate) struct DirectLinks {
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
     pub(super) jobs: VecDeque<DirectLinkJob>,
+    /// +ciris (leviculum#100): NAT reports and how sessions ended.
+    pub(super) nat: super::nat_report::NatState,
     /// +ciris (leviculum#107), tests only: send COMPLETE without the path
     /// MTU, as a peer from before the field does.
     #[cfg(test)]
@@ -295,7 +299,7 @@ pub(crate) struct DirectLinks {
 }
 
 impl DirectLinks {
-    fn link_of_session(&self, session: &SessionId) -> Option<LinkId> {
+    pub(super) fn link_of_session(&self, session: &SessionId) -> Option<LinkId> {
         self.sessions
             .iter()
             .find(|(_, s)| s.id() == session)
@@ -755,6 +759,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 now_ms,
             );
         }
+        self.record_direct_link_outcome(
+            link_id,
+            held.session,
+            held.proposed,
+            crate::direct_link::DirectLinkOutcome::of_failure(failure),
+        );
         self.events.push(NodeEvent::DirectLinkFailed {
             link_id,
             failure,
@@ -815,6 +825,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 session,
                 previous,
                 attached_at_ms: now_ms,
+                proposed,
             },
         );
         // A path that came up starts the retry schedule over, for when it
@@ -828,6 +839,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             interface = index,
             previous = ?previous,
             "direct link: established, link moved onto the direct interface"
+        );
+        self.record_direct_link_outcome(
+            link_id,
+            session,
+            proposed,
+            crate::direct_link::DirectLinkOutcome::Established,
         );
         if recovered {
             self.events.push(NodeEvent::LinkRecovered { link_id });
@@ -886,6 +903,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             host_payload,
         } = signal
         else {
+            if self
+                .direct_links
+                .sessions
+                .get(&link_id)
+                .is_some_and(|s| s.id() == signal.session())
+            {
+                self.log_direct_link_signal(&link_id, &signal, false);
+            }
             if let Signal::Complete { session, .. } = &signal {
                 self.direct_link_nudged(&link_id, session);
             }
@@ -1174,6 +1199,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let session_id = *session.id();
             match step {
                 Step::Send(signal) => {
+                    self.log_direct_link_signal(&link_id, &signal, true);
                     if !self.send_direct_link_signal(&link_id, &signal, now_ms) {
                         self.end_direct_link_session(link_id, Some(Failure::Timeout));
                         return;
@@ -1289,6 +1315,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.direct_links.jobs.push_back(DirectLinkJob::Release {
                 session: *session.id(),
             });
+            self.record_direct_link_outcome(
+                link_id,
+                *session.id(),
+                session.role() == Role::Initiator,
+                crate::direct_link::DirectLinkOutcome::of_failure(failure),
+            );
             self.events.push(NodeEvent::DirectLinkFailed {
                 link_id,
                 failure,
@@ -1563,6 +1595,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.outbox)
             + outbox
             + hc::vec_deque_bytes(&d.jobs)
+            + d.nat.heap_bytes()
     }
 
     /// The link is being removed: end its session and retire its interface.
@@ -1659,6 +1692,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         why: &str,
         retire: bool,
     ) {
+        if !self.links.contains_key(&attachment.link_id) {
+            return;
+        }
+        self.record_direct_link_outcome(
+            attachment.link_id,
+            attachment.session,
+            attachment.proposed,
+            crate::direct_link::DirectLinkOutcome::Lost,
+        );
         let Some(link) = self.links.get_mut(&attachment.link_id) else {
             return;
         };

@@ -13895,3 +13895,5 @@ mod mvr_timed_frames;
 mod mvr_send_seq;
 mod send_seq;
 pub use send_seq::LinkSeqStats;
+// NAT type and direct-link outcomes (+ciris, leviculum#100).
+mod nat_report;
