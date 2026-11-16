@@ -15,6 +15,8 @@ on:
       - scripts/natlab/nat_type.py
       - leviculum-std/examples/natlab_node.rs
       - leviculum-std/src/direct_link.rs
+      - leviculum-std/src/direct_link/**
+      - leviculum-std/src/interfaces/direct_udp.rs
       - leviculum-core/src/direct_link/**
       - leviculum-core/src/node/direct_link.rs
       - leviculum-core/src/node/nat_report.rs
