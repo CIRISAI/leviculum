@@ -131,6 +131,15 @@ pub struct DirectLinkKeys {
     /// (TOML rejects a bad value while parsing).
     #[serde(skip)]
     pub invalid_probe_port: Option<String>,
+    /// +ciris (leviculum#101): `port_mapping = yes|no`, whether this node
+    /// asks its router to open its listening ports. Default no. Read by
+    /// [`crate::port_mapping::PortMappingConfig::from_config`].
+    #[serde(default)]
+    pub port_mapping: Option<crate::port_mapping::ConfigSwitch>,
+    /// +ciris (leviculum#101): the gateway to ask over PCP and NAT-PMP,
+    /// instead of the default route's.
+    #[serde(default)]
+    pub port_mapping_gateway: Option<String>,
 }
 
 /// Read a `[reticulum]` INI key of the direct-link upgrade. Reached from the
@@ -155,7 +164,9 @@ pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &s
         "direct_connect_policy" => {
             config.direct_link.direct_connect_policy = Some(value.trim().to_ascii_lowercase())
         }
-        _ => {}
+        _ => {
+            crate::port_mapping::apply_ini_key(config, key, value);
+        }
     }
 }
 

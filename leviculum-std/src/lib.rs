@@ -144,3 +144,6 @@ pub use leviculum_core::node::{
 /// Direct-link upgrade (+ciris, leviculum#70). Declared last so the fork
 /// moves no line an upstream citation points at.
 pub mod direct_link;
+/// Router port mapping: PCP, NAT-PMP and UPnP-IGD (+ciris, leviculum#101).
+/// Declared last so the fork moves no line an upstream citation points at.
+pub mod port_mapping;

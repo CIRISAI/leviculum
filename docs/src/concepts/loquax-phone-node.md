@@ -86,7 +86,7 @@ What already fits the seam:
   case: a host that never sees `/dev/ttyACM*`, Android named. The phone
   supplies `open`. The KISS detection and configuration, the airtime
   bucket and the reconnect loop stay the host RNode interface's own, and
-  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:3200`)
+  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:3204`)
   hot-plugs the radio when the cable goes in.
 - **BLE needs a second carrier binding, not a second interface.** The
   host BLE interface is split into a pure half, `links` (admission,

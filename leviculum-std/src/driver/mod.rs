@@ -1873,6 +1873,7 @@ pub struct ReticulumNode {
     /// never taken while the node lock is held (upstream #199: no new
     /// lock-taking wait paths).
     completions: Arc<CompletionRegistry>,
+    pub(crate) port_mapping: port_mapping::NodePortMapping, // +ciris leviculum#101
 }
 
 impl Drop for ReticulumNode {
@@ -1999,6 +2000,7 @@ impl ReticulumNode {
             discover_interfaces: true,
             core_processor: Mutex::new(None),
             completions: CompletionRegistry::new(),
+            port_mapping: Default::default(),
         }
     }
 
@@ -2598,6 +2600,7 @@ impl ReticulumNode {
 
         // Release the runtime context now that all tasks are spawned, then keep
         // the runtime alive in the node so its worker thread keeps driving them.
+        run.port_mapping = port_mapping::start(self); // +ciris leviculum#101
         drop(enter_guard);
         run.runtime = Some(runtime);
 
@@ -2885,6 +2888,7 @@ impl ReticulumNode {
                 .await
                 .map_err(|e| Error::Config(format!("runner panicked: {}", e)))?;
         }
+        port_mapping::stop(run.port_mapping, run.runtime.as_ref()).await; // +ciris leviculum#101
 
         // The event loop is gone, so every radio interface is writing its
         // board the goodbye (radio off, leave) on its own task. Let those
@@ -14127,3 +14131,7 @@ mod first_hop_timeout_tests {
 // +ciris: a link's Channel sequence watermarks, in its own file so no cited
 // line moves.
 mod seq_stats;
+
+// +ciris (leviculum#101): router port mapping, the node side; its own file so
+// no cited line moves.
+mod port_mapping;

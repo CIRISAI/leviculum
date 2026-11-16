@@ -108,6 +108,8 @@ pub struct ReticulumNodeBuilder {
     /// The host RAM the transport tables are fitted to; `None` reads
     /// `/proc/meminfo` (order 1586, [`Self::host_ram_bytes`]).
     host_ram_explicit: Option<Option<u64>>,
+    /// +ciris (leviculum#101): over config; methods in `port_mapping.rs`.
+    pub(super) port_map_cfg: Option<crate::port_mapping::PortMappingConfig>,
 }
 
 impl Default for ReticulumNodeBuilder {
@@ -154,6 +156,7 @@ impl ReticulumNodeBuilder {
             discovery_job_interval_secs_explicit: None,
             core_processor: None,
             host_ram_explicit: None,
+            port_map_cfg: None,
         }
     }
 
@@ -1390,6 +1393,7 @@ impl ReticulumNodeBuilder {
             }
             node.direct_link_keepalive = Some((interval, dead_after));
         }
+        super::port_mapping::configure(&mut node, self.port_map_cfg.take(), &config.reticulum)?;
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
         node.host_resolver = self.host_resolver.clone();
         // Where both shared-instance channels live (D2 of the 2026-10-11
