@@ -28,17 +28,21 @@ pub enum NatMapping {
     /// destination anew (symmetric, "hard"). The address a facilitator
     /// reported is not the one the peer's punch has to reach.
     EndpointDependent,
-    /// Not enough answers to say.
+    /// Not enough answers to say: fewer than two servers at distinct IP
+    /// addresses answered. Never a guess; the report's probes still show
+    /// what each server saw.
     Unknown(NatUnknown),
 }
 
 /// Why a [`NatMapping`] is [`NatMapping::Unknown`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NatUnknown {
-    /// Only one probe server is configured, and its answer was not the
-    /// socket's own address.
+    /// Fewer than two servers at distinct IP addresses were probed (one
+    /// server, or several ports of one host), so there was nothing to
+    /// compare.
     OneServer,
-    /// Two or more servers were probed and only one answered.
+    /// Servers at two or more distinct IP addresses were probed, and
+    /// answers came from only one of those addresses.
     OneAnswered,
     /// No server answered.
     NoAnswer,
@@ -96,10 +100,9 @@ pub struct NatReport {
     /// Every answer kept the local port (a port-preserving NAT, which makes
     /// a punch easier to predict). `None` when nothing answered.
     pub port_preserved: Option<bool>,
-    /// The servers that answered share one IP address. Two ports on one
-    /// host tell a port-dependent mapping from an independent one, but not
-    /// an address-dependent one (RFC 4787's rarer middle case), which then
-    /// reads as [`NatMapping::EndpointIndependent`].
+    /// Two or more servers answered and all share one IP address. The
+    /// verdict is then `Unknown(OneServer)` whatever they saw: two ports on
+    /// one host cannot see an address-dependent NAT.
     pub servers_share_ip: bool,
     /// The socket has a global IPv6 host candidate, which a peer can punch
     /// whatever the IPv4 NAT does.
@@ -159,32 +162,81 @@ impl NatReport {
 /// The verdict on `probes` from one socket with host addresses
 /// `host_candidates`.
 ///
-/// Only answers in the first answer's address family are compared: an IPv4
+/// It needs answers from servers at two distinct IP addresses (leviculum#100:
+/// never guess). Only the first answer from each server address counts, and
+/// only answers in the first answer's address family are compared: an IPv4
 /// and an IPv6 mapping are different sockets' worth of NAT, not a moved
-/// mapping.
+/// mapping. With two distinct servers' answers, a moved mapping is
+/// endpoint-dependent, one equal to a host address is no NAT, and an equal
+/// one is endpoint-independent.
 #[must_use]
 pub fn classify(probes: &[NatProbe], host_candidates: &[SocketAddr]) -> NatMapping {
-    let mut answers = probes.iter().filter_map(|p| p.mapped);
-    let Some(first) = answers.next() else {
+    let distinct_servers = |ps: &mut dyn Iterator<Item = &NatProbe>| {
+        let mut ips: Vec<core::net::IpAddr> = Vec::new();
+        for p in ps {
+            if !ips.contains(&p.server.ip()) {
+                ips.push(p.server.ip());
+            }
+        }
+        ips.len()
+    };
+    let Some(first) = probes.iter().find_map(|p| p.mapped) else {
         return NatMapping::Unknown(NatUnknown::NoAnswer);
     };
-    let same_family: Vec<SocketAddr> = core::iter::once(first)
-        .chain(answers.filter(|a| a.is_ipv4() == first.is_ipv4()))
-        .collect();
-    if same_family.iter().any(|a| *a != first) {
-        return NatMapping::EndpointDependent;
+    // One answer per server address, in the first answer's family.
+    let mut answers: Vec<(core::net::IpAddr, SocketAddr)> = Vec::new();
+    for p in probes {
+        if let Some(m) = p.mapped {
+            if m.is_ipv4() == first.is_ipv4() && !answers.iter().any(|(ip, _)| *ip == p.server.ip())
+            {
+                answers.push((p.server.ip(), m));
+            }
+        }
     }
-    if host_candidates.contains(&first) {
-        return NatMapping::NoNat;
+    if answers.len() < 2 {
+        return if distinct_servers(&mut probes.iter()) >= 2 {
+            NatMapping::Unknown(NatUnknown::OneAnswered)
+        } else {
+            NatMapping::Unknown(NatUnknown::OneServer)
+        };
     }
-    if same_family.len() >= 2 {
-        return NatMapping::EndpointIndependent;
-    }
-    if probes.len() >= 2 {
-        NatMapping::Unknown(NatUnknown::OneAnswered)
+    if answers.iter().any(|(_, m)| *m != first) {
+        NatMapping::EndpointDependent
+    } else if host_candidates.contains(&first) {
+        NatMapping::NoNat
     } else {
-        NatMapping::Unknown(NatUnknown::OneServer)
+        NatMapping::EndpointIndependent
     }
+}
+
+/// +ciris (leviculum#100): the length of a probe sent to a peer's direct
+/// socket: an RNSP request padded with zeros to the size of the largest
+/// answer (an IPv6 one), so the answer is never larger than the request.
+pub const RNSP_PEER_REQUEST_LEN: usize = super::wire::RNSP_REQUEST_LEN + 1 + 16 + 2;
+
+/// +ciris (leviculum#100): an RNSP request for `nonce`, padded to
+/// [`RNSP_PEER_REQUEST_LEN`]. Only a peer's direct socket accepts it; a
+/// facilitator expects the bare 21-byte request, which [`super::wire::rnsp_request`]
+/// builds.
+#[must_use]
+pub fn rnsp_peer_request(nonce: &[u8; 16]) -> [u8; RNSP_PEER_REQUEST_LEN] {
+    let mut out = [0u8; RNSP_PEER_REQUEST_LEN];
+    out[..super::wire::RNSP_REQUEST_LEN].copy_from_slice(&super::wire::rnsp_request(nonce));
+    out
+}
+
+/// +ciris (leviculum#100): the answer to a padded RNSP request `data`
+/// that arrived from `src`, or `None` if `data` is not one or the answer
+/// would be larger than it (no amplification, whatever the address family).
+#[must_use]
+pub fn answer_peer_probe(data: &[u8], src: &SocketAddr) -> Option<Vec<u8>> {
+    let len = super::wire::RNSP_REQUEST_LEN;
+    if data.len() < RNSP_PEER_REQUEST_LEN || data[len..].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let nonce = super::wire::parse_rnsp_request(&data[..len])?;
+    let answer = super::wire::rnsp_response(&nonce, src);
+    (answer.len() <= data.len()).then_some(answer)
 }
 
 /// How one direct-link attempt ended, for correlating with [`NatMapping`].
@@ -369,9 +421,6 @@ mod tests {
             probe("198.51.100.2:4343", Some(LAN)),
         ]);
         assert_eq!(both.mapping, NatMapping::NoNat);
-        // One server is enough to see there is no NAT.
-        let one = report(vec![probe("198.51.100.1:4343", Some(LAN))]);
-        assert_eq!(one.mapping, NatMapping::NoNat);
     }
 
     #[test]
@@ -407,14 +456,68 @@ mod tests {
         assert_eq!(none.mapped(), None);
     }
 
+    /// leviculum#100: two ports of one host are one server. Whatever they
+    /// saw, same mapping or moved, the verdict is unknown, never a guess,
+    /// and the observations stay in the report.
     #[test]
-    fn two_ports_on_one_server_are_flagged() {
+    fn two_ports_on_one_server_are_one_server() {
+        for second in ["203.0.113.1:40000", "203.0.113.1:40007"] {
+            let r = report(vec![
+                probe("198.51.100.1:3478", Some("203.0.113.1:40000")),
+                probe("198.51.100.1:3479", Some(second)),
+            ]);
+            assert_eq!(
+                r.mapping,
+                NatMapping::Unknown(NatUnknown::OneServer),
+                "{second}"
+            );
+            assert!(r.servers_share_ip);
+            assert_eq!(r.probes[1].mapped, Some(addr(second)));
+        }
+        // A third, distinct server that never answered: only one address did.
         let r = report(vec![
             probe("198.51.100.1:3478", Some("203.0.113.1:40000")),
             probe("198.51.100.1:3479", Some("203.0.113.1:40000")),
+            probe("198.51.100.2:3478", None),
         ]);
-        assert_eq!(r.mapping, NatMapping::EndpointIndependent);
-        assert!(r.servers_share_ip);
+        assert_eq!(r.mapping, NatMapping::Unknown(NatUnknown::OneAnswered));
+    }
+
+    /// leviculum#100: a single server seeing the socket's own address is
+    /// still one server: unknown, with the observation kept.
+    #[test]
+    fn one_server_is_unknown_even_when_it_sees_the_host_address() {
+        let r = report(vec![probe("198.51.100.1:4343", Some(LAN))]);
+        assert_eq!(r.mapping, NatMapping::Unknown(NatUnknown::OneServer));
+        assert_eq!(r.mapped(), Some(addr(LAN)));
+        assert_eq!(r.port_preserved, Some(true));
+    }
+
+    /// leviculum#100: a peer probe's answer is never larger than its
+    /// request, for either family, and an unpadded or dirty request gets
+    /// none.
+    #[test]
+    fn a_peer_probe_answer_is_never_larger_than_its_request() {
+        let nonce = [7u8; 16];
+        let request = rnsp_peer_request(&nonce);
+        for src in ["203.0.113.1:40000", "[2001:db8::1234:5678]:40000"] {
+            let answer = answer_peer_probe(&request, &addr(src)).expect("answered");
+            assert!(
+                answer.len() <= request.len(),
+                "{src}: {} > {}",
+                answer.len(),
+                request.len()
+            );
+            assert_eq!(
+                super::super::wire::parse_rnsp_response(&answer, &nonce),
+                Some(addr(src))
+            );
+        }
+        let bare = super::super::wire::rnsp_request(&nonce);
+        assert_eq!(answer_peer_probe(&bare, &addr(LAN)), None);
+        let mut dirty = request;
+        dirty[RNSP_PEER_REQUEST_LEN - 1] = 1;
+        assert_eq!(answer_peer_probe(&dirty, &addr(LAN)), None);
     }
 
     #[test]
