@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::{netinfo, MappingMethod, MappingProtocol, MappingState, PortMappingStatus};
+use super::{netinfo, FailReason, MappingMethod, MappingProtocol, MappingState, PortMappingStatus};
 use crate::sync_ext::MutexRecover;
 
 pub(crate) type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -65,14 +65,28 @@ pub(crate) struct Lease {
     pub lifetime_secs: u32,
 }
 
-/// Why a client produced no mapping.
+/// Why a client produced no mapping. Both carry the structured cause and a
+/// debug detail with no external address in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MapError {
     /// The gateway does not speak this method (no answer, wrong version, no
     /// such service): the next method is tried.
-    Unsupported(String),
+    Unsupported(FailReason, String),
     /// It speaks it and said no.
-    Refused(String),
+    Refused(FailReason, String),
+}
+
+impl MapError {
+    pub(crate) fn cause(&self) -> FailReason {
+        match self {
+            MapError::Unsupported(c, _) | MapError::Refused(c, _) => *c,
+        }
+    }
+    pub(crate) fn detail(&self) -> &str {
+        match self {
+            MapError::Unsupported(_, d) | MapError::Refused(_, d) => d,
+        }
+    }
 }
 
 /// One protocol toward one gateway.
@@ -259,7 +273,7 @@ impl Engine {
                 }
                 // The gateway that holds it is no longer ours to ask: start
                 // over on the network the host is on now.
-                self.lose(i, "the gateway changed");
+                self.lose(i, FailReason::Other, "the gateway changed");
                 self.entries[i].failures = 0;
             }
             self.acquire(i, &clients, &mut silent).await;
@@ -280,6 +294,7 @@ impl Engine {
             external_port: key.internal_port,
         };
         let mut refusals: Vec<String> = Vec::new();
+        let mut cause: Option<FailReason> = None;
         let first = self.entries[i].failures == 0;
         for client in clients.iter().filter(|c| c.v6() == key.v6) {
             let tag = (client.method(), client.v6());
@@ -302,14 +317,15 @@ impl Engine {
                     self.granted(i, client.clone(), lease).await;
                     return;
                 }
-                Err(MapError::Unsupported(why)) => {
+                Err(MapError::Unsupported(_, why)) => {
                     tracing::debug!(
                         "port mapping: {} unavailable: {why}",
                         client.method().as_str()
                     );
                     silent.push(tag);
                 }
-                Err(MapError::Refused(why)) => {
+                Err(err @ MapError::Refused(..)) => {
+                    let why = err.detail().to_string();
                     if first {
                         tracing::warn!(
                             "port mapping: {} refused {} port {}: {why}",
@@ -325,6 +341,7 @@ impl Engine {
                         key.internal_port
                     );
                     refusals.push(format!("{}: {why}", client.method().as_str()));
+                    cause.get_or_insert(err.cause());
                 }
             }
         }
@@ -335,7 +352,8 @@ impl Engine {
             MappingState::NoGateway
         } else {
             MappingState::Failed {
-                reason: refusals.join("; "),
+                cause: cause.unwrap_or(FailReason::Other),
+                detail: refusals.join("; "),
             }
         };
         if e.failures == 1 && refusals.is_empty() {
@@ -470,16 +488,19 @@ impl Engine {
                 }
                 if netinfo::non_public_reason(new.external.ip()).is_some() {
                     // The router's WAN side changed under us.
-                    self.lose(i, "the gateway's external address is no longer public");
+                    self.lose(
+                        i,
+                        FailReason::Other,
+                        "the gateway's external address is no longer public",
+                    );
                     let _ = timed(client.unmap(key, &new)).await;
                     return;
                 }
                 self.hold(i, client, new);
             }
             Err(err) => {
-                let reason = match err {
-                    MapError::Unsupported(w) | MapError::Refused(w) => w,
-                };
+                let cause = err.cause();
+                let reason = err.detail().to_string();
                 let now = Instant::now();
                 match self.entries[i].expires {
                     Some(exp) if now < exp => {
@@ -493,10 +514,13 @@ impl Engine {
                         );
                         self.entries[i].next =
                             now + (left / 2).clamp(Duration::from_secs(5), FIRST_BACKOFF);
-                        self.entries[i].status.state = MappingState::Renewing { reason };
+                        self.entries[i].status.state = MappingState::Renewing {
+                            cause,
+                            detail: reason,
+                        };
                     }
                     _ => {
-                        self.lose(i, &format!("renewal failed: {reason}"));
+                        self.lose(i, cause, &format!("renewal failed: {reason}"));
                     }
                 }
             }
@@ -505,7 +529,7 @@ impl Engine {
 
     /// The held mapping is gone (or never was useful): report it lost and
     /// start over with backoff.
-    fn lose(&mut self, i: usize, reason: &str) {
+    fn lose(&mut self, i: usize, cause: FailReason, reason: &str) {
         let e = &mut self.entries[i];
         tracing::warn!(
             "port mapping: lost {} port {}: {reason}",
@@ -521,7 +545,8 @@ impl Engine {
         e.status.lease_secs = 0;
         e.status.lease_expires = None;
         e.status.state = MappingState::Failed {
-            reason: reason.to_string(),
+            cause,
+            detail: reason.to_string(),
         };
         self.tell(i);
     }
@@ -533,36 +558,51 @@ impl Engine {
             let (Some(client), Some(lease)) = (e.client.take(), e.lease.take()) else {
                 continue;
             };
+            let permanent = lease.lifetime_secs == 0;
             match timed(client.unmap(e.key, &lease)).await {
-                Ok(()) => tracing::info!(
-                    "port mapping: removed the mapping of {} port {} from the gateway",
-                    e.key.protocol.as_str(),
-                    e.key.internal_port
-                ),
-                Err(err) => tracing::warn!(
-                    "port mapping: could not remove the mapping of {} port {} from the \
-                     gateway ({err:?}); it lapses {}",
-                    e.key.protocol.as_str(),
-                    e.key.internal_port,
-                    if lease.lifetime_secs == 0 {
-                        "never: delete it on the router by hand".to_string()
-                    } else {
-                        "when its lease runs out".to_string()
-                    }
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        "port mapping: removed the mapping of {} port {} from the gateway",
+                        e.key.protocol.as_str(),
+                        e.key.internal_port
+                    );
+                    e.expires = None;
+                    e.status.external = None;
+                    e.status.lease_expires = None;
+                    e.status.state = MappingState::Removed;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "port mapping: could not remove the mapping of {} port {} from the \
+                         gateway ({:?}: {}); it lapses {}",
+                        e.key.protocol.as_str(),
+                        e.key.internal_port,
+                        err.cause(),
+                        err.detail(),
+                        if permanent {
+                            "never: delete it on the router by hand"
+                        } else {
+                            "when its lease runs out"
+                        }
+                    );
+                    // The external address stays: the host needs it to tell
+                    // the user which port to remove.
+                    e.status.state = MappingState::RemoveFailed {
+                        cause: err.cause(),
+                        permanent,
+                    };
+                }
             }
-            e.expires = None;
-            e.status.external = None;
-            e.status.lease_expires = None;
-            e.status.state = MappingState::Removed;
             self.tell(i);
         }
-        // Nothing is held any more: every entry reads Removed, the ones
+        // Nothing else is held: every other entry reads Removed, the ones
         // never mapped included.
         for e in &mut self.entries {
-            e.status.state = MappingState::Removed;
-            e.status.external = None;
-            e.status.lease_expires = None;
+            if !matches!(e.status.state, MappingState::RemoveFailed { .. }) {
+                e.status.state = MappingState::Removed;
+                e.status.external = None;
+                e.status.lease_expires = None;
+            }
         }
         self.publish();
     }
@@ -580,10 +620,10 @@ fn lease_text(secs: u32) -> String {
 async fn timed<T>(fut: BoxFut<'_, Result<T, MapError>>) -> Result<T, MapError> {
     match tokio::time::timeout(OP_TIMEOUT, fut).await {
         Ok(r) => r,
-        Err(_) => Err(MapError::Unsupported(format!(
-            "no answer within {}s",
-            OP_TIMEOUT.as_secs()
-        ))),
+        Err(_) => Err(MapError::Unsupported(
+            FailReason::Timeout,
+            format!("no answer within {}s", OP_TIMEOUT.as_secs()),
+        )),
     }
 }
 

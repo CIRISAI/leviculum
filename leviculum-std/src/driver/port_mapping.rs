@@ -65,6 +65,7 @@ impl NodePortMapping {
 pub(crate) struct RunHandle {
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    shared: Arc<Mutex<Shared>>,
 }
 
 impl ReticulumNodeBuilder {
@@ -185,7 +186,12 @@ fn event_sink(node: &ReticulumNode) -> crate::port_mapping::engine::ChangeSink {
     let dropped = Arc::clone(&node.control_dropped);
     Box::new(move |s: &PortMappingStatus| {
         let Some(tx) = &tx else { return };
-        let external = if s.state.is_held() { s.external } else { None };
+        let external = if s.state.is_held() || matches!(s.state, MappingState::RemoveFailed { .. })
+        {
+            s.external
+        } else {
+            None
+        };
         let event = NodeEvent::PortMappingChanged {
             internal_port: s.internal_port,
             udp: s.protocol == MappingProtocol::Udp,
@@ -259,7 +265,11 @@ fn spawn_engine(node: &ReticulumNode, keys: Vec<PortKey>) -> Option<RunHandle> {
     );
     let (shutdown, rx) = watch::channel(false);
     let task = tokio::spawn(engine.run(rx));
-    Some(RunHandle { shutdown, task })
+    Some(RunHandle {
+        shutdown,
+        task,
+        shared: Arc::clone(&node.port_mapping.shared),
+    })
 }
 
 #[cfg(not(feature = "port-mapping"))]
@@ -276,7 +286,12 @@ pub(super) async fn stop(handle: Option<RunHandle>, runtime: Option<&tokio::runt
 }
 
 async fn stop_on(handle: Option<RunHandle>, runtime: Option<tokio::runtime::Handle>) {
-    let Some(RunHandle { shutdown, task }) = handle else {
+    let Some(RunHandle {
+        shutdown,
+        task,
+        shared,
+    }) = handle
+    else {
         return;
     };
     let _ = shutdown.send(true);
@@ -290,12 +305,41 @@ async fn stop_on(handle: Option<RunHandle>, runtime: Option<tokio::runtime::Hand
     };
     if !waited {
         abort.abort();
+        // The task died holding these: their deletes never landed.
+        for s in &mut shared.lock_recover().statuses {
+            if s.state.is_held() {
+                s.state = MappingState::RemoveFailed {
+                    cause: crate::port_mapping::FailReason::Timeout,
+                    permanent: s.lease_secs == 0,
+                };
+            }
+        }
         tracing::warn!(
             "port mapping: the gateway did not confirm every deletion within {}s; a mapping \
              left behind lapses when its lease runs out",
             STOP_BOUND.as_secs()
         );
     }
+}
+
+/// The statuses as of now: a held mapping whose lease has run out is
+/// never reported held, even if the task has not got to it yet.
+fn current(statuses: &[PortMappingStatus]) -> Vec<PortMappingStatus> {
+    let now = std::time::Instant::now();
+    statuses
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            if s.state.is_held() && s.lease_expires.is_some_and(|at| at <= now) {
+                s.state = MappingState::Failed {
+                    cause: crate::port_mapping::FailReason::Timeout,
+                    detail: "the lease ran out before a renewal landed".into(),
+                };
+                s.external = None;
+            }
+            s
+        })
+        .collect()
 }
 
 impl ReticulumNode {
@@ -354,7 +398,7 @@ impl ReticulumNode {
     /// state, external address and lease. Empty while port mapping is off
     /// or before the first start.
     pub fn port_mappings(&self) -> Vec<PortMappingStatus> {
-        self.port_mapping.lock().statuses.clone()
+        current(&self.port_mapping.lock().statuses)
     }
 
     /// +ciris (leviculum#101): what the node knows about whether the
@@ -364,29 +408,34 @@ impl ReticulumNode {
     /// [`record_reachability_check`](Self::record_reachability_check)
     /// recorded a successful dial from outside.
     pub fn reachability(&self) -> ReachabilityReport {
-        let shared = self.port_mapping.lock();
-        let external_ipv4 = shared
-            .statuses
+        let (mappings, stored_v6, last_check) = {
+            let shared = self.port_mapping.lock();
+            (
+                current(&shared.statuses),
+                shared.global_v6.clone(),
+                shared.last_check,
+            )
+        };
+        let external_ipv4 = mappings
             .iter()
             .filter(|s| s.state.is_held())
             .filter_map(|s| s.external)
             .map(|e| e.ip())
             .find(IpAddr::is_ipv4);
-        let global_ipv6 = if shared.global_v6.is_empty() {
+        let global_ipv6 = if stored_v6.is_empty() {
             crate::port_mapping::netinfo::global_ipv6_addresses()
         } else {
-            shared.global_v6.clone()
+            stored_v6
         };
         ReachabilityReport {
             enabled: self.port_mapping_enabled(),
-            mappings: shared.statuses.clone(),
-            external_ipv4,
-            global_ipv6,
-            cgnat_detected: shared
-                .statuses
+            cgnat_detected: mappings
                 .iter()
                 .any(|s| matches!(s.state, MappingState::CgnatDetected { .. })),
-            last_check: shared.last_check,
+            mappings,
+            external_ipv4,
+            global_ipv6,
+            last_check,
         }
     }
 
@@ -448,6 +497,33 @@ mod tests {
         if cfg!(feature = "port-mapping") {
             assert!(build(ReticulumNodeBuilder::new().enable_port_mapping(true)).await);
         }
+    }
+
+    /// A held mapping whose lease ran out is never reported held, whatever
+    /// the task has got to.
+    #[test]
+    fn a_lapsed_lease_is_never_reported_mapped() {
+        let mut s = PortMappingStatus {
+            protocol: MappingProtocol::Tcp,
+            internal_port: 4242,
+            ipv6: false,
+            method: None,
+            external: Some("203.0.113.7:4242".parse().unwrap()),
+            lease_secs: 120,
+            lease_expires: Some(std::time::Instant::now() - Duration::from_secs(1)),
+            state: MappingState::Mapped,
+        };
+        let got = current(std::slice::from_ref(&s));
+        assert!(matches!(
+            got[0].state,
+            MappingState::Failed {
+                cause: crate::port_mapping::FailReason::Timeout,
+                ..
+            }
+        ));
+        assert_eq!(got[0].external, None);
+        s.lease_expires = Some(std::time::Instant::now() + Duration::from_secs(60));
+        assert_eq!(current(&[s])[0].state, MappingState::Mapped);
     }
 
     #[test]

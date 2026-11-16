@@ -94,6 +94,27 @@ impl MappingMethod {
     }
 }
 
+/// Why a mapping failed, for a host to act on without parsing text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FailReason {
+    /// The gateway declined: not authorized, mapping disabled on the
+    /// router, out of resources.
+    Refused,
+    /// The external port is taken (UPnP 718), and asking the router to
+    /// choose one did not help (or the router could not provide one).
+    PortTaken,
+    /// The gateway did not answer.
+    Timeout,
+    /// The gateway does not speak PCP, NAT-PMP or UPnP-IGD, or not the
+    /// operation asked for.
+    Unsupported,
+    /// A malformed or unexpected response.
+    Protocol,
+    /// Anything else (a changed gateway, a network failure at the router).
+    Other,
+}
+
 /// Where one requested mapping stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MappingState {
@@ -102,23 +123,27 @@ pub enum MappingState {
     /// The router holds a mapping; `external` says from where. Still not
     /// proof of reachability (see the module docs).
     Mapped,
-    /// A mapping is held, but its renewal is failing; the lease has not
-    /// run out yet, and the node keeps retrying until it does (then
-    /// `Failed`). Still counts as mapped.
+    /// The router holds a mapping and its lease is still valid, but the
+    /// renewal is failing. The node keeps retrying; at the lease's expiry
+    /// it becomes `Failed`. Counts as held ([`MappingState::is_held`]).
     Renewing {
         /// Why the last renewal failed.
-        reason: String,
+        cause: FailReason,
+        /// Debug text; never the external address.
+        detail: String,
     },
     /// A gateway answered and refused, or a held mapping could not be
     /// renewed before its lease ran out. Retried with backoff.
     Failed {
-        /// What went wrong, for the operator.
-        reason: String,
+        /// Why.
+        cause: FailReason,
+        /// Debug text for the operator; never the external address.
+        detail: String,
     },
     /// The router mapped the port but its own external address is private
     /// or in the carrier-grade shared range: another NAT sits upstream and
     /// the mapping opens nothing the internet can reach. The mapping was
-    /// deleted again; it is re-checked every half hour.
+    /// deleted again; it is re-checked every six hours.
     CgnatDetected {
         /// The external address the router reported.
         external_ip: IpAddr,
@@ -128,8 +153,20 @@ pub enum MappingState {
     /// No PCP, NAT-PMP or UPnP-IGD gateway answered (for an IPv6 entry: no
     /// IPv6 gateway, or it does not speak PCP).
     NoGateway,
-    /// Deleted on a clean stop.
+    /// Deleted from the router (a clean stop, or port mapping turned off).
     Removed,
+    /// The delete failed: refused, timed out, or the gateway was gone. The
+    /// status keeps the external address so the host can tell the user
+    /// which port to remove. A later start (or turning port mapping on
+    /// again) reclaims it when it is a UPnP entry of this node's.
+    RemoveFailed {
+        /// Why the delete failed.
+        cause: FailReason,
+        /// The lease was permanent (0): the mapping stays open on the
+        /// router until someone removes it. Otherwise it lapses with its
+        /// lease.
+        permanent: bool,
+    },
 }
 
 impl MappingState {
