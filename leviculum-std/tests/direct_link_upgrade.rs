@@ -88,11 +88,23 @@ async fn leaf(tcp_port: u16, settings: DirectLinkSettings) -> TestNode {
 /// an interface that signals no MTU (Codeberg #357), forwarding to a port
 /// nobody listens on.
 async fn leaf_with(tcp_port: u16, settings: DirectLinkSettings, udp: bool) -> TestNode {
+    leaf_probing(tcp_port, settings, udp, Vec::new()).await
+}
+
+/// [`leaf_with`], probing `nat_servers` beside its facilitator
+/// (leviculum#100).
+async fn leaf_probing(
+    tcp_port: u16,
+    settings: DirectLinkSettings,
+    udp: bool,
+    nat_servers: Vec<String>,
+) -> TestNode {
     let addr: SocketAddr = format!("127.0.0.1:{tcp_port}").parse().unwrap();
     let mut builder = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_client(addr)
-        .direct_link(settings);
+        .direct_link(settings)
+        .nat_probe_servers(nat_servers);
     if udp {
         builder = builder.add_interface_config(leviculum_std::config::InterfaceConfig {
             name: "Plain UDP".to_string(),
@@ -157,7 +169,7 @@ async fn linked_through_relay(
     leviculum_std::driver::LinkHandle,
     leviculum_core::DestinationHash,
 ) {
-    linked_through_relay_with(a_settings, external, false).await
+    linked_through_relay_with(a_settings, external, false, Vec::new()).await
 }
 
 /// [`linked_through_relay`], with B carrying a plain UDP interface too when
@@ -166,6 +178,7 @@ async fn linked_through_relay_with(
     a_settings: DirectLinkSettings,
     external: Option<(u16, u16)>,
     b_udp: bool,
+    b_nat_servers: Vec<String>,
 ) -> (
     Option<TestNode>,
     TestNode,
@@ -187,7 +200,7 @@ async fn linked_through_relay_with(
         }
     };
     let mut a = leaf(tcp_port, a_settings).await;
-    let mut b = leaf_with(tcp_port, proposer(facilitator_port), b_udp).await;
+    let mut b = leaf_probing(tcp_port, proposer(facilitator_port), b_udp, b_nat_servers).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let identity = Identity::generate(&mut rand_core::OsRng);
@@ -259,7 +272,7 @@ async fn a_link_born_on_the_punched_path_runs_at_its_mtu() {
     // B also runs a plain UDP interface, which signals no MTU: it must not
     // pull the punched leg down to the base.
     let (t, mut a, mut b, link_id, _handle, hash) =
-        linked_through_relay_with(accepter(), None, true).await;
+        linked_through_relay_with(accepter(), None, true, Vec::new()).await;
     upgrade(&mut a, &mut b, &link_id, &hash).await;
 
     let identity = Identity::generate(&mut rand_core::OsRng);
@@ -952,4 +965,131 @@ async fn an_upgrade_over_a_1280_path_moves_at_1280() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_upgrade_over_a_path_under_every_probe_step_moves_at_500() {
     upgrade_over_a_narrow_path(1000, 500).await;
+}
+
+/// +ciris (leviculum#100): B probes a second facilitator beside the relay's
+/// from its session socket and classifies its NAT: on loopback both see the
+/// socket's own address, which is no host candidate there (loopback is left
+/// out), so the verdict is endpoint-independent, on one IP. A, with no
+/// facilitator of its own and none configured, probes only the one B named
+/// and says so. Each side records the upgrade beside its verdict, and B
+/// raised the change event before the upgrade's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upgrade_reports_the_nat_type_from_two_servers() {
+    use leviculum_core::direct_link::{DirectLinkOutcome, NatMapping, NatUnknown};
+    let second_port = next_port();
+    let _second = start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
+        facilitator_port: Some(second_port),
+        ..Default::default()
+    }))
+    .await;
+    let (_t, mut a, mut b, link_id, _handle, _hash) = linked_through_relay_with(
+        accepter(),
+        None,
+        false,
+        vec![format!("127.0.0.1:{second_port}")],
+    )
+    .await;
+    assert!(b.node.nat_report().is_none(), "nothing probed yet");
+    b.node.propose_direct_link(&link_id).await.expect("propose");
+    let mut changed = None;
+    let up = next_event(&mut b.rx, Duration::from_secs(20), |ev| {
+        if let NodeEvent::NatTypeChanged { previous, report } = ev {
+            changed = Some((*previous, report.mapping));
+        }
+        matches!(
+            ev,
+            NodeEvent::DirectLinkEstablished { .. } | NodeEvent::DirectLinkFailed { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(up, Some(NodeEvent::DirectLinkEstablished { .. })),
+        "{up:?}"
+    );
+    assert_eq!(changed, Some((None, NatMapping::EndpointIndependent)));
+    let report = b.node.nat_report().expect("B's report");
+    assert_eq!(report.mapping, NatMapping::EndpointIndependent);
+    assert_eq!(report.probes.len(), 2);
+    assert!(report.probes.iter().all(|p| p.mapped.is_some()));
+    assert!(report.servers_share_ip);
+    assert_eq!(report.port_preserved, Some(true), "loopback keeps the port");
+    assert!(report.at_unix_secs.is_some());
+
+    let up = next_event(&mut a.rx, Duration::from_secs(20), |ev| {
+        matches!(
+            ev,
+            NodeEvent::DirectLinkEstablished { .. } | NodeEvent::DirectLinkFailed { .. }
+        )
+    })
+    .await;
+    assert!(matches!(up, Some(NodeEvent::DirectLinkEstablished { .. })));
+    assert_eq!(
+        a.node.nat_report().map(|r| r.mapping),
+        Some(NatMapping::Unknown(NatUnknown::OneServer))
+    );
+
+    for (side, nat, proposed) in [
+        (&b, NatMapping::EndpointIndependent, true),
+        (&a, NatMapping::Unknown(NatUnknown::OneServer), false),
+    ] {
+        let outcomes = side.node.direct_link_outcomes();
+        assert_eq!(outcomes.established, 1);
+        let record = outcomes.recent.last().expect("a record");
+        assert_eq!(record.outcome, DirectLinkOutcome::Established);
+        assert_eq!(record.nat, Some(nat));
+        assert_eq!(record.proposed, proposed);
+        assert_eq!(record.link_id, link_id);
+    }
+}
+
+/// +ciris (leviculum#100): a NAT probe outside any session, from the host's
+/// call: one facilitator alone cannot classify, two can, and an
+/// unanswering second server is reported as such.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_probes_its_nat_type_on_demand() {
+    use leviculum_core::direct_link::{NatMapping, NatUnknown};
+    let (one, two) = (next_port(), next_port());
+    let _servers = [
+        start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
+            facilitator_port: Some(one),
+            ..Default::default()
+        }))
+        .await,
+        start(ReticulumNodeBuilder::new().direct_link(DirectLinkSettings {
+            facilitator_port: Some(two),
+            ..Default::default()
+        }))
+        .await,
+    ];
+    let silent = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+    let silent_port = silent.local_addr().unwrap().port();
+    let prober = |extra: Vec<String>| {
+        start(
+            ReticulumNodeBuilder::new()
+                .direct_link(proposer(one))
+                .nat_probe_servers(extra),
+        )
+    };
+    let alone = prober(Vec::new()).await;
+    assert_eq!(
+        alone.node.probe_nat().await.unwrap().mapping,
+        NatMapping::Unknown(NatUnknown::OneServer)
+    );
+    let paired = prober(vec![format!("127.0.0.1:{two}")]).await;
+    let report = paired.node.probe_nat().await.unwrap();
+    assert_eq!(report.mapping, NatMapping::EndpointIndependent);
+    assert_eq!(paired.node.nat_report(), Some(report));
+    let half = prober(vec![format!("127.0.0.1:{silent_port}")]).await;
+    let started = tokio::time::Instant::now();
+    let report = half.node.probe_nat().await.unwrap();
+    assert_eq!(report.mapping, NatMapping::Unknown(NatUnknown::OneAnswered));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the facilitator's answer bounds the wait: {:?}",
+        started.elapsed()
+    );
+    // Without a facilitator there is nothing to probe.
+    let none = start(ReticulumNodeBuilder::new()).await;
+    assert!(none.node.probe_nat().await.is_err());
 }

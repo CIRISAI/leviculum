@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 94
+TOTAL 97
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -103,6 +103,9 @@ driver::ReticulumNode::start_shared
 driver::ReticulumNode::transport_stats
 driver::ReticulumNode::tunnel_ids
 driver::ReticulumNode::unregister_destination
+driver::nat_report::ReticulumNode::direct_link_outcomes
+driver::nat_report::ReticulumNode::nat_report
+driver::nat_report::ReticulumNode::probe_nat
 driver::relay_route::ReticulumNode::connect_via
 driver::relay_route::ReticulumNode::forward_refusals
 driver::relay_route::ReticulumNode::forwarded_links
