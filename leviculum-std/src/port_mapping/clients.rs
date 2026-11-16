@@ -11,7 +11,10 @@ use std::time::Duration;
 use crab_nat::{natpmp, pcp, GatewayAddress, InternetProtocol, PortMappingOptions, TimeoutConfig};
 use igd_next::aio::tokio::{search_gateway, Tokio};
 use igd_next::aio::Gateway;
-use igd_next::{AddAnyPortError, AddPortError, PortMappingProtocol, SearchOptions};
+use igd_next::{
+    AddAnyPortError, AddPortError, GetGenericPortMappingEntryError as GenericError,
+    PortMappingProtocol, SearchOptions,
+};
 
 use super::engine::{
     BoxFut, Discover, Discovered, Lease, MapError, MapRequest, MappingClient, PortKey,
@@ -19,8 +22,11 @@ use super::engine::{
 use super::{netinfo, MappingMethod, MappingProtocol, PortMappingConfig};
 use crate::sync_ext::MutexRecover;
 
-/// The description a UPnP mapping carries in the router's table.
-const UPNP_DESCRIPTION: &str = "leviculum";
+/// How many entries of the router's UPnP table the start-up reclaim reads
+/// at most.
+const RECLAIM_MAX_ENTRIES: u32 = 128;
+/// The bound on reading the table, whatever its size.
+const RECLAIM_BOUND: Duration = Duration::from_secs(5);
 
 /// PCP and NAT-PMP retries: 250 ms, 500 ms, 1 s, so a gateway that does
 /// not speak the protocol costs under two seconds rather than the RFC's
@@ -225,18 +231,131 @@ pub(crate) struct UpnpClient {
     /// own (igd-next refuses loopback ones otherwise; the tests need it).
     trusted: Vec<IpAddr>,
     gateway: tokio::sync::Mutex<Option<Gateway<Tokio>>>,
+    /// This node's tag (`super::upnp_tag`): the description prefix that
+    /// marks a mapping in the router's table as ours.
+    tag: String,
+    /// The (protocol, internal port) pairs this node maps over IPv4.
+    ours: Vec<(MappingProtocol, u16)>,
+    /// External ports of our own stale mappings found at start, to ask for
+    /// again so a crash-restart keeps its external port.
+    reclaimed: Mutex<HashMap<(MappingProtocol, u16), u16>>,
+}
+
+fn igd_proto(p: MappingProtocol) -> PortMappingProtocol {
+    match p {
+        MappingProtocol::Tcp => PortMappingProtocol::TCP,
+        MappingProtocol::Udp => PortMappingProtocol::UDP,
+    }
 }
 
 impl UpnpClient {
     /// Search from `local_ip` toward `ssdp` (the multicast group in
     /// production, a loopback responder in tests).
-    pub(crate) fn new(local_ip: Ipv4Addr, ssdp: SocketAddr) -> Self {
+    pub(crate) fn new(
+        local_ip: Ipv4Addr,
+        ssdp: SocketAddr,
+        tag: String,
+        ours: Vec<(MappingProtocol, u16)>,
+    ) -> Self {
         UpnpClient {
             local_ip,
             ssdp,
             trusted: Vec::new(),
             gateway: tokio::sync::Mutex::new(None),
+            tag,
+            ours,
+            reclaimed: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// `leviculum:<tag>:<proto>/<internal port>`: stable across runs, and
+    /// free of any RNS identity or destination hash (the table is readable
+    /// from the whole LAN).
+    fn description(&self, protocol: MappingProtocol, internal_port: u16) -> String {
+        format!(
+            "leviculum:{}:{}/{internal_port}",
+            self.tag,
+            protocol.as_str()
+        )
+    }
+
+    /// Find this node's own mappings left in the router's table by a run
+    /// that did not stop cleanly (IGDv1 routers grant only permanent
+    /// leases, so they never lapse). One is kept per port, to be asked for
+    /// again; any further duplicate is deleted. A mapping is ours only when
+    /// its description carries our tag, its internal client is this host's
+    /// LAN address and its protocol and internal port are ones we map:
+    /// nothing else, another leviculum node's included, is touched. A
+    /// router that cannot list its table gets the plain path, which
+    /// re-adds the same external port for the same client and so replaces
+    /// the stale entry on most IGDs.
+    async fn reclaim(&self, gw: &Gateway<Tokio>) {
+        let prefix = format!("leviculum:{}:", self.tag);
+        let mut found: Vec<(MappingProtocol, u16, u16)> = Vec::new();
+        let listing = async {
+            for index in 0..RECLAIM_MAX_ENTRIES {
+                let entry = match gw.get_generic_port_mapping_entry(index).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        if index == 0 && !matches!(e, GenericError::SpecifiedArrayIndexInvalid) {
+                            tracing::debug!(
+                                "port mapping: the UPnP gateway does not list its table ({e}); \
+                                 re-adding the same external ports instead"
+                            );
+                        }
+                        break;
+                    }
+                };
+                let protocol = match entry.protocol {
+                    PortMappingProtocol::TCP => MappingProtocol::Tcp,
+                    PortMappingProtocol::UDP => MappingProtocol::Udp,
+                };
+                let client_is_us = entry
+                    .internal_client
+                    .trim()
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip == IpAddr::V4(self.local_ip));
+                if entry.port_mapping_description.starts_with(&prefix)
+                    && client_is_us
+                    && self.ours.contains(&(protocol, entry.internal_port))
+                {
+                    found.push((protocol, entry.internal_port, entry.external_port));
+                }
+            }
+        };
+        if tokio::time::timeout(RECLAIM_BOUND, listing).await.is_err() {
+            tracing::debug!("port mapping: reading the UPnP table took too long; stopped");
+        }
+        if found.is_empty() {
+            return;
+        }
+        let (mut reused, mut removed) = (0usize, 0usize);
+        let mut reclaimed = HashMap::new();
+        for (protocol, internal, external) in found {
+            if let std::collections::hash_map::Entry::Vacant(v) =
+                reclaimed.entry((protocol, internal))
+            {
+                v.insert(external);
+                reused += 1;
+                tracing::debug!(
+                    "port mapping: reusing our stale UPnP mapping of {} port {internal} \
+                     (external port {external})",
+                    protocol.as_str()
+                );
+            } else if gw.remove_port(igd_proto(protocol), external).await.is_ok() {
+                removed += 1;
+                tracing::debug!(
+                    "port mapping: removed a duplicate stale UPnP mapping of {} port \
+                     {internal} (external port {external})",
+                    protocol.as_str()
+                );
+            }
+        }
+        tracing::info!(
+            "port mapping: found this node's stale UPnP mappings from an earlier run: \
+             {reused} reused, {removed} removed"
+        );
+        *self.reclaimed.lock_recover() = reclaimed;
     }
 
     /// Also trust a device location at `ip` (tests: a loopback IGD).
@@ -265,6 +384,7 @@ impl UpnpClient {
             gw.addr,
             gw.service_type
         );
+        self.reclaim(&gw).await;
         *cached = Some(gw.clone());
         Ok(gw)
     }
@@ -276,18 +396,16 @@ impl UpnpClient {
         external_port: u16,
         local: SocketAddr,
         lease: u32,
+        desc: &str,
     ) -> Result<(u16, u32), MapError> {
         let refused = |e: &dyn std::fmt::Display| MapError::Refused(format!("UPnP-IGD: {e}"));
         match gw
-            .add_port(protocol, external_port, local, lease, UPNP_DESCRIPTION)
+            .add_port(protocol, external_port, local, lease, desc)
             .await
         {
             Ok(()) => return Ok((external_port, lease)),
             Err(AddPortError::OnlyPermanentLeasesSupported) if lease != 0 => {
-                return match gw
-                    .add_port(protocol, external_port, local, 0, UPNP_DESCRIPTION)
-                    .await
-                {
+                return match gw.add_port(protocol, external_port, local, 0, desc).await {
                     Ok(()) => Ok((external_port, 0)),
                     Err(e) => Err(refused(&e)),
                 };
@@ -299,13 +417,10 @@ impl UpnpClient {
             Err(e) => return Err(refused(&e)),
         }
         // The external port is someone else's: let the router choose.
-        match gw
-            .add_any_port(protocol, local, lease, UPNP_DESCRIPTION)
-            .await
-        {
+        match gw.add_any_port(protocol, local, lease, desc).await {
             Ok(port) => Ok((port, lease)),
             Err(AddAnyPortError::OnlyPermanentLeasesSupported) if lease != 0 => gw
-                .add_any_port(protocol, local, 0, UPNP_DESCRIPTION)
+                .add_any_port(protocol, local, 0, desc)
                 .await
                 .map(|port| (port, 0))
                 .map_err(|e| refused(&e)),
@@ -331,9 +446,51 @@ impl MappingClient for UpnpClient {
                 MappingProtocol::Udp => PortMappingProtocol::UDP,
             };
             let local = SocketAddr::new(IpAddr::V4(self.local_ip), req.key.internal_port);
-            let result = self
-                .add(&gw, protocol, req.external_port, local, req.lease_secs)
-                .await;
+            let desc = self.description(req.key.protocol, req.key.internal_port);
+            let stale = self
+                .reclaimed
+                .lock_recover()
+                .remove(&(req.key.protocol, req.key.internal_port));
+            let result = match stale {
+                // Ask for our stale mapping's external port again: the same
+                // client and port replace the entry, and the external port
+                // survives the crash-restart.
+                Some(ext) => match self
+                    .add(&gw, protocol, ext, local, req.lease_secs, &desc)
+                    .await
+                {
+                    Ok((port, lease)) => {
+                        if port != ext {
+                            // Replaced elsewhere: the stale entry is an orphan.
+                            let _ = gw.remove_port(protocol, ext).await;
+                        }
+                        Ok((port, lease))
+                    }
+                    Err(_) => {
+                        let _ = gw.remove_port(protocol, ext).await;
+                        self.add(
+                            &gw,
+                            protocol,
+                            req.external_port,
+                            local,
+                            req.lease_secs,
+                            &desc,
+                        )
+                        .await
+                    }
+                },
+                None => {
+                    self.add(
+                        &gw,
+                        protocol,
+                        req.external_port,
+                        local,
+                        req.lease_secs,
+                        &desc,
+                    )
+                    .await
+                }
+            };
             let (port, lease) = match result {
                 Ok(v) => v,
                 Err(e) => {
@@ -381,14 +538,23 @@ type CachedClients = (Option<IpAddr>, Option<IpAddr>, Discovered);
 pub(crate) struct SystemDiscover {
     config: PortMappingConfig,
     want_v6: bool,
+    tag: String,
+    ours: Vec<(MappingProtocol, u16)>,
     cache: Mutex<Option<CachedClients>>,
 }
 
 impl SystemDiscover {
-    pub(crate) fn new(config: PortMappingConfig, want_v6: bool) -> Self {
+    pub(crate) fn new(
+        config: PortMappingConfig,
+        want_v6: bool,
+        tag: String,
+        ours: Vec<(MappingProtocol, u16)>,
+    ) -> Self {
         SystemDiscover {
             config,
             want_v6,
+            tag,
+            ours,
             cache: Mutex::new(None),
         }
     }
@@ -467,7 +633,12 @@ impl Discover for SystemDiscover {
                     }
                     MappingMethod::UpnpIgd => {
                         if let Some(IpAddr::V4(local)) = local4 {
-                            clients.push(std::sync::Arc::new(UpnpClient::new(local, SSDP_V4)));
+                            clients.push(std::sync::Arc::new(UpnpClient::new(
+                                local,
+                                SSDP_V4,
+                                self.tag.clone(),
+                                self.ours.clone(),
+                            )));
                         }
                     }
                 }

@@ -238,7 +238,13 @@ fn spawn_engine(node: &ReticulumNode, keys: Vec<PortKey>) -> Option<RunHandle> {
     let config = node.port_mapping.config.clone();
     let want_v6 = keys.iter().any(|k| k.v6);
     let lease_secs = u32::try_from(config.lease.as_secs()).unwrap_or(u32::MAX);
-    let discover = crate::port_mapping::clients::SystemDiscover::new(config, want_v6);
+    let tag = crate::port_mapping::upnp_tag(&node.identity_hash());
+    let ours = keys
+        .iter()
+        .filter(|k| !k.v6)
+        .map(|k| (k.protocol, k.internal_port))
+        .collect();
+    let discover = crate::port_mapping::clients::SystemDiscover::new(config, want_v6, tag, ours);
     let engine = crate::port_mapping::engine::Engine::new(
         keys,
         lease_secs,

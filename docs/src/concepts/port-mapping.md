@@ -66,6 +66,44 @@ The gateway for PCP and NAT-PMP comes from the routing table
 (`/proc/net/route` on Linux, `route -n get default` on macOS and the BSDs,
 `route print` on Windows), or from `port_mapping_gateway`.
 
+## Stale mappings after a crash
+
+A leased mapping lapses on its own, so PCP and NAT-PMP need no cleanup: a
+mapping left by a crash expires with its lease (two hours at most), and a
+PCP renewal reuses the mapping's nonce, so the gateway updates the mapping
+it already holds instead of adding a second. IGDv1 routers that grant only
+permanent UPnP leases are different: every unclean exit leaves an entry
+that never goes away.
+
+So every UPnP mapping the node makes carries a stable description,
+`leviculum:<tag>:<proto>/<internal port>` (for example
+`leviculum:3fa94c0e12ab:tcp/4242`). The tag is the first 12 hex characters
+of SHA-256(`"leviculum-portmap/v1"` || the transport identity hash). It is
+the same on every run of the same node and different for every other node,
+and it reveals neither the identity nor any destination hash: the router's
+table can be read by anything on the LAN.
+
+When the node first reaches a UPnP gateway, before it maps anything, it
+reads the table (`GetGenericPortMappingEntry`, at most 128 entries or until
+the first error, five seconds at most). An entry is the node's own only if
+all of these hold:
+
+- its description starts with `leviculum:<our tag>:`;
+- its internal client is this host's LAN address on the gateway-facing
+  interface;
+- its protocol and internal port are one this run maps.
+
+For each such port the node asks for the stale entry's external port again,
+which replaces the entry, so a crash and restart keep the same external
+port. A second stale entry for the same port is deleted. Nothing else is
+touched: another leviculum node's entries (a different tag), entries for
+another host, an entry of ours for a port this run no longer maps, and
+everything that is not leviculum's. A router that cannot list its table
+gets the plain path: the node asks for the internal port as the external
+one, and most IGDs replace an entry with the same external port and
+internal client. The cleanup is logged at info as counts only; the ports
+are at debug.
+
 ## Carrier-grade and double NAT
 
 Many ISPs, and nearly every mobile network, put customers behind a

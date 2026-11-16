@@ -385,6 +385,23 @@ fn default_on_given(var: Option<&str>) -> bool {
         )
 }
 
+/// The tag that marks this node's UPnP mappings in the router's table: the
+/// first 12 hex characters of SHA-256(`"leviculum-portmap/v1"` || the
+/// transport identity hash). Stable across runs, so a restart finds what a
+/// crash left; not the identity or a destination hash, which the router's
+/// LAN-readable table must not show.
+#[cfg_attr(not(feature = "port-mapping"), allow(dead_code))]
+pub(crate) fn upnp_tag(identity_hash: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"leviculum-portmap/v1");
+    h.update(identity_hash);
+    h.finalize()[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// A `[reticulum]` switch as written: a TOML boolean, or a word (INI and
 /// TOML strings), checked by [`PortMappingConfig::from_config`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
