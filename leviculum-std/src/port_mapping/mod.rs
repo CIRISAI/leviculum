@@ -8,10 +8,15 @@
 //! whichever the router offers), renews each mapping before its lease runs
 //! out, and deletes them on a clean stop.
 //!
-//! Opening a port on someone's router is a security decision, so the
-//! feature is off unless the config (`[reticulum] port_mapping = yes`) or
-//! the builder ([`ReticulumNodeBuilder::port_mapping`]) turns it on, and
-//! every mapping made or removed is logged at info level.
+//! It is on by default (the ruling on #101), and runs in the background:
+//! `start` never waits for a gateway. Opening a port on someone's router is
+//! still a decision the operator can see and undo: `[reticulum]
+//! port_mapping = no` or [`ReticulumNodeBuilder::enable_port_mapping`]
+//! `(false)` turns it off, and every mapping asked for, made or removed is
+//! logged at info level. The external address is logged at debug only; the
+//! accessors and the event carry it, and the host decides what to export.
+//! On a network with no gateway the node stays quiet: one round of requests,
+//! then backoff to an hour, logged once.
 //!
 //! A mapping is not proof that the node is reachable: the router can be
 //! behind a carrier-grade NAT (reported as [`MappingState::CgnatDetected`]
@@ -25,7 +30,7 @@
 //! default); these types are always compiled, so a build without the
 //! feature still reads the config key and refuses `port_mapping = yes`.
 //!
-//! [`ReticulumNodeBuilder::port_mapping`]: crate::driver::ReticulumNodeBuilder::port_mapping
+//! [`ReticulumNodeBuilder::enable_port_mapping`]: crate::driver::ReticulumNodeBuilder::enable_port_mapping
 //! [`ReticulumNode::record_reachability_check`]: crate::driver::ReticulumNode::record_reachability_check
 
 #[cfg(feature = "port-mapping")]
@@ -244,7 +249,7 @@ impl ReachabilityReport {
 /// [`ReticulumNodeBuilder::port_mapping`]: crate::driver::ReticulumNodeBuilder::port_mapping
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortMappingConfig {
-    /// Map anything at all. Default off.
+    /// Map anything at all. Default on (see [`default_on`]).
     pub enabled: bool,
     /// Map the node's listeners: every TCP and WebSocket server interface
     /// not bound to loopback, and the direct-link facilitator's UDP port.
@@ -267,7 +272,7 @@ pub struct PortMappingConfig {
 impl Default for PortMappingConfig {
     fn default() -> Self {
         PortMappingConfig {
-            enabled: false,
+            enabled: true,
             map_listeners: true,
             extra_ports: Vec::new(),
             gateway: None,
@@ -297,10 +302,11 @@ impl PortMappingConfig {
     pub fn from_config(config: &crate::config::ReticulumConfig) -> Result<Self, Error> {
         let keys = &config.direct_link;
         let enabled = match &keys.port_mapping {
-            None => false,
+            None => default_on(),
             Some(ConfigSwitch::Bool(b)) => *b,
             Some(ConfigSwitch::Word(w)) => match w.trim().to_ascii_lowercase().as_str() {
-                "" | "no" | "false" | "off" | "0" => false,
+                "" => default_on(),
+                "no" | "false" | "off" | "0" => false,
                 "yes" | "true" | "on" | "1" => true,
                 other => {
                     return Err(Error::Config(format!(
@@ -354,6 +360,29 @@ impl PortMappingConfig {
         }
         Ok(())
     }
+}
+
+/// Whether a node whose config and builder say nothing maps its ports: on,
+/// when this build has the `port-mapping` feature, unless the environment
+/// sets `LEVICULUM_PORT_MAPPING_DEFAULT=off` (or `no`, `0`, `false`). The
+/// variable only moves the default; an explicit `port_mapping = yes` or
+/// builder setting still wins. The workspace's `.cargo/config.toml` sets it
+/// for `cargo test` and `cargo run`, so no test reaches the real router of
+/// the machine (or CI runner) it runs on.
+pub fn default_on() -> bool {
+    default_on_given(
+        std::env::var("LEVICULUM_PORT_MAPPING_DEFAULT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn default_on_given(var: Option<&str>) -> bool {
+    cfg!(feature = "port-mapping")
+        && !matches!(
+            var.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+            Some("off" | "no" | "0" | "false")
+        )
 }
 
 /// A `[reticulum]` switch as written: a TOML boolean, or a word (INI and

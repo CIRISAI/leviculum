@@ -27,10 +27,23 @@ use crate::sync_ext::MutexRecover;
 const STOP_BOUND: Duration = Duration::from_secs(12);
 
 /// The port-mapping part of a node: its settings, and what the task shares.
-#[derive(Default)]
 pub(crate) struct NodePortMapping {
     config: PortMappingConfig,
     shared: Arc<Mutex<Shared>>,
+}
+
+impl Default for NodePortMapping {
+    /// Off: only the builder (`configure`) turns it on, so a node made any
+    /// other way maps nothing.
+    fn default() -> Self {
+        NodePortMapping {
+            config: PortMappingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            shared: Arc::default(),
+        }
+    }
 }
 
 impl NodePortMapping {
@@ -49,17 +62,19 @@ pub(crate) struct RunHandle {
 
 impl ReticulumNodeBuilder {
     /// +ciris (leviculum#101): port-mapping settings, overriding the
-    /// config's `port_mapping` and `port_mapping_gateway`. Off by default:
-    /// with it on, the node asks the router (PCP, then NAT-PMP, then
-    /// UPnP-IGD) to open its listening ports to the internet, and logs each
-    /// mapping at info level.
+    /// config's `port_mapping` and `port_mapping_gateway`. On by default:
+    /// the node asks the router (PCP, then NAT-PMP, then UPnP-IGD) to open
+    /// its listening ports to the internet, in the background, and logs
+    /// each mapping at info level (without the external address, which is
+    /// at debug).
     pub fn port_mapping(mut self, config: PortMappingConfig) -> Self {
         self.port_map_cfg = Some(config);
         self
     }
 
-    /// +ciris (leviculum#101): [`port_mapping`](Self::port_mapping) with
-    /// every setting but the switch at its default.
+    /// +ciris (leviculum#101): the switch alone, every other setting at
+    /// its default. `enable_port_mapping(false)` turns port mapping off,
+    /// whatever the config says.
     pub fn enable_port_mapping(self, enabled: bool) -> Self {
         self.port_mapping(PortMappingConfig {
             enabled,
@@ -200,7 +215,7 @@ pub(super) fn start(node: &ReticulumNode) -> Option<RunHandle> {
         shared.statuses.clear();
     }
     if keys.is_empty() {
-        tracing::info!("port mapping: on, but this node runs no listener to map");
+        tracing::debug!("port mapping: on, but this node runs no listener to map");
         return None;
     }
     tracing::info!(
@@ -316,7 +331,7 @@ impl ReticulumNode {
     /// it back inside), so only a host can run the check; until one does,
     /// a mapping is a claim, not proof.
     pub fn record_reachability_check(&self, external: SocketAddr, answered: bool) {
-        tracing::info!(
+        tracing::debug!(
             "port mapping: a host check {} {external}",
             if answered {
                 "reached this node at"
@@ -340,6 +355,32 @@ mod tests {
             listen_ip: ip.map(str::to_string),
             listen_port: port,
             ..Default::default()
+        }
+    }
+
+    /// The switch: on by default (as far as the environment allows), off
+    /// through the builder or the config key, and the builder wins.
+    #[tokio::test]
+    async fn the_switch_turns_it_off_from_the_builder_or_the_config() {
+        let build = |b: ReticulumNodeBuilder| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let node = b
+                .storage_path(dir.path().to_path_buf())
+                .build()
+                .await
+                .unwrap();
+            node.port_mapping.config.enabled
+        };
+        assert_eq!(
+            build(ReticulumNodeBuilder::new()).await,
+            crate::port_mapping::default_on()
+        );
+        assert!(!build(ReticulumNodeBuilder::new().enable_port_mapping(false)).await);
+        let off: crate::config::Config =
+            toml::from_str("[reticulum]\nport_mapping = false\n").unwrap();
+        assert!(!build(ReticulumNodeBuilder::new().config(off)).await);
+        if cfg!(feature = "port-mapping") {
+            assert!(build(ReticulumNodeBuilder::new().enable_port_mapping(true)).await);
         }
     }
 
