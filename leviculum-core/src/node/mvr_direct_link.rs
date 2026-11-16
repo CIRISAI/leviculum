@@ -2571,3 +2571,127 @@ fn an_upgrade_with_a_peer_that_sends_no_path_mtu_moves_at_1400() {
         full_mdu_crosses(&mut pair, DIRECT_LINK_MTU);
     }
 }
+
+/// +ciris (leviculum#100): a report for `session` with the mapping `mapped`
+/// from each of `servers` (`None`: no answer), off a socket on port 40001.
+fn nat_report(mapped: &[Option<&str>]) -> crate::direct_link::NatReport {
+    let probes = mapped
+        .iter()
+        .enumerate()
+        .map(|(i, m)| crate::direct_link::NatProbe {
+            server: SocketAddr::new([203, 0, 113, 7 + i as u8].into(), 4343),
+            mapped: m.map(|s| s.parse().unwrap()),
+        })
+        .collect();
+    crate::direct_link::NatReport::from_probes(
+        probes,
+        40001,
+        std::vec!["10.0.0.2:40001".parse().unwrap()],
+        0,
+        None,
+    )
+}
+
+/// +ciris (leviculum#100): each attempt's end is recorded beside its
+/// session's NAT verdict, under the link id the application holds, and
+/// both an established path and its later loss count.
+#[test]
+fn outcomes_are_recorded_with_the_sessions_nat_type() {
+    use crate::direct_link::{DirectLinkOutcome, NatMapping};
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let report = nat_report(&[Some("198.51.100.1:40001"), Some("198.51.100.1:40001")]);
+    assert_eq!(report.mapping, NatMapping::EndpointIndependent);
+    let _ = pair.a.record_nat_report(Some(&session), report);
+    let a_direct = add_direct_iface(&mut pair.a, "A_direct");
+    let b_direct = add_direct_iface(&mut pair.b, "B_direct");
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    let _ = pair.a.handle_interface_down(InterfaceId(a_direct));
+
+    let a = pair.a.direct_link_outcomes();
+    assert_eq!((a.established, a.lost), (1, 1));
+    let outcomes: Vec<_> = a.recent.iter().map(|r| (r.outcome, r.nat)).collect();
+    assert_eq!(
+        outcomes,
+        std::vec![
+            (
+                DirectLinkOutcome::Established,
+                Some(NatMapping::EndpointIndependent)
+            ),
+            (
+                DirectLinkOutcome::Lost,
+                Some(NatMapping::EndpointIndependent)
+            ),
+        ]
+    );
+    assert!(a
+        .recent
+        .iter()
+        .all(|r| r.proposed && r.link_id == pair.link));
+    // B never reported a NAT type: its record says so.
+    let b = pair.b.direct_link_outcomes();
+    assert_eq!(b.established, 1);
+    assert_eq!(b.recent[0].nat, None);
+    assert!(!b.recent[0].proposed);
+}
+
+/// +ciris (leviculum#100): a failed punch is recorded as such.
+#[test]
+fn a_failed_punch_is_recorded_beside_the_nat_type() {
+    use crate::direct_link::{DirectLinkOutcome, NatMapping};
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let _ = pair.a.record_nat_report(
+        Some(&session),
+        nat_report(&[Some("198.51.100.1:51000"), Some("198.51.100.1:51004")]),
+    );
+    let _ = pair.a.direct_link_punched(&session, None);
+    let a = pair.a.direct_link_outcomes();
+    assert_eq!(a.punch_failed, 1);
+    assert_eq!(a.recent[0].outcome, DirectLinkOutcome::PunchFailed);
+    assert_eq!(a.recent[0].nat, Some(NatMapping::EndpointDependent));
+}
+
+/// +ciris (leviculum#100): the first report raises the change event, a
+/// repeat does not, a different known type does, and an unknown probe after
+/// a known one updates the report without raising anything.
+#[test]
+fn the_nat_type_event_fires_on_a_change_of_known_type() {
+    use crate::direct_link::{NatMapping, NatUnknown};
+    let mut pair = Pair::new();
+    let changes = |out: &TickOutput| -> Vec<(Option<NatMapping>, NatMapping)> {
+        out.events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::NatTypeChanged { previous, report } => Some((*previous, report.mapping)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(pair.a.nat_report().is_none());
+    let cone = || nat_report(&[Some("198.51.100.1:40001"), Some("198.51.100.1:40001")]);
+    let sym = || nat_report(&[Some("198.51.100.1:51000"), Some("198.51.100.1:51004")]);
+    let out = pair.a.record_nat_report(None, cone());
+    assert_eq!(
+        changes(&out),
+        std::vec![(None, NatMapping::EndpointIndependent)]
+    );
+    assert!(changes(&pair.a.record_nat_report(None, cone())).is_empty());
+    assert_eq!(
+        changes(&pair.a.record_nat_report(None, sym())),
+        std::vec![(
+            Some(NatMapping::EndpointIndependent),
+            NatMapping::EndpointDependent
+        )]
+    );
+    let out = pair
+        .a
+        .record_nat_report(None, nat_report(&[Some("198.51.100.1:51000"), None]));
+    assert!(changes(&out).is_empty());
+    assert_eq!(
+        pair.a.nat_report().map(|r| r.mapping),
+        Some(NatMapping::Unknown(NatUnknown::OneAnswered))
+    );
+    // Back to the last known type: nothing changed.
+    assert!(changes(&pair.a.record_nat_report(None, sym())).is_empty());
+}

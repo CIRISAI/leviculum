@@ -756,6 +756,18 @@ pub enum NodeEvent {
         /// The payload
         data: Vec<u8>,
     },
+
+    /// +ciris (leviculum#100): this node's NAT classification changed, from
+    /// a direct-link probe of two servers off one socket. Raised for the
+    /// first report, and then whenever a known classification differs from
+    /// the last known one; an [`Unknown`](crate::direct_link::NatMapping::Unknown)
+    /// probe after a known one updates `nat_report` but raises nothing.
+    NatTypeChanged {
+        /// The last known classification; `None` for the first report.
+        previous: Option<crate::direct_link::NatMapping>,
+        /// The report, with the observations behind the verdict.
+        report: alloc::boxed::Box<crate::direct_link::NatReport>,
+    },
 }
 
 /// Delivery plane a [`NodeEvent`] belongs to.
@@ -839,7 +851,9 @@ impl NodeEvent {
             | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::PeerCongested { .. }
             | NodeEvent::InterfaceDown(_)
-            | NodeEvent::FramesDropped { .. } => None,
+            | NodeEvent::FramesDropped { .. }
+            // A node's NAT is about its sockets, not any one link.
+            | NodeEvent::NatTypeChanged { .. } => None,
         }
     }
 
@@ -1002,6 +1016,10 @@ impl NodeEvent {
             | NodeEvent::FramesDropped { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. } => EventClass::Control,
+
+            // +ciris (leviculum#100): rare (a change of network), and the
+            // host's record of NAT type against punch outcome needs each.
+            NodeEvent::NatTypeChanged { .. } => EventClass::Control,
         }
     }
 
@@ -1060,6 +1078,7 @@ impl NodeEvent {
             NodeEvent::FramesDropped { .. } => "FramesDropped",
             NodeEvent::ControlPlaneOverflow { .. } => "ControlPlaneOverflow",
             NodeEvent::CoreProcessorPanicked { .. } => "CoreProcessorPanicked",
+            NodeEvent::NatTypeChanged { .. } => "NatTypeChanged",
         }
     }
 }
