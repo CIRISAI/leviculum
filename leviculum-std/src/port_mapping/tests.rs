@@ -838,6 +838,30 @@ mod against_fakes {
         permanent_only: bool,
         /// Answer AddPortMapping for this external port with 718.
         taken: Option<u16>,
+        /// Answer GetGenericPortMappingEntry with 401, as an IGD that
+        /// cannot list its table.
+        no_listing: bool,
+        /// The router's mapping table.
+        table: Arc<Mutex<Vec<FakeEntry>>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct FakeEntry {
+        ext: u16,
+        proto: String,
+        int_port: u16,
+        client: String,
+        desc: String,
+    }
+
+    fn entry(ext: u16, proto: &str, int_port: u16, client: &str, desc: &str) -> FakeEntry {
+        FakeEntry {
+            ext,
+            proto: proto.into(),
+            int_port,
+            client: client.into(),
+            desc: desc.into(),
+        }
     }
 
     /// An IGDv2 on loopback: an SSDP responder, the device and service
@@ -949,16 +973,62 @@ mod against_fakes {
                 let port: u16 = tag(body, "NewExternalPort")
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(0);
+                let new = entry(
+                    port,
+                    &tag(body, "NewProtocol").unwrap_or_default(),
+                    tag(body, "NewInternalPort")
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0),
+                    &tag(body, "NewInternalClient").unwrap_or_default(),
+                    &tag(body, "NewPortMappingDescription").unwrap_or_default(),
+                );
+                let mut table = b.table.lock_recover();
+                let held = table
+                    .iter()
+                    .position(|e| e.ext == new.ext && e.proto == new.proto);
                 if b.permanent_only && lease != "0" {
                     (500, fault(725, "OnlyPermanentLeasesSupported"))
-                } else if b.taken == Some(port) {
+                } else if b.taken == Some(port)
+                    || held.is_some_and(|i| table[i].client != new.client)
+                {
                     (500, fault(718, "ConflictInMappingEntry"))
                 } else {
+                    // Same port, same client: the entry is replaced.
+                    match held {
+                        Some(i) => table[i] = new,
+                        None => table.push(new),
+                    }
                     ok("")
                 }
             }
             "AddAnyPortMapping" => ok("<NewReservedPort>50000</NewReservedPort>"),
-            "DeletePortMapping" => ok(""),
+            "DeletePortMapping" => {
+                let port: u16 = tag(body, "NewExternalPort")
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0);
+                let proto = tag(body, "NewProtocol").unwrap_or_default();
+                b.table
+                    .lock_recover()
+                    .retain(|e| !(e.ext == port && e.proto == proto));
+                ok("")
+            }
+            "GetGenericPortMappingEntry" if b.no_listing => (500, fault(401, "Invalid Action")),
+            "GetGenericPortMappingEntry" => {
+                let index: usize = tag(body, "NewPortMappingIndex")
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(usize::MAX);
+                match b.table.lock_recover().get(index) {
+                    None => (500, fault(713, "SpecifiedArrayIndexInvalid")),
+                    Some(e) => ok(&format!(
+                        "<NewRemoteHost></NewRemoteHost><NewExternalPort>{}</NewExternalPort>\
+                         <NewProtocol>{}</NewProtocol><NewInternalPort>{}</NewInternalPort>\
+                         <NewInternalClient>{}</NewInternalClient><NewEnabled>1</NewEnabled>\
+                         <NewPortMappingDescription>{}</NewPortMappingDescription>\
+                         <NewLeaseDuration>0</NewLeaseDuration>",
+                        e.ext, e.proto, e.int_port, e.client, e.desc
+                    )),
+                }
+            }
             _ => (500, fault(401, "Invalid Action")),
         }
     }
@@ -1077,15 +1147,149 @@ mod against_fakes {
                 tasks: vec![ssdp_task, http_task],
             }
         }
+        /// The actions, less the table reads of the start-up reclaim.
         fn actions(&self) -> Vec<String> {
-            self.actions.lock_recover().clone()
+            self.actions
+                .lock_recover()
+                .iter()
+                .filter(|a| !a.starts_with("GetGenericPortMappingEntry"))
+                .cloned()
+                .collect()
         }
+        fn listings(&self) -> usize {
+            self.actions
+                .lock_recover()
+                .iter()
+                .filter(|a| a.starts_with("GetGenericPortMappingEntry"))
+                .count()
+        }
+    }
+
+    const TAG: &str = "abcdefabcdef";
+
+    fn upnp(igd: &FakeIgd, tcp_ports: &[u16]) -> UpnpClient {
+        UpnpClient::new(
+            LOOPBACK,
+            igd.ssdp,
+            TAG.into(),
+            tcp_ports
+                .iter()
+                .map(|p| (MappingProtocol::Tcp, *p))
+                .collect(),
+        )
+        .trusting(LOOPBACK.into())
+    }
+
+    /// A crash on an IGDv1 router leaves a permanent mapping behind. At the
+    /// next start the node finds its own (our tag, this host, a port it
+    /// maps), asks for the same external port again, and deletes a
+    /// duplicate; every other entry, another leviculum node's included,
+    /// stays as it was.
+    #[tokio::test]
+    async fn our_stale_upnp_mapping_is_reclaimed_and_nothing_else_is_touched() {
+        let ours = format!("leviculum:{TAG}:tcp/4242");
+        let others = vec![
+            // Another leviculum node on the same host: a different tag.
+            entry(
+                42000,
+                "TCP",
+                4242,
+                "127.0.0.1",
+                "leviculum:ffffffffffff:tcp/4242",
+            ),
+            // Ours by tag, but another host's address.
+            entry(42001, "TCP", 4242, "127.0.0.9", &ours),
+            // Ours by tag and host, but a port this run does not map.
+            entry(
+                42002,
+                "TCP",
+                5555,
+                "127.0.0.1",
+                &format!("leviculum:{TAG}:tcp/5555"),
+            ),
+            // Unrelated.
+            entry(3074, "UDP", 3074, "127.0.0.5", "Microsoft Multiplayer"),
+        ];
+        let mut table = vec![entry(41000, "TCP", 4242, "127.0.0.1", &ours)];
+        table.extend(others.clone());
+        table.push(entry(41001, "TCP", 4242, "127.0.0.1", &ours));
+        let b = IgdBehaviour {
+            table: Arc::new(Mutex::new(table)),
+            ..Default::default()
+        };
+        let igd = FakeIgd::start(b.clone()).await;
+        let client = upnp(&igd, &[4242]);
+        let lease = client.map(&req(4242)).await.expect("UPnP maps");
+        assert_eq!(
+            lease.external.port(),
+            41000,
+            "the external port survives the restart"
+        );
+        assert_eq!(igd.listings(), 7, "six entries read, then the end");
+        let after = b.table.lock_recover().clone();
+        assert_eq!(after[0], entry(41000, "TCP", 4242, "127.0.0.1", &ours));
+        assert_eq!(
+            after[1..],
+            others[..],
+            "the duplicate is gone, the rest untouched"
+        );
+        assert_eq!(
+            igd.actions(),
+            vec![
+                "DeletePortMapping ext=41001 lease=",
+                "AddPortMapping ext=41000 lease=7200",
+                "GetExternalIPAddress ext= lease=",
+            ]
+        );
+    }
+
+    /// An IGD that cannot list its table: the plain path, which asks for
+    /// the internal port as the external one and so replaces a stale entry
+    /// of the same client and port.
+    #[tokio::test]
+    async fn a_gateway_that_cannot_list_its_table_gets_the_same_port_re_added() {
+        let ours = format!("leviculum:{TAG}:tcp/4242");
+        let b = IgdBehaviour {
+            no_listing: true,
+            table: Arc::new(Mutex::new(vec![entry(
+                4242,
+                "TCP",
+                4242,
+                "127.0.0.1",
+                &ours,
+            )])),
+            ..Default::default()
+        };
+        let igd = FakeIgd::start(b.clone()).await;
+        let lease = upnp(&igd, &[4242])
+            .map(&req(4242))
+            .await
+            .expect("UPnP maps");
+        assert_eq!(lease.external.port(), 4242);
+        assert_eq!(igd.listings(), 1, "asked once, refused, not again");
+        assert_eq!(
+            b.table.lock_recover().len(),
+            1,
+            "replaced, not added beside"
+        );
+        assert!(!igd.actions().iter().any(|a| a.starts_with("Delete")));
+    }
+
+    #[test]
+    fn the_upnp_tag_is_stable_short_and_not_the_identity() {
+        let id = [0x11u8; 16];
+        let tag = crate::port_mapping::upnp_tag(&id);
+        assert_eq!(tag.len(), 12);
+        assert!(tag.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(tag, crate::port_mapping::upnp_tag(&id));
+        assert_ne!(tag, crate::port_mapping::upnp_tag(&[0x12u8; 16]));
+        assert!(!"11111111111111111111111111111111".contains(&tag));
     }
 
     #[tokio::test]
     async fn upnp_maps_the_internal_port_and_deletes_it() {
         let igd = FakeIgd::start(IgdBehaviour::default()).await;
-        let client = UpnpClient::new(LOOPBACK, igd.ssdp).trusting(LOOPBACK.into());
+        let client = upnp(&igd, &[4242]);
         let lease = client.map(&req(4242)).await.expect("UPnP maps");
         assert_eq!(lease.external, SocketAddr::new(PUBLIC.into(), 4242));
         assert_eq!(lease.lifetime_secs, 7200);
@@ -1107,7 +1311,7 @@ mod against_fakes {
             ..Default::default()
         })
         .await;
-        let client = UpnpClient::new(LOOPBACK, igd.ssdp).trusting(LOOPBACK.into());
+        let client = upnp(&igd, &[4242]);
         let lease = client.map(&req(4242)).await.expect("UPnP maps");
         assert_eq!(lease.lifetime_secs, 0);
         assert_eq!(
@@ -1126,7 +1330,7 @@ mod against_fakes {
             ..Default::default()
         })
         .await;
-        let client = UpnpClient::new(LOOPBACK, igd.ssdp).trusting(LOOPBACK.into());
+        let client = upnp(&igd, &[4242]);
         let lease = client.map(&req(4242)).await.expect("UPnP maps");
         assert_eq!(lease.external, SocketAddr::new(PUBLIC.into(), 50000));
         client.unmap(tcp(4242), &lease).await.unwrap();
@@ -1142,7 +1346,12 @@ mod against_fakes {
     async fn no_upnp_answer_is_unsupported_not_refused() {
         // A bound socket that never answers.
         let mute = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let client = UpnpClient::new(LOOPBACK, mute.local_addr().unwrap());
+        let client = UpnpClient::new(
+            LOOPBACK,
+            mute.local_addr().unwrap(),
+            TAG.into(),
+            vec![(MappingProtocol::Tcp, 4242)],
+        );
         assert!(matches!(
             client.map(&req(4242)).await,
             Err(MapError::Unsupported(_))
@@ -1214,6 +1423,8 @@ async fn real_router() {
         Arc::new(UpnpClient::new(
             local,
             "239.255.255.250:1900".parse().unwrap(),
+            crate::port_mapping::upnp_tag(b"real_router test"),
+            vec![(MappingProtocol::Tcp, 47123)],
         )),
     ];
     for c in clients {

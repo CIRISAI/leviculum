@@ -425,8 +425,15 @@ impl Engine {
         e.client = Some(client);
         e.lease = Some(lease);
         if changed {
-            (self.sink)(&e.status);
+            self.tell(i);
         }
+    }
+
+    /// Publish, then raise the change: a host that reads `port_mappings`
+    /// on the event sees what the event says.
+    fn tell(&self, i: usize) {
+        self.publish();
+        (self.sink)(&self.entries[i].status);
     }
 
     async fn renew(&mut self, i: usize) {
@@ -507,12 +514,13 @@ impl Engine {
         e.status.state = MappingState::Failed {
             reason: reason.to_string(),
         };
-        (self.sink)(&e.status);
+        self.tell(i);
     }
 
     /// Delete every held mapping (the clean stop).
     pub(crate) async fn release_all(&mut self) {
-        for e in &mut self.entries {
+        for i in 0..self.entries.len() {
+            let e = &mut self.entries[i];
             let (Some(client), Some(lease)) = (e.client.take(), e.lease.take()) else {
                 continue;
             };
@@ -538,7 +546,7 @@ impl Engine {
             e.status.external = None;
             e.status.lease_expires = None;
             e.status.state = MappingState::Removed;
-            (self.sink)(&e.status);
+            self.tell(i);
         }
         self.publish();
     }

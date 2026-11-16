@@ -38,7 +38,12 @@ git tag, not the version string. -->
   default-on `port-mapping` feature of `leviculum-std`; core gains only the
   event. `LEVICULUM_PORT_MAPPING_DEFAULT=off` moves the default to off; the
   workspace's `.cargo/config.toml` sets it so tests never reach a real
-  router. See `docs/src/concepts/port-mapping.md`.
+  router. Every UPnP mapping is described `leviculum:<tag>:<proto>/<port>`,
+  the tag a hash of the identity hash; at start the node reads the IGD's
+  table and reclaims only its own stale entries (tag, this host's address and
+  a port it maps all matching), so a crash on a permanent-lease router
+  leaves no orphan and keeps the external port. See
+  `docs/src/concepts/port-mapping.md`.
 
 ## [0.35.0+ciris.1] — CIRIS fork
 
