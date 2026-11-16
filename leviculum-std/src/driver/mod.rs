@@ -1765,9 +1765,9 @@ pub struct ReticulumNode {
     pub(crate) metrics_baseline: Mutex<crate::telemetry::CounterBaseline>, // leviculum#77
     /// Direct-link upgrade settings (+ciris, leviculum#70).
     pub(crate) direct_link: crate::direct_link::DirectLinkSettings,
-    /// +ciris (leviculum#99): the direct-link keepalive interval and silence
-    /// bound, when the host set them.
-    pub(crate) direct_link_keepalive: Option<(Duration, Duration)>,
+    /// +ciris (leviculum#99, #100): the host's direct-link keepalive, and the
+    /// servers probed beside the facilitator for the NAT type.
+    pub(crate) direct_link_extras: crate::direct_link::DirectLinkExtras,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1973,7 +1973,7 @@ impl ReticulumNode {
             max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             metrics_baseline: Mutex::default(),
             direct_link: crate::direct_link::DirectLinkSettings::default(),
-            direct_link_keepalive: None,
+            direct_link_extras: Default::default(),
             event_rx,
             run: Mutex::new(lifecycle::RunState::new(action_dispatch_tx)),
             corrupt_every,
@@ -2543,7 +2543,7 @@ impl ReticulumNode {
         let max_assembled_resource_size = self.max_assembled_resource_size;
         let plane_counters = Arc::clone(&self.plane_counters);
         let direct_link = self.direct_link.clone();
-        let direct_link_keepalive = self.direct_link_keepalive;
+        let direct_link_extras = self.direct_link_extras.clone();
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -2586,7 +2586,7 @@ impl ReticulumNode {
                 max_assembled_resource_size,
                 plane_counters,
                 direct_link,
-                direct_link_keepalive,
+                direct_link_extras,
             )
             .await;
         });
@@ -5436,7 +5436,7 @@ async fn run_event_loop(
     max_assembled_resource_size: usize,
     plane_counters: Arc<PlaneCounters>,
     direct_link: crate::direct_link::DirectLinkSettings,
-    direct_link_keepalive: Option<(Duration, Duration)>,
+    direct_link_extras: crate::direct_link::DirectLinkExtras,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -5485,9 +5485,9 @@ async fn run_event_loop(
     let (direct_outcome_tx, mut direct_outcome_rx) =
         mpsc::channel::<crate::direct_link::Outcome>(64);
     let mut direct_links = crate::direct_link::DirectLinkRuntime::new(direct_outcome_tx);
-    if let Some((keepalive, inactivity)) = direct_link_keepalive {
-        direct_links.set_fast_timing(keepalive, inactivity);
-    }
+    // +ciris (leviculum#99, #100): the host's keepalive, and the servers each
+    // session probes beside its facilitator for the NAT type.
+    direct_links.configure(&direct_link, direct_link_extras);
     let _facilitator = match direct_link.facilitator_port {
         Some(port) => match crate::direct_link::spawn_facilitator(port).await {
             Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),
@@ -5846,9 +5846,9 @@ async fn run_event_loop(
         // call that can produce such work runs inside a branch below, or
         // arrives through branch 2, so the top of the loop sees it all.
         if direct_link_active {
-            let jobs = inner.lock_recover().take_direct_link_jobs();
-            for job in jobs {
-                direct_links.run(job);
+            let jobs = crate::direct_link::take_jobs(&mut inner.lock_recover());
+            for (job, link) in jobs {
+                direct_links.run_on(job, link);
             }
         }
 
@@ -5879,15 +5879,15 @@ async fn run_event_loop(
             Some(outcome) = direct_outcome_rx.recv() => {
                 use crate::direct_link::Outcome;
                 let output = match outcome {
-                    Outcome::Probed {
-                        session,
-                        public,
-                        local,
-                    } => Some(
-                        inner
-                            .lock_recover()
-                            .direct_link_probed_with_local(&session, public, local),
-                    ),
+                    // +ciris (leviculum#100): the probe found this node's
+                    // reflexive address and, from the servers probed beside
+                    // the facilitator, its NAT type. The node records the
+                    // type, then takes the address; one output carries both,
+                    // the type's event first.
+                    probed @ Outcome::Probed { .. } => {
+                        Some(crate::direct_link::probed(&mut inner.lock_recover(), probed))
+                    }
+                    // A punch that got through, or one that did not.
                     Outcome::Punched { session, peer: Some(peer), early, mtu } => {
                         let id = InterfaceId(
                             autoconnect_wiring
@@ -12247,7 +12247,7 @@ mod tests {
             segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             Arc::new(PlaneCounters::default()),
             crate::direct_link::DirectLinkSettings::default(),
-            None,
+            Default::default(),
         ));
 
         FlushLoopHarness {
@@ -14131,6 +14131,9 @@ mod first_hop_timeout_tests {
 // +ciris: a link's Channel sequence watermarks, in its own file so no cited
 // line moves.
 mod seq_stats;
+// +ciris (leviculum#100): the NAT type and direct-link outcomes, in its own
+// file so no cited line moves.
+mod nat_report;
 
 // +ciris (leviculum#101): router port mapping, the node side; its own file so
 // no cited line moves.

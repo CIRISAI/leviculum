@@ -67,7 +67,7 @@ pub struct ReticulumNodeBuilder {
     assemble_resources_off_lock: bool,
     /// leviculum#70: direct-link settings (takes priority over config).
     direct_link_explicit: Option<crate::direct_link::DirectLinkSettings>,
-    direct_link_keepalive: Option<(std::time::Duration, std::time::Duration)>,
+    pub(super) direct_link_extras: crate::direct_link::DirectLinkExtrasConfig,
     /// Explicit control-channel capacity override (takes priority over config)
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
@@ -139,7 +139,7 @@ impl ReticulumNodeBuilder {
             max_assembled_resource_size_explicit: None,
             assemble_resources_off_lock: true,
             direct_link_explicit: None,
-            direct_link_keepalive: None,
+            direct_link_extras: Default::default(),
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
@@ -1003,7 +1003,7 @@ impl ReticulumNodeBuilder {
         interval: std::time::Duration,
         dead_after: std::time::Duration,
     ) -> Self {
-        self.direct_link_keepalive = Some((interval, dead_after));
+        self.direct_link_extras.keepalive = Some((interval, dead_after));
         self
     }
 
@@ -1385,14 +1385,14 @@ impl ReticulumNodeBuilder {
             node.max_assembled_resource_size = bytes;
         }
         node.direct_link = direct_link;
-        if let Some((interval, dead_after)) = self.direct_link_keepalive {
-            if interval.is_zero() || dead_after <= interval {
-                return Err(Error::Config(format!(
-                    "direct_link_keepalive: interval {interval:?} must be above zero and below dead_after {dead_after:?}"
-                )));
-            }
-            node.direct_link_keepalive = Some((interval, dead_after));
-        }
+        // +ciris (leviculum#99, #100): the host's direct-link keepalive
+        // (refused when the interval is zero or not below the silence bound)
+        // and the servers probed beside the facilitator for the NAT type (the
+        // builder's, or else the config's `nat_probe_addrs`; refused when an
+        // entry has no port), checked and handed to the node. The keepalive
+        // is checked here rather than in its setter, so the setter can chain.
+        let extras = std::mem::take(&mut self.direct_link_extras);
+        node.direct_link_extras = extras.resolve(&config.reticulum)?;
         super::port_mapping::configure(&mut node, self.port_map_cfg.take(), &config.reticulum)?;
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
         node.host_resolver = self.host_resolver.clone();
@@ -1691,7 +1691,7 @@ mod tests {
             .await
             .expect("a sound keepalive builds");
         assert_eq!(
-            node.direct_link_keepalive,
+            node.direct_link_extras.keepalive,
             Some((Duration::from_secs(25), Duration::from_secs(80)))
         );
         for (interval, dead_after) in [(0, 10), (20, 20), (30, 10)] {
