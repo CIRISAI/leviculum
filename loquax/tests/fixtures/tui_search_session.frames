@@ -1,16 +1,16 @@
 === 120x40 ===
 --- frame 1: typed ---
-┌● Search────────────── esc closes ┐┌  <5ec0ea2e…>  unknown────────────────────────── 5ec0ea2ecbc35ac16053c86cc29663ec ┐
-│ / tripod                         ││                                                              no propagation node │
+┌● Search────────────── esc closes ┐┌  Unknown ·5ec0  Two contacts have no name yet────────────────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
-│ ▌you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│ ▌you to Unknown ·5ec0      14:07 ││                                                                                  │
 │ ▌the «tripod» stays in the van,… ││                                                                                  │
 │                                  ││                                                                                  │
-│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  you to Unknown ·61dd      14:06 ││                                                                                  │
 │  the «tripod» fits               ││                                                                                  │
 │                                  ││                                                                                  │
-│  you to <61ddb79a…>        14:05 ││                                                                                  │
+│  you to Unknown ·61dd      14:05 ││                                                                                  │
 │  and the small «tripod» if it f… ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -33,25 +33,25 @@
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                     the «tripod» stays in the van, 61ddb79a has the bag  14:07 ○ │
-│                                  │├  to <5ec0ea2e…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                    the «tripod» stays in the van, 61ddb79a has the bag  14:07 ◷  │
+│                                  │├  to Unknown ·5ec0──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 2: opened ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet────────────────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
-│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  you to Unknown ·5ec0      14:07 ││                                                                                  │
 │  the «tripod» stays in the van,… ││                                                                                  │
 │                                  ││                                                                                  │
-│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  you to Unknown ·61dd      14:06 ││                                                                                  │
 │  the «tripod» fits               ││                                                                                  │
 │                                  ││                                                                                  │
-│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌you to Unknown ·61dd      14:05 ││                                                                                  │
 │ ▌and the small «tripod» if it f… ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -68,31 +68,31 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
-│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                  ▌and the small «tripod»         │
-│                                  ││                                                  ▌if it fits in the bag  14:05 ○ │
+│                                  ││                                                 ▌and the small «tripod»          │
+│                                  ││                                                 ▌if it fits in the bag  14:05 ◷  │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ○ │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                      the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unknown ·61dd──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: next ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet────────────────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
-│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  you to Unknown ·5ec0      14:07 ││                                                                                  │
 │  the «tripod» stays in the van,… ││                                                                                  │
 │                                  ││                                                                                  │
-│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  you to Unknown ·61dd      14:06 ││                                                                                  │
 │  the «tripod» fits               ││                                                                                  │
 │                                  ││                                                                                  │
-│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌you to Unknown ·61dd      14:05 ││                                                                                  │
 │ ▌and the small «tripod» if it f… ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -109,31 +109,31 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
-│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                   and the small «tripod»         │
-│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                  and the small «tripod»          │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
 │                                  ││                                                                                  │
-│                                  ││                                                      ▌the «tripod» fits  14:06 ○ │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                     ▌the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unknown ·61dd──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: previous ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet────────────────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
-│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  you to Unknown ·5ec0      14:07 ││                                                                                  │
 │  the «tripod» stays in the van,… ││                                                                                  │
 │                                  ││                                                                                  │
-│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  you to Unknown ·61dd      14:06 ││                                                                                  │
 │  the «tripod» fits               ││                                                                                  │
 │                                  ││                                                                                  │
-│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌you to Unknown ·61dd      14:05 ││                                                                                  │
 │ ▌and the small «tripod» if it f… ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -150,29 +150,29 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
-│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                  ▌and the small «tripod»         │
-│                                  ││                                                  ▌if it fits in the bag  14:05 ○ │
+│                                  ││                                                 ▌and the small «tripod»          │
+│                                  ││                                                 ▌if it fits in the bag  14:05 ◷  │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ○ │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                      the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unknown ·61dd──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: both groups ---
-┌● Search────────────── esc closes ┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / 61dd                           ││                                                              no propagation node │
+┌● Search────────────── esc closes ┐┌  Unknown ·61dd  Two contacts have no name yet────────────────────────────────────┐
+│ / 61dd                           ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  1 ││                                                                                  │
-│ ▌<«61dd»b79a…>             14:06 ││                                                                                  │
+│ ▌Unknown ·«61dd»           14:06 ││                                                                                  │
 │ ▌you: the tripod fits            ││                                                                                  │
 │                                  ││                                                                                  │
 │ MESSAGES                       1 ││                                                                                  │
-│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  you to Unknown ·5ec0      14:07 ││                                                                                  │
 │  …ipod stays in the van, «61dd»… ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -191,25 +191,25 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
-│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                   and the small tripod           │
-│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                  and the small tripod            │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
 │                                  ││                                                                                  │
-│                                  ││                                                         the tripod fits  14:06 ○ │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                        the tripod fits  14:06 ◷  │
+│                                  │├  to Unknown ·61dd──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ <5ec0ea2e…>                14:07 ││                                                              no propagation node │
+┌● tui─────────────────────────────┐┌  Unknown ·61dd  Two contacts have no name yet────────────────────────────────────┐
+│ Unknown ·5ec0              14:07 ││                                                                         no relay │
 │ you: the tripod stays in the va… ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
-│▌<61ddb79a…>                14:06 ││                                                                                  │
+│▌Unknown ·61dd              14:06 ││                                                                                  │
 │▌you: the tripod fits             ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -232,167 +232,167 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
-│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                   and the small tripod           │
-│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                  and the small tripod            │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
 │                                  ││                                                                                  │
-│                                  ││                                                         the tripod fits  14:06 ○ │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                        the tripod fits  14:06 ◷  │
+│                                  │├  to Unknown ·61dd──────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === 80x24 ===
 --- frame 1: typed ---
-┌● Search──── esc closes ┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌● Search──── esc closes ┐┌  Unknown ·5ec0  Two contacts have no name yet──────┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
-│ ▌you to <5ec0ea… 14:07 ││                                                    │
+│ ▌you to Unknown… 14:07 ││                                                    │
 │ ▌the «tripod» stays i… ││                                                    │
 │                        ││                                                    │
-│  you to <61ddb7… 14:06 ││                                                    │
+│  you to Unknown… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│  you to <61ddb7… 14:05 ││                                                    │
+│  you to Unknown… 14:05 ││                                                    │
 │  … the small «tripod»… ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                     the «tripod» stays in the van, │
-│                        ││                     61ddb79a has the bag  14:07 ○  │
-│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                     61ddb79a has the bag  14:07 ◷  │
+│                        │├  to Unknown ·5ec0── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 2: opened ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet──────┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
-│  you to <5ec0ea… 14:07 ││                                                    │
+│  you to Unknown… 14:07 ││                                                    │
 │  the «tripod» stays i… ││                                                    │
 │                        ││                                                    │
-│  you to <61ddb7… 14:06 ││                                                    │
+│  you to Unknown… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to Unknown… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
-│                        ││                   soak?  19:40 ○                   │
+│                        ││                   soak?  19:40 ◷                   │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                    ▌and the small «tripod»         │
-│                        ││                    ▌if it fits in the bag  14:05 ○ │
+│                        ││                   ▌and the small «tripod»          │
+│                        ││                   ▌if it fits in the bag  14:05 ◷  │
 │                        ││                                                    │
-│                        ││                         the «tripod» fits  14:06 ○ │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                        the «tripod» fits  14:06 ◷  │
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 3: next ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet──────┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
-│  you to <5ec0ea… 14:07 ││                                                    │
+│  you to Unknown… 14:07 ││                                                    │
 │  the «tripod» stays i… ││                                                    │
 │                        ││                                                    │
-│  you to <61ddb7… 14:06 ││                                                    │
+│  you to Unknown… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to Unknown… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
-│                        ││                   soak?  19:40 ○                   │
+│                        ││                   soak?  19:40 ◷                   │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                     and the small «tripod»         │
-│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                    and the small «tripod»          │
+│                        ││                    if it fits in the bag  14:05 ◷  │
 │                        ││                                                    │
-│                        ││                        ▌the «tripod» fits  14:06 ○ │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                       ▌the «tripod» fits  14:06 ◷  │
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 4: previous ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● Unknown ·61dd  Two contacts have no name yet──────┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
-│  you to <5ec0ea… 14:07 ││                                                    │
+│  you to Unknown… 14:07 ││                                                    │
 │  the «tripod» stays i… ││                                                    │
 │                        ││                                                    │
-│  you to <61ddb7… 14:06 ││                                                    │
+│  you to Unknown… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to Unknown… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
-│                        ││                   soak?  19:40 ○                   │
+│                        ││                   soak?  19:40 ◷                   │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                    ▌and the small «tripod»         │
-│                        ││                    ▌if it fits in the bag  14:05 ○ │
+│                        ││                   ▌and the small «tripod»          │
+│                        ││                   ▌if it fits in the bag  14:05 ◷  │
 │                        ││                                                    │
-│                        ││                         the «tripod» fits  14:06 ○ │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                        the «tripod» fits  14:06 ◷  │
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 5: both groups ---
-┌● Search──── esc closes ┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Search──── esc closes ┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
 │ / 61dd                 ││                                                    │
 │                        ││                                                    │
 │ CONVERSATIONS        1 ││                                                    │
-│ ▌<«61dd»b79a…>   14:06 ││                                                    │
+│ ▌Unknown ·«61dd» 14:06 ││                                                    │
 │ ▌you: the tripod fits  ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             1 ││                                                    │
-│  you to <5ec0ea… 14:07 ││                                                    │
+│  you to Unknown… 14:07 ││                                                    │
 │  … in the van, «61dd»… ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
-│                        ││                   soak?  19:40 ○                   │
+│                        ││                   soak?  19:40 ◷                   │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                     and the small tripod           │
-│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                    and the small tripod            │
+│                        ││                    if it fits in the bag  14:05 ◷  │
 │                        ││                                                    │
-│                        ││                           the tripod fits  14:06 ○ │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                          the tripod fits  14:06 ◷  │
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
-│ <5ec0ea2e…>      14:07 ││                                                    │
+┌● tui───────────────────┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
+│ Unknown ·5ec0    14:07 ││                                                    │
 │ you: the tripod stays… ││                                                    │
 │                        ││                                                    │
-│▌<61ddb79a…>      14:06 ││                                                    │
+│▌Unknown ·61dd    14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
-│                        ││                   soak?  19:40 ○                   │
+│                        ││                   soak?  19:40 ◷                   │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                     and the small tripod           │
-│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                    and the small tripod            │
+│                        ││                    if it fits in the bag  14:05 ◷  │
 │                        ││                                                    │
-│                        ││                           the tripod fits  14:06 ○ │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                          the tripod fits  14:06 ◷  │
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

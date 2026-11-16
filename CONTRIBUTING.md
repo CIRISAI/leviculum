@@ -57,6 +57,51 @@ does not clone — `scripts/ci-gate-integ.sh` names them) through
 anything for those two to run; they are the checks that do not depend
 on your clone having our hooks.
 
+## Versions
+
+The version numbers move with the code, by script, at every landing (a
+push of gated work to `origin/master`, a few a day). The rule: every
+versioned unit whose files changed since `origin/master` carries a
+version newer than the one there.
+
+* **The units.** The workspace (`[workspace.package] version` in the
+  root `Cargo.toml`, and with it every crate whose version is the
+  workspace's: core, std, the CLI with `lnsd`, `lnflash`, ...), and
+  each of `loquax`, `loquax-android`, `lnomad`, `lnpnd`, `lblogd`,
+  `leviculum-nrf`, `leviculum-esp` and `leviculum-lr11xx` with a
+  version of its own. A unit's files are its crate directory; `docs/`,
+  `scripts/` and the `Justfile` move nothing on their own.
+* **What moves.** A plain version bumps its patch, `0.1.0` to `0.1.1`.
+  The workspace sits in a development window and its moving number is
+  the dev counter: `0.10.0-dev`, `0.10.0-dev.1`, `0.10.0-dev.2`. The
+  packaging turns that into `0.10.0~dev.2`, which upgrades an installed
+  `0.10.0~dev` and sorts below the `0.10.0` it leads to
+  (`scripts/test-deb-stamp.sh` compares both). `loquax-android`'s
+  `[package.metadata.android] version-code` grows by one with its
+  version, because Android refuses an update whose versionCode did not
+  grow; the app's `Makefile` stamps that code and the version into the
+  manifest.
+* **How.** `python3 -I scripts/bump-touched.py` bumps every owed unit
+  and the lock files that name it; commit the result. `just
+  version-guard`, part of `just guards`, refuses a tree that forgot.
+  Several passes between two landings share one bump.
+* **The base.** Both print what they compared against first,
+  `base=<sha12> (origin/master, <date>)`, and every `OWED` line names
+  the unit's `base_version=` and `head_version=`. `--base <sha>`
+  compares against any other commit instead. A base that is not an
+  ancestor of HEAD stops the script with `base is not an ancestor of
+  HEAD; fetch origin` and exit 2, which a gate reads as its own
+  infrastructure, not as owed versions (exit 1). A base that is an
+  ancestor but stale looks fresh to git; run `git fetch origin` before
+  the guard and read the date on the base line.
+* **What only the maintainer moves.** Minor and major. At a release
+  `0.10.0-dev.N` becomes `0.10.0` and the next window opens as
+  `0.11.0-dev.1`; no script does that step.
+
+Every binary's `--version` prints the version and the commit it was
+built from, and the firmware's `[FW_BUILD]` banner carries
+`version=` after `git_sha=` and `dirty=`.
+
 ## Commit messages and attribution
 
 Documentation and commit messages are English; no AI trailers. Commit

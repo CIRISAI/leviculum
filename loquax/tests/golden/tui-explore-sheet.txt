@@ -1,0 +1,24 @@
+Explore
+┌● Last seen───────────────────────────────────────────────────────────────────┐
+│▏Search                                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌  ────────────────────────────────────────────────────────────────────────────┐
+│RNS Moscow                                                                    │
+│not seen yet                                                                  │
+│                                                                              │
+│▌[ Use this server for rooms ]                                                │
+│  You have no name on this server yet: in the room you appear without one.    │
+│                                                                              │
+│Its rooms                                                                     │
+│Asking the server for its rooms…                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter use or join │ ↑↓ move │ Esc close

@@ -1,0 +1,53 @@
+[package]
+name = "lnmapd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Map store daemon: serves signed, content-addressed map pieces over HTTP and Reticulum"
+# Part of the leviculum workspace, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+leviculum-core = { path = "../leviculum-core" }
+leviculum-std = { path = "../leviculum-std" }
+# The piece split reads the region file's own index (version 4, index
+# first), nothing deeper: no cut machinery enters this crate.
+leviculum-map = { path = "../leviculum-map", features = ["std"] }
+axum.workspace = true
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rmpv.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+# The front-door cache's upstream fetch and the HTTP piece fetcher.
+# Blocking (one fetch is one spawn_blocking), rustls on ring so the
+# musl-static binaries need no system TLS (as leviculum-mapcut's http).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+# The tests cut their fixture region from the committed grunewald
+# archive, the same source the arriving-region tests use.
+leviculum-mapcut = { path = "../leviculum-mapcut" }
+# The Reticulum-side test fetches through lnomad's real request path,
+# the same client code a page fetch uses (drop-in driver, not a
+# parallel one).
+lnomad = { path = "../lnomad" }
+tempfile = "3"
+
+[lib]
+name = "lnmapd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lnmapd"
+path = "src/main.rs"
+
+[[bin]]
+name = "lnmapcut"
+path = "src/bin/lnmapcut.rs"

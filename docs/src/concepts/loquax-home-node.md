@@ -18,6 +18,11 @@ identity.
 The home node ends the sharing. One always-on Loquax holds the identity and
 keeps every message; the user's other devices read from it.
 
+How far the home node is a Reticulum node (an LXMF endpoint behind a full
+lnsd, never a transport or a propagation node, devices admitted by pairing
+and never by port) is [what a Loquax Mailbox is](loquax-mailbox-roles.md),
+invariants M1 to M5.
+
 ## Roles and keys
 
 | Role | Holds | Runs |
@@ -63,8 +68,11 @@ refused before anything goes on the wire, in lower-case base32 behind the
 prefix `lqxh1` (140 characters). The home destination and the LXMF
 address both derive from the public key, so the code needs nothing else.
 
-A phone has no shared instance to reach the home node through, so it needs
-the home node's TCP server too. `loquax mailbox admit --server host:port`
+A device on the home node's own computer reaches it through the
+daemon's shared instance (rung 0 of
+[the ladder](loquax-reachability.md)). A phone has no shared instance to
+reach the home node through, so it needs the home node's TCP server
+too. `loquax mailbox admit --server host:port`
 writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
 brackets): the base32 alphabet has no `@`, so the split is unambiguous, a
 code without the address reads as before, and a desktop's `home join`
@@ -73,6 +81,9 @@ in Unicode half blocks, the base32 in upper case in the QR alphanumeric
 mode (version 6 for the code alone, at error correction level M). The
 Android join screen takes the combined form pasted or shared to it from a
 QR reader and fills the address from it.
+How a phone outside the home reaches that server, through a shared
+rendezvous node or any mesh path, is
+[Reaching the mailbox from anywhere](loquax-reachability.md).
 
 On the new device, `loquax mailbox join <code>` creates the device identity,
 asks for the path to the home destination, opens a link to it, identifies
@@ -112,23 +123,128 @@ Link requests on `loquax.home`, msgpack on the wire:
 
 ```text
 /join  [token: bin16, name: str]   -> [status]
-/sync  [cursor: uint]              -> [status, first: uint, more: bool,
-                                       [[seq: uint, kind: uint, at: int, packed: bin], ...]]
+/sync  [cursor: uint, (page: uint, (fold: str))]
+                                   -> [status, first: uint, more: bool,
+                                       [[seq: uint, kind: uint, at: int, packed: bin], ...],
+                                       (left: uint)]
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
+/mark  [2, [id: bin32, ...], read_at: uint] -> [status]
 /petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
+/key   [address: bin16, public_key: bin64] -> [status]
+/move  [token: bin16, cursor: uint] -> [status, private_key: bin64, ratchets: bin,
+                                       known: bin, name: str, first: uint, more: bool,
+                                       [[seq, kind, id: bin32, at, packed], ...]]
+/moved [token: bin16, cursor: uint] -> [status]
+/group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
+/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
+/groupdelete [client_id: bin16, group: bin16] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
 admitted, 3 unknown or used token, 4 malformed request, 5 the home node's
-store failed. A `/sync` answer carries the entries after the cursor, oldest
+store failed, 6 behind (a `/moved` whose cursor is older than the
+archive's newest entry).
+
+`/move` and `/moved` (1281) move the mailbox to another device; see
+[how Loquax reaches its mailbox](loquax-reachability.md), "Moving to a new
+phone". They are answered only to an admitted device whose request
+carries the token of the move the owner opened on the mailbox itself
+(`loquax/src/home/handover.rs`), never to an admitted device alone.
+
+`/group` (1307) makes a group the home hosts, its owner the admin
+(`loquax/src/home/group.rs`, the study
+`docs/drafts/group-chats-study-2026-11.md`): the group's key stays on the
+home, an invitation from the owner to every member goes through the
+outbox, and the group's own engine sends the owner the membership, so
+every device learns the group from its archive. The same client id asked
+again answers the group it made then. A home that archives an invitation
+learns the group's key from it, so a Join from any of its devices goes
+out before the group's announce is heard.
+
+The invitation is a text every client shows, in English whatever the
+admin's language (1348; a phone of 1307 pass six still sends its
+language as a fourth element, which the home reads past and ignores):
+"Lew invited you to Familie: lxma://… Reply /leave to leave." A Loquax
+says the card in its reader's language from the `lev` key `0x04`
+([the `lev` keys](loquax-read-receipts.md)). A member whose newest
+message to the owner did not say it understands groups, or that never
+wrote, is taken for a stock client (Columba, Sideband), and its text
+adds once "Loquax shows members and names:" and the site's address
+(`LOQUAX_URL`, the site's root until its download page is published).
+The whole text stays under 300 characters with its 168-character code;
+names too long for that leave the link out. A Loquax shows the card,
+not the text. The admin's member sheet reads where each invitation
+stands from its delivery in the member's chat: delivering, waiting at
+the propagation node for the member to come online, not delivered, or
+plainly invited once delivered.
+
+`/groupadd` (1307 G2) adds members to a group the home hosts and its
+owner is admin of: each new one gets an invitation from the owner, the
+epoch moves, and every member that understands groups gets the new
+membership from the group. A member already in it is skipped, so the
+same request again adds nobody. Beside the requests, the home keeps a
+group going on its own (G2): a copy's retries survive a restart (open
+copies are made again from the archived original, byte for byte; one
+whose text rule changed since, so that no copy made again has its id, is
+made under the rule the program has and booked under the new id, where
+the restart ended it before, 1406), each
+group announces every hour on its own clock beside the announce at its
+engine's start, a member whose last three proofs each took more than
+2 s gets its lines held for 60 s and sent as one digest (`lev` key
+`0x06`), and a reaction goes to every other member that is not slow
+with its target rewritten to the id each one knows the message by: its
+own copy, or its own original when it wrote the line. A stock member
+gets it too, since Columba and Sideband draw reactions (1387, Lew
+2026-11-03; G2 had given stock members none); a slow one gets none, as
+a digest carries text only.
+
+The writer's ticks (1307 pass four): the group's proof says the group
+has it, one tick. Once every copy of a line sent alone is proven the
+home sends the writer, when it understands groups, the status `lev`
+key `0x03` with the counts (two ticks once all are proven), again for
+every late copy a digest proves, and once every member that sends read
+receipts read it. A read receipt a member sends the group is booked
+against its copy (`group_fanout.read_at`); a member counts as a reader
+while its newest message to the group said capability bit 0. A copy a
+propagation node took is kept so (`group_fanout.propagated`, schema 13),
+and a restart tries it direct again but does not upload it twice.
+
+`/groupdelete` (1307 pass four) deletes a group the home hosts and its
+owner is admin of, for everyone: every present member gets the last
+membership with the standing ended (a stock member the text "Lew ended
+Familie."), then the home forgets the group's rows, its archived
+conversation and its key file. While the home runs, the group's engine
+proves and drops every later message to the address, as a stranger's;
+after a restart nothing answers at it, since the key is gone. A group
+the home does not host answers `Ok` (deleted before, or never there), so
+a lost answer asked again is no error; a group whose admin is someone
+else is refused. The owner's devices forget the conversation whole when
+the answer or the last membership comes; a member's device keeps the
+history, closed, under the line "Lew ended the group.".
+
+A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a
 response resource. `first` is the oldest sequence the archive still holds,
 so a client whose cursor fell behind an eviction says so in its log.
+
+The page bound (1363) and `left` (1415) are a narrow client's: it asks
+pages of at most that many bytes and reads how many entries still wait.
+The fold (1439) is a device's capability word, what it keeps of the
+archive (`wire::Fold`, `loquax/src/home/wire.rs`). A board says `board`
+and is served only the kinds `board::fold` reads (a message received or
+sent, a mark, a name), none over 16 KiB, and `left` counts only those,
+so its "Fetched N of M" is the M it will get: an archive whose first
+796 entries are imported history reaches a board's first names on its
+first page. The phone and the desktop say no word and keep the whole
+archive; a home from before 1439 reads the first two elements and
+serves everything, and an unknown word folds nothing away.
 
 - **Fetching never deletes.** Only `/mark` changes state, and it does so
   by appending an entry, not by removing one (see "Read and sent state on
@@ -230,8 +346,8 @@ then and may sleep.
 - **Idempotent by the client's id.** The same id handed in again is
   answered from the outbox with the message it made the first time, also
   after a restart; nothing is signed twice. A client whose answer was lost
-  asks again with the same id, up to three times
-  (`home::client::send_retrying`).
+  asks again with the same id, three times in all (`home::client::send`,
+  the ask's `ATTEMPTS`).
 - **The outbox is a table** (`home_outbox`, schema 5 of the store), one row
   a message: the client's id, the message id, the destination, the packed
   bytes, when it came, whether it is still retried, and whether a
@@ -249,6 +365,62 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
+- **A direct leg nobody answers is given up within 45 s** (1328, 1331).
+  The router's stock direct leg against a recipient that does not answer
+  runs five link attempts, each retried twice by the core and followed by
+  a path request: about six minutes on a 2-hop path, and on miauhaus legs
+  ran past the stall bound below. A direct leg whose message has not
+  reached `Sending` after `outgoing::ANSWER_SECS` (45 s; the reference's
+  single link establishment waits 6 s per hop plus the first hop's time)
+  is called off in the router, logged as `HOME outbox direct unanswered`,
+  and counts as a direct failure: the propagation node is offered the copy
+  on the next tick, before any announce restarts the direct leg. A message
+  the node holds already is not offered again, and its line says so
+  (`… the propagation node holds a copy`, 1406: the line offered the node
+  every message, 22 of 27 at one restart of the field mailbox). The
+  announce and hourly retries go on as before. The bound sits under the
+  router's own end of such a leg: a recipient whose key the home never
+  held fails there after five attempts 12 s apart, 60 s, never under
+  50 s, while the bound, checked on a 1 s tick against a start in whole
+  seconds, fires by 47 s. At 60 s the two met within a second and the
+  daemon's start phase chose the winner (1331). A router that ends an
+  unanswered leg first anyway is the same fact: the line is
+  `HOME outbox direct unanswered … reason=router: …` and the copy goes
+  to the propagation node at once.
+- **A path response is no announce** (1330). Every direct leg called off
+  or failed ends in a path request of the router's own, which a transport
+  node answers from its cache within a minute. The router reports that
+  answer as it reports an announce, flagged as a path response (Python's
+  `is_path_response`), and the outbox starts nothing on it: taken for the
+  recipient, it tried an offline member direct every 100 s on miauhaus
+  after the copy was on the node. Only the recipient's own announce and
+  the hour try direct again.
+- **Every engine selects its own propagation node** (1328). A hosted
+  group's copies go out on the group's engine, which runs no collection:
+  the home's engine selecting a node selects nothing there, so before a
+  copy's propagated leg the group's engine is told the node the home uses
+  unless it reported holding it. A propagated leg's lines name the node
+  (`pn=`, its first four bytes, as `PN_PULL` does), so a `handed-on` reads
+  beside the node's own `PN_ACCEPT` (1330). A failed leg's log line carries the
+  engine's reason (`reason=unsent: …`, `reason=rejected`, …), and after the
+  router's state the transport's word on the last failed attempt
+  (`reason=failed: delivery link closed (Stale)`, `reason=failed: upload
+  transfer: …`), or `reason=failed: no attempt got a link` when none
+  failed on one (1330).
+- **A leg that never ends is given up** (1293). The outbox starts no leg
+  for a message already on one, so a leg whose end the router never
+  reports (a link that died mid-leg, a transfer that stalled, a message the
+  engine refused without naming it) would hold the message forever. After
+  `outgoing::STALL_SECS` without a sign of the leg (779 s: the 725 s the
+  core takes to close a link that went silent, the router's five attempts
+  10 s apart after it, and one 4 s processing interval as margin; every
+  state the router reports for the message is a sign and moves the bound)
+  the home node calls the leg off in the router, logs `HOME outbox <leg>
+  stalled`, and archives one `stalled` entry. A stalled direct leg counts
+  as a direct failure: the propagation node is offered the copy once, on
+  the next tick, and direct retries go on at the next announce and hour. A
+  restart needs nothing of this: the row keeps no leg, so every message
+  still retried is due direct at once.
 - **No propagation node selected.** With neither `--pn` nor a config entry
   and `--sync-interval off`, nothing selects one: a collection is what
   applies the mailbox rule of `loquax-mailbox.md`. The home node does not
@@ -256,11 +428,21 @@ then and may sleep.
   table and may wait for announce replays, and the outbox's path must not
   wait. It logs once per message that only direct retries remain and why.
   With `--pn` it selects that node before the first upload.
-- **A propagated copy needs the recipient's key.** The copy on the node is
-  encrypted for the recipient, so a recipient never heard (no announce ever
-  reached the home node) cannot be propagated to: the leg waits for its
-  path, and goes out as soon as the recipient announces once. A sender
-  writing to a known contact has its key.
+- **A propagated copy needs the recipient's key** (1406). The copy on the
+  node is encrypted for the recipient, so a recipient never heard (no
+  announce ever reached the home node) cannot be propagated to. The leg
+  fails at once, `HOME outbox propagated failed … reason=no key for
+  <recipient>, path requested`, and the engine asks the recipient's path.
+  The answer brings the key: a path response offers the node the copy
+  once more, the recipient's own announce tries direct, and without
+  either the hour's direct leg asks the path again. Before, the router
+  held such a leg without a word (`propagation_runtime.rs`, the
+  `Err(RouterError::Node(_))` arm after `ensure_prepared_upload`, which
+  asks the path and charges no attempt), the line `HOME outbox propagated
+  … pn=` promised an upload that never came, and the leg ended only at
+  the stall bound, every hour for seven days. A leg's line is written when
+  the router took it, so a leg the engine refuses leaves only its
+  `failed` line. A sender writing to a known contact has its key.
 - **DELIVERED when a direct proof arrives**, even after the propagation node
   took a copy. Both legs carry the same bytes, so the same hash, and the
   recipient keeps one message per hash
@@ -270,8 +452,10 @@ then and may sleep.
   transaction as the outbox row changes: `sent` (kind 1, the packed message
   as signed), `propagated` (2), `delivered` (3), `failed` (4: the seven days
   ended with no propagation node ever taking it) and `retries ended` (5: the
-  direct retries ended while a copy waits on the propagation node). Kinds 2
-  to 5 carry the message id as their bytes.
+  direct retries ended while a copy waits on the propagation node), and
+  `stalled` (11: a leg was given up and the message is tried again; the
+  first per message). Kinds 2 to 5 and 11 carry the message id as their
+  bytes.
 
 On the client the compose line and `loquax send` go through `/send`. The
 screen names the bubble after the id the home node answered with
@@ -279,8 +463,10 @@ screen names the bubble after the id the home node answered with
 each pull turns the state entries into the bubble's state: the sent entry
 as sent (`Command::HomeSent`; the message left the device and the home node
 has it), and through `Command::HomeState` propagated as at a propagation node,
-delivered as delivered, failed as failed. `loquax fetch` prints a line
-`message <id> <state>` for each.
+delivered as delivered, failed as failed. A `stalled` entry changes no
+state; through `Command::HomeStalled` the detail view's ledger says
+"sending stopped without an answer, trying again". `loquax fetch` prints a
+line `message <id> <state>` for each.
 
 **A client pulls right after it sends**, so the bubble leaves queued
 without waiting for the schedule: the screen starts a pull (sync reason
@@ -302,6 +488,11 @@ sent bubble on the others.
   entry of kind 6, under the SHA-256 of those bytes, so the same mark twice,
   from one client or two, is one entry. Every client applies the entry on
   its next pull (`Command::HomeMark`, `OutboxEvent::HomeMarked`).
+- **Seen** (flag 2, 1234) carries a third element, the reader's clock: the
+  messages were on a device's screen, and the home node signs their read
+  receipts (`loquax-read-receipts.md`, section 8). It keeps a seen mark of
+  only the ids no earlier seen mark names, so the first device sets the
+  read time and a second sends nothing new.
 - **Read** means every received message up to the marked one in its
   conversation is read, as opening the conversation there read them: the
   unread count becomes the number of received messages after it. A device
@@ -365,6 +556,12 @@ engine on the shared instance it is.
 - **Before 1132** the archive has no name entries: a client learns a
   peer's name from the first announce the home node hears after it runs
   this version.
+- **Every other name** (1643). The names of peers without a relation
+  are no archive entries but rows of the mailbox's `home_names` table,
+  every LXMF delivery announce's name with its first and last hearing
+  and hops, at most 4 096: they ride in the `/pages` delta as row kind
+  2, wake nobody, and the client folds them into its names as an
+  announce (`loquax-mailbox.md`, section 5).
 
 ## The reader's names on every device
 
@@ -388,6 +585,55 @@ and photo a phone shows stays on that phone
   the contacts file, takes it as the reader's word and writes the
   contacts file, and never hands it back. A home node from before 1139
   answers `/petname` as malformed, which the client says in its log.
+- **Owed until the home takes it** (1635). A petname the device set is
+  owed until the home answers `/petname` with ok: the newest of each peer
+  is kept in the device's store (`owed_petnames`, schema 19) and handed
+  again with the next hand or after a restart, one hand at a time so the
+  home takes a peer's names in the order they were set
+  (`UiModel::take_petnames`, `UiEvent::PetnamesHanded`). While owed, a
+  pulled entry for the peer changes nothing on screen: the home stamps an
+  entry when it takes it, so the owed one will be its newest, and the
+  pulled one is older, a name the reader cleared among them. A pulled
+  entry that says the same is the home's echo and settles the debt. Once
+  taken, the archive holds nothing older for the peer, but a pull already
+  under way may; until that pull ends an entry counts only if the home
+  took it after the device's answer came (its `at` past the device's
+  clock then, `UiModel::home_petname`). A cleared petname is an entry
+  with the empty name: the home needs no tombstone of its own, since its
+  newest entry of a peer is the reader's last word.
+- **Peer states are owed the same way** (1640). A pin, a mute, an
+  archive or a block the device set is owed until the home answers
+  `/peerstate` with ok, by the same rules and the same code
+  (`ui::owed::Owed`, one per kind of word): the newest state of each peer
+  in the device's store (`owed_peer_states`, schema 21), handed again
+  after a restart, one hand at a time (`UiModel::take_peer_states`,
+  `UiEvent::PeerStatesHanded`), over any pulled entry while owed and over
+  an entry the home stamped before the answer until the pull ends
+  (`UiModel::home_peer_state`, the pull now carries the entry's `at`). A
+  pin loosened just before the app stopped no longer comes back from the
+  home after the restart. Verified is not among them: it stays on the
+  device that compared the key, and nothing of it goes to the home.
+
+## Contact keys from a code
+
+1187. A contact code, `lxma://<address>:<public key>` as Columba and
+Sideband share it (`loquax::lxma`), carries the contact's key, so the
+first message can go out before any announce of the contact was heard.
+The key has to reach the home node, which signs and sends.
+
+- **`/key`** hands the home node the peer's address and its identity's
+  64 byte public key. The phone sends it when the user adds a contact
+  from a scanned or pasted code (`Request::AddContact`), on a task of its
+  own, asked again as a petname is.
+- **The home node** refuses a device it never admitted, and a pair whose
+  address is not the one the key makes (malformed). It archives nothing:
+  the daemon remembers the identity in its node's known destinations,
+  which the node keeps on disk as it keeps those it learned from
+  announces (`server::key`, `daemon::answer`).
+- **A home node from before 1187** answers `/key` as malformed. The phone
+  says so once ("Your mailbox did not take the contact's key yet") and the
+  first message waits for the contact's announce, as every message did
+  before.
 
 ## Imported history
 
@@ -469,7 +715,12 @@ even when it alone is larger than the cap.
 To every sender the home node is an ordinary `lxmf.delivery` destination:
 senders deliver DIRECT and get their proof. It announces at start and every
 360 minutes, the interval lxmd's config template offers for the same
-announce (`reference/LXMF/LXMF/Utilities/lxmd.py:1140`). It also collects
+announce (`reference/LXMF/LXMF/Utilities/lxmd.py:1140`). For a day after
+its identity moved in (an import adopted it or brought its ratchets,
+`$LNMSG_HOME/identity.moved`) it announces every 30 minutes instead, the
+reference's ratchet interval, so peers that remember the old program's
+ratchet hear a new one soon (order 1185, `loquax-import.md`, "Ratchets").
+Its delivery destination has ratchets, as every Python LXMF router's does. It also collects
 from its propagation node on the messenger's own schedule
 (`loquax-mailbox.md`, "When to sync"), so mail that senders propagated
 arrives too; those senders get no direct proof from it.
@@ -503,7 +754,10 @@ beside a running `lnsd`. It takes the
 messenger's `--instance`, `--config`, `--pn`, `--sync-interval` and
 `--timeout`. It logs to stderr (`warn,loquax=info`, `RUST_LOG` replaces
 it), one `HOME` line for each archived message, admission and refusal, and
-never logs a message's text. Without the package, a systemd user unit:
+never logs a message's text. Each collection from the propagation node
+leaves one line, also when it found nothing (1293): `PN_PULL n=<messages>
+pn=<first 8 hex of the node> next_in_s=<seconds to the next>`, so the
+fifteen-minute cadence shows. Without the package, a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/loquax-home.service

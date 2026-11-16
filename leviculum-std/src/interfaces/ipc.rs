@@ -63,6 +63,28 @@ impl SharedInstanceTransport {
         }
     }
 
+    /// Whether a shared instance named `instance_name` listens on its data
+    /// channel under this transport: a connect that succeeds, closed again
+    /// at once, as a client that attached and left. For a program that runs
+    /// beside a daemon when there is one and on a node of its own when not
+    /// (loquax's mailbox, 1354). Needs no runtime: on a loopback transport
+    /// the connect succeeds or fails at once.
+    pub fn answers(&self, instance_name: &str) -> bool {
+        match self.endpoint(&format!("rns/{instance_name}")) {
+            #[cfg(unix)]
+            IpcEndpoint::Unix(name) => connect_unix(&name).is_ok(),
+            IpcEndpoint::Tcp(addr) => std::net::TcpStream::connect(addr).is_ok(),
+        }
+    }
+
+    /// The address of the channel `abstract_name` (`rns/<instance>` or
+    /// `rns/<instance>/rpc`) as an operator reads it: `@rns/<name>` for the
+    /// Linux abstract socket, the file on another Unix, `127.0.0.1:<port>`
+    /// on the TCP path. For a client tool's failure message.
+    pub fn describe(&self, abstract_name: &str) -> String {
+        self.endpoint(abstract_name).to_string()
+    }
+
     /// The endpoint of the channel `abstract_name` (`rns/<instance>` or
     /// `rns/<instance>/rpc`) under this transport.
     pub(crate) fn endpoint(&self, abstract_name: &str) -> IpcEndpoint {
@@ -385,6 +407,31 @@ mod tests {
         let config =
             crate::ini_config::parse_ini("[reticulum]\n  shared_instance_port = 40011\n").unwrap();
         assert!(!SharedInstanceTransport::from_config(&config.reticulum).tcp);
+    }
+
+    /// A listener on the data channel answers; the same port with nothing
+    /// on it does not.
+    #[test]
+    fn a_listening_instance_answers_and_a_closed_one_does_not() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t = tcp(Some(port), None);
+        assert!(t.answers("default"));
+        drop(listener);
+        assert!(!t.answers("default"));
+    }
+
+    /// The abstract socket the same way, by the instance's name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_abstract_socket_instance_answers_by_its_name() {
+        let name = format!("answers-test-{}", std::process::id());
+        let t = SharedInstanceTransport::default();
+        assert!(!t.answers(&name));
+        let listener = bind_unix(&format!("rns/{name}")).unwrap();
+        assert!(t.answers(&name));
+        drop(listener);
+        assert!(!t.answers(&name));
     }
 
     /// A TCP endpoint binds and dials, and bytes cross it both ways.

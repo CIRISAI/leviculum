@@ -211,11 +211,6 @@ impl RawConfig {
         const INERT: &[(&str, &str, &str)] = &[
             (
                 "propagation",
-                "prioritise_destinations",
-                "eviction is size- and age-driven only; see lnpnd(1)",
-            ),
-            (
-                "propagation",
                 "static_peers_bypass_sequential",
                 "one validation worker serves all peers in arrival order; see lnpnd(1)",
             ),
@@ -287,6 +282,72 @@ pub fn default_config_dir() -> PathBuf {
 /// `leviculum-nrf/pn-store/src/lib.rs`).
 pub const DEFAULT_AUTOPEER_MAXDEPTH: u8 = 6;
 
+/// The per-message transfer limit an unset key resolves to, lxmd's
+/// `PROPAGATION_LIMIT` of 256 KB (`reference/LXMF/LXMF/LXMRouter.py:55`,
+/// and lxmd's own fallback for both key spellings,
+/// `reference/LXMF/LXMF/Utilities/lxmd.py:165-177`). It was 4 until 1294,
+/// against the example config's 256: a stock peer then sent us nothing
+/// above 4 KB, and an upload above it stayed here for good (1664: shared).
+pub const DEFAULT_TRANSFER_LIMIT_KB: u64 = leviculum_lxmf::constants::PROPAGATION_LIMIT_KB;
+
+/// The per-sync limit an unset key resolves to, lxmd's `SYNC_LIMIT`,
+/// 40 transfers (`reference/LXMF/LXMF/LXMRouter.py:59`); 32 until 1294.
+pub const DEFAULT_SYNC_LIMIT_KB: u64 = leviculum_lxmf::constants::SYNC_LIMIT_KB;
+
+/// The largest client upload an unset key resolves to, lxmd's
+/// `DELIVERY_LIMIT` of 1000 KB (`reference/LXMF/LXMF/LXMRouter.py:60`):
+/// above it the recipient could not take the message either, so lnpnd
+/// refuses the resource with `PN_REJECT reason=too_large`.
+pub const DEFAULT_DELIVERY_LIMIT_KB: u64 = 1000;
+
+/// The three size limits a config and the command line resolve to.
+///
+/// One function for the daemon and its tests, so a test that pins what a
+/// node without a config takes runs the resolution `main.rs` runs, not a
+/// copy of its constants (order 1663).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeLimits {
+    /// Announce field 3 and the local-only bound, in kilobytes.
+    pub transfer_kb: u64,
+    /// Announce field 4 and the inbound resource bound, in kilobytes.
+    pub sync_kb: u64,
+    /// The largest client upload taken at all, in kilobytes.
+    pub delivery_kb: u64,
+}
+
+impl SizeLimits {
+    /// Flags first, then the config's keys, then lxmd's defaults. Both
+    /// spellings of the transfer key are read, the newer one winning, as
+    /// `apply_config` reads them (`lxmd.py:165-177`).
+    pub fn resolve(
+        file: &RawConfig,
+        transfer_flag: Option<u64>,
+        sync_flag: Option<u64>,
+    ) -> Result<Self, ConfigError> {
+        let transfer_kb = match transfer_flag {
+            Some(kb) => kb,
+            None => file
+                .get_u64("propagation", "propagation_message_max_accepted_size")?
+                .or(file.get_u64("propagation", "propagation_transfer_max_accepted_size")?)
+                .unwrap_or(DEFAULT_TRANSFER_LIMIT_KB),
+        };
+        let sync_kb = match sync_flag {
+            Some(kb) => kb,
+            None => file
+                .get_u64("propagation", "propagation_sync_max_accepted_size")?
+                .unwrap_or(DEFAULT_SYNC_LIMIT_KB),
+        };
+        let delivery_kb = file
+            .get_u64("lxmf", "delivery_transfer_max_accepted_size")?
+            .unwrap_or(DEFAULT_DELIVERY_LIMIT_KB);
+        Ok(Self {
+            transfer_kb,
+            sync_kb,
+            delivery_kb,
+        })
+    }
+}
+
 /// Our example config: `lxmd --exampleconfig`'s keys
 /// (`__default_lxmd_config__`, `reference/LXMF/LXMF/Utilities/lxmd.py:957-1178`)
 /// with this daemon's defaults and the differences called out where they
@@ -348,7 +409,9 @@ autopeer_maxdepth = 6
 # the propagation node message store,
 # specified in megabytes. Old and oversized
 # messages are removed first when the store
-# fills. Defaults to 500 megabytes.
+# fills. Defaults to 500 megabytes, less on
+# a host whose RAM cannot hold the index of
+# a full store in a quarter of it (lnpnd(1)).
 
 # message_storage_limit = 500
 
@@ -370,10 +433,12 @@ autopeer_maxdepth = 6
 
 # propagation_stamp_cost_target = 13
 
-# How far below the target a stamp from another propagation node may
-# fall and still be accepted.
+# How far below the target a stamp may fall and still be accepted.
+# The default is 0: a stock peer only takes messages worth 13 or more
+# from us, so with the target at 13 anything lower would stay on this
+# node until it expired. lxmd's 3 goes with its target of 16.
 
-# propagation_stamp_cost_flexibility = 3
+# propagation_stamp_cost_flexibility = 0
 
 # The peering key value required of nodes that want to deliver
 # messages to this one. The default is 1, the cheapest cost a stock

@@ -162,9 +162,43 @@ pub fn led_registers(port: u8, pin: u8, active_low: bool) -> LedRegisters {
     }
 }
 
+/// The address of a pin's `PIN_CNF` register (base + 0x700 + 4 * pin).
+pub fn pin_cnf_addr(port: u8, pin: u8) -> u32 {
+    let base = if port == 1 { P1_BASE } else { P0_BASE };
+    base + 0x700 + 4 * u32::from(pin & 31)
+}
+
+/// The `PIN_CNF` value that makes a button the wake source of System OFF
+/// (order 1511): an input, buffer connected, pulled away from its pressed
+/// level, sensing the pressed level. `DIR` 0 (input), `INPUT` 0
+/// (connect), `PULL` 1 (down) or 3 (up), `SENSE` 2 (high) or 3 (low),
+/// from the product spec's GPIO chapter.
+pub fn wake_pin_cnf(active_high: bool) -> u32 {
+    let (pull, sense) = if active_high { (1u32, 2u32) } else { (3, 3) };
+    (pull << 2) | (sense << 16)
+}
+
+/// The `SENSE` field of a `PIN_CNF` (bits 16 and 17), for clearing it on
+/// every pin but the button's before System OFF: any pin left sensing
+/// would wake the board too.
+pub const PIN_CNF_SENSE_MASK: u32 = 0b11 << 16;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wake_pin_senses_its_pressed_level_against_its_pull() {
+        // T114 P1.10, active low: pull-up, sense low.
+        assert_eq!(pin_cnf_addr(1, 10), 0x5000_0300 + 0x700 + 40);
+        assert_eq!(wake_pin_cnf(false), (3 << 2) | (3 << 16));
+        // T1000-E P0.06, active high: pull-down, sense high.
+        assert_eq!(pin_cnf_addr(0, 6), 0x5000_0718);
+        assert_eq!(wake_pin_cnf(true), (1 << 2) | (2 << 16));
+        // Input, connected: the low two bits are zero.
+        assert_eq!(wake_pin_cnf(true) & 0b11, 0);
+        assert_eq!(wake_pin_cnf(false) & PIN_CNF_SENSE_MASK, 3 << 16);
+    }
 
     /// A boot, a second boot, a query, a fresh fault, the next boot: what
     /// the `.retained` word holds and what each read returns.

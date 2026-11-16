@@ -12,6 +12,7 @@
 
 use embedded_graphics::prelude::*;
 
+use crate::coverage::Coverage;
 use crate::fill::{FillRule, FillStats, Filler};
 
 /// Integer square root, `floor(sqrt(v))`.
@@ -88,7 +89,7 @@ const FLAT_TURN: i64 = 4;
 /// square caps: [`stroke_pen`] with [`Pen::square`], in a loop of its own.
 /// It is every line the M9 draws, and the general walk's bookkeeping for
 /// joints and dashes cost it a quarter more instructions (callgrind, 1099).
-pub fn stroke<D: DrawTarget>(
+pub fn stroke<D: Coverage>(
     f: &mut Filler<'_, '_>,
     pts: &[Point],
     width: i32,
@@ -136,7 +137,7 @@ pub fn stroke<D: DrawTarget>(
 /// Segments whose quad lies wholly outside the filler's clip are skipped.
 /// When the scratch runs out of edge slots the shapes so far are filled
 /// and the walk goes on: an opaque colour painted twice is the same picture.
-pub fn stroke_pen<D: DrawTarget>(
+pub fn stroke_pen<D: Coverage>(
     f: &mut Filler<'_, '_>,
     pts: &[Point],
     pen: Pen,
@@ -251,7 +252,7 @@ pub fn stroke_pen<D: DrawTarget>(
 /// Add the ring `r`, filling first when the scratch has no room for it;
 /// `false` when it does not fit even into an empty scratch.
 #[inline]
-fn add<D: DrawTarget>(
+fn add<D: Coverage>(
     f: &mut Filler<'_, '_>,
     r: &[Point],
     target: &mut D,

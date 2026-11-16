@@ -1,0 +1,136 @@
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol                  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: named ---
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob                    ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol                  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: collision ---
+┌● tui───────────────────┐┌  Bob ·61dd  Zwei Kontakte heißen Bob───────────────┐
+│▌Bob ·61dd              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol                  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: petname ---
+┌● tui───────────────────┐┌  Carol  known · announces Caroline─────────────────┐
+│ Bob ·61dd              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌Carol                  ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Carol────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 5: rename ---
+┌● tui───────────────────┐┌  Carol  known · announces Caroline─────────────────┐
+│ Bob ·61dd              ││                                                    │
+│                   ┌ commands ────────────────────────────┐                   │
+│                   │> Carol Meyer                         │                   │
+│ B0b ·5ec0         │your name for Carol                   │                   │
+│                   │Enter sets it, empty clears it        │                   │
+│                   └──────────────────────────────────────┘                   │
+│▌Carol                  ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Carol────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter run │ Esc close
+--- frame 6: renamed ---
+┌● tui───────────────────┐┌  Carol Meyer  known · announces Caroline───────────┐
+│ Bob ·61dd              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌Carol Meyer            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                               ┌───────────────────┐│
+│                        ││                               │✓ named Carol Meyer││
+│                        ││               Noch keine Nachr└───────────────────┘│
+│                        │├  to Carol Meyer──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 7: blocked ---
+┌● tui───────────────────┐┌  Bob ·61dd  Zwei Kontakte heißen Bob───────────────┐
+│▌Bob ·61dd              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│           ┌─────────────────────────────────────────────────────────────────┐│
+│           │✓ blocked Carol Meyer: its messages are kept, :blocked lists them││
+│           └─────────────────────────────────────────────────────────────────┘│
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 8: blocked view ---
+┌● Blocked───── :blocked ┐┌  Carol Meyer  blocked · announces Caroline─────────┐
+│▌Carol Meyer            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                     ┌─────────────────────────────┐│
+│                        ││                     │✓ 1 blocked, :blocked returns││
+│                        ││               Noch k└─────────────────────────────┘│
+│                        │├  to Carol Meyer──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

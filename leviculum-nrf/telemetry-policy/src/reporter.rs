@@ -324,7 +324,21 @@ pub const fn path_withhold(has_path: bool, route_held: bool) -> Option<Withhold>
 
 /// How often a failed flash write is tried; the SoftDevice refuses flash
 /// access while the radio is busy.
-pub const SAVE_RETRIES: u8 = 3;
+///
+/// Twelve, not three (order 1626). The S140 SoftDevice Specification
+/// ("Flash memory API") schedules flash access between radio events and
+/// answers `NRF_EVT_FLASH_OPERATION_ERROR` when it finds no slot before its
+/// own time-out, with "retry the flash memory operation" as the remedy. On
+/// the T114 one such round cost 741 ms, plus [`SAVE_RETRY_MS`], while a BLE
+/// link whose teardown the peer never acknowledged held the radio for its
+/// 4 s supervision timeout: three rounds gave up a second before the radio
+/// came free. Twelve rounds outlast that three times over. A failed round
+/// that never started its erase costs no wear; one whose erase succeeded and
+/// whose write then failed costs one erase cycle of the page's 10^4.
+/// The answering task does not wait this long: past its window it answers
+/// "pending" (`REFUSE_PERSIST_PENDING`), and only a write abandoned here is
+/// "lost".
+pub const SAVE_RETRIES: u8 = 12;
 /// The pause after each failed flash write.
 pub const SAVE_RETRY_MS: u64 = 250;
 
@@ -605,33 +619,55 @@ mod tests {
     // -- The flash write ---------------------------------------------------
 
     #[test]
-    fn a_flash_that_fails_three_times_is_lost_after_three_pauses() {
+    fn a_flash_that_always_fails_is_lost_after_the_last_pause() {
         let mut save = FlashSave::new();
-        let steps = [
-            save.after_attempt(false),
-            save.after_attempt(false),
-            save.after_attempt(false),
-        ];
+        for attempt in 1..SAVE_RETRIES {
+            assert_eq!(
+                save.after_attempt(false),
+                SaveStep::Failed {
+                    attempt,
+                    wait_ms: SAVE_RETRY_MS,
+                    gave_up: false
+                }
+            );
+        }
         assert_eq!(
-            steps,
-            [
-                SaveStep::Failed {
-                    attempt: 1,
-                    wait_ms: SAVE_RETRY_MS,
-                    gave_up: false
-                },
-                SaveStep::Failed {
-                    attempt: 2,
-                    wait_ms: SAVE_RETRY_MS,
-                    gave_up: false
-                },
-                SaveStep::Failed {
-                    attempt: 3,
-                    wait_ms: SAVE_RETRY_MS,
-                    gave_up: true
-                },
-            ]
+            save.after_attempt(false),
+            SaveStep::Failed {
+                attempt: SAVE_RETRIES,
+                wait_ms: SAVE_RETRY_MS,
+                gave_up: true
+            }
         );
+    }
+
+    /// Order 1626, the T114 trace: each SoftDevice time-out round took
+    /// 741 ms, the radio stayed busy for the link's 4 s supervision timeout
+    /// from the moment the save was asked for. The retry budget has to
+    /// outlast that, or the store gives up on a write that would have
+    /// landed a second later, which is what three rounds did.
+    #[test]
+    fn the_retry_budget_outlasts_a_ble_teardown_the_peer_never_acknowledged() {
+        const EVT_ERROR_ROUND_MS: u64 = 741;
+        const SUPERVISION_TIMEOUT_MS: u64 = 4_000;
+        let mut save = FlashSave::new();
+        let mut elapsed = 0u64;
+        loop {
+            elapsed += EVT_ERROR_ROUND_MS;
+            if elapsed > SUPERVISION_TIMEOUT_MS {
+                // The radio is free; this round's erase gets its slot.
+                assert_eq!(save.after_attempt(true), SaveStep::Written);
+                break;
+            }
+            match save.after_attempt(false) {
+                SaveStep::Failed {
+                    gave_up: false,
+                    wait_ms,
+                    ..
+                } => elapsed += wait_ms,
+                other => panic!("gave up at {elapsed} ms, before the radio came free: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -644,13 +680,11 @@ mod tests {
         assert_eq!(save.after_attempt(true), SaveStep::Written);
     }
 
-    /// The radio profile's page runs the same loop. Its numbers are the
-    /// ones it ran inline before it did (three tries, 250 ms after each),
-    /// so a profile a host sent while the radio was busy lands on the third
-    /// try and is acked Durable, and one refused three times is Lost after
-    /// 750 ms.
+    /// The radio profile's page runs the same loop: a profile a host sent
+    /// while the radio was busy lands on the third try, and one refused on
+    /// every try is Lost after twelve pauses of 250 ms.
     #[test]
-    fn the_radio_page_lands_on_its_third_try_or_is_lost_after_750_ms() {
+    fn the_radio_page_lands_on_its_third_try_or_is_lost_after_twelve_pauses() {
         let mut save = FlashSave::new();
         assert!(matches!(
             save.after_attempt(false),
@@ -669,8 +703,8 @@ mod tests {
                 SaveStep::Written => 0,
             })
             .sum();
-        assert_eq!(waited, 750);
-        assert_eq!(SAVE_RETRIES, 3);
+        assert_eq!(waited, 3_000);
+        assert_eq!(SAVE_RETRIES, 12);
     }
 
     // -- Inbound hand-over -------------------------------------------------

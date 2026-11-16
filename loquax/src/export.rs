@@ -71,6 +71,22 @@ pub fn export(home: &Path, dir: &Path) -> Result<Exported, ImportError> {
         &storage.join(MARKER),
         b"loquax export: NomadNet's tree, LXMF packed_container per message\n",
     )?;
+    // The delivery destination's ratchets, where NomadNet's router loads
+    // them (`<storage>/lxmf/ratchets/<address>.ratchets`, LXMRouter.py:131
+    // and :357; the file is already in that format): every peer that heard
+    // Loquax announce encrypts short messages to one of them for 30 days,
+    // and the program the identity moves to has to hold them (1185).
+    let held = leviculum_std::dest_ratchet_keys_path(&home.join("storage"), &address);
+    match std::fs::read(&held) {
+        Ok(ratchets) => {
+            let to = storage
+                .join("lxmf/ratchets")
+                .join(format!("{}.ratchets", to_hex(&address)));
+            key::write_private(&to, &ratchets).map_err(|e| ImportError::new(&to, e))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ImportError::new(&held, error)),
+    }
 
     let mut out = Exported {
         address,
@@ -175,7 +191,10 @@ fn container(
     };
     let lxmf_state = match (row.outbound, row.delivery) {
         (false, _) => state::DELIVERED,
-        (true, Some(DeliveryState::Delivered)) => state::DELIVERED,
+        (
+            true,
+            Some(DeliveryState::Arrived | DeliveryState::Delivered | DeliveryState::Read { .. }),
+        ) => state::DELIVERED,
         (true, Some(DeliveryState::Sent | DeliveryState::InMailbox)) => state::SENT,
         (true, Some(DeliveryState::Rejected)) => state::REJECTED,
         (true, Some(DeliveryState::Failed)) => state::FAILED,

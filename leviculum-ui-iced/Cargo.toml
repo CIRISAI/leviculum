@@ -1,0 +1,62 @@
+[package]
+name = "leviculum-ui-iced"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Iced widgets shared by the Leviculum window programs"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+leviculum-ui = { path = "../leviculum-ui" }
+
+# The window's crates link libdl (x11-dl and libloading open X11 and
+# Wayland with dlopen), which the workspace's musl-static default target
+# cannot link: there the crate is empty, as a window is a gnu-target build
+# (Loquax's `gui` feature says the same). `cargo test --workspace` on musl
+# then builds and tests nothing here; `just lnomad-gui` and `just
+# loquax-gui` test it on the host target.
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+# iced 0.14 with its software renderer and the canvas the icons are drawn
+# on, the version and renderer Loquax's window measured. x11 and wayland
+# because the software renderer's surface (softbuffer) does not build
+# without a window system; winit opens both with dlopen. The fonts are the
+# program's. thread-pool, Loquax's executor: iced refuses to build without one.
+# advanced: the headless render and click (`headless`).
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas", "advanced"] }
+# The frame meter (`fps`, 1441): iced's own spans of a frame, through the
+# sink the workspace's vendored iced_debug adds (see the workspace
+# manifest's patch). The emulated window (`headless::drive`, 1441):
+# iced's user interface as its event loop runs it, and the software
+# renderer's present as its compositor runs it, damage and all, into a
+# buffer of our own. The versions iced 0.14 already put in the lock.
+iced_debug = "0.14"
+iced_runtime = { version = "0.14", default-features = false }
+iced_tiny_skia = { version = "0.14", default-features = false }
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
+# The window icon's PNG (`window_icon`), decoded once at the start; the
+# version in the lock through iced and the programs' tests.
+png = "0.18"
+
+# A frame's CPU time in the emulated window (`headless::thread_cpu_ns`,
+# 1473): the thread's own clock (CLOCK_THREAD_CPUTIME_ID), which a test's
+# frame budget counts so a loaded host does not stretch it; the crate
+# forbids unsafe code, and rustix calls it safely. The version in the lock.
+[target.'cfg(all(unix, not(target_env = "musl")))'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time"] }
+
+# The desktop's light or dark on Linux (`desktop`, 1310): the freedesktop
+# colour scheme over D-Bus, the reader iced's `linux-theme-detection` uses.
+# Not that feature: with it iced blocks the window's start on the portal
+# for up to 200 ms (iced_winit 0.14.1, src/lib.rs:545), which measured
+# +203 ms to the first window on a desktop whose portal does not answer.
+# Here the same stream runs as a subscription and the window starts at once.
+# async-io: zbus's own reactor, so the stream runs on iced's thread pool.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+mundy = { version = "0.2", default-features = false, features = ["async-io", "color-scheme"] }

@@ -46,10 +46,12 @@
 
 mod button;
 mod cadence;
+mod position;
 mod scheduler;
 
 pub use button::*;
 pub use cadence::*;
+pub use position::*;
 pub use scheduler::*;
 
 /// A peer identity, as both stacks report it on peer-up and stamp on

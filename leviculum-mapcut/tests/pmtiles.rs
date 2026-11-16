@@ -2,7 +2,11 @@
 //! varint directory, runs and a leaf directory.
 
 use leviculum_map::region::TileId;
-use leviculum_mapcut::pmtiles::{parse_directory, tile_id, tile_of, Archive};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use leviculum_mapcut::pmtiles::{parse_directory, tile_id, tile_of, write, Archive, RangeRead};
+use leviculum_mapcut::Res;
 
 #[test]
 fn hilbert_ids_round_trip() {
@@ -107,4 +111,50 @@ fn a_directory_cut_short_is_an_error() {
     for cut in 0..root.len() {
         assert!(parse_directory(&root[..cut]).is_err(), "cut at {cut}");
     }
+}
+
+/// An archive held in memory, read as a file would be.
+struct Held(Vec<u8>);
+
+impl RangeRead for Held {
+    fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+        let start = usize::try_from(offset)?.min(self.0.len());
+        let end = usize::try_from(offset.saturating_add(len))?.min(self.0.len());
+        Ok(self.0[start..end].to_vec())
+    }
+}
+
+#[test]
+fn a_root_of_every_tile_is_searched_in_place() {
+    // An extract writes one root holding every tile's entry, Germany's
+    // parts hundreds of thousands each. `locate` once copied that root for
+    // every tile it looked up, so the cut of a country did not end in ten
+    // minutes (1193). Every z9 tile, 262,144 entries: searched in place it
+    // is milliseconds, copied it is terabytes of memcpy.
+    let z = 9u8;
+    let mut tiles = BTreeMap::new();
+    for x in 0..(1u32 << z) {
+        for y in 0..(1u32 << z) {
+            tiles.insert(TileId { z, x, y }, vec![(x ^ y) as u8]);
+        }
+    }
+    let mut file = Vec::new();
+    write(&tiles, 1, &serde_json::json!({}), &mut file).expect("write");
+    let a = Archive::from_source(Held(file)).expect("open");
+    // Checked as it goes, so the copy fails at the bound and does not hang.
+    let bound = Duration::from_secs(20);
+    let started = Instant::now();
+    for (i, (&t, blob)) in tiles.iter().enumerate() {
+        let (at, _, len) = a.locate(t).expect("locate").expect("held");
+        assert_eq!(at, t);
+        assert_eq!(len as usize, blob.len());
+        assert!(
+            started.elapsed() < bound,
+            "{i} of 262,144 lookups in a root of as many entries took over {bound:?}"
+        );
+    }
+    assert_eq!(
+        a.locate(TileId { z: 10, x: 0, y: 0 }).expect("locate"),
+        None
+    );
 }

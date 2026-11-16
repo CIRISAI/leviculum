@@ -44,6 +44,7 @@
 mod builder;
 mod event;
 mod link_management;
+pub mod remote_dfu;
 pub mod remote_status;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
@@ -64,6 +65,8 @@ mod mvr_ble_cull_identity_mismatch;
 mod mvr_ble_departure_loop;
 #[cfg(test)]
 mod mvr_ble_held_announce_peer;
+#[cfg(test)]
+mod mvr_ble_held_announce_peer_lost;
 #[cfg(test)]
 mod mvr_ble_link_table_delivery_hint;
 #[cfg(test)]
@@ -178,6 +181,8 @@ mod mvr_orphaned_path_cache;
 mod mvr_overheard_direct_data;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_own_path_response_gone_requester;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_path_answer_through_us;
 #[cfg(test)]
 mod mvr_path_request_prune;
 #[cfg(test)]
@@ -214,6 +219,8 @@ mod mvr_reboot_relay_nopath_solicit;
 mod mvr_relay_endpoint_announce_loss;
 #[cfg(test)]
 mod mvr_relay_pr_from_next_hop;
+#[cfg(test)]
+mod mvr_renamed_client_before_teardown;
 #[cfg(test)]
 mod mvr_request_response_pins;
 #[cfg(test)]
@@ -691,7 +698,14 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     max_incoming_resource_size: usize,
     /// How many incoming resources one link may carry at once; an
     /// advertisement beyond it is refused with an RCL (Codeberg #657).
-    max_incoming_resources_per_link: usize,
+    /// A `u16` (the builder clamps), so the flag below shares its word
+    /// and the node box a board pins (`leviculum_heap_budget::
+    /// NODE_BOX_BYTES`, 8 B of slack) does not grow (1459).
+    max_incoming_resources_per_link: u16,
+    /// Whether a compressed incoming resource is taken; when not, its
+    /// advertisement is refused with an RCL at once
+    /// ([`NodeCoreBuilder::decompresses`]).
+    decompresses: bool,
     /// Receive-window adaptation policy for incoming resources (Codeberg
     /// #85). Passed into every `IncomingResource` this node creates.
     resource_window_policy: crate::resource::WindowPolicy,
@@ -705,6 +719,19 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// with the destination hash; consumed take-once at the Single-destination
     /// decrypt site and always cleared before the call returns.
     pending_single_dest_plaintext: Option<SingleDestPlaintext>,
+    /// The hash of the packet whose decrypt just failed at one of our Single
+    /// destinations. Transport queues `ProofRequested` right behind the
+    /// `PacketReceived` for every locally addressed packet, before anyone
+    /// has tried to decrypt it; this is how the proof learns that the
+    /// decrypt failed and stays unsent, as the reference proves only what
+    /// `Destination.receive` accepted (`RNS/Transport.py:2159-2160`).
+    /// Cleared by the next `ProofRequested`, whichever packet it names.
+    ///
+    /// Boxed, as `split_internal` is: unboxed, its 33 bytes grew the node
+    /// box past the board's pinned budget and cost an endpoint link
+    /// (`NODE_BOX_BYTES` in `leviculum-nrf/heap-budget`); the box lives
+    /// only between a failed decrypt and the proof request behind it.
+    undecrypted_packet: Option<Box<[u8; 32]>>,
     /// Full destination names whose per-identity hash a peer-up report pulls
     /// a path for (Codeberg #365); see
     /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
@@ -796,10 +823,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             direct_links: direct_link::DirectLinks::default(),
             assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
-            max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK,
+            max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK as u16,
+            decompresses: cfg!(feature = "compression"),
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
+            undecrypted_packet: None,
             peer_up_pull_names: Vec::new(),
         }
     }
@@ -812,6 +841,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     // Destination Management
+    /// Turn ratchets on for `dest` with this node's randomness and clock,
+    /// before it is registered: [`Self::register_destination`] then loads
+    /// the keys the storage kept for it, so a restarted process holds the
+    /// ratchets it announced before. The reference cadence is the
+    /// destination's default (30 minutes, 512 retained,
+    /// `RNS/Destination.py:85,90`), and the rotation happens on announce.
+    ///
+    /// # Errors
+    /// [`crate::destination::DestinationError::CannotEnableRatchetsOnOut`]
+    /// for an OUT destination.
+    pub fn enable_ratchets(
+        &mut self,
+        dest: &mut Destination,
+    ) -> Result<(), crate::destination::DestinationError> {
+        let now_ms = self.transport.clock().now_ms();
+        dest.enable_ratchets(&mut self.rng, now_ms)
+    }
+
     /// Register a destination to receive packets and/or connections
     ///
     /// # Arguments
@@ -971,7 +1018,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `allowed` is the set of identity hashes permitted to query; an empty
     /// list registers the handler but rejects every requester (Python parity:
     /// the ACL is consulted even when empty).
-    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>) {
+    ///
+    /// `dfu` also registers `/dfu` beside `/status`, under the same list
+    /// ([`remote_dfu`], Codeberg #235). Python never asks for that path, so
+    /// no Python peer can trip over it.
+    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>, dfu: bool) {
         let identity_bytes = match self.transport.identity().private_key_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -1003,6 +1054,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // IN/SINGLE destinations accept links by default; the client
         // establishes a link, identifies, then issues the `/status` request.
         self.register_destination(mgmt_dest);
+        if dfu {
+            self.register_request_handler(
+                hash,
+                remote_dfu::DFU_PATH,
+                request::RequestPolicy::AllowList(allowed.clone()),
+            );
+        }
         self.register_request_handler(hash, "/status", request::RequestPolicy::AllowList(allowed));
         self.remote_mgmt_dest_hash = Some(hash);
         self.mgmt_destinations.push(hash);
@@ -1186,9 +1244,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.transport
                     .storage_mut()
                     .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                let _ = self
-                    .transport
-                    .send_on_interface_to_peer(idx, &buf[..len], peer);
+                self.transport.send_own_announce_on_interface(
+                    idx,
+                    &buf[..len],
+                    dest_hash.into_bytes(),
+                    peer,
+                );
             }
             None => self.transport.send_on_all_interfaces(&buf[..len]),
         }
@@ -1795,7 +1856,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // (`reference/Reticulum/RNS/Link.py:516-517`, split at
         // `reference/Reticulum/RNS/Resource.py:299-313`).
         let resource_hash = if packed.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
-            self.send_internal_split(link_id, packed, None, &request_id, false, Some(timeout))?
+            self.send_internal_split(
+                link_id,
+                packed,
+                None,
+                &request_id,
+                false,
+                Some(timeout),
+                true,
+            )?
         } else {
             let outgoing = OutgoingResource::new_request(
                 &packed,
@@ -2200,6 +2269,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8; TRUNCATED_HASHBYTES],
         response_data: &[u8],
     ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        self.send_response_resource_with(link_id, request_id, response_data, true)
+    }
+
+    /// [`send_response_resource`](Self::send_response_resource), saying
+    /// whether the resource may be compressed. `true` compresses whenever
+    /// bz2 shrinks the data, as the reference does
+    /// (`reference/Reticulum/RNS/Resource.py:248`); `false` never does, for
+    /// a responder whose requesters include boards: no board build links
+    /// the decompressor, and a board refuses a compressed advertisement
+    /// with an RCL at once (1459). Without the `compression` feature both
+    /// are uncompressed.
+    pub fn send_response_resource_with(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; TRUNCATED_HASHBYTES],
+        response_data: &[u8],
+        compress: bool,
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
         use crate::msgpack::{write_bin, write_fixarray_header};
         use crate::packet::PacketContext;
         use crate::resource::outgoing::OutgoingResource;
@@ -2224,7 +2311,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         debug_assert_eq!(wrapped.len(), framed_len);
         if wrapped.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
             let resource_hash =
-                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None, compress)?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
 
@@ -2242,7 +2329,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             None,
             Some(request_id),
             &link.resource_crypt_params(),
-            true,
+            compress,
             &mut self.rng,
             now_ms,
         )?;
@@ -2339,7 +2426,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let mut framed = PrefixSource::new(prefix, response);
             let wrapped = crate::resource::read_source_to_vec(&mut framed)?;
             let resource_hash =
-                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None, true)?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
 
@@ -2435,6 +2522,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 request_id,
                 true,
                 None,
+                true,
             )?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
@@ -2495,6 +2583,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// (`advance_outgoing_segments`). The reference builds its next segment
     /// with the same request id and flag
     /// (`reference/Reticulum/RNS/Resource.py:770-778`).
+    #[allow(clippy::too_many_arguments)]
     fn send_internal_split(
         &mut self,
         link_id: &LinkId,
@@ -2503,6 +2592,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8],
         is_response: bool,
         advertisement_timeout_ms: Option<u64>,
+        compress: bool,
     ) -> Result<[u8; 32], crate::resource::ResourceError> {
         use crate::packet::PacketContext;
         use crate::resource::outgoing::{segment_count, InternalRequestTag, OutgoingSegmentPlan};
@@ -2528,7 +2618,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let metadata_size = metadata.as_ref().map_or(0, |m| 3 + m.len());
         let total_segments = segment_count(metadata_size + data.len());
         let mut plan =
-            OutgoingSegmentPlan::new(data, metadata, metadata_size, total_segments, true);
+            OutgoingSegmentPlan::new(data, metadata, metadata_size, total_segments, compress);
         let segment1 = plan.build_segment(1, &crypt, &mut self.rng, now_ms, Some(&tag))?;
         let resource_hash = *segment1.resource_hash();
         let adv_bytes = segment1.adv_packet().to_vec();
@@ -2611,7 +2701,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // response resource bypasses the application): refuse the way
         // `handle_resource_adv` refuses one it has no room for, so the
         // sender is not left advertising into silence (Codeberg #657).
-        if link.incoming_resource_count() + assembling >= self.max_incoming_resources_per_link {
+        if link.incoming_resource_count() + assembling
+            >= usize::from(self.max_incoming_resources_per_link)
+        {
             self.refuse_incoming_resource(link_id, &resource_hash, now_ms, "incoming_full");
             return Err(ResourceError::TransferInProgress);
         }
@@ -2685,6 +2777,97 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Cancel the resource `resource_hash` this node is receiving on
+    /// `link_id`: a receiver cancel (RCL) naming it, the receiver's state
+    /// for it gone, and a `ResourceFailed` with
+    /// [`Cancelled`](crate::resource::ResourceError::Cancelled). The sender
+    /// ends its transfer on the RCL as it does on a refused advertisement
+    /// (`reference/Reticulum/RNS/Link.py`, the `RESOURCE_RCL` branch calling
+    /// `Resource._rejected()`). When the resource was the response to a
+    /// request, the request fails with it as a `RequestTimedOut`, at once,
+    /// and the requester may ask again on the same link (1461: an answer
+    /// whose every part the line lost, the watchdog's retries running past
+    /// the requester's bound).
+    pub fn cancel_incoming_resource(
+        &mut self,
+        link_id: &LinkId,
+        resource_hash: &[u8; 32],
+    ) -> Result<crate::transport::TickOutput, crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceError;
+
+        let link_id = self.resolve_link_id(link_id);
+        let now_ms = self.transport.clock().now_ms();
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.take_incoming_resource(resource_hash)
+            .ok_or(ResourceError::NoPendingResource)?;
+        if let Ok(pkt) = link.build_data_packet_with_context(
+            resource_hash,
+            PacketContext::ResourceRcl,
+            &mut self.rng,
+        ) {
+            link.record_outbound(now_ms);
+            self.route_link_packet(&link_id, &pkt);
+        }
+        self.events.push(NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash: *resource_hash,
+            error: ResourceError::Cancelled,
+            is_sender: false,
+        });
+        Ok(self.process_events_and_actions())
+    }
+
+    /// Cancel the resource this node is sending on `link_id`: an initiator
+    /// cancel (ICL) naming it, so the receiver fails it at once, the
+    /// sender's state for it gone, and a `ResourceFailed` with
+    /// [`Cancelled`](crate::resource::ResourceError::Cancelled). Python's
+    /// `Resource.cancel()` on the sending side
+    /// (`reference/Reticulum/RNS/Resource.py:1086-1095`). A receiver that
+    /// was fetching the response to a request learns it as that request
+    /// timing out, and may ask again on the same link (1459, the home
+    /// cancelling a page mid-way). A later segment of a split send is
+    /// dropped with it.
+    pub fn cancel_outgoing_resource(
+        &mut self,
+        link_id: &LinkId,
+    ) -> Result<crate::transport::TickOutput, crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceError;
+
+        let link_id = self.resolve_link_id(link_id);
+        let now_ms = self.transport.clock().now_ms();
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        let resource = link
+            .take_outgoing_resource()
+            .ok_or(ResourceError::NoPendingResource)?;
+        let resource_hash = *resource.resource_hash();
+        drop(resource);
+        let _ = link.take_outgoing_segments();
+        if let Ok(pkt) = link.build_data_packet_with_context(
+            &resource_hash,
+            PacketContext::ResourceIcl,
+            &mut self.rng,
+        ) {
+            link.record_outbound(now_ms);
+            self.route_link_packet(&link_id, &pkt);
+        }
+        self.end_split_send(&link_id);
+        self.events.push(NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash,
+            error: ResourceError::Cancelled,
+            is_sender: true,
+        });
+        Ok(self.process_events_and_actions())
+    }
+
     /// Set the resource acceptance strategy for a link.
     pub fn set_resource_strategy(
         &mut self,
@@ -2693,7 +2876,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Result<(), crate::resource::ResourceError> {
         // Resolve a possibly-stale caller-visible id: the caller configures
         // the link straight off the `LinkEstablished` event
-        // (`leviculum-cli/src/cp.rs:809`, `leviculum-std/src/remote_status.rs:283`),
+        // (`leviculum-cli/src/cp.rs:809`, `leviculum-std/src/remote_status.rs:374`),
         // and after a #66 retry that id is the pre-re-key one.
         let link_id = &self.resolve_link_id(link_id);
         let link = self
@@ -2837,6 +3020,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // leak into a later call.
         self.pending_single_dest_plaintext = None;
         out
+    }
+
+    /// A packet for one of our Single destinations did not decrypt: say so to
+    /// the application, and keep the proof transport queued behind it from
+    /// going out.
+    fn undecryptable(
+        &mut self,
+        destination: DestinationHash,
+        raw_hash: Option<[u8; 32]>,
+        len: usize,
+        interface_index: usize,
+    ) {
+        self.undecrypted_packet = raw_hash.map(Box::new);
+        self.events.push(NodeEvent::PacketUndecryptable {
+            destination,
+            len,
+            interface_index,
+        });
     }
 
     /// Snapshot the decrypt context for a registered Single destination, so
@@ -3164,6 +3365,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Transport medium for an interface (`Unknown` when unset).
     pub fn interface_kind(&self, id: usize) -> crate::traits::InterfaceKind {
         self.transport.interface_kind(id)
+    }
+
+    /// Record the route rule an interface's medium declared (Codeberg #230,
+    /// order 1380): the media-aware driver calls this at registration with
+    /// [`PathChoice::HopsAndLoss`](crate::transport::PathChoice::HopsAndLoss)
+    /// for a radio interface. See
+    /// [`Transport::set_interface_path_choice`](crate::transport::Transport::set_interface_path_choice).
+    pub fn set_interface_path_choice(&mut self, id: usize, choice: crate::transport::PathChoice) {
+        self.transport.set_interface_path_choice(id, choice);
+    }
+
+    /// The route rule an interface runs under, override applied.
+    pub fn interface_path_choice(&self, id: usize) -> crate::transport::PathChoice {
+        self.transport.interface_path_choice(id)
     }
 
     /// Set whether the ingress burst limiter runs for an interface (Codeberg
@@ -3516,6 +3731,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.mark_interface_torn_down(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
+        self.transport.remove_interface_path_choice(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
         self.transport.remove_interface_link_profile(iface_idx);
 
@@ -3617,6 +3833,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         peer: [u8; TRUNCATED_HASHBYTES],
     ) -> crate::transport::TickOutput {
         let lost_paths = self.transport.drop_paths_via_peer(iface.0, &peer);
+        // An announce held through the lost link would be released with it
+        // as next hop, a route nothing can carry (#480).
+        let dropped_holds = self.transport.drop_held_announces_via_peer(iface.0, &peer);
+        if dropped_holds > 0 {
+            crate::tracing::debug!(
+                event = "ANN_HELD_DROPPED",
+                peer = %HexShort(&peer),
+                iface = %self.transport.iface_name(iface.0),
+                reason = "peer_lost",
+                n = dropped_holds,
+            );
+        }
 
         crate::tracing::debug!(
             "Peer <{}> lost on {}, removed {} paths",
@@ -3761,6 +3989,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             crate::tracing::debug!(event = "IFACE_UP_STALE", idx = interface_index,);
             return self.process_events_and_actions();
         }
+        // The peer counts our announces on a new interface from now (order
+        // 1320): the re-announce below goes out paced.
+        self.transport.mark_interface_fresh(interface_index);
         self.announce_local_destinations(interface_index, None);
         self.process_events_and_actions()
     }
@@ -3859,9 +4090,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.transport
                                 .storage_mut()
                                 .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                            let _ = self.transport.send_on_interface_to_peer(
+                            // Paced on a fresh interface (order 1320): the
+                            // first at once, every further one a spacing on.
+                            self.transport.send_own_announce_on_interface(
                                 interface_index,
                                 &buf[..len],
+                                dest_hash.into_bytes(),
                                 peer,
                             );
                             sent += 1;
@@ -3899,9 +4133,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     self.transport
                         .storage_mut()
                         .add_packet_hash(crate::packet::packet_hash(&cached_raw));
-                    let _ = self.transport.send_on_interface_to_peer(
+                    self.transport.send_own_announce_on_interface(
                         interface_index,
                         &cached_raw,
+                        *hash,
                         peer,
                     );
                     sent += 1;
@@ -4795,6 +5030,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                             dest = %HexShort(destination_hash.as_ref()),
                                             "Dropped packet, ratchet enforcement"
                                         );
+                                        self.undecryptable(
+                                            dest_hash_typed,
+                                            raw_hash,
+                                            packet.data.len(),
+                                            interface_index,
+                                        );
                                         return;
                                     }
                                     m.plaintext
@@ -4818,6 +5059,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                             crate::tracing::trace!(
                                                 dest = %HexShort(destination_hash.as_ref()),
                                                 "Dropped packet, decryption failed"
+                                            );
+                                            self.undecryptable(
+                                                dest_hash_typed,
+                                                raw_hash,
+                                                packet.data.len(),
+                                                interface_index,
                                             );
                                             return;
                                         }
@@ -4899,6 +5146,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 peer,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
+                if self.undecrypted_packet.take().as_deref() == Some(&packet_hash) {
+                    crate::tracing::debug!(
+                        dest = %HexShort(&destination_hash),
+                        "No proof for a packet that did not decrypt"
+                    );
+                    return;
+                }
                 let proof_strategy = self
                     .destinations
                     .get(&dest_hash)
@@ -10883,8 +11137,11 @@ mod tests {
         node.transport.clock().advance(300);
         let _ = node.handle_timeout();
 
-        // Now simulate interface recovery: call handle_interface_up
-        let output = node.handle_interface_up(0);
+        // Now simulate interface recovery: call handle_interface_up. The
+        // second announce on the fresh interface leaves a spacing after the
+        // first (order 1320).
+        let mut output = node.handle_interface_up(0);
+        output.actions.extend(node.release_paced_announces());
 
         // We expect two sends targeting the recovered interface (Codeberg
         // #132: no longer broadcasts): one fresh announce for daemon_dest,
@@ -13547,6 +13804,28 @@ mod tests {
             .iter()
             .any(|e| matches!(e, NodeEvent::RequestTimedOut { .. }));
         assert!(!has_timeout);
+    }
+}
+
+#[cfg(test)]
+mod mvr_path_response_survives_reannounce;
+
+#[cfg(test)]
+mod mvr_announce_committed_before_interface_up;
+
+#[cfg(test)]
+impl<R: CryptoRngCore, S: Storage> NodeCore<R, crate::test_utils::MockClock, S> {
+    /// Walk the clock through every own announce a fresh interface paced
+    /// (order 1320) and return the actions that released them, in order.
+    pub(crate) fn release_paced_announces(&mut self) -> Vec<crate::transport::Action> {
+        let mut actions = Vec::new();
+        while self.transport.fresh_announces_waiting() > 0 {
+            self.transport
+                .clock()
+                .advance(crate::transport::FRESH_ANNOUNCE_SPACING_MS);
+            actions.extend(self.handle_timeout().actions);
+        }
+        actions
     }
 }
 

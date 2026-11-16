@@ -28,6 +28,9 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+mod copies;
+pub use copies::QueuedCopies;
+
 /// Packet slots in the LoRa outbound queue.
 ///
 /// Sixteen times the four slots this queue had until #344. Four slots against
@@ -605,11 +608,12 @@ impl OwnShare {
 
 /// What the LoRa interface does with a packet the core hands it.
 ///
-/// Three outcomes, in the order they are decided: a carrier switched off by
+/// Four outcomes, in the order they are decided: a carrier switched off by
 /// the operator (`lnflash --set-media lora=off`) swallows the packet however
-/// full the queue is, a lit carrier with a full queue refuses it with the
-/// bound that bound, and otherwise the packet is queued with its room already
-/// reserved. Was inline in the firmware's `LoRaInterface::try_send`, moved
+/// full the queue is, a byte-identical copy of a frame still queued is
+/// dropped as already queued (1169), a lit carrier with a full queue refuses
+/// it with the bound that bound, and otherwise the packet is queued with its
+/// room already reserved. Was inline in the firmware's `LoRaInterface::try_send`, moved
 /// here so a host test holds each arm (leviculum#413): no rig cell switches
 /// the LoRa carrier off under traffic or fills the queue to its bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,26 +623,45 @@ pub enum Outbound {
     /// chance and this one never gets it, so the driver must not re-queue
     /// it. Nothing is reserved.
     Swallow,
+    /// The queue already holds a frame with exactly these bytes, not yet
+    /// handed to the transmitter: answer `Ok` and drop the copy, because the
+    /// queued one puts the same frame on the air. Decided before the bounds,
+    /// so a copy is never refused as `BufferFull` and re-offered by the
+    /// driver. Nothing is reserved.
+    Duplicate,
     /// The queue is full: answer `BufferFull`, saying which bound refused.
     /// Nothing is reserved.
     Refuse(QueueBound),
-    /// Room is reserved: the caller must enqueue the packet, or hand the
-    /// room back through [`QueueBudget::channel_refused`].
+    /// Room is reserved and the frame recorded in the [`QueuedCopies`]: the
+    /// caller must enqueue the packet, or hand both back through
+    /// [`QueueBudget::channel_refused`] and [`QueuedCopies::dequeued`].
     Queue,
 }
 
-/// Decide what happens to an outbound packet of `len` bytes. On
-/// [`Outbound::Queue`] the room is already reserved in `budget`.
+/// Decide what happens to the outbound packet `frame`. On
+/// [`Outbound::Queue`] the room is already reserved in `budget` and the
+/// frame recorded in `copies`.
 ///
 /// The carrier is read before the queue, so a dark carrier answers the same
 /// whatever the queue holds. The same order as the BLE outbound path
 /// (`leviculum_ble_tx::saturation::outbound_verdict`).
-pub fn outbound_verdict(carrier_on: bool, budget: &QueueBudget, len: usize) -> Outbound {
+pub fn outbound_verdict(
+    carrier_on: bool,
+    budget: &QueueBudget,
+    copies: &QueuedCopies,
+    frame: &[u8],
+) -> Outbound {
     if !carrier_on {
         return Outbound::Swallow;
     }
-    match budget.reserve(len) {
-        Ok(()) => Outbound::Queue,
+    if copies.is_queued(frame) {
+        return Outbound::Duplicate;
+    }
+    match budget.reserve(frame.len()) {
+        Ok(()) => {
+            copies.queued(frame);
+            Outbound::Queue
+        }
         Err(bound) => Outbound::Refuse(bound),
     }
 }

@@ -1,22 +1,33 @@
 //! Events in: [`AppEvent`], and [`update`], which folds one into the
 //! [`Model`] and returns the effects it asks the shell to perform.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use leviculum_micron::{FieldKind, MicronDocument};
 
 use crate::bookmarks::Bookmark;
-use crate::browser::{self};
 use crate::discovery::DiscoveredNode;
 use crate::image::{ImageSlot, Probe, SlotState, MAX_INLINE_IMAGES};
+use crate::names::{direct_hit, search, VisitOutcome};
 use crate::page_cache::CacheEntry;
 use crate::render::{standalone_links, RenderedLink};
-use crate::url::{classify_link, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH};
+use crate::url::{
+    classify_link, is_nururl, parse_nururl, parse_url, resolve_link, LinkKind, Target, UrlError,
+    DEFAULT_PATH,
+};
 
 use super::chrome::*;
 use super::geometry::{rect_contains, regions, Rect};
-use super::input::{
-    input_request, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use super::input::{InputBuffer, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use super::intent::{apply, Intent};
+use super::keys;
 use super::model::*;
+use super::strings::{with, with_args, Arg, Lang, StrId, Text};
+#[cfg(test)]
 pub(crate) use leviculum_ui::keymap::{self, Ctx, Panes, SCROLL_ROWS};
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
@@ -41,6 +52,8 @@ pub enum AppEvent {
     },
     /// A navigation failed with a human-readable message.
     LoadFailed(String),
+    /// A navigation failed, in the catalogue's words (the shell's fetch).
+    LoadFailedText(Text),
     /// A file download completed and was saved to disk.
     DownloadDone {
         /// The filename it was saved as.
@@ -50,8 +63,8 @@ pub enum AppEvent {
         /// The directory it was saved into, for the toast.
         dir: String,
     },
-    /// A file download failed with a human-readable message.
-    DownloadFailed(String),
+    /// A file download failed, with what the reader is told.
+    DownloadFailed(Text),
     /// An inline image's transfer started.
     ImageLoading {
         /// The link index it belongs to.
@@ -92,6 +105,8 @@ pub enum AppEvent {
     NodeDiscovered(DiscoveredNode),
     /// The spinner animation tick, delivered while a fetch is in flight.
     Tick,
+    /// What a tap on a scene node, or a host, asks ([`super::intent`]).
+    Intent(super::intent::Intent),
 }
 
 /// Fold an event into the model, returning any [`Effect`]s for the IO shell.
@@ -109,22 +124,37 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::PageLoaded { doc, title } => apply_loaded(model, doc, title),
+        AppEvent::Intent(intent) => super::intent::apply(model, intent),
         AppEvent::LoadFailed(msg) => {
+            if show_failed(model) {
+                return Vec::new();
+            }
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
             Vec::new()
         }
+        AppEvent::LoadFailedText(text) => {
+            if show_failed(model) {
+                return Vec::new();
+            }
+            model.pending = None;
+            model.say(ToastKind::Error, text);
+            Vec::new()
+        }
         AppEvent::DownloadDone { name, bytes, dir } => {
             model.download = None;
-            model.set_toast(
+            model.say(
                 ToastKind::Info,
-                format!("downloaded {name} ({bytes} bytes) to {dir}"),
+                with_args(
+                    StrId::Downloaded,
+                    vec![Arg::Str(name), Arg::Int(bytes as i64), Arg::Str(dir)],
+                ),
             );
             Vec::new()
         }
         AppEvent::DownloadFailed(msg) => {
             model.download = None;
-            model.set_toast(ToastKind::Error, msg);
+            model.say(ToastKind::Error, msg);
             Vec::new()
         }
         AppEvent::ImageLoading { link } => {
@@ -159,6 +189,16 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Mouse(mouse) => {
+            // The name-search list is keyboard driven: the wheel moves its
+            // selection, and no click or hover reaches the page underneath.
+            if model.names.is_some() {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => move_name_sel(model, ScrollCmd::LineDown),
+                    MouseEventKind::ScrollUp => move_name_sel(model, ScrollCmd::LineUp),
+                    _ => {}
+                }
+                return Vec::new();
+            }
             let vp = model.viewport();
             match mouse.kind {
                 // The wheel scrolls whichever window owns the screen: an open
@@ -211,33 +251,12 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
 pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) -> Vec<Effect> {
     let pending = model.pending.take();
     let anchor = model.pending_anchor.take();
-    // A fresh fetch, not a cache hit: clear the "cached" marker.
-    model.cached_view = false;
-    model.doc = doc;
-    // A fresh document replaces the old fields: clear the store so the relayout
-    // lays them out from the new prefill, then rebuild the editable store from it.
-    model.field_state.clear();
-    model.relayout(content_width(model.size.0));
-    model.rebuild_field_state();
-    model.scroll = 0;
-    model.title = title;
-    model.dismiss_toast();
-    // A fresh page invalidates any focus/hover cursor into the old link set, and
-    // any search match highlights against the old page.
-    model.focus = None;
-    model.field_focus = None;
-    model.mode = Mode::Browse;
-    model.hover = None;
-    model.matches.clear();
-    model.current_match = None;
+    show_doc(model, doc, title);
     let loaded_target = pending.map(|pending| {
-        model.current_dest = Some(pending.target.dest_hash);
-        match pending.action {
-            HistoryAction::Push => model.history.visit(pending.target.clone()),
-            HistoryAction::Goto(idx) => model.history.goto(idx),
-        }
+        enter_history(model, &pending);
         pending.target
     });
+    model.failed = None;
     // The loaded page's node may differ from the previous one: refresh the
     // identify display flag from what the model has learned so far. The IO
     // shell follows up with the session's authoritative answer for this load.
@@ -252,12 +271,18 @@ pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String
                 let vp = model.viewport();
                 model.scroll = line.min(model.max_scroll(vp));
             }
-            None => model.set_toast(ToastKind::Error, format!("anchor #{name} not found")),
+            None => model.say(ToastKind::Error, with(StrId::AnchorNotFound, name)),
         }
     }
     // Cache the freshly loaded page (overwriting any prior entry for this target,
     // as a reload does) so a later revisit renders instantly. A non-idempotent
     // form submit is never cached.
+    let mut effects = Vec::new();
+    if let Some(target) = &loaded_target {
+        if pin_visit(model, target.dest_hash) {
+            effects.push(Effect::SavePins);
+        }
+    }
     if let Some(target) = loaded_target {
         if !is_form_submit(&target) {
             model.page_cache.insert(
@@ -270,7 +295,8 @@ pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String
             );
         }
     }
-    plan_images(model)
+    effects.extend(plan_images(model));
+    effects
 }
 
 /// Work out which of the page's links are pictures, install a slot for each,
@@ -307,7 +333,7 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
             });
             continue;
         }
-        let Ok((target, _)) = browser::resolve_link(link, model.current_dest) else {
+        let Ok((target, _)) = resolve_link(link, model.current_dest) else {
             continue;
         };
         requests.push(ImageRequest {
@@ -335,22 +361,130 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// The start screen's micron source: what a reader sees when `lnomad` is
-/// started without a URL. A real micron document rather than hand-drawn chrome,
-/// so it goes through the same parse/layout/render path as a fetched page and
-/// re-wraps on a resize or a theme change for free.
-pub(crate) const START_PAGE: &str = "\
->lnomad
-
-Terminal browser for NomadNet pages.
-
-No page is open. Node discovery runs in the background, so nodes appear in the \
-places panel as their announces arrive.
-
-`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
+/// The start screen's micron source in `lang`: what a reader sees when
+/// `lnomad` is started without a URL. A real micron document rather than
+/// hand-drawn chrome, so it goes through the same parse/layout/render path as a
+/// fetched page and re-wraps on a resize or a theme change for free.
+pub(crate) fn start_page(lang: Lang, hosted: bool) -> String {
+    let w = |id: StrId| id.text(lang);
+    if hosted {
+        // A messenger's tab on a touch screen (1337): no keys to name, one
+        // sentence over the places list the tab opens with.
+        return format!(
+            ">{}\n\n{}",
+            w(StrId::StartHostedTitle),
+            w(StrId::StartHosted)
+        );
+    }
+    format!(
+        ">lnomad\n\n{}\n\n{}\n\n`!d`! {}   `!:`! {}   `!?`! {}   `!q`! {}",
+        w(StrId::StartTagline),
+        w(StrId::StartNoPage),
+        w(StrId::Places),
+        w(StrId::Url),
+        w(StrId::Help),
+        w(StrId::Quit),
+    )
+}
 
 /// The title shown for the start screen, in place of a page's node name.
 pub(crate) const START_TITLE: &str = "lnomad";
+
+/// Put `doc` on screen under `title`, at its top, every cursor into the
+/// page before gone: a fresh fetch's page, or a hosted browser's failure
+/// page ([`show_failed`]).
+fn show_doc(model: &mut Model, doc: MicronDocument, title: String) {
+    // A fresh fetch, not a cache hit: clear the "cached" marker.
+    model.cached_view = false;
+    model.doc = doc;
+    // A fresh document replaces the old fields: clear the store so the relayout
+    // lays them out from the new prefill, then rebuild the editable store from it.
+    model.field_state.clear();
+    model.relayout(content_width(model.size.0));
+    model.rebuild_field_state();
+    model.scroll = 0;
+    model.title = title;
+    model.dismiss_toast();
+    // A fresh page invalidates any focus/hover cursor into the old link set, and
+    // any search match highlights against the old page.
+    model.focus = None;
+    model.field_focus = None;
+    model.mode = Mode::Browse;
+    model.hover = None;
+    model.matches.clear();
+    model.current_match = None;
+}
+
+/// The navigation `pending` arrived: its destination is the current one and
+/// the history moves to it. The retry of a failure page replaces that page's
+/// entry rather than pushing the same target a second time (1669).
+fn enter_history(model: &mut Model, pending: &Pending) {
+    model.current_dest = Some(pending.target.dest_hash);
+    match pending.action {
+        HistoryAction::Push
+            if model.failed.as_ref() == Some(&pending.target)
+                && model.history.current() == Some(&pending.target) => {}
+        HistoryAction::Push => model.history.visit(pending.target.clone()),
+        HistoryAction::Goto(idx) => model.history.goto(idx),
+    }
+}
+
+/// A hosted browser's page that did not come (1669, walk 12, finding 69:
+/// the phone showed an empty page under "Pages", the address field back to
+/// its placeholder and two toasts in jargon, with no way to try again). The
+/// failure is the page now: its address stays the target's, it says that
+/// there was no connection to the page's node by the name the host gave it
+/// ([`Model::label`]) and offers to try again as a link to the same target,
+/// and it is an entry of the history, so Back leaves it as it leaves a
+/// page. Nothing of it is cached or pinned. `false`, and nothing changed,
+/// where it does not apply: the standalone browser, a download, no fetch
+/// out, and the refresh of a cached copy on screen, which stays.
+fn show_failed(model: &mut Model) -> bool {
+    if !model.hosted {
+        return false;
+    }
+    let Some(pending) = model.pending.clone() else {
+        return false;
+    };
+    if pending.target.is_file
+        || (model.cached_view && model.history.current() == Some(&pending.target))
+    {
+        return false;
+    }
+    model.pending = None;
+    model.pending_anchor = None;
+    let name = model
+        .label
+        .clone()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| short_hex(&pending.target.dest_hash));
+    let said = with(StrId::FetchNoConnection, escape_micron(&name)).resolve(model.lang);
+    let micron = format!(
+        "\n{said}\n\n`[{}`{}]\n",
+        escape_micron(StrId::FetchTryAgain.text(model.lang)),
+        target_url(&pending.target)
+    );
+    show_doc(model, leviculum_micron::parse(&micron), name);
+    enter_history(model, &pending);
+    model.failed = Some(pending.target);
+    if let Some(dest) = model.current_dest {
+        model.identifying = model.identify_known.contains(&dest);
+    }
+    true
+}
+
+/// `text` as micron shows it verbatim: the escape before each character
+/// micron reads as markup inside a line.
+fn escape_micron(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '`' | '\\' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// Show the start screen and open the places panel over it.
 ///
@@ -362,10 +496,60 @@ pub(crate) const START_TITLE: &str = "lnomad";
 pub fn show_start_screen(model: &mut Model) {
     apply_loaded(
         model,
-        leviculum_micron::parse(START_PAGE),
+        leviculum_micron::parse(&start_page(model.lang, model.hosted)),
         START_TITLE.to_string(),
     );
     model.show_places = true;
+}
+
+/// A host opens a page anew (1621, Loquax's Explore and a chat's link):
+/// the page shown, its title and its trail go at once, so nothing of the
+/// page before shows while the new one loads, and the first Back from it
+/// gives the browser back to the host ([`Effect::Quit`]). A fetch in flight
+/// is cancelled. The cache, the bookmarks and the nodes stay.
+pub fn start_trail(model: &mut Model) -> Vec<Effect> {
+    let was_loading = model.is_loading();
+    model.pending = None;
+    model.pending_anchor = None;
+    model.download = None;
+    let mut effects = apply_loaded(model, MicronDocument::default(), String::new());
+    model.history = super::model::History::default();
+    model.current_dest = None;
+    model.show_places = false;
+    model.names = None;
+    if was_loading {
+        effects.insert(0, Effect::Cancel);
+    }
+    effects
+}
+
+/// Back at the start of a hosted browser's trail (1621): a fetch in
+/// flight is cancelled and the browser gives way to its host
+/// ([`Effect::Quit`], which a host reads as "back to where the reader came
+/// from").
+pub(crate) fn leave_host(model: &mut Model) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if model.is_loading() {
+        model.pending = None;
+        model.pending_anchor = None;
+        model.download = None;
+        effects.push(Effect::Cancel);
+    }
+    effects.push(Effect::Quit);
+    effects
+}
+
+/// The platform's own address field now holds `value`: the address bar
+/// is entered first, as a press on it enters it, and then holds the text,
+/// its cursor at the end. What a window's text field says on every edit,
+/// the standalone window's and the Browse tab's in Loquax's (1369).
+pub fn type_address(model: &mut Model, value: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if model.mode != Mode::Address {
+        effects = apply(model, Intent::Activate(super::scene::NodeId::Address));
+    }
+    model.input = super::input::field_with(value);
+    effects
 }
 
 /// Split a trailing `#anchor` off a target's path, returning the anchor-free
@@ -386,74 +570,51 @@ pub fn split_path_anchor(mut target: Target) -> (Target, Option<String>) {
     }
 }
 
-/// Fold a key press, routed by mode. Returns any effects.
+/// Fold a key press. The key table ([`super::keys`]) names the action the
+/// key runs in the pane the model is in (the help, the places panel and the
+/// name list own the keys while open, else the mode); the action becomes an
+/// [`Intent`] and folds through [`apply`] as a tap does. A key the table
+/// does not hold goes to what the pane types into, or nowhere.
 pub(crate) fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-    // Any key dismisses the current toast; a handler below may raise a fresh one
-    // for this very key (e.g. `m` -> "bookmarked"), which then wins.
+    // Any key dismisses the current toast; the intent below may raise a fresh
+    // one for this very key (e.g. `m` -> "bookmarked"), which then wins.
     model.dismiss_toast();
 
-    // Ctrl-C quits from any mode.
-    if ctrl && key.code == KeyCode::Char('c') {
-        model.quit = true;
-        return vec![Effect::Quit];
+    let pane = keys::pane(model);
+    if let Some(action) = keys::resolve(&key, pane, keys::ctx(model)) {
+        return match Intent::of_key(action, model) {
+            Some(intent) => apply(model, intent),
+            None => Vec::new(),
+        };
     }
-
-    // The help overlay swallows keys until dismissed. While it is open every
-    // scroll key from `SCROLL_ROWS` moves the OVERLAY's view (via the shared
-    // `scrolled` rule), not the page underneath.
-    if model.show_help {
-        if matches!(
-            key.code,
-            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
-        ) {
-            model.show_help = false;
-        } else if let Some(cmd) = key_to_scroll(&key) {
-            let (viewport, max) = help_scroll_geometry(model);
-            model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
-        }
+    // While the name list asks, any key but `y` is the answer no.
+    if pane == keys::ASK {
+        return apply(model, Intent::Answer { yes: false });
+    }
+    if model.show_help || model.show_places || model.names.is_some() {
         return Vec::new();
     }
-
-    // The places panel is modal like the help overlay: it owns keys until closed.
-    if model.show_places {
-        return update_places_key(model, key);
-    }
-
     match model.mode {
-        Mode::Address => update_address_key(model, key),
-        Mode::Hint => update_hint_key(model, key),
-        Mode::Search => update_search_key(model, key),
-        Mode::Field => update_field_key(model, key),
-        Mode::Browse => update_browse_key(model, key, ctrl),
+        Mode::Address => {
+            model.input.edit(&key);
+            Vec::new()
+        }
+        Mode::Search => {
+            model.search_input.edit(&key);
+            Vec::new()
+        }
+        Mode::Hint => type_hint(model, key),
+        Mode::Field => type_field(model, key),
+        Mode::Browse => Vec::new(),
     }
 }
 
-/// Fold a key while a form field has focus. Tab/Shift-Tab move to the next/
-/// previous interactive element; Esc leaves editing back to browse. A text field
-/// takes the usual editing keys (typing, Backspace/Delete, Left/Right, Home/End)
-/// and re-lays the page out so its widget reflects the new value; a checkbox/
-/// radio toggles on Space (a radio deselects its group siblings). Any other key
-/// is ignored, so field editing never leaks into browse hotkeys.
-pub(crate) fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Tab => {
-            focus_next(model);
-            return Vec::new();
-        }
-        KeyCode::BackTab => {
-            focus_prev(model);
-            return Vec::new();
-        }
-        KeyCode::Esc => {
-            model.field_focus = None;
-            model.mode = Mode::Browse;
-            return Vec::new();
-        }
-        _ => {}
-    }
-
+/// Type a key into the focused form field, the keys the table left over. A
+/// text field takes the usual editing keys (typing, Backspace/Delete,
+/// Left/Right, Home/End) and re-lays the page out so its widget reflects the
+/// new value; a checkbox or radio takes nothing but its `Space`, which the
+/// table holds. With no field focused the mode falls back to browsing.
+pub(crate) fn type_field(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     let Some(fi) = model.field_focus else {
         model.mode = Mode::Browse;
         return Vec::new();
@@ -461,38 +622,43 @@ pub(crate) fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> 
     let Some(fe) = model.field_state.get(fi - 1) else {
         return Vec::new();
     };
-
-    match fe.kind {
-        FieldKind::Text => {
-            if matches!(
-                key.code,
-                KeyCode::Char(_)
-                    | KeyCode::Backspace
-                    | KeyCode::Delete
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Home
-                    | KeyCode::End
-            ) {
-                if let Some(fe) = model.field_state.get_mut(fi - 1) {
-                    if let Some(req) = input_request(&key) {
-                        fe.input.handle(req);
-                    }
-                }
-                // The widget text changed width: re-lay the page out so the box
-                // and every downstream position stay correct, keeping the scroll.
-                let (w, vp) = (model.width, model.viewport());
-                model.relayout(w);
-                model.clamp_scroll(vp);
-            }
+    let editing = matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+    );
+    if fe.kind == FieldKind::Text && editing {
+        if let Some(fe) = model.field_state.get_mut(fi - 1) {
+            fe.input.edit(&key);
         }
-        FieldKind::Checkbox | FieldKind::Radio => {
-            if key.code == KeyCode::Char(' ') {
-                toggle_field(model, fi);
-            }
-        }
+        // The widget text changed width: re-lay the page out so the box
+        // and every downstream position stay correct, keeping the scroll.
+        let (w, vp) = (model.width, model.viewport());
+        model.relayout(w);
+        model.clamp_scroll(vp);
     }
     Vec::new()
+}
+
+/// Set text field `fi` (1-based) to `text`, as a platform's own editor
+/// hands it in, and lay the page out again around the new width, keeping
+/// the scroll. A checkbox, a radio or an index off the page is left alone.
+pub(crate) fn fill_field(model: &mut Model, fi: usize, text: &str) {
+    let Some(fe) = fi.checked_sub(1).and_then(|i| model.field_state.get_mut(i)) else {
+        return;
+    };
+    if fe.kind != FieldKind::Text {
+        return;
+    }
+    fe.input.set_value(text);
+    let (w, vp) = (model.width, model.viewport());
+    model.relayout(w);
+    model.clamp_scroll(vp);
 }
 
 /// Activate field `fi` (1-based): a checkbox toggles its checked state, a radio
@@ -533,40 +699,13 @@ pub(crate) fn select_radio(model: &mut Model, fi: usize) {
     }
 }
 
-/// Fold a key while the in-page search editor has focus. `Enter` commits the
-/// query (compute matches, jump to the first); `Esc` cancels and clears all
-/// highlights; any other key edits the query.
-pub(crate) fn update_search_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+/// Type a key in hint mode, the keys the table left over. A character
+/// narrows the visible labels (by label prefix or link-text substring); a
+/// unique match follows the link, activates the form field, or drives the
+/// control; `Backspace` takes the last character back. A non-matching key
+/// is ignored.
+pub(crate) fn type_hint(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     match key.code {
-        KeyCode::Esc => {
-            exit_search(model);
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let query = model.search_input.value().to_string();
-            model.mode = Mode::Browse;
-            commit_search(model, &query);
-            Vec::new()
-        }
-        _ => {
-            if let Some(req) = input_request(&key) {
-                model.search_input.handle(req);
-            }
-            Vec::new()
-        }
-    }
-}
-
-/// Fold a key while hint mode is active. A character narrows the visible labels
-/// (by label prefix or link-text substring); a unique match follows the link,
-/// activates the form field, or drives the control. `Esc` exits; a non-matching
-/// key is ignored.
-pub(crate) fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Esc => {
-            exit_hint(model);
-            Vec::new()
-        }
         KeyCode::Backspace => {
             model.hint_input.pop();
             Vec::new()
@@ -604,191 +743,51 @@ pub(crate) fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     }
 }
 
-/// Fold a key while the address editor has focus.
-pub(crate) fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Esc => {
-            model.mode = Mode::Browse;
-            model.input.reset();
-            model.dismiss_toast();
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let raw = model.input.value().trim().to_string();
-            match parse_url(&raw, model.current_dest) {
-                Ok(target) => {
-                    model.mode = Mode::Browse;
-                    model.input.reset();
-                    begin_navigation(model, target, HistoryAction::Push, None)
+/// Go where the address field's text `raw` says: a URL, a `nomadnetwork://`
+/// one, or a name to search (1227). What Enter in the address editor and
+/// [`Intent::Go`](super::intent::Intent::Go) do.
+pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
+    let raw = raw.to_string();
+    if is_nururl(&raw) {
+        return match parse_nururl(&raw) {
+            Ok(nur) => {
+                model.mode = Mode::Browse;
+                model.input.set_value("");
+                let effects = begin_navigation(model, nur.target, HistoryAction::Push, None);
+                // After begin_navigation, whose toast dismissal must not
+                // clear this one.
+                if !nur.ignored.is_empty() {
+                    model.say(
+                        ToastKind::Info,
+                        with(StrId::NururlIgnored, nur.ignored.join(", ")),
+                    );
                 }
-                Err(err) => {
-                    model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
-                    Vec::new()
-                }
+                effects
             }
-        }
-        _ => {
-            if let Some(req) = input_request(&key) {
-                model.input.handle(req);
+            Err(err) => {
+                model.say(ToastKind::Error, bad_url_note(StrId::BadUrl, &raw, err));
+                Vec::new()
             }
-            Vec::new()
-        }
-    }
-}
-
-/// Fold a key while browsing (scrolling, navigation, mode switches).
-pub(crate) fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect> {
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-
-    if key.code == KeyCode::Char('q') {
-        model.quit = true;
-        return vec![Effect::Quit];
-    }
-
-    // Cancel an in-flight fetch or download (Esc or Ctrl-g), returning to the
-    // current page.
-    if model.is_loading() && (key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')))
-    {
-        model.pending = None;
-        model.download = None;
-        model.set_toast(ToastKind::Info, "cancelled");
-        return vec![Effect::Cancel];
-    }
-
-    // Ctrl-L: recompute the layout and redraw, keeping the (re-clamped) offset.
-    if ctrl && key.code == KeyCode::Char('l') {
-        let (w, vp) = (model.width, model.viewport());
-        model.relayout(w);
-        model.clamp_scroll(vp);
-        return Vec::new();
-    }
-
-    // Enter address mode.
-    if key.code == KeyCode::Char(':') {
-        enter_address(model);
-        return Vec::new();
-    }
-
-    // Enter hint mode (`f`).
-    if key.code == KeyCode::Char('f') && !ctrl && !alt {
-        enter_hint(model);
-        return Vec::new();
-    }
-
-    // Enter in-page search mode (`/`).
-    if key.code == KeyCode::Char('/') && !ctrl && !alt {
-        enter_search(model);
-        return Vec::new();
-    }
-
-    // Cycle the current search match: `n` next, `N` previous (both wrap), each
-    // scrolling the current match into view. A no-op with no active matches.
-    if key.code == KeyCode::Char('n') && !ctrl && !alt {
-        next_match(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::Char('N') && !ctrl && !alt {
-        prev_match(model);
-        return Vec::new();
-    }
-
-    // Toggle the light/dark theme (`t`), correcting a wrong auto-detection.
-    if key.code == KeyCode::Char('t') && !ctrl && !alt {
-        model.toggle_theme();
-        return Vec::new();
-    }
-
-    // Toggle the places panel (`d`): bookmarks + discovered nodes.
-    if key.code == KeyCode::Char('d') && !ctrl && !alt {
-        toggle_places(model);
-        return Vec::new();
-    }
-
-    // Bookmark (or un-bookmark) the current page (`m`).
-    if key.code == KeyCode::Char('m') && !ctrl && !alt {
-        return toggle_bookmark_current(model);
-    }
-
-    // Open the focused picture in the system image viewer (`o`): it is saved
-    // to the download directory first, because the platform handler needs a
-    // file and the picture has only ever existed in memory. A no-op unless an
-    // arrived picture is focused.
-    if key.code == KeyCode::Char('o') && !ctrl && !alt {
-        if let Some(effect) = model
-            .focus
-            .and_then(|index| saved_image_effect(model, index, true))
-        {
-            model.dismiss_toast();
-            return vec![effect];
-        }
-        return Vec::new();
-    }
-
-    // Yank the current page (or focused link) URL to the clipboard (`y`).
-    if key.code == KeyCode::Char('y') && !ctrl && !alt {
-        return yank_url(model);
-    }
-
-    // Toggle identifying to the current page's node (`i`), reloading it so the
-    // decision takes effect on a fresh link.
-    if key.code == KeyCode::Char('i') && !ctrl && !alt {
-        return toggle_identify(model);
-    }
-
-    // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
-    if key.code == KeyCode::Tab {
-        focus_next(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::BackTab {
-        focus_prev(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::Enter {
-        return match model.focus {
-            Some(idx) => follow_link(model, idx),
-            None => Vec::new(),
         };
     }
-
-    // Toggle the help overlay.
-    if key.code == KeyCode::Char('?') {
-        model.show_help = true;
-        model.help_scroll = 0;
-        return Vec::new();
+    match parse_url(&raw, model.current_dest) {
+        Ok(target) => {
+            model.mode = Mode::Browse;
+            model.input.set_value("");
+            begin_navigation(model, target, HistoryAction::Push, None)
+        }
+        Err(_) if is_name_query(&raw) => search_names(model, &raw),
+        Err(err) => {
+            model.say(ToastKind::Error, bad_url_note(StrId::BadUrl, &raw, err));
+            Vec::new()
+        }
     }
-
-    // Reload the current page (no history change). Bound to `R`, `Ctrl-R` and
-    // `F5` to match browser muscle memory; bare lowercase `r` stays free, as a
-    // mesh reload is expensive and single letters are reserved for cheap local
-    // actions.
-    if key.code == KeyCode::Char('R')
-        || (ctrl && key.code == KeyCode::Char('r'))
-        || key.code == KeyCode::F(5)
-    {
-        return reload_current(model);
-    }
-
-    // Back / forward (Alt-Left / Alt-Right): peek the target and re-fetch it,
-    // moving the cursor only once it loads.
-    if alt && key.code == KeyCode::Left {
-        return go_back(model);
-    }
-    if alt && key.code == KeyCode::Right {
-        return go_forward(model);
-    }
-
-    if let Some(cmd) = key_to_scroll(&key) {
-        let vp = model.viewport();
-        model.apply_scroll(cmd, vp);
-    }
-    Vec::new()
 }
 
 /// Enter address-entry mode with a cleared editor.
 pub(crate) fn enter_address(model: &mut Model) {
     model.mode = Mode::Address;
-    model.input.reset();
+    model.input.set_value("");
     model.dismiss_toast();
 }
 
@@ -809,7 +808,7 @@ pub(crate) fn exit_hint(model: &mut Model) {
 /// match highlights so the reader starts from a clean slate.
 pub(crate) fn enter_search(model: &mut Model) {
     model.mode = Mode::Search;
-    model.search_input.reset();
+    model.search_input.set_value("");
     model.matches.clear();
     model.current_match = None;
     model.dismiss_toast();
@@ -819,7 +818,7 @@ pub(crate) fn enter_search(model: &mut Model) {
 /// highlights plus the current-match marker.
 pub(crate) fn exit_search(model: &mut Model) {
     model.mode = Mode::Browse;
-    model.search_input.reset();
+    model.search_input.set_value("");
     model.matches.clear();
     model.current_match = None;
     model.dismiss_toast();
@@ -832,7 +831,7 @@ pub(crate) fn commit_search(model: &mut Model, query: &str) {
     model.matches = find_matches(&model.page, query);
     if model.matches.is_empty() {
         model.current_match = None;
-        model.set_toast(ToastKind::Info, format!("no matches for \"{query}\""));
+        model.say(ToastKind::Info, with(StrId::NoMatches, query));
     } else {
         model.current_match = Some(0);
         model.dismiss_toast();
@@ -922,9 +921,11 @@ pub struct DeletedBookmark {
 }
 
 /// The flat, ordered list of places: every bookmark (in insertion order), then
-/// every discovered node (in discovery order). The single source of truth for
-/// both the panel's rendering and its selection/activation, so a row index means
-/// the same thing to each.
+/// every discovered node, the one heard last first, as Loquax's Explore lists
+/// them (1639, walk 5 new 24: the sheet listed the oldest first); discovery
+/// order breaks a tie. The single source of truth for both the panel's
+/// rendering and its selection/activation, so a row index means the same thing
+/// to each.
 pub fn places(model: &Model) -> Vec<Place> {
     let mut out = Vec::new();
     for b in model.bookmarks.list() {
@@ -933,7 +934,9 @@ pub fn places(model: &Model) -> Vec<Place> {
             title: b.title.clone(),
         });
     }
-    for n in model.node_registry.nodes() {
+    let mut nodes = model.node_registry.nodes();
+    nodes.sort_by_key(|n| core::cmp::Reverse(n.last_seen));
+    for n in nodes {
         out.push(Place::Node {
             dest_hash: n.dest_hash,
             name: n.name.clone(),
@@ -960,36 +963,6 @@ pub(crate) fn toggle_places(model: &mut Model) {
 pub(crate) fn close_places(model: &mut Model) {
     model.show_places = false;
     model.places_hover = None;
-}
-
-/// Fold a key while the places panel is open. The up/down motions are the SAME
-/// as the content scroll: [`key_to_scroll`] maps `j`/`k`/`Ctrl-n`/`Ctrl-p`/arrows
-/// (line), `Ctrl-f`/`Ctrl-b`/`Ctrl-d`/`Ctrl-u` (page/half-page, clamped to the
-/// ends), and `g`/`G`/Home/End (first/last), applied to the panel SELECTION
-/// instead of the page. `Enter` opens the selected place, `x`/`Delete` delete
-/// the selected bookmark, `u` undoes the last deletion, `Esc`/`d` close the
-/// panel.
-pub(crate) fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    // Movement shares the content keymap, so the panel and the page scroll the
-    // same way. This is checked first: `Ctrl-d` is a half-page motion here, not
-    // the `d` that closes the panel.
-    if let Some(cmd) = key_to_scroll(&key) {
-        apply_places_scroll(model, cmd);
-        return Vec::new();
-    }
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('d') => {
-            close_places(model);
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let idx = model.places_sel;
-            activate_place(model, idx)
-        }
-        KeyCode::Char('x') | KeyCode::Delete => delete_bookmark_at(model, model.places_sel),
-        KeyCode::Char('u') => undo_delete_bookmark(model),
-        _ => Vec::new(),
-    }
 }
 
 /// The places panel's line layout: the rendered LINE each entry sits on (indexed
@@ -1186,19 +1159,122 @@ pub(crate) fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.set_toast(ToastKind::Error, bad_url_note("bad bookmark", &url, err));
+                model.say(
+                    ToastKind::Error,
+                    bad_url_note(StrId::BadBookmark, &url, err),
+                );
                 return Vec::new();
             }
         },
-        Place::Node { dest_hash, .. } => Target {
-            dest_hash,
-            path: DEFAULT_PATH.to_string(),
-            fields: Vec::new(),
-            is_file: false,
-        },
+        Place::Node { dest_hash, .. } => node_target(dest_hash),
     };
     close_places(model);
     begin_navigation(model, target, HistoryAction::Push, None)
+}
+
+/// A node's default page: what opening a discovered node or a name-search hit
+/// fetches.
+pub(crate) fn node_target(dest_hash: [u8; 16]) -> Target {
+    Target {
+        dest_hash,
+        path: DEFAULT_PATH.to_string(),
+        fields: Vec::new(),
+        is_file: false,
+    }
+}
+
+/// Whether a typed address that did not parse as a URL is a name to search
+/// for ([`crate::names`]). Everything is, except what is plainly a mistyped
+/// address: a local URL or a bare path (`:`, `/`), a backtick field, any
+/// `scheme://` form (`nomadnet://`, `lxmf://`), and an `lxmf@` address.
+pub(crate) fn is_name_query(raw: &str) -> bool {
+    !raw.is_empty()
+        && !raw.starts_with([':', '/'])
+        && !raw.contains('`')
+        && !raw.contains("://")
+        && !matches!(classify_link(raw), LinkKind::Lxmf(_))
+}
+
+/// Search the announces seen and the pinned sites for a typed name. No hit
+/// says so; the one exact, unambiguous name opens directly; anything else
+/// opens the result list.
+pub(crate) fn search_names(model: &mut Model, raw: &str) -> Vec<Effect> {
+    let hits = search(&model.node_registry, &model.pins, raw);
+    if hits.is_empty() {
+        model.say(ToastKind::Info, with(StrId::NoSiteNamed, raw));
+        return Vec::new();
+    }
+    model.mode = Mode::Browse;
+    model.input.set_value("");
+    if let Some(hit) = direct_hit(&hits, raw) {
+        let dest = hit.dest;
+        return begin_navigation(model, node_target(dest), HistoryAction::Push, None);
+    }
+    model.names = Some(NameResults {
+        query: raw.to_string(),
+        hits,
+        sel: 0,
+        confirm: false,
+    });
+    Vec::new()
+}
+
+/// The name-search list's viewport in rows: the overlay is at most the full
+/// terminal height, minus its border and its one hint line.
+pub(crate) fn names_viewport(model: &Model) -> usize {
+    (model.size.1 as usize).saturating_sub(3).max(1)
+}
+
+/// Move the name-search selection by a scroll motion, leaving any question.
+pub(crate) fn move_name_sel(model: &mut Model, cmd: ScrollCmd) {
+    let vp = names_viewport(model);
+    if let Some(results) = model.names.as_mut() {
+        if results.hits.is_empty() {
+            return;
+        }
+        results.confirm = false;
+        results.sel = scrolled(results.sel, cmd, vp, results.hits.len() - 1);
+    }
+}
+
+/// Close the list and open its selected site. `confirmed` is the reader's
+/// yes to a site whose name is pinned to another hash: the site's hash is then
+/// pinned under that name too, beside the first, before the fetch starts.
+pub(crate) fn open_name_hit(model: &mut Model, confirmed: bool) -> Vec<Effect> {
+    let Some(results) = model.names.take() else {
+        return Vec::new();
+    };
+    let Some(hit) = results.hits.get(results.sel).cloned() else {
+        return Vec::new();
+    };
+    let mut effects = Vec::new();
+    if confirmed {
+        if let Some(name) = &hit.name {
+            let now = model.wall_now();
+            if model.pins.pin(name, &hit.dest, now) {
+                effects.push(Effect::SavePins);
+            }
+        }
+    }
+    effects.extend(begin_navigation(
+        model,
+        node_target(hit.dest),
+        HistoryAction::Push,
+        None,
+    ));
+    effects
+}
+
+/// Record a fresh load of `dest` against the pins: the first visit pins the
+/// name it announced, a later one moves its `last_seen`. Returns whether the
+/// pins changed and so need saving.
+pub(crate) fn pin_visit(model: &mut Model, dest: [u8; 16]) -> bool {
+    let name = model
+        .node_registry
+        .get_by_hash(&dest)
+        .and_then(|n| n.name.clone());
+    let now = model.wall_now();
+    model.pins.note_visit(name.as_deref(), &dest, now) != VisitOutcome::Unchanged
 }
 
 /// Delete the bookmark on places row `idx` and persist: stash it in the
@@ -1227,7 +1303,7 @@ pub(crate) fn delete_bookmark_at(model: &mut Model, idx: usize) -> Vec<Effect> {
     model.places_sel = model.places_sel.min(len.saturating_sub(1));
     clamp_places_scroll(model);
     let label = if title.is_empty() { url } else { title };
-    model.set_toast(ToastKind::Info, format!("removed {label} — u to undo"));
+    model.say(ToastKind::Info, with(StrId::RemovedUndo, label));
     vec![Effect::SaveBookmarks]
 }
 
@@ -1238,7 +1314,7 @@ pub(crate) fn delete_bookmark_at(model: &mut Model, idx: usize) -> Vec<Effect> {
 /// save when the URL was re-bookmarked in the meantime.
 pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
     let Some(del) = model.last_deleted_bookmark.take() else {
-        model.set_toast(ToastKind::Info, "nothing to undo");
+        model.say(ToastKind::Info, Text::key(StrId::NothingToUndo));
         return Vec::new();
     };
     let at = del.index.min(model.bookmarks.len());
@@ -1250,7 +1326,7 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
         },
     );
     if !restored {
-        model.set_toast(ToastKind::Info, format!("already bookmarked: {}", del.url));
+        model.say(ToastKind::Info, with(StrId::AlreadyBookmarked, del.url));
         return Vec::new();
     }
     model.places_sel = at;
@@ -1260,7 +1336,7 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
     } else {
         del.title
     };
-    model.set_toast(ToastKind::Info, format!("restored {label}"));
+    model.say(ToastKind::Info, with(StrId::Restored, label));
     vec![Effect::SaveBookmarks]
 }
 
@@ -1269,19 +1345,19 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
 /// with a toast note when nothing is loaded.
 pub(crate) fn toggle_bookmark_current(model: &mut Model) -> Vec<Effect> {
     let Some(url) = current_url(model) else {
-        model.set_toast(ToastKind::Info, "nothing to bookmark");
+        model.say(ToastKind::Info, Text::key(StrId::NothingToBookmark));
         return Vec::new();
     };
     if model.bookmarks.contains(&url) {
         model.bookmarks.remove(&url);
-        model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
+        model.say(ToastKind::Info, with(StrId::RemovedBookmark, url));
     } else {
         let title = model.title.trim().to_string();
         model.bookmarks.add(Bookmark {
             url: url.clone(),
             title,
         });
-        model.set_toast(ToastKind::Info, format!("bookmarked {url}"));
+        model.say(ToastKind::Info, with(StrId::Bookmarked, url));
     }
     vec![Effect::SaveBookmarks]
 }
@@ -1293,11 +1369,11 @@ pub(crate) fn yank_url(model: &mut Model) -> Vec<Effect> {
     let url = match focused_link_url(model).or_else(|| current_url(model)) {
         Some(url) => url,
         None => {
-            model.set_toast(ToastKind::Info, "nothing to copy");
+            model.say(ToastKind::Info, Text::key(StrId::NothingToCopy));
             return Vec::new();
         }
     };
-    model.set_toast(ToastKind::Info, format!("copied {url}"));
+    model.say(ToastKind::Info, with(StrId::Copied, url.clone()));
     vec![Effect::Copy(url)]
 }
 
@@ -1306,7 +1382,7 @@ pub(crate) fn yank_url(model: &mut Model) -> Vec<Effect> {
 pub(crate) fn focused_link_url(model: &Model) -> Option<String> {
     let idx = model.focus?;
     let link = model.links.iter().find(|l| l.index == idx)?;
-    let (target, _anchor) = browser::resolve_link(link, model.current_dest).ok()?;
+    let (target, _anchor) = resolve_link(link, model.current_dest).ok()?;
     Some(target_url(&target))
 }
 
@@ -1458,7 +1534,7 @@ pub(crate) fn load_from_cache(
             Some(line) => model.scroll = line.min(model.max_scroll(vp)),
             None => {
                 model.scroll = 0;
-                model.set_toast(ToastKind::Error, format!("anchor #{name} not found"));
+                model.say(ToastKind::Error, with(StrId::AnchorNotFound, name));
             }
         },
         None => model.scroll = entry.scroll.min(model.max_scroll(vp)),
@@ -1511,14 +1587,19 @@ pub(crate) fn toggle_identify(model: &mut Model) -> Vec<Effect> {
         .chars()
         .take(8)
         .collect();
-    if on {
+    if on && model.hosted && !model.identify_explained {
+        // A host's reader has no help screen and no `i` key (1650): the
+        // first switch-on says what it means.
+        model.identify_explained = true;
+        model.say(ToastKind::Info, Text::key(StrId::IdentifyExplained));
+    } else if on {
         let fp8: String = model.fingerprint.chars().take(8).collect();
-        model.set_toast(
+        model.say(
             ToastKind::Info,
-            format!("Identifying to {dest8} as {fp8}  (i to stop)"),
+            with_args(StrId::IdentifyingTo, vec![Arg::Str(dest8), Arg::Str(fp8)]),
         );
     } else {
-        model.set_toast(ToastKind::Info, format!("Now anonymous to {dest8}"));
+        model.say(ToastKind::Info, with(StrId::AnonymousTo, dest8));
     }
     effects
 }
@@ -1563,7 +1644,7 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             vec![Effect::OpenExternal(url)]
         }
         LinkKind::Unsafe(scheme) => {
-            model.set_toast(ToastKind::Error, format!("won't open {scheme}: link"));
+            model.say(ToastKind::Error, with(StrId::WontOpen, scheme));
             Vec::new()
         }
         // NomadNet opens a conversation here. We are a page browser with no
@@ -1572,11 +1653,17 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         // send. Anything is better than the "malformed URL" this used to
         // produce, which read as a broken page rather than an unsupported
         // action.
+        // Hosted in a messenger (a tab of Loquax), there is a composer: the
+        // address goes to it, as NomadNet's does.
+        LinkKind::Lxmf(hash) if model.hosted => {
+            model.dismiss_toast();
+            vec![Effect::Write(hash)]
+        }
         LinkKind::Lxmf(hash) => {
-            model.set_toast(ToastKind::Info, format!("LXMF address copied: {hash}"));
+            model.say(ToastKind::Info, with(StrId::LxmfCopied, hash.clone()));
             vec![Effect::Copy(hash)]
         }
-        LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
+        LinkKind::Rns => match resolve_link(&link, model.current_dest) {
             Ok((mut target, anchor)) => {
                 // A submit link (one that references form fields, or `*` for all)
                 // carries the CURRENT field values, packaged as NomadNet expects:
@@ -1590,9 +1677,9 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
                 begin_navigation(model, target, HistoryAction::Push, anchor)
             }
             Err(err) => {
-                model.set_toast(
+                model.say(
                     ToastKind::Error,
-                    bad_url_note("bad link", &link.target, err),
+                    bad_url_note(StrId::BadLink, &link.target, err),
                 );
                 Vec::new()
             }
@@ -1628,12 +1715,16 @@ pub(crate) fn saved_image_effect(model: &Model, index: usize, open: bool) -> Opt
     }
 }
 
-pub(crate) fn bad_url_note(what: &str, raw: &str, err: UrlError) -> String {
+pub(crate) fn bad_url_note(what: StrId, raw: &str, err: UrlError) -> Text {
+    let what = Arg::Text(Box::new(Text::key(what)));
     match err {
         UrlError::NoDestination if raw.starts_with('/') => {
-            format!("{what} — try :{raw} (a local URL keeps the \":\")")
+            with_args(StrId::TryLocal, vec![what, Arg::Str(raw.to_string())])
         }
-        other => format!("{what}: {raw} — {other}"),
+        other => with_args(
+            StrId::BadUrlWhy,
+            vec![what, Arg::Str(raw.to_string()), Arg::Str(other.to_string())],
+        ),
     }
 }
 
@@ -1646,7 +1737,7 @@ pub(crate) fn bad_url_note(what: &str, raw: &str, err: UrlError) -> String {
 /// under a `field_` prefix. A text field is always included; a checkbox/radio is
 /// included only when checked (its submit value), and several checked checkboxes
 /// sharing a name are comma-joined. The `k=v` preset components are handled by
-/// [`browser::resolve_link`] as `var_<k>`, so they are ignored here.
+/// [`resolve_link`] as `var_<k>`, so they are ignored here.
 pub(crate) fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(String, String)> {
     let mut all = false;
     let mut referenced: Vec<&str> = Vec::new();
@@ -1671,7 +1762,7 @@ pub(crate) fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(
         }
         let key = format!("field_{}", fe.name);
         match fe.kind {
-            FieldKind::Text => out.push((key, fe.input.value().to_string())),
+            FieldKind::Text => out.push((key, InputBuffer::value(&fe.input).to_string())),
             FieldKind::Checkbox => {
                 if fe.checked {
                     if let Some(existing) = out.iter_mut().find(|(k, _)| *k == key) {
@@ -1878,7 +1969,7 @@ pub(crate) fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect>
     // A click on a footer button runs its action (same as pressing its key).
     if footer_shows_buttons(model) {
         for slot in footer_layout(model, footer) {
-            if slot.item.action != FooterAction::None && rect_contains(slot.rect, col, row) {
+            if slot.item.action != FooterAction::Sentence && rect_contains(slot.rect, col, row) {
                 return run_footer_action(model, slot.item.action);
             }
         }
@@ -1904,7 +1995,7 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
         let [_topbar, _content, footer] = regions(model.frame_area());
         if let Some(slot) = footer_layout(model, footer)
             .into_iter()
-            .find(|s| s.item.action != FooterAction::None && rect_contains(s.rect, col, row))
+            .find(|s| s.item.action != FooterAction::Sentence && rect_contains(s.rect, col, row))
         {
             model.footer_hover = Some(slot.index);
             model.hover = None;
@@ -1921,43 +2012,15 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
 /// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, from
 /// the shared scroll rows ([`SCROLL_ROWS`], in `leviculum-ui` so loquax reads the
 /// same ones). Returns `None` for keys that are not scroll motions.
+#[cfg(test)]
 pub(crate) fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
     keymap::best(SCROLL_ROWS, key, Panes::SCROLL, Ctx::NONE).map(|(_, cmd)| cmd)
 }
 
-/// Run a footer button's action, mirroring the key it stands for.
+/// Run a footer button's action: the intent the key it shows raises.
 pub(crate) fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
-    match action {
-        FooterAction::Back => go_back(model),
-        FooterAction::Forward => go_forward(model),
-        FooterAction::Reload => reload_current(model),
-        FooterAction::Identify => toggle_identify(model),
-        FooterAction::Hint => {
-            enter_hint(model);
-            Vec::new()
-        }
-        FooterAction::Search => {
-            enter_search(model);
-            Vec::new()
-        }
-        FooterAction::Places => {
-            toggle_places(model);
-            Vec::new()
-        }
-        FooterAction::Mark => toggle_bookmark_current(model),
-        FooterAction::Copy => yank_url(model),
-        FooterAction::Help => {
-            model.show_help = !model.show_help;
-            if model.show_help {
-                model.help_scroll = 0;
-            }
-            Vec::new()
-        }
-        FooterAction::Quit => {
-            model.quit = true;
-            vec![Effect::Quit]
-        }
-        FooterAction::Key(code) => update_key(model, KeyEvent::new(code, KeyModifiers::NONE)),
-        FooterAction::None => Vec::new(),
+    match Intent::of_key(action, model) {
+        Some(intent) => apply(model, intent),
+        None => Vec::new(),
     }
 }

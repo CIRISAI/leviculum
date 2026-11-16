@@ -1,0 +1,24 @@
+┌●┌ Advanced ────────────────────────────────────────────────────────────────┐─┐
+│N│Relay                                                                     │ │
+│:│While your mailbox is offline, mail for you waits at a relay in the       │ │
+│o│network, which Loquax chooses by itself.                                  │ │
+│c│Server for public rooms: None                                             │ │
+│ │1  RNS Moscow                                                             │ │
+│ │2  Cascadia                                                               │ │
+│ │3  Chatsurfer                                                             │ │
+│ │4  CTRS                                                                   │ │
+│ │5  Minuteman                                                              │ │
+│ │6  RMAP.WORLD Hub                                                         │ │
+│ │7  Save Europe                                                            │ │
+│ │8  SoCal Public                                                           │ │
+│ │9  UTN Oregon                                                             │ │
+│ │0  HADARC                                                                 │ │
+│ │m  More…                                                                  │ │
+│ │n  None: ✓                                                                │ │
+│ │a  Another server: paste its address                                      │ │
+│ │You have no name on this server yet: in the room you appear without one.  │ │
+│ │?  Help                                                                   │ │
+│ │                                                                          │ ┤
+│ │a row's key runs it · q back                                              │ │
+└─└────────────────────────────────────────────────────────────── Esc closes ┘─┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -1,0 +1,24 @@
+┌● Mia───────────────────┐┌  messages──────────────────────────────────────────┐
+│Noch keine              ││                                                    │
+│Unterhaltungen: :new    ││                                                    │
+│conversation beginnt    ││                                                    │
+│eine mit dem Code eines ││                                                    │
+│Kontakts.               ││                                                    │
+│ ┌ Dein Profil ─────────────────────────────────────────────────────────────┐ │
+│ │Mia                                                                       │ │
+│ │                                                                          │ │
+│ │Deine Adresse                                                             │ │
+│ │4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c                                   │ │
+│ │                                                                          │ │
+│ │Postfach: noch nicht eingerichtet                                         │ │
+│ │                                                                          │ │
+│ │Deine Geräte                                                              │ │
+│ │  Dieses Gerät                                                            │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

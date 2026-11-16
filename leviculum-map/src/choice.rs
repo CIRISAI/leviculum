@@ -66,22 +66,24 @@ impl Bounds {
 /// The regions a view draws, as indices into `regions` (file name,
 /// header), in the order they are drawn: every region whose box reaches
 /// into the view and whose zooms reach the view's ([`useful_zooms`]),
-/// shallower data first and ties by file name, so the deepest is drawn
-/// last, on top. Each is drawn into its own box (1077), so regions loaded
+/// shallower data first, then the older layer profile, then by file name,
+/// so the deepest is drawn last, on top, and of two as deep the newer
+/// profile (1727: a hand-placed profile 1 region under the profile 2 copy
+/// the autoload brought for its box, `crate::profile`). Each is drawn into its own box (1077), so regions loaded
 /// side by side join up (1089). Empty for the outline alone.
 pub fn drawn<'a>(
     regions: impl IntoIterator<Item = (&'a str, &'a Header)>,
     view: &Viewport,
 ) -> Vec<usize> {
-    let mut found: Vec<(u8, &str, usize)> = regions
+    let mut found: Vec<(u8, u8, &str, usize)> = regions
         .into_iter()
         .enumerate()
         .filter(|(_, (_, h))| useful_zooms(h).contains(&view.zoom()))
         .filter(|(_, (_, h))| !view.area_of(&h.bounds).is_zero_sized())
-        .map(|(i, (name, h))| (h.max_zoom, name, i))
+        .map(|(i, (name, h))| (h.max_zoom, h.profile, name, i))
         .collect();
     found.sort();
-    found.into_iter().map(|(_, _, i)| i).collect()
+    found.into_iter().map(|(_, _, _, i)| i).collect()
 }
 
 /// The view zooms a region draws at: its shallowest, down to

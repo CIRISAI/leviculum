@@ -373,6 +373,117 @@ pub const PN_LIST_CONTROL_ALLOWED: u8 = 2;
 /// which `leviculum_pn_store::BOARD_LIST_MAX` is asserted equal to.
 pub const PN_LIST_MAX_HASHES: usize = 16;
 
+/// Set whom the board shares its position with in its `lev.position`
+/// announce (order 1301): `lnflash --share-position
+/// <default|off|owner|everyone>`.
+///
+/// Payload is one byte, the setting
+/// ([`crate::position_share_store`]: 0 default, 1 off, 2 owner, 3
+/// everyone); a byte above
+/// [`crate::position_share_store::POSITION_SHARE_MAX`] is refused with
+/// [`REFUSE_VALUE`]. Persisted on the telemetry flash page before the ack
+/// (#358) and applied at once: the next position announce follows it, and
+/// the `[POSITION] share=` line says what the board now runs. USB-only by
+/// where the parser sits, as [`TYPE_MGMT_ALLOW`] argues: a setting that
+/// decides whether a board says where it is must never be writable over
+/// the air.
+pub const TYPE_POSITION_SHARE: u8 = 0x17;
+
+/// Dump the frame the display shows over the debug stream (order 1361, the
+/// ThinkNode M9's Loquax image): `PBM <w> <h>`, the rows as `PBR` lines and
+/// a closing `PBE <fnv32>`, the text format of `loquax_m9::dump`, so the rig
+/// compares the board's screen with the golden the host pinned.
+///
+/// Payload is empty, dump what is shown, or one byte naming a screen the
+/// board first walks to from its fixture model with its own keys
+/// (`loquax_m9::fixture::Screen`: 0 the chats list, 1 the pinned chat); a
+/// screen it does not know is refused with [`REFUSE_VALUE`]. Acked before
+/// the dump starts, so the ack is not stuck behind seconds of text. Only a
+/// board with a display it renders accepts it; every other board refuses it
+/// as an unknown type.
+pub const TYPE_FRAME_DUMP: u8 = 0x18;
+
+/// Host → board (order 1415): make the board a device of a Loquax home.
+/// The payload is the home's admission code as `loquax mailbox admit`
+/// prints it, UTF-8, at most [`HOME_CODE_MAX`] bytes, with or without its
+/// rendezvous list; the board reads it with the code's own parser, makes a
+/// device identity, writes the pending record to flash and acks, after
+/// which it joins the home over its node. A code that does not parse is
+/// refused [`REFUSE_VALUE`], a record flash would not take
+/// [`REFUSE_PERSIST`]. The written form of the code the M9 can also type
+/// on its keys, so the bench never types 140 characters. Only a board
+/// that runs a Loquax client accepts it.
+pub const TYPE_HOME_CODE: u8 = 0x19;
+
+/// The longest [`TYPE_HOME_CODE`] payload: the 140-character code and a
+/// rendezvous list of a few `host:port` entries.
+pub const HOME_CODE_MAX: usize = 512;
+
+/// Host → board (order 1533): press a key on the board's keyboard, a test
+/// hook for the bench walk. The payload is the controller's key code, one
+/// byte, and optionally how long the key is held, milliseconds, two bytes
+/// big-endian: a held key answers again at the controller's repeat
+/// interval for that long. The board enqueues the code where its keyboard
+/// interrupt enqueues a polled answer, so everything from the queue to the
+/// panel is the path a finger takes. Code 0 (an idle answer) is refused
+/// [`REFUSE_VALUE`]. Only an image built for the bench accepts it (the
+/// M9's bench image, `scripts/build-m9-image.sh --bench`, banner
+/// `[BENCH] inject=on`); every release image refuses it as an unknown
+/// type.
+pub const TYPE_KEY_INJECT: u8 = 0x1A;
+
+/// The longest hold a [`TYPE_KEY_INJECT`] asks for: ten seconds, longer
+/// than any walk holds a key and short enough that a garbled length does
+/// not leave a key down for a minute.
+pub const KEY_INJECT_HOLD_MAX_MS: u16 = 10_000;
+
+/// Host → board (order 1540): owe the summary log every conversation's
+/// row again, and the ring's state with its marks, so the next open of a
+/// chat writes the flash while the UI core folds the page: the window the
+/// hang of 2026-11-07 was in, re-armed on demand. A test hook for the
+/// bench walk (`scripts/m9-walks/hang.walk`); without it every open after
+/// the first wrote nothing and the race was never under load. The board
+/// arms it and fires it at the next open, after the page read, so a quiet
+/// turn in between cannot use it up.
+///
+/// Payload is empty or one byte of flags: [`BENCH_OWE_ERASE_LOG`] closes
+/// the summary log's open sector first, so the write opens the next one
+/// with an erase; [`BENCH_OWE_ERASE_RING`] does the same to the message
+/// ring, which the open's read mark goes to. A flag outside
+/// [`BENCH_OWE_FLAGS`] is refused [`REFUSE_VALUE`], a longer payload
+/// [`REFUSE_MALFORMED`], a board without a message store
+/// [`REFUSE_UNSUPPORTED`]. Only the M9's bench image accepts it, as
+/// [`TYPE_KEY_INJECT`].
+pub const TYPE_BENCH_OWE: u8 = 0x1B;
+
+/// [`TYPE_BENCH_OWE`]: the summary log's write erases a sector.
+pub const BENCH_OWE_ERASE_LOG: u8 = 0x01;
+/// [`TYPE_BENCH_OWE`]: the ring's next write erases a sector.
+pub const BENCH_OWE_ERASE_RING: u8 = 0x02;
+/// Every flag [`TYPE_BENCH_OWE`] knows.
+pub const BENCH_OWE_FLAGS: u8 = BENCH_OWE_ERASE_LOG | BENCH_OWE_ERASE_RING;
+
+/// Host → board (orders 1540, 1562): a message arrives, with no network
+/// and no mailbox, so the next open has an unread to mark: Lew's case (an
+/// unread chat, Enter, the read mark and the rows written while the UI
+/// core folds). It comes from the bench's own synthetic peer into one
+/// conversation, "Bench", never into a real chat (1562; 1540 took a row
+/// of the list and wrote into that chat). The board keeps the message in
+/// its ring, flagged as the bench's, folds it as a pulled one, and puts
+/// the list's cursor on "Bench". Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`] (1540's one-byte row among it). Only the
+/// M9's bench image accepts it.
+pub const TYPE_BENCH_ARRIVE: u8 = 0x1C;
+
+/// Host → board (order 1562): take the bench's arrivals out of the
+/// message store: the flagged ones, and 1540's unflagged ones (a zero
+/// signature and words that start `bench arrival `), with the read marks
+/// that name nothing else; then erase the summary log and restart, so the
+/// boot rebuilds the list from the ring. The board acks, says `[BENCH]
+/// forget=done ...` and restarts. Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`]. Only the M9's bench image accepts it.
+pub const TYPE_BENCH_FORGET: u8 = 0x1D;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -381,8 +492,36 @@ pub const PN_LIST_MAX_HASHES: usize = 16;
 pub const TYPE_ACK: u8 = 0x81;
 /// Named refusal; payload is `[refused_type, reason]`.
 pub const TYPE_REFUSAL: u8 = 0x82;
-/// Capability report; payload is `[ENVELOPE_VERSION, accepted types...]`.
+/// Capability report; payload is `[ENVELOPE_VERSION, accepted types...]`,
+/// optionally followed by [`CAPABILITY_FACTS_MARKER`] and fact bytes
+/// ([`encode_capability_report_with_facts`]).
 pub const TYPE_CAPABILITY_REPORT: u8 = 0x83;
+
+/// Separates a capability report's accepted types from the facts the board
+/// states about itself. [`TYPE_UNSPECIFIED`], which no firmware accepts, so
+/// the boundary cannot be mistaken for a type.
+///
+/// Backward compatible by construction: a host from before the facts reads
+/// everything after the version as accepted types and only ever asks
+/// whether one named type is among them (periculum-wire's
+/// `capability_report_accepts`, `periculum/periculum-wire/src/envelope.rs:331-334`;
+/// lnflash's `probe_capabilities`). The marker is `0x00` and every fact
+/// lives in [`CAPABILITY_FACT_RANGE`], above any frame type, so neither can
+/// answer such a question with a false yes.
+pub const CAPABILITY_FACTS_MARKER: u8 = TYPE_UNSPECIFIED;
+
+/// The byte values a capability fact may take: `0xF0..=0xFF`, reserved here
+/// so no frame type is ever allocated among them (host commands count up
+/// from 0x01, board answers from 0x81).
+pub const CAPABILITY_FACT_RANGE: core::ops::RangeInclusive<u8> = 0xF0..=0xFF;
+
+/// Fact: the board shares one UART between its debug text and its HDLC
+/// transport under XON/XOFF flow control (`leviculum-nrf/serial-mux`, the
+/// ThinkNode M9). A host must then escape 0x11 and 0x13 in every frame and
+/// strip the board's own flow bytes; lnsd turns its mux on when it reads
+/// this (`interfaces::serial_mux` in leviculum-std). Its presence is the
+/// value: a report that carries it says `serial_mux=1`.
+pub const FACT_SERIAL_MUX: u8 = 0xF0;
 /// Radio report (Codeberg #349); payload is the same parameter block
 /// [`TYPE_RADIO_CONFIG`] carries, describing what the radio is running.
 ///
@@ -607,6 +746,27 @@ pub const REFUSE_NO_CLOCK: u8 = 0x07;
 /// does carry the consumer — it is the boot that left the carrier down, and
 /// a reset with this configuration on the page is what fixes it.
 pub const REFUSE_NOT_RUNNING: u8 = 0x08;
+/// The value is applied and its page write is still under way: the store
+/// has not finished inside the board's answer window, and it has not given
+/// up either (order 1626, #24, #474).
+///
+/// The third refusal that is not a rejection, and the sibling of
+/// [`REFUSE_PERSIST`]: that one says the store gave up and a reset would
+/// lose the value, this one says the store is still retrying and the value
+/// will land. Until 2026-11-10 both were [`REFUSE_PERSIST`], and the Pocket
+/// answered a media profile with it 2.5 s into a 5 s write that then
+/// landed: the next boot came up on the very profile the board had called
+/// lost, and the harness that trusted the refusal skipped 17 cells.
+///
+/// The SoftDevice schedules flash access between radio events, and a BLE
+/// link that is busy or being torn down can hold an erase off for seconds;
+/// the store keeps trying for longer than any host waits for one answer.
+/// A host that needs the record durable before it resets the board
+/// re-asks (a query, or the same frame again, which a page that already
+/// carries the value answers at once) until the answer is durable. The
+/// board logs `[TELEMETRY] persist landed <record> after <ms> ms` when the
+/// write completes, and `persist gave up after retries` if it does not.
+pub const REFUSE_PERSIST_PENDING: u8 = 0x09;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -746,6 +906,108 @@ pub fn decode_store_storm_payload(payload: &[u8]) -> Option<StoreStormWire> {
         records: u16::from_be_bytes([bytes[0], bytes[1]]),
         size: u16::from_be_bytes([bytes[2], bytes[3]]),
     })
+}
+
+/// Encode a complete position-share frame (order 1301).
+pub fn encode_position_share(setting: u8) -> Vec<u8> {
+    encode_frame(TYPE_POSITION_SHARE, &[setting])
+}
+
+/// Encode a complete frame-dump request (order 1361): what is shown for
+/// `None`, else the screen the byte names.
+pub fn encode_frame_dump(screen: Option<u8>) -> Vec<u8> {
+    match screen {
+        Some(screen) => encode_frame(TYPE_FRAME_DUMP, &[screen]),
+        None => encode_frame(TYPE_FRAME_DUMP, &[]),
+    }
+}
+
+/// Decode a [`TYPE_FRAME_DUMP`] payload: `Some(None)` for what is shown,
+/// `Some(Some(screen))` for one byte, `None` (malformed) for more.
+pub fn decode_frame_dump_payload(payload: &[u8]) -> Option<Option<u8>> {
+    match payload {
+        [] => Some(None),
+        [screen] => Some(Some(*screen)),
+        _ => None,
+    }
+}
+
+/// Encode a complete home-code frame (order 1415). `None` when the code is
+/// empty or longer than [`HOME_CODE_MAX`].
+pub fn encode_home_code(code: &str) -> Option<Vec<u8>> {
+    (!code.is_empty() && code.len() <= HOME_CODE_MAX)
+        .then(|| encode_frame(TYPE_HOME_CODE, code.as_bytes()))
+}
+
+/// What one [`TYPE_KEY_INJECT`] asks (order 1533): the key code, and how
+/// long it is held; none is one press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInject {
+    pub code: u8,
+    pub hold_ms: Option<u16>,
+}
+
+/// Encode a complete key-injection frame (order 1533).
+pub fn encode_key_inject(inject: KeyInject) -> Vec<u8> {
+    match inject.hold_ms {
+        None => encode_frame(TYPE_KEY_INJECT, &[inject.code]),
+        Some(ms) => {
+            let [hi, lo] = ms.to_be_bytes();
+            encode_frame(TYPE_KEY_INJECT, &[inject.code, hi, lo])
+        }
+    }
+}
+
+/// Decode a [`TYPE_KEY_INJECT`] payload: `None` (malformed) for any
+/// length but one or three bytes. Whether the code and the hold are
+/// values the board takes is [`KeyInject::valid`]'s to say.
+pub fn decode_key_inject_payload(payload: &[u8]) -> Option<KeyInject> {
+    match payload {
+        [code] => Some(KeyInject {
+            code: *code,
+            hold_ms: None,
+        }),
+        [code, hi, lo] => Some(KeyInject {
+            code: *code,
+            hold_ms: Some(u16::from_be_bytes([*hi, *lo])),
+        }),
+        _ => None,
+    }
+}
+
+impl KeyInject {
+    /// A key code that is a key (not 0, the idle answer) and a hold of at
+    /// most [`KEY_INJECT_HOLD_MAX_MS`].
+    pub fn valid(&self) -> bool {
+        self.code != 0 && self.hold_ms.is_none_or(|ms| ms <= KEY_INJECT_HOLD_MAX_MS)
+    }
+}
+
+/// Decode a [`TYPE_BENCH_OWE`] payload (order 1540): the flags, 0 for
+/// an empty payload; `None` (malformed) for more than one byte. Whether
+/// the flags are known is [`BENCH_OWE_FLAGS`]' to say.
+pub fn decode_bench_owe_payload(payload: &[u8]) -> Option<u8> {
+    match payload {
+        [] => Some(0),
+        [flags] => Some(*flags),
+        _ => None,
+    }
+}
+
+/// Whether a [`TYPE_BENCH_ARRIVE`] or [`TYPE_BENCH_FORGET`] payload
+/// reads (order 1562): it is empty.
+pub fn decode_bench_empty_payload(payload: &[u8]) -> Option<()> {
+    payload.is_empty().then_some(())
+}
+
+/// Decode a [`TYPE_HOME_CODE`] payload: the code's text, `None`
+/// (malformed) when it is empty, too long or not UTF-8. Whether it is a
+/// code is the board's parser's to say.
+pub fn decode_home_code_payload(payload: &[u8]) -> Option<&str> {
+    if payload.is_empty() || payload.len() > HOME_CODE_MAX {
+        return None;
+    }
+    core::str::from_utf8(payload).ok()
 }
 
 /// What one [`TYPE_PN_CONFIG`] asks for (Codeberg #384). A field holding
@@ -976,8 +1238,8 @@ pub fn mgmt_allow_answer(
     stored: Option<&[[u8; TRUNCATED_HASHBYTES]]>,
     running: bool,
 ) -> Vec<u8> {
-    if persist == Persist::Lost {
-        return encode_refusal(for_type, REFUSE_PERSIST);
+    if let Some(reason) = persist_refusal(persist) {
+        return encode_refusal(for_type, reason);
     }
     let mut flags = 0u8;
     if stored.is_some() {
@@ -1101,6 +1363,10 @@ pub enum ConfigDelivery {
     /// write failed or timed out: nothing will survive the reset, so the
     /// answer must not claim otherwise.
     StoreFailed,
+    /// Same boot state as [`Stored`](ConfigDelivery::Stored), but the page
+    /// write is still being retried when the answer is due: answered
+    /// [`REFUSE_PERSIST_PENDING`], not [`REFUSE_PERSIST`] (order 1626).
+    StorePending,
 }
 
 /// The enveloped answer to a [`TYPE_RADIO_CONFIG`] frame.
@@ -1122,6 +1388,7 @@ pub fn radio_config_answer(delivery: ConfigDelivery) -> Vec<u8> {
         }
         ConfigDelivery::Stored => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_NOT_RUNNING),
         ConfigDelivery::StoreFailed => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_PERSIST),
+        ConfigDelivery::StorePending => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_PERSIST_PENDING),
     }
 }
 
@@ -1169,16 +1436,48 @@ pub fn decode_refusal_payload(payload: &[u8]) -> Option<(u8, u8)> {
 
 /// Encode a complete capability report for the given accepted types.
 pub fn encode_capability_report(accepted: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(1 + accepted.len());
+    encode_capability_report_with_facts(accepted, &[])
+}
+
+/// Encode a complete capability report that also states `facts` about the
+/// board (each one in [`CAPABILITY_FACT_RANGE`], e.g. [`FACT_SERIAL_MUX`]).
+/// No facts gives exactly the report [`encode_capability_report`] always
+/// wrote; with facts the payload is
+/// `[ENVELOPE_VERSION, accepted..., CAPABILITY_FACTS_MARKER, facts...]`.
+pub fn encode_capability_report_with_facts(accepted: &[u8], facts: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + accepted.len() + facts.len());
     payload.push(ENVELOPE_VERSION);
     payload.extend_from_slice(accepted);
+    if !facts.is_empty() {
+        payload.push(CAPABILITY_FACTS_MARKER);
+        payload.extend_from_slice(facts);
+    }
     encode_frame(TYPE_CAPABILITY_REPORT, &payload)
 }
 
 /// Decode a capability-report payload into `(version, accepted types)`.
+/// The accepted types end at [`CAPABILITY_FACTS_MARKER`] if the report
+/// carries facts ([`decode_capability_report_facts`]).
 pub fn decode_capability_report_payload(payload: &[u8]) -> Option<(u8, &[u8])> {
-    let (version, accepted) = payload.split_first()?;
+    let (version, rest) = payload.split_first()?;
+    let accepted = match rest.iter().position(|&b| b == CAPABILITY_FACTS_MARKER) {
+        Some(at) => &rest[..at],
+        None => rest,
+    };
     Some((*version, accepted))
+}
+
+/// The facts a capability-report payload states, empty for a report
+/// without any (every firmware before the facts). `None` for a payload too
+/// short to be a report.
+pub fn decode_capability_report_facts(payload: &[u8]) -> Option<&[u8]> {
+    let (_version, rest) = payload.split_first()?;
+    Some(
+        match rest.iter().position(|&b| b == CAPABILITY_FACTS_MARKER) {
+            Some(at) => &rest[at + 1..],
+            None => &[],
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,8 +1680,23 @@ pub enum Persist {
     /// The record is on the page: a reset comes back with it. The only
     /// state that may be acked.
     Durable,
-    /// Applied in RAM, not written: [`REFUSE_PERSIST`].
+    /// Applied in RAM, and the store gave up writing it:
+    /// [`REFUSE_PERSIST`].
     Lost,
+    /// Applied in RAM, and the store is still writing it when the answer
+    /// is due: [`REFUSE_PERSIST_PENDING`]. Not a loss (order 1626).
+    Pending,
+}
+
+/// The refusal reason for a persist outcome that is not
+/// [`Persist::Durable`], so every answer on the persist path names the
+/// same difference between "gave up" and "still writing".
+pub fn persist_refusal(persist: Persist) -> Option<u8> {
+    match persist {
+        Persist::Durable => None,
+        Persist::Lost => Some(REFUSE_PERSIST),
+        Persist::Pending => Some(REFUSE_PERSIST_PENDING),
+    }
 }
 
 /// The answer to a fixed-position frame, decided by capability first —
@@ -1399,10 +1713,10 @@ pub fn fixed_position_answer(reporter_wired: bool, delivered: bool, persist: Per
         encode_refusal(TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED)
     } else if !delivered {
         encode_refusal(TYPE_FIXED_POSITION, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_ack(TYPE_FIXED_POSITION)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_FIXED_POSITION, reason)
     } else {
-        encode_refusal(TYPE_FIXED_POSITION, REFUSE_PERSIST)
+        encode_ack(TYPE_FIXED_POSITION)
     }
 }
 
@@ -1576,10 +1890,10 @@ pub fn media_profile_answer(
         encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_UNSUPPORTED)
     } else if !delivered {
         encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_media_report(&running, &configured)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_MEDIA_PROFILE, reason)
     } else {
-        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_PERSIST)
+        encode_media_report(&running, &configured)
     }
 }
 
@@ -1818,9 +2132,10 @@ pub fn node_name_answer(name_wired: bool, persist: Persist, report: NodeNameRepo
     match (name_wired, report) {
         (false, _) => encode_refusal(TYPE_NODE_NAME, REFUSE_UNSUPPORTED),
         (true, None) => encode_refusal(TYPE_NODE_NAME, REFUSE_BUSY),
-        (true, Some(_)) if persist != Persist::Durable => {
-            encode_refusal(TYPE_NODE_NAME, REFUSE_PERSIST)
-        }
+        (true, Some(_)) if persist != Persist::Durable => encode_refusal(
+            TYPE_NODE_NAME,
+            persist_refusal(persist).unwrap_or(REFUSE_PERSIST),
+        ),
         (true, Some((flags, mesh, ble))) => encode_node_name_report(flags, mesh, ble),
     }
 }
@@ -1889,10 +2204,10 @@ pub fn telemetry_target_answer(
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_VALUE)
     } else if !delivered {
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_ack(TYPE_TELEMETRY_TARGET)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_TELEMETRY_TARGET, reason)
     } else {
-        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_PERSIST)
+        encode_ack(TYPE_TELEMETRY_TARGET)
     }
 }
 
@@ -2096,6 +2411,12 @@ pub enum ControlAction {
     /// `encode_ack(TYPE_PN_LIST)` only once it landed. Already inside its
     /// bounds: the classifier refused anything else.
     PnList(PnListWire),
+    /// Envelope position share (order 1301): persist the setting, apply
+    /// it, and answer `encode_ack(TYPE_POSITION_SHARE)` only once the
+    /// record is on the page (#358). Already inside
+    /// [`crate::position_share_store::POSITION_SHARE_MAX`]: the classifier
+    /// refused anything else.
+    PositionShare(u8),
     /// Envelope channel-stats query: answer via
     /// [`encode_channel_stats_report`]. Read-only, like
     /// [`MediaQuery`](Self::MediaQuery).
@@ -2340,6 +2661,16 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             }
             None => malformed,
         },
+        TYPE_POSITION_SHARE => match frame.payload {
+            [setting] if *setting <= crate::position_share_store::POSITION_SHARE_MAX => {
+                ControlAction::PositionShare(*setting)
+            }
+            [_] => ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_VALUE,
+            },
+            _ => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -2378,6 +2709,7 @@ mod tests {
         TYPE_MGMT_ALLOW_QUERY,
         TYPE_CHANNEL_STATS_QUERY,
         TYPE_PN_LIST,
+        TYPE_POSITION_SHARE,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -3061,6 +3393,56 @@ mod tests {
         let (version, accepted) = decode_capability_report_payload(frame.payload).unwrap();
         assert_eq!(version, ENVELOPE_VERSION);
         assert_eq!(accepted, ACCEPTED);
+        assert_eq!(decode_capability_report_facts(frame.payload), Some(&[][..]));
+    }
+
+    /// A report without facts is byte for byte the report from before them,
+    /// and a report with the serial-mux fact gives both halves back.
+    #[test]
+    fn the_capability_facts_round_trip() {
+        assert_eq!(
+            encode_capability_report_with_facts(ACCEPTED, &[]),
+            encode_capability_report(ACCEPTED)
+        );
+        let report = encode_capability_report_with_facts(ACCEPTED, &[FACT_SERIAL_MUX]);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(
+            frame.payload.last(),
+            Some(&FACT_SERIAL_MUX),
+            "{:02x?}",
+            frame.payload
+        );
+        let (version, accepted) = decode_capability_report_payload(frame.payload).unwrap();
+        assert_eq!(version, ENVELOPE_VERSION);
+        assert_eq!(accepted, ACCEPTED);
+        assert_eq!(
+            decode_capability_report_facts(frame.payload),
+            Some(&[FACT_SERIAL_MUX][..])
+        );
+        assert_eq!(decode_capability_report_facts(&[]), None);
+    }
+
+    /// A host from before the facts reads everything after the version as
+    /// accepted types and asks `contains` (periculum-wire's
+    /// `capability_report_accepts`). For every byte that is or could become
+    /// a frame type, the fact-carrying report answers it exactly as the
+    /// plain report does.
+    #[test]
+    fn an_old_host_reads_a_fact_carrying_report_unchanged() {
+        let plain = encode_capability_report(ACCEPTED);
+        let with = encode_capability_report_with_facts(ACCEPTED, &[FACT_SERIAL_MUX]);
+        let old_accepts = |report: &[u8], t: u8| {
+            let frame = decode_frame(report).unwrap();
+            frame.payload[1..].contains(&t)
+        };
+        for t in 0x01..*CAPABILITY_FACT_RANGE.start() {
+            assert_eq!(
+                old_accepts(&plain, t),
+                old_accepts(&with, t),
+                "type {t:#04x}"
+            );
+        }
+        assert!(CAPABILITY_FACT_RANGE.contains(&FACT_SERIAL_MUX));
     }
 
     #[test]
@@ -3310,7 +3692,7 @@ mod tests {
         );
     }
 
-    /// The other five outcomes, so the one ack stays the only ack and each
+    /// The other six outcomes, so the one ack stays the only ack and each
     /// refusal keeps the reason a host branches on.
     #[test]
     fn every_radio_config_outcome_but_applied_is_a_named_refusal() {
@@ -3320,6 +3702,7 @@ mod tests {
             (ConfigDelivery::Unconfirmed, REFUSE_BUSY),
             (ConfigDelivery::Stored, REFUSE_NOT_RUNNING),
             (ConfigDelivery::StoreFailed, REFUSE_PERSIST),
+            (ConfigDelivery::StorePending, REFUSE_PERSIST_PENDING),
         ] {
             assert_eq!(
                 refusal_reason(&radio_config_answer(delivery), TYPE_RADIO_CONFIG),
@@ -3341,6 +3724,7 @@ mod tests {
             ConfigDelivery::Undeliverable,
             ConfigDelivery::Unconfirmed,
             ConfigDelivery::StoreFailed,
+            ConfigDelivery::StorePending,
         ] {
             assert!(
                 !legacy_radio_config_acked(delivery),
@@ -3760,6 +4144,69 @@ mod tests {
             decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
             Some((TYPE_MEDIA_PROFILE, REFUSE_PERSIST))
         );
+    }
+
+    /// Order 1626: a write the store is still retrying is not a loss. The
+    /// Pocket answered 0x06 2.5 s into a 5 s write that then landed, and the
+    /// harness skipped 17 cells on a profile the next boot came up with.
+    #[test]
+    fn a_profile_still_being_written_is_pending_not_lost() {
+        let running = MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        let answer = media_profile_answer(true, true, Persist::Pending, running, running);
+        assert_eq!(
+            decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
+            Some((TYPE_MEDIA_PROFILE, REFUSE_PERSIST_PENDING))
+        );
+        assert_ne!(REFUSE_PERSIST_PENDING, REFUSE_PERSIST);
+    }
+
+    /// Every answer on the persist path names the same three states the
+    /// same way, so a host reads one table for all of them.
+    #[test]
+    fn every_persist_path_answer_tells_pending_from_lost() {
+        let profile = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: true,
+        };
+        let name = name("ab");
+        for (persist, reason) in [
+            (Persist::Lost, REFUSE_PERSIST),
+            (Persist::Pending, REFUSE_PERSIST_PENDING),
+        ] {
+            assert_eq!(persist_refusal(persist), Some(reason));
+            for (answer, ty) in [
+                (
+                    fixed_position_answer(true, true, persist),
+                    TYPE_FIXED_POSITION,
+                ),
+                (
+                    media_profile_answer(true, true, persist, profile, profile),
+                    TYPE_MEDIA_PROFILE,
+                ),
+                (
+                    telemetry_target_answer(true, true, true, persist),
+                    TYPE_TELEMETRY_TARGET,
+                ),
+                (
+                    node_name_answer(true, persist, Some((0, &name, &name))),
+                    TYPE_NODE_NAME,
+                ),
+                (
+                    mgmt_allow_answer(TYPE_MGMT_ALLOW, persist, Some(&[]), false),
+                    TYPE_MGMT_ALLOW,
+                ),
+            ] {
+                assert_eq!(
+                    decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
+                    Some((ty, reason)),
+                    "{persist:?} answered with the wrong reason for type 0x{ty:02x}"
+                );
+            }
+        }
+        assert_eq!(persist_refusal(Persist::Durable), None);
     }
 
     #[test]
@@ -4361,6 +4808,188 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn a_frame_dump_request_round_trips_and_no_other_board_takes_it() {
+        assert_eq!(encode_frame_dump(None), [0xA4, 0xA5, TYPE_FRAME_DUMP, 0, 0]);
+        assert_eq!(
+            encode_frame_dump(Some(1)),
+            [0xA4, 0xA5, TYPE_FRAME_DUMP, 0, 1, 1]
+        );
+        for screen in [None, Some(0), Some(1), Some(0xFF)] {
+            let frame = encode_frame_dump(screen);
+            let decoded = decode_frame(&frame).expect("an envelope");
+            assert_eq!(decoded.frame_type, TYPE_FRAME_DUMP);
+            assert_eq!(decode_frame_dump_payload(decoded.payload), Some(screen));
+        }
+        assert_eq!(decode_frame_dump_payload(&[0, 1]), None);
+        // The nRF boards' list does not carry it: refused by name, as every
+        // type a board has no consumer for.
+        assert_eq!(
+            classify_control_frame(&encode_frame_dump(None), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FRAME_DUMP,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    #[test]
+    fn a_home_code_round_trips_and_no_other_board_takes_it() {
+        let code = "lqxh1abcde fghij@rendezvous";
+        let frame = encode_home_code(code).expect("frame");
+        let decoded = decode_frame(&frame).expect("an envelope");
+        assert_eq!(decoded.frame_type, TYPE_HOME_CODE);
+        assert_eq!(decode_home_code_payload(decoded.payload), Some(code));
+        assert_eq!(encode_home_code(""), None);
+        let long = "a".repeat(HOME_CODE_MAX + 1);
+        assert_eq!(encode_home_code(&long), None);
+        assert!(encode_home_code(&long[1..]).is_some());
+        assert_eq!(decode_home_code_payload(&[]), None);
+        assert_eq!(decode_home_code_payload(long.as_bytes()), None);
+        assert_eq!(decode_home_code_payload(&[0xFF, 0xFE]), None);
+        // A code is base32 and ASCII punctuation: on the M9's one UART the
+        // frame carries none of the mux's flow bytes (0x11, 0x13) for the
+        // 140 characters a code has.
+        let typed = alloc::format!("lqxh1{}", "a".repeat(135));
+        let frame = encode_home_code(&typed).expect("frame");
+        assert!(!frame.iter().any(|b| *b == 0x11 || *b == 0x13));
+        assert_eq!(
+            classify_control_frame(&frame, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_HOME_CODE,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    /// 1533: a press and a hold round-trip; one byte, three bytes, nothing
+    /// else; code 0 and a hold over the cap are no values; and no board
+    /// that lists its types here takes it (only the M9's bench image does).
+    #[test]
+    fn a_key_injection_round_trips_and_no_other_board_takes_it() {
+        let press = KeyInject {
+            code: 0xb7,
+            hold_ms: None,
+        };
+        let hold = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(500),
+        };
+        assert_eq!(
+            encode_key_inject(press),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 1, 0xb7]
+        );
+        assert_eq!(
+            encode_key_inject(hold),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 3, 0xb5, 0x01, 0xF4]
+        );
+        for inject in [press, hold] {
+            let frame = encode_key_inject(inject);
+            let decoded = decode_frame(&frame).expect("an envelope");
+            assert_eq!(decoded.frame_type, TYPE_KEY_INJECT);
+            assert_eq!(decode_key_inject_payload(decoded.payload), Some(inject));
+            assert!(inject.valid());
+        }
+        assert_eq!(decode_key_inject_payload(&[]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2, 3, 4]), None);
+        let idle = KeyInject {
+            code: 0,
+            hold_ms: None,
+        };
+        assert!(!idle.valid(), "an idle answer is no key");
+        let long = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(KEY_INJECT_HOLD_MAX_MS + 1),
+        };
+        assert!(!long.valid());
+        assert_eq!(
+            classify_control_frame(&encode_key_inject(press), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_KEY_INJECT,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    /// 1540, 1562: the bench's owe, arrive and forget frames read their payloads, and
+    /// no board that lists its types here takes them.
+    #[test]
+    fn the_bench_owe_arrive_and_forget_frames_read_and_no_other_board_takes_them() {
+        assert_eq!(decode_bench_owe_payload(&[]), Some(0));
+        assert_eq!(
+            decode_bench_owe_payload(&[BENCH_OWE_ERASE_LOG]),
+            Some(BENCH_OWE_ERASE_LOG)
+        );
+        assert_eq!(decode_bench_owe_payload(&[1, 2]), None);
+        assert_eq!(BENCH_OWE_FLAGS & !0x03, 0);
+        // 1562: arrive and forget carry nothing; 1540's row is refused.
+        assert_eq!(decode_bench_empty_payload(&[]), Some(()));
+        assert_eq!(decode_bench_empty_payload(&[7]), None);
+        assert_eq!(decode_bench_empty_payload(&[1, 2]), None);
+        assert_eq!(
+            encode_frame(TYPE_BENCH_OWE, &[BENCH_OWE_ERASE_LOG]),
+            [0xA4, 0xA5, 0x1B, 0, 1, 0x01]
+        );
+        assert_eq!(
+            encode_frame(TYPE_BENCH_ARRIVE, &[]),
+            [0xA4, 0xA5, 0x1C, 0, 0]
+        );
+        assert_eq!(
+            encode_frame(TYPE_BENCH_FORGET, &[]),
+            [0xA4, 0xA5, 0x1D, 0, 0]
+        );
+        for frame_type in [TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE, TYPE_BENCH_FORGET] {
+            assert!(!CAPABILITY_FACT_RANGE.contains(&frame_type));
+            assert_eq!(
+                classify_control_frame(&encode_frame(frame_type, &[0]), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: frame_type,
+                    reason: REFUSE_UNKNOWN_TYPE,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn position_share_classifies_and_refuses_a_setting_it_does_not_know() {
+        for setting in 0..=crate::position_share_store::POSITION_SHARE_MAX {
+            assert_eq!(
+                classify_control_frame(&encode_position_share(setting), ACCEPTED),
+                ControlAction::PositionShare(setting)
+            );
+        }
+        assert_eq!(
+            classify_control_frame(&encode_position_share(4), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_VALUE,
+            }
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_POSITION_SHARE, &[]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_POSITION_SHARE, &[1, 1]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        // A firmware that does not list it refuses it as unknown.
+        assert_eq!(
+            classify_control_frame(&encode_position_share(2), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
     #[test]
     fn pn_config_classifies_and_keep_keep_is_refused() {
         let both = PnConfigWire {

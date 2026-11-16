@@ -24,6 +24,7 @@ allow = [
     "AGPL-3.0",
     "AGPL-3.0-or-later",
     "bzip2-1.0.6", # libbz2-rs-sys — the bzip2 license (RNS uses bzip2)
+    "LGPL-2.1-only", # codec2 — upstream loquax's voice codec (Sideband interop); compatible with AGPL
 ]
 confidence-threshold = 0.8
 
@@ -47,6 +48,11 @@ ignore = [
     # Unmaintained, not a vulnerability, and no successor release exists. It is
     # a small transitive dependency; drop this when its dependents move off it.
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; transitive only, no fix exists" },
+    # zbus's zvariant family, unmaintained with no fix; reached only through
+    # upstream's iced GUI (mundy, for the desktop theme). No fork crate uses it.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; only via upstream iced GUI, no fix exists" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; only via upstream iced GUI, no fix exists" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; only via upstream iced GUI, no fix exists" },
 ]
 
 [bans]

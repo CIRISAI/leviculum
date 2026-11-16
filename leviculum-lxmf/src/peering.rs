@@ -26,12 +26,16 @@
 //! answers with "want none" for what it already holds.
 //!
 //! What a Python peer observes from the cursor design: offers that may
-//! include ids it already holds, including messages it itself sent us (a
-//! cursor cannot encode the reference's `from_peer` exclusion,
-//! `flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
-//! wire-legal and self-limiting: `offer_request` answers out of its own
-//! store membership (`LXMRouter.py:2318`) and declines them; the cost is
-//! offer-list bytes, never message bodies.
+//! include ids it already holds. A cursor alone cannot encode the
+//! reference's `from_peer` exclusion (`flush_peer_distribution_queue`,
+//! `LXMRouter.py:2484`), and offering a message back to the peer it came
+//! from cost message bodies, not only offer-list bytes, whenever that peer
+//! had delivered and purged it since: `offer_request` answers out of its
+//! own store membership (`LXMRouter.py:2318`) and wants it back (LV-1003).
+//! A host therefore records each synced message's origin beside the store
+//! (lnpnd's peering runtime) and steps past it in the offer toward that
+//! peer ([`OfferBuilder::skip_held_by_peer`]); the board keeps no such
+//! record and still offers it back.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ops::ControlFlow;
@@ -54,12 +58,11 @@ pub const OFFER_REQUEST_PATH: &str = "/offer";
 
 /// Reference peer-table cap and our host default
 /// (`MAX_PEERS`, `reference/LXMF/LXMF/LXMRouter.py:43`). The board build
-/// configures 16 instead: §5 budgets `104·N + 6144 ≤ 8192` bytes of
-/// peering RAM against the worst observed free heap, N ≤ 19, with margin
-/// (`BOARD_MAX_PEERS`, `leviculum-nrf/heap-budget/src/lib.rs`, where a
-/// compile-time assert holds the derivation; the record was 80 B in the
-/// design draft and grew to 104 B when the identity hash and the announce
-/// facts joined it).
+/// configures 7 instead (`BOARD_MAX_PEERS`,
+/// `leviculum-nrf/heap-budget/src/lib.rs`, where compile-time asserts hold
+/// the derivation): §5's record arithmetic allowed 16, but the table holds
+/// each `Peer` inline in a B-tree, and a T114 with 16 peers ran out of heap
+/// on 2026-11-10; seven is the most one B-tree node holds.
 pub const MAX_PEERS_DEFAULT: usize = 20;
 
 /// Autopeer on propagation announces by default
@@ -707,6 +710,11 @@ pub enum DropReason {
     /// Unpeered by [`PeerTable::rotate`] to keep headroom for newcomers
     /// (`rotate_peers`, `LXMRouter.py:2060-2126`).
     Rotation,
+    /// Over `max_peers` at load or at a maintenance pass, and the least
+    /// synced ([`PeerTable::trim_to_cap`]). The reference has no such drop:
+    /// its cap only gates admission (`LXMRouter.py:2032`), and its table
+    /// lives on a host with the RAM to hold whatever a store brings back.
+    Cap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -849,24 +857,87 @@ impl PeerTable {
         refreshed
     }
 
-    /// Restore persisted peers (engine start-up). A non-static record
-    /// already unheard past [`MAX_UNREACHABLE_SECS`] at `now` is not
-    /// restored: it is returned instead, and the caller removes it from its
-    /// store. The reference restores such a peer and culls it in its first
-    /// `sync_peers` pass (`LXMRouter.py:615-628`, `:2136-2140`); doing it
-    /// here makes the load heal a persisted table on its own, before any
-    /// sync pass or clock seed can dial or refresh the dead entry.
-    pub fn restore(&mut self, records: Vec<PeerRecord>, now: u64) -> Vec<[u8; DESTINATION_LENGTH]> {
+    /// Restore persisted peers (engine start-up), and hand back every
+    /// record that did not make it into the table with the reason, for the
+    /// caller to remove from its store and log as `PN_PEER action=drop`.
+    ///
+    /// A non-static record already unheard past [`MAX_UNREACHABLE_SECS`] at
+    /// `now` is not restored ([`DropReason::Unreachable`]). The reference
+    /// restores such a peer and culls it in its first `sync_peers` pass
+    /// (`LXMRouter.py:615-628`, `:2136-2140`); doing it here makes the load
+    /// heal a persisted table on its own, before any sync pass or clock seed
+    /// can dial or refresh the dead entry.
+    ///
+    /// The rest is held to `max_peers` ([`Self::trim_to_cap`],
+    /// [`DropReason::Cap`]). The cap used to be an admission rule only
+    /// ([`Self::handle_announce`]), and a store written under a larger cap
+    /// came back whole: a T114 whose table had grown to 15 under the old
+    /// board cap of 16 booted with all 15 after the cap went to 7, and the
+    /// heap budget sized for 7 ran out (order 1651, LV-1006).
+    pub fn restore(
+        &mut self,
+        records: Vec<PeerRecord>,
+        now: u64,
+    ) -> Vec<([u8; DESTINATION_LENGTH], DropReason)> {
         let mut dropped = Vec::new();
         for record in records {
             let mut peer = record.into_peer();
             peer.is_static =
                 self.config.static_peers.contains(&peer.destination_hash) || peer.is_static;
             if unreachable_at(&peer, now) {
-                dropped.push(peer.destination_hash);
+                dropped.push((peer.destination_hash, DropReason::Unreachable));
                 continue;
             }
             self.peers.insert(peer.destination_hash, peer);
+        }
+        dropped.extend(
+            self.trim_to_cap()
+                .into_iter()
+                .map(|hash| (hash, DropReason::Cap)),
+        );
+        dropped
+    }
+
+    /// Hold the table to `max_peers`: drop the non-static, idle peers the
+    /// node has the least invested in until it fits, and return them, least
+    /// valuable first. Static peers bypass the cap here as at admission, and
+    /// a peer mid-round is never dropped (its round would end on a missing
+    /// entry); either can leave the table above the cap until the next call.
+    ///
+    /// Kept first: the highest cursor, then the latest `last_heard`, then
+    /// destination-hash order. The cursor is how far the board's own sync
+    /// rounds have carried the peer through the store, the work a drop
+    /// throws away (a re-peered node is offered everything again); the
+    /// board keeps no traffic counters, so [`Self::rotate`]'s acceptance
+    /// ratio has nothing to rank by there.
+    ///
+    /// [`Self::restore`] calls it on every load, and a host without
+    /// [`Self::rotate`]'s counters calls it on its maintenance tick, so no
+    /// path can leave a table past the cap for longer than one tick.
+    pub fn trim_to_cap(&mut self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let excess = self.peers.len().saturating_sub(self.config.max_peers);
+        if excess == 0 {
+            return Vec::new();
+        }
+        let mut droppable: Vec<&Peer> = self
+            .peers
+            .values()
+            .filter(|peer| !peer.is_static && peer.state == SyncPhase::Idle)
+            .collect();
+        // Ascending by what is kept: the first entries are the ones to drop.
+        droppable.sort_by(|a, b| {
+            a.cursor
+                .cmp(&b.cursor)
+                .then(a.last_heard.cmp(&b.last_heard))
+                .then(b.destination_hash.cmp(&a.destination_hash))
+        });
+        let dropped: Vec<[u8; DESTINATION_LENGTH]> = droppable
+            .into_iter()
+            .take(excess)
+            .map(|peer| peer.destination_hash)
+            .collect();
+        for hash in &dropped {
+            self.peers.remove(hash);
         }
         dropped
     }
@@ -1549,6 +1620,12 @@ pub struct InboundGate {
 }
 
 impl InboundGate {
+    /// Estimated heap bytes of the throttle map (a host census, lnpnd's
+    /// `PN_CENSUS peers=`).
+    pub fn heap_bytes(&self) -> usize {
+        leviculum_core::heap_census::btree_map_bytes(&self.throttled)
+    }
+
     /// Every gate the reference applies before looking at the offer
     /// itself (`offer_request`, `LXMRouter.py:2266-2295`), in its order:
     /// sequential stamp validation, concurrent inbound syncs, the
@@ -1596,10 +1673,11 @@ impl InboundGate {
     }
 }
 
-/// Answer the membership half of an `/offer`: wanted = ids not in the
-/// store (`offer_request`, `LXMRouter.py:2318-2329`). Store membership is
-/// the only filter, as in the reference — a drained id is re-accepted and
-/// re-deduplicated at ingest.
+/// Answer the membership half of an `/offer`: wanted = ids `known` does not
+/// name (`offer_request`, `LXMRouter.py:2318-2329`). The reference asks its
+/// store alone, so a drained id is wanted back and dropped at ingest; a
+/// host passes [`crate::PropagationNode::knows`], which also names what it
+/// processed and let go (LV-1003).
 pub fn answer_offer(
     transient_ids: &[TransientId],
     contains: impl Fn(&TransientId) -> bool,
@@ -1675,6 +1753,15 @@ impl OfferBuilder {
         }
     }
 
+    /// Hold the offer to our own transfer limit as well as the peer's: a
+    /// message above it is local only
+    /// ([`PropagationNode::is_local_only`](crate::PropagationNode::is_local_only))
+    /// and is skipped as oversize, for good, whatever the peer would take.
+    pub fn with_own_transfer_limit(mut self, transfer_limit_bytes: u64) -> Self {
+        self.transfer_limit_bytes = self.transfer_limit_bytes.min(transfer_limit_bytes);
+        self
+    }
+
     pub fn push(&mut self, entry: &StoredMessage) -> ControlFlow<()> {
         if self.stopped {
             return ControlFlow::Break(());
@@ -1702,6 +1789,21 @@ impl OfferBuilder {
         self.cumulative += transfer_size;
         self.plan.ids.push(entry.transient_id);
         self.plan.cursor_target = entry.sequence;
+        ControlFlow::Continue(())
+    }
+
+    /// Step past `entry` without offering it: the peer the offer goes to is
+    /// the one it came from, as the host recorded at ingest (LV-1003). A permanent skip like oversize and low value, so the cursor
+    /// moves past it; the reference never offers a message to its
+    /// `from_peer` either (`flush_peer_distribution_queue`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2484`).
+    pub fn skip_held_by_peer(&mut self, entry: &StoredMessage) -> ControlFlow<()> {
+        if self.stopped {
+            return ControlFlow::Break(());
+        }
+        if entry.sequence > self.initial_cursor {
+            self.plan.cursor_target = entry.sequence;
+        }
         ControlFlow::Continue(())
     }
 

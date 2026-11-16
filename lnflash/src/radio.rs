@@ -195,6 +195,11 @@ pub const PRESETS: [PresetDef; 4] = [
     },
 ];
 
+/// The shipped preset, the one every estimate falls back to. Indexed at
+/// compile time, so a table without a first entry does not build; that the
+/// first entry is eu868 is held by a test.
+pub const EU868_PRESET: &PresetDef = &PRESETS[0];
+
 /// The presets a user can actually pick, in menu order.
 pub fn selectable() -> impl Iterator<Item = &'static PresetDef> {
     PRESETS.iter().filter(|p| p.unavailable.is_none())
@@ -481,16 +486,26 @@ impl RadioChoice {
 }
 
 /// How the radio step is reached.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RadioPlan {
-    /// Ask the user. `--yes` answers "the defaults", because `Assumed` takes
-    /// every default rather than blocking on a prompt nobody will see.
-    #[default]
+    /// The zero-config default (#476): ask nothing. A board that reports a
+    /// profile other than the shipped one keeps it; otherwise it is sent
+    /// the preset the host's place estimates ([`crate::region`]).
+    Estimate(crate::region::Estimate),
+    /// Ask the user (`--ask`). `--yes` answers "the defaults", because
+    /// `Assumed` takes every default rather than blocking on a prompt nobody
+    /// will see.
     Ask,
     /// Already decided on the command line; do not ask.
     Fixed(RadioChoice),
     /// Do not touch the radio configuration at all.
     Skip,
+}
+
+impl Default for RadioPlan {
+    fn default() -> Self {
+        Self::Estimate(crate::region::Estimate::default())
+    }
 }
 
 /// The dialect decision on an already-opened port (#238): one capability
@@ -927,7 +942,13 @@ mod tests {
         );
         let custom = RadioSettings { sf: 11, ..EU868 };
         assert_eq!(RadioChoice::Custom(custom).settings(), custom);
-        assert_eq!(RadioPlan::default(), RadioPlan::Ask);
+        // #476: the default is the estimate, never the prompt.
+        assert_eq!(
+            RadioPlan::default(),
+            RadioPlan::Estimate(crate::region::Estimate::default())
+        );
+        assert_eq!(EU868_PRESET.name, "eu868");
+        assert_eq!(EU868_PRESET.settings, EU868);
     }
 
     #[test]

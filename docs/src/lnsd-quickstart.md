@@ -35,11 +35,14 @@ The package:
 - Installs `lnsd`, `lnstest`, `lncp`, and `lnstatus` under `/usr/bin/`,
   with a man page for each.
 - Creates a system user `leviculum` and a group of the same name.
-- Drops a default config file at `/etc/reticulum/config` (mode 644)
-  and creates the config directory `/etc/reticulum` mode 2775
+- Creates the config directory `/etc/reticulum` mode 2775
   (group-writable + setgid, so files created inside it inherit the
   `leviculum` group).
-- Enables and starts the `lnsd.service` systemd unit.
+- Enables and starts the `lnsd.service` systemd unit. On its first
+  start `lnsd` writes `/etc/reticulum/config` itself, the file
+  `lnsd --writeconfig` writes: rnsd's default with an `[auto]` section
+  after it. The package ships no config file, and an upgrade leaves a
+  config an earlier package installed as it is.
 
 For the native tools (`lnstest`, `lncp`, `lnstatus`) and Python tools (`rnstatus`,
 `rnpath`, `rnprobe`, Sideband, Nomadnet, …) to talk to the running
@@ -49,6 +52,14 @@ daemon, your user has to be in the `leviculum` group:
 sudo usermod -aG leviculum "$USER"
 # log out and back in, or `newgrp leviculum` for this shell only
 ```
+
+The tools find the daemon's directory, `/etc/reticulum`, without flags
+because it comes first in the lookup order the installation guide
+states in its "Configuration directory" section
+(`docs/src/guide/installation.md:104-117`). If you also run a daemon of your own on
+`~/.reticulum`, the tools still take `/etc/reticulum` while its
+`config` exists; a tool that then fails says so and prints the
+`--config` that selects the other directory.
 
 Verify the installation:
 
@@ -63,10 +74,11 @@ systemctl is-active lnsd
 
 ## Minimum-viable config
 
-The default `/etc/reticulum/config` is conservative: it brings up a
+The `/etc/reticulum/config` lnsd writes on its first start brings up a
 single `AutoInterface` for local LAN peers, with transport routing
-disabled. That's enough to talk to other Reticulum nodes on the same
-LAN, but it does not connect you to the wider mesh.
+disabled, and its `[auto]` section dials up to two servers of a shipped
+list (first `leviculum.network`), which it leaves for servers the
+network announces once enough of them stand.
 
 A reasonable beta-tester config has two interfaces: one for the LAN, one
 TCP uplink to a public entrypoint. Edit `/etc/reticulum/config` to:
@@ -164,6 +176,7 @@ daemon version: not exposed by the shared-instance RPC ...
 
 ----- Config -----
 config dir:  /etc/reticulum
+config /etc/reticulum (given by --config)
 config file: /etc/reticulum/config
 config file: present, parsed OK
 

@@ -1,0 +1,24 @@
+Entdecken
+┌● Zuletzt gesehen─────────────────────────────────────────────────────────────┐
+│▏Suchen                                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌  ────────────────────────────────────────────────────────────────────────────┐
+│Seiten                                                                        │
+│ Lesezeichen                                                                  │
+│▌* Relay Süd  gesehen vor 2 Tagen · direkt erreichbar                         │
+│ Heute                                                                        │
+│   Marcel's node  gesehen vor 10 Min. · über 2 Stationen erreichbar           │
+│                                                                              │
+│Räume                                                                         │
+│Du bist in keinem Raum. Such dir unten einen Server aus.                      │
+│ Server                                                                       │
+│ RNS Moscow  noch nicht gesehen                                               │
+│ Cascadia  noch nicht gesehen                                                 │
+│ Chatsurfer  noch nicht gesehen                                               │
+│ CTRS  noch nicht gesehen                                                     │
+│ Minuteman  noch nicht gesehen                                                │
+│ RMAP.WORLD Hub  noch nicht gesehen                                           │
+│ Save Europe  noch nicht gesehen                                              │
+│ SoCal Public  noch nicht gesehen                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats

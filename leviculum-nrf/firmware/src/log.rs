@@ -53,6 +53,9 @@ pub struct LogRing {
     buf: core::cell::UnsafeCell<[u8; LOG_RING_SIZE]>,
     write_pos: AtomicUsize,
     read_pos: AtomicUsize,
+    /// Bytes a lapping writer took from the reader before it read them,
+    /// since boot ([`LogRing::dropped`]).
+    dropped: AtomicUsize,
 }
 
 // Safety: Embassy is single-threaded (cooperative executor on one core).
@@ -71,6 +74,7 @@ impl LogRing {
             buf: core::cell::UnsafeCell::new([0u8; LOG_RING_SIZE]),
             write_pos: AtomicUsize::new(0),
             read_pos: AtomicUsize::new(0),
+            dropped: AtomicUsize::new(0),
         }
     }
 
@@ -99,7 +103,18 @@ impl LogRing {
         let rp = self.read_pos.load(Ordering::Relaxed);
         if let Some(oldest) = leviculum_boot_trace::tail::lapped_reader(wp, rp, LOG_RING_SIZE) {
             self.read_pos.store(oldest, Ordering::Release);
+            self.dropped
+                .fetch_add(oldest.wrapping_sub(rp), Ordering::Relaxed);
         }
+    }
+
+    /// How many bytes the ring has lost since boot: written, then
+    /// overwritten by a writer that lapped the reader before the reader got
+    /// to them. Until order 1300 nothing counted them, so a debug capture
+    /// with a hole in it could not tell a ring overrun from a board that
+    /// said nothing. The debug writer reports it as `LOG_DROPPED n=`.
+    pub fn dropped(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Read up to `out.len()` bytes. Returns number of bytes read.
@@ -141,7 +156,7 @@ pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 ///
 /// It is *meaningful* from every logging context too, because every
 /// firmware entry point calls `embassy_nrf::init` — which starts RTC1 —
-/// at the start of `main`, before any log call (`bin/rak4631.rs:43`;
+/// at the start of `main`, before any log call (`bin/solarnode.rs:67`;
 /// on the shared loop `node_loop::enter`, `src/node_loop.rs:187`). The panic handler
 /// (`lib.rs:715`) and the `HardFault` exception (`lib.rs:955`) never log:
 /// both write their evidence to `.uninit` RAM and `sys_reset`, and it is
@@ -391,6 +406,22 @@ mod tests {
         assert_eq!(n, LOG_RING_SIZE);
         assert_eq!(&out[n - 3..n], b"xyz");
         assert!(out[..n - 3].iter().all(|&b| b == b'a'));
+    }
+
+    #[test]
+    fn a_lapping_writer_counts_the_bytes_the_reader_lost() {
+        let ring = LogRing::new();
+        ring.write(&[b'a'; LOG_RING_SIZE]);
+        assert_eq!(ring.dropped(), 0, "a full ring has lost nothing yet");
+        ring.write(b"xyz");
+        assert_eq!(ring.dropped(), 3);
+        // The reader catches up; a second lap counts from where it stood.
+        let mut out = [0u8; LOG_RING_SIZE];
+        assert_eq!(ring.read(&mut out), LOG_RING_SIZE);
+        ring.write(&[b'b'; LOG_RING_SIZE]);
+        assert_eq!(ring.dropped(), 3, "the reader had read everything");
+        ring.write(b"12345");
+        assert_eq!(ring.dropped(), 8);
     }
 
     #[test]

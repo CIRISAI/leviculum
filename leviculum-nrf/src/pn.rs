@@ -143,9 +143,11 @@
 //! What a refusal no longer shows as is a missing proof, so every
 //! refusing arm now logs `PN_REJECT reason=<word> via=<carrier>` — the
 //! same fixed-word line `lnpnd` keeps — and the accepted arm still
-//! reports its flush as `PN_ACCEPT ... durable=`. The advertisement
-//! refused for its size adds `size=<bytes> cap=<bytes>`, the limit it
-//! failed (867: until then that arm was the one without a line). A verdict
+//! reports its flush as `PN_ACCEPT ... durable= local_only=`. The
+//! advertisement refused adds `bytes=<bytes> limit=<bytes>`, the limit it
+//! failed, with lnpnd's reason words `too_large`, `over_sync_limit` and
+//! `store_full` (867: until then that arm was the one without a line; 1355
+//! gave it lnpnd's words and keys). A verdict
 //! the node itself then refuses, the late `incoming_full` above all, logs
 //! `PN_REJECT reason=<error> link=<16 hex> accept=<0|1>` (878).
 //!
@@ -180,9 +182,11 @@
 //!                                               cache, flush queues
 //!         + (0)                                 SERVE_PEAK_BYTES, the
 //!                                               outbound serve transient —
-//!                                               48 922 B at the announced
-//!                                               cap and UNFUNDED, see the
-//!                                               arithmetic at the constant
+//!                                               17 264 B at the announced
+//!                                               cap, gated live and not
+//!                                               reserved (order 1676), see
+//!                                               the arithmetic at the
+//!                                               constant
 //!       + reserve                             fragmentation reserve
 //!                                             + the shared BLE channels
 //!                                             + one incoming resource at
@@ -192,7 +196,7 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 752, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 752, role 22 144, reserve 17 824,
 //! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
 //! 10 792 B and the division yields **4** (leaving 8 B of slack, #661, #662, #666, #852, 860, 867, 981): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
@@ -237,6 +241,7 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use leviculum_core::envelope::{PnConfigWire, PN_COST_KEEP};
 use leviculum_core::identity::Identity;
+use leviculum_core::link::LinkError;
 use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::pn_config_store::StoredPnConfig;
 use leviculum_core::resource::ResourceStrategy;
@@ -255,9 +260,9 @@ use leviculum_lxmf::constants::{
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     answer_offer, offer_budget_for_mdu, offer_reply, peering_key_material, plan_sync_batch,
-    DeclineReason, DropReason, InboundGate, OfferBuilder, OfferPlan, OfferReply, OfferResponse,
-    PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase,
-    SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
+    DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse, PeerChange,
+    PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase, SyncSource,
+    WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -403,6 +408,14 @@ const MAINTENANCE_SECS: u64 = 480;
 
 /// `PN_STATS` cadence (instruction item 3).
 const STATS_SECS: u64 = 300;
+
+/// How often the engine looks for peer records ageing toward the reclaim
+/// ([`Engine::tick_peer_refresh`]). A record is re-saved once it is half a
+/// lap old and erased a full lap after it was written, so the look has
+/// seven of the region's sixteen pages to happen in: a minute is far inside
+/// that at any write rate the board sustains, and the scan reads the
+/// memory-mapped region without writing.
+const PEER_REFRESH_SECS: u64 = 60;
 
 /// The longest the loop sleeps before the idle-link sweep looks again
 /// ([`Engine::tick_idle_links`]). The sweep also runs on every settle pass
@@ -723,6 +736,9 @@ pub struct EngineHeapCensus {
     pub role: usize,
     /// Unflushed writes queued at both store adapters.
     pub flush: usize,
+    /// Peering dials held for the client reserve since boot (order 1666):
+    /// a count, not bytes, and outside [`Self::total`].
+    pub dials_held: u32,
 }
 
 impl EngineHeapCensus {
@@ -736,6 +752,30 @@ impl EngineHeapCensus {
             + self.role
             + self.flush
     }
+}
+
+/// One held peering dial (order 1666): `PN_SYNC peer=… action=defer
+/// reason=client_pending|client_reserve links=… max=… clients_pending=…`.
+/// Same `action=defer` shape as the cap's `reason=link_cap`, so a capture
+/// counts every deferred round with one grep and splits them by reason.
+fn log_dial_held(
+    destination: &[u8; 16],
+    reason: &'static str,
+    links: usize,
+    max: usize,
+    clients_pending: usize,
+) {
+    crate::log::log_fmt(
+        "PN_SYNC ",
+        format_args!(
+            "peer={} action=defer reason={} links={} max={} clients_pending={}",
+            Hex(destination),
+            reason,
+            links,
+            max,
+            clients_pending
+        ),
+    );
 }
 
 /// A stamp validation parked between settle passes.
@@ -798,7 +838,16 @@ pub struct Engine {
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
     next_maintenance_at_ms: u64,
+    next_peer_refresh_at_ms: u64,
+    /// A sync message the store did not keep since the last maintenance
+    /// sweep: `/offer`s answer `ERROR_THROTTLED` and peer batches are
+    /// refused at their advertisement until the sweep, booked for the next
+    /// settle pass, has run (`PN_STORE_FULL`, lnpnd's rule, order 1355).
+    store_full: bool,
     next_stats_at_ms: u64,
+    /// Peering dials held for the client reserve since boot (order 1666),
+    /// the census's `pn_dial_held=`.
+    dials_held: u32,
     announce_withheld_logged: bool,
     active: Option<ActiveDelivery>,
     next_active_at_ms: u64,
@@ -925,19 +974,32 @@ impl Engine {
         ));
         // A record already unheard past the reference's 14 days is left
         // out and purged here, so a table that holds dead peers heals on
-        // load (leviculum#466): nothing below may dial it or refresh it.
+        // load (leviculum#466): nothing below may dial it or refresh it. So
+        // is every record past `BOARD_MAX_PEERS` (order 1651): a table
+        // stored under the old cap of 16 came back whole and outgrew the
+        // heap the budget sized for seven; the purge persists the trim.
         if let Ok(records) = peer_store.load_all() {
-            for dropped in peers.restore(records, node.emission_secs()) {
+            for (dropped, reason) in peers.restore(records, node.emission_secs()) {
                 let _ = peer_store.remove(&dropped);
                 crate::log::log_fmt(
                     "PN_PEER ",
                     format_args!(
-                        "peer={} action=drop reason=unreachable peers={}",
+                        "peer={} action=drop reason={} peers={}",
                         Hex(&dropped),
+                        drop_reason_word(reason),
                         peers.len()
                     ),
                 );
             }
+        }
+        // A live record whose body no longer decodes is left out of the
+        // load: a peer lost without a drop, named here rather than silently.
+        let undecodable = peer_store.undecodable_peer_records();
+        if undecodable > 0 {
+            crate::log::log_fmt_critical(
+                "PN_PEER_SKIP ",
+                format_args!("reason=undecodable records={}", undecodable),
+            );
         }
         // The reference's order (`enable_propagation`,
         // `reference/LXMF/LXMF/LXMRouter.py:615-642`), lnpnd's too: the
@@ -1005,7 +1067,10 @@ impl Engine {
             last_synced: None,
             next_sync_at_ms: 0,
             next_maintenance_at_ms: 0,
+            next_peer_refresh_at_ms: 0,
+            store_full: false,
             next_stats_at_ms: 0,
+            dials_held: 0,
             announce_withheld_logged: false,
             active: None,
             next_active_at_ms: 0,
@@ -1076,6 +1141,7 @@ impl Engine {
             link_maps,
             role: self.role.heap_bytes(),
             flush: self.role.store().queued_heap_bytes() + self.peer_store.queued_heap_bytes(),
+            dials_held: self.dials_held,
         }
     }
 
@@ -1106,6 +1172,7 @@ impl Engine {
             cadence.wait_ms(AnnounceSlot::Propagation, now_ms)
         }));
         due = due.min(self.next_maintenance_at_ms.max(now_ms + 1));
+        due = due.min(self.next_peer_refresh_at_ms.max(now_ms + 1));
         due = due.min(self.next_stats_at_ms.max(now_ms + 1));
         due = due.min(now_ms.saturating_add(IDLE_SWEEP_MS));
         due = due.min(self.next_sync_at_ms.max(now_ms + 1));
@@ -1182,6 +1249,7 @@ impl Engine {
     {
         let mut out = TickOutput::default();
         for event in events {
+            leviculum_firmware::thread_watch::set_phase(event_phase(event));
             self.on_event(node, event, &mut out);
         }
         out
@@ -1300,13 +1368,23 @@ impl Engine {
                 // also held to what the record log can store (D11), since
                 // past this point the resource is proven before the role
                 // ever sees it.
+                //
+                // The reasons and keys are lnpnd's (order 1355): a client's
+                // upload above what the store keeps is `too_large`, a peer's
+                // batch above the sync limit `over_sync_limit`, and a peer's
+                // batch after a sync message the store did not keep, until
+                // the sweep, `store_full`.
                 let from_peer = self.validated_links.contains_key(link_id);
-                let oversize =
-                    leviculum_pn_store::board_oversize_refusal(&self.role, *data_size, from_peer);
-                if let Some(refusal) = &oversize {
+                let refusal = leviculum_pn_store::board_resource_refusal(
+                    &self.role,
+                    *data_size,
+                    from_peer,
+                    self.store_full,
+                );
+                if let Some(refusal) = &refusal {
                     crate::log::log_fmt("PN_REJECT ", format_args!("{refusal}"));
                 }
-                let within_limit = oversize.is_none();
+                let within_limit = refusal.is_none();
                 let in_flight: usize = node
                     .links()
                     .map(|(_, link)| link.incoming_resource_count())
@@ -1624,21 +1702,7 @@ impl Engine {
             }
             PeerChange::Dropped(reason) => {
                 let _ = self.peer_store.remove(&destination_hash);
-                self.log_peer(
-                    "drop",
-                    &destination_hash,
-                    match reason {
-                        DropReason::Disabled => "disabled",
-                        DropReason::OutOfDepth => "out_of_depth",
-                        DropReason::CostRaised => "cost_raised",
-                        DropReason::Unreachable => "unreachable",
-                        DropReason::NoAccess => "no_access",
-                        // The board does not rotate (`PeerTable::rotate`
-                        // runs on the host's tick); named for the shared
-                        // vocabulary.
-                        DropReason::Rotation => "rotation",
-                    },
-                );
+                self.log_peer("drop", &destination_hash, drop_reason_word(reason));
             }
             PeerChange::Declined(reason) => {
                 if reason == DeclineReason::TableFull {
@@ -1747,7 +1811,8 @@ impl Engine {
         let Some(peer) = self.peers.get(&peer_hash) else {
             return;
         };
-        let mut offer_builder = OfferBuilder::new(peer, offer_budget_for_mdu(mdu));
+        let mut offer_builder =
+            leviculum_pn_store::board_offer_builder(&self.role, peer, offer_budget_for_mdu(mdu));
         if self
             .role
             .store()
@@ -2328,6 +2393,17 @@ impl Engine {
             self.abandon_grind("batch_concluded");
         }
         if let Some(batch) = self.sync_batch.take() {
+            if let Some((offered, dropped)) = batch.drain.store_full() {
+                crate::log::log_fmt(
+                    "PN_STORE_FULL ",
+                    format_args!(
+                        "peer={} offered={} dropped={}",
+                        Hex(&batch.remote),
+                        offered,
+                        dropped
+                    ),
+                );
+            }
             crate::log::log_fmt(
                 "PN_SYNC ",
                 format_args!(
@@ -2454,6 +2530,9 @@ impl Engine {
         let mut out = TickOutput::default();
         let now_ms = node.now_ms();
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnTicks,
+        );
         self.harvest_mining();
         // The PN's path requests are the application's, as LXMRouter's and
         // LXMPeer's are in the reference (`LXMRouter.py:642`,
@@ -2465,10 +2544,17 @@ impl Engine {
         }
         self.tick_announce(node, now_ms, &mut out);
         self.tick_maintenance(node, now_ms);
+        self.tick_peer_refresh(now_ms);
         self.tick_stats(now_ms);
         self.tick_idle_links(node, now_ms, &mut out);
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnSyncRound,
+        );
         self.tick_sync(node, now_ms, &mut out);
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnWork,
+        );
         if self.grind.as_ref().is_some_and(|grind| grind.reprice) {
             // The walk's record is mid-workblock: it finishes first, because
             // the one parked stream cannot be handed to another material.
@@ -2485,6 +2571,9 @@ impl Engine {
                 self.work.push_front(unfinished);
             }
         } else if self.sync_batch.is_some() {
+            leviculum_firmware::thread_watch::set_phase(
+                leviculum_firmware::thread_watch::Phase::PnSyncIntake,
+            );
             self.perform_sync_step(node, &mut out).await;
         } else if self.reprice.is_some() {
             // Lowest priority: the walk takes a pass only when no upload,
@@ -2492,6 +2581,9 @@ impl Engine {
             self.reprice_step();
         }
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnFlush,
+        );
         self.flush(node).await;
         out
     }
@@ -2748,9 +2840,47 @@ impl Engine {
         let now = node.emission_secs();
         let evicted = self.role.tick(now);
         self.log_evictions(&evicted);
+        // The sweep a store failure booked has run: offers are answered
+        // again. On this store it frees nothing a failure was short of (the
+        // ring reclaims its oldest page by itself, so a record that did not
+        // land was refused by the flash, not for room); it is the point the
+        // board tries again, as lnpnd's is.
+        self.store_full = false;
         for dropped in self.peers.cull(now) {
             let _ = self.peer_store.remove(&dropped);
             self.log_peer("drop", &dropped, "unreachable");
+        }
+        // The board's rotation (order 1651). lnpnd runs
+        // `PeerTable::rotate` every `ROTATION_INTERVAL_SECS`; its rule ranks
+        // peers by traffic counters the board does not keep, and with none it
+        // postpones every pass, so here the table is held to the cap by
+        // `trim_to_cap` instead, every `MAINTENANCE_SECS`. Admission and
+        // restore already stop at the cap; this is the pass that catches any
+        // other path, a peer kept past the cap mid-round included.
+        for dropped in self.peers.trim_to_cap() {
+            let _ = self.peer_store.remove(&dropped);
+            self.log_peer("drop", &dropped, drop_reason_word(DropReason::Cap));
+        }
+    }
+
+    /// Keep the stored peer records out of the round-robin reclaim
+    /// ([`PnPeerStore::refresh_ageing_peers`], order 1651): every
+    /// [`PEER_REFRESH_SECS`], each record whose copy aged into the older half
+    /// of the region is re-saved unchanged and flushed with the next drain.
+    /// Before, a peer that neither announced nor synced for a lap of the
+    /// region was erased with its page and missing from the next boot's
+    /// table without a drop event.
+    fn tick_peer_refresh(&mut self, now_ms: u64) {
+        if now_ms < self.next_peer_refresh_at_ms {
+            return;
+        }
+        self.next_peer_refresh_at_ms = now_ms + PEER_REFRESH_SECS * 1000;
+        let refreshed = self.peer_store.refresh_ageing_peers();
+        if !refreshed.is_empty() {
+            crate::log::log_fmt(
+                "PN_PEER_REFRESH ",
+                format_args!("reason=ageing records={}", refreshed.len()),
+            );
         }
     }
 
@@ -2993,7 +3123,8 @@ impl Engine {
             return;
         }
 
-        let mut offer_builder = OfferBuilder::new(peer, OFFER_PROBE_BUDGET);
+        let mut offer_builder =
+            leviculum_pn_store::board_offer_builder(&self.role, peer, OFFER_PROBE_BUDGET);
         if self
             .role
             .store()
@@ -3039,29 +3170,77 @@ impl Engine {
             out.merge(node.request_path_unthrottled(&DestinationHash::new(destination)));
             return;
         };
+        // The client reserve (order 1666, LV-1006): a propagation node
+        // exists to accept clients, so peering waits (a) while a client's
+        // link request is proved but not yet active, for at most that
+        // link's establishment timeout (6 s per hop plus the 54 s responder
+        // bonus, plus up to 25 % jitter: 60 to 75 s at one hop), and (b)
+        // while its dial would leave fewer than CLIENT_RESERVED_LINKS slots
+        // of the cap free. Checked before the backoff is booked: a held dial
+        // is the node's state, not the peer's fault, and the next sync pass
+        // asks again.
+        let links = node.link_count();
+        let max_links = node.transport_config().max_links;
+        let clients_pending = node.pending_inbound_links(&self.dest_hash);
+        let over_ceiling = max_links.is_some_and(|max| {
+            links > leviculum_heap_budget::peering_dial_ceiling(max) && links < max
+        });
+        if clients_pending > 0 || over_ceiling {
+            self.dials_held = self.dials_held.saturating_add(1);
+            log_dial_held(
+                &destination,
+                if clients_pending > 0 {
+                    "client_pending"
+                } else {
+                    "client_reserve"
+                },
+                links,
+                max_links.unwrap_or(0),
+                clients_pending,
+            );
+            return;
+        }
         peer.book_sync_attempt(now);
         peer.state = SyncPhase::LinkEstablishing;
-        let (link_id, _, core_out) =
-            match node.connect(DestinationHash::new(destination), &signing_key) {
-                Ok(connected) => connected,
-                Err(_) => {
-                    // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
-                    // core has emitted LinkRefused, which the bins render
-                    // as a LINK_REFUSED line (`crate::events`); the
-                    // backoff above is already booked, so this round
-                    // retries on a later sync pass instead of spinning.
-                    if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
-                        crate::log::log_fmt(
-                            "PN_SYNC ",
-                            format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
-                        );
-                        if let Some(peer) = self.peers.get_mut(&destination) {
-                            peer.state = SyncPhase::Idle;
-                        }
-                    }
-                    return;
+        let (link_id, _, core_out) = match node.connect_keeping_free(
+            DestinationHash::new(destination),
+            &signing_key,
+            leviculum_heap_budget::CLIENT_RESERVED_LINKS,
+        ) {
+            Ok(connected) => connected,
+            Err(LinkError::ReserveHeld {
+                links,
+                max,
+                keep_free: _,
+            }) => {
+                // The pre-check above makes this unreachable today; kept so
+                // a change to either rule cannot turn a held dial into a
+                // booked backoff without a line saying so.
+                self.dials_held = self.dials_held.saturating_add(1);
+                log_dial_held(&destination, "client_reserve", links, max, 0);
+                if let Some(peer) = self.peers.get_mut(&destination) {
+                    peer.state = SyncPhase::Idle;
                 }
-            };
+                return;
+            }
+            Err(_) => {
+                // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
+                // core has emitted LinkRefused, which the bins render
+                // as a LINK_REFUSED line (`crate::events`); the
+                // backoff above is already booked, so this round
+                // retries on a later sync pass instead of spinning.
+                if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
+                    crate::log::log_fmt(
+                        "PN_SYNC ",
+                        format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
+                    );
+                    if let Some(peer) = self.peers.get_mut(&destination) {
+                        peer.state = SyncPhase::Idle;
+                    }
+                }
+                return;
+            }
+        };
         out.merge(core_out);
         self.outbound = Some(OutboundSync {
             peer: destination,
@@ -3214,11 +3393,32 @@ impl Engine {
     /// `live_cap=` is what this fetch may ship, and `free=`/`largest=`
     /// beside `margin=` are every input it was computed from, so the
     /// arithmetic can be re-run from a capture.
-    fn read_serve_cap(&mut self) {
+    ///
+    /// The reading and the answer are one step
+    /// ([`leviculum_pn_store::board_answer_get`], host-tested there): the
+    /// cap is set, the role answers under it, and an answer the heap alone
+    /// refused is logged as `PN_REJECT reason=heap_low via=get` (order
+    /// 1676). That refusal is the serve transient's only protection, by
+    /// decision: the boot plan reserves nothing for it
+    /// (`HEAP_BUDGET_SERVE mode=live_gated reserve=0`).
+    fn answer_get_under_live_heap(
+        &mut self,
+        request: &[u8],
+        mailbox: &[u8; 16],
+        now: u64,
+    ) -> Result<GetOutcome, leviculum_lxmf::GetError> {
         let (_, free) = leviculum_firmware::heap::heap_stats();
         let largest = crate::heap_census::largest_free_block();
-        let live_cap = crate::heap_census::live_serve_cap(self.serve_boot_cap, free, largest);
-        self.role.set_serve_cap_bytes(Some(live_cap));
+        let answer = leviculum_pn_store::board_answer_get(
+            &mut self.role,
+            self.serve_boot_cap,
+            free,
+            largest,
+            request,
+            mailbox,
+            now,
+        )?;
+        let live_cap = answer.live_cap;
         crate::log::log_fmt(
             "SERVE_CAP ",
             format_args!(
@@ -3230,6 +3430,10 @@ impl Engine {
                 free
             ),
         );
+        if answer.heap_low {
+            Self::log_reject(leviculum_pn_store::HEAP_LOW, "get");
+        }
+        Ok(answer.outcome)
     }
 
     /// `Some(work)` gives the item back unperformed: its stamp grind needs
@@ -3295,17 +3499,21 @@ impl Engine {
                         // a storage statement, and holding it for the flush
                         // put it behind the whole stamp workblock.
                         let durable = self.flush(node).await;
+                        // `local_only=1`: above our own transfer limit, so
+                        // never offered to a peer; its recipient collects it
+                        // here (1295's rule, `board_offer_builder`).
                         crate::log::log_fmt(
                             "PN_ACCEPT ",
                             format_args!(
-                                "tid={} dst={} bytes={} value={} dup={} via={} durable={}",
+                                "tid={} dst={} bytes={} value={} dup={} via={} durable={} local_only={}",
                                 Hex(&transient_id[..8]),
                                 Hex(&destination_hash),
                                 size,
                                 stamp_value,
                                 duplicate as u8,
                                 via,
-                                durable as u8
+                                durable as u8,
+                                self.role.is_local_only(size) as u8
                             ),
                         );
                         notify_if_for_us(&destination_hash, duplicate);
@@ -3372,8 +3580,7 @@ impl Engine {
                     }
                 };
                 let now = node.emission_secs();
-                self.read_serve_cap();
-                match self.role.handle_get(&data, &mailbox, now) {
+                match self.answer_get_under_live_heap(&data, &mailbox, now) {
                     Ok(GetOutcome::List { response, count }) => {
                         crate::log::log_fmt(
                             "PN_GET ",
@@ -3455,6 +3662,16 @@ impl Engine {
         // that says so is still sent: silence would cost the peer its
         // request timeout and the same retry.
         if !self.own_traffic_go("offer_answer") {
+            return OfferResponse::Error(PeerError::Throttled).encode();
+        }
+
+        // A store that did not keep a sync message since the last sweep
+        // declines with the reference's postponement, as lnpnd does: the
+        // peer keeps its messages and comes back after `PN_STAMP_THROTTLE`
+        // (`reference/LXMF/LXMF/LXMPeer.py:421-425`), where "want none"
+        // would tell it we hold them all.
+        if self.store_full {
+            Self::log_reject("store_full", "offer");
             return OfferResponse::Error(PeerError::Throttled).encode();
         }
 
@@ -3589,11 +3806,26 @@ impl Engine {
                     ),
                 );
                 notify_if_for_us(&destination_hash, duplicate);
-                if !duplicate && durable {
+                if !duplicate {
                     if let Some(batch) = self.sync_batch.as_mut() {
-                        batch.drain.accept(size as u64);
+                        if durable {
+                            batch.drain.accept(size as u64);
+                        } else {
+                            // The write did not reach flash: the role forgot
+                            // the id (`settle_message_op`), and the sender's
+                            // cursor is already past it.
+                            batch.drain.store_failure();
+                            self.store_full = true;
+                        }
                     }
                 }
+            }
+            UploadOutcome::StoreFailed(_) => {
+                Self::log_reject(reason, "sync");
+                if let Some(batch) = self.sync_batch.as_mut() {
+                    batch.drain.store_failure();
+                }
+                self.store_full = true;
             }
             refused => {
                 Self::log_reject(reason, "sync");
@@ -3603,6 +3835,11 @@ impl Engine {
                     }
                 }
             }
+        }
+        if self.store_full {
+            // The sweep runs on the next settle pass, before the next sync
+            // is taken; until then offers and peer batches are declined.
+            self.next_maintenance_at_ms = 0;
         }
         let drained = self.sync_batch.as_ref().map(|batch| {
             (
@@ -3721,6 +3958,21 @@ impl Engine {
     }
 }
 
+/// The `reason=` word of a `PN_PEER action=drop` line, lnpnd's vocabulary
+/// (`lnpnd/src/peering.rs`, `drop_reason_name`).
+fn drop_reason_word(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::Disabled => "disabled",
+        DropReason::OutOfDepth => "out_of_depth",
+        DropReason::CostRaised => "cost_raised",
+        DropReason::Unreachable => "unreachable",
+        DropReason::NoAccess => "no_access",
+        // lnpnd's rotation; the board trims by `Cap` instead.
+        DropReason::Rotation => "rotation",
+        DropReason::Cap => "cap",
+    }
+}
+
 /// Execute one [`FlushOp`] on the record-store task; `Some(free_bytes)`
 /// on success.
 async fn execute(op: &FlushOp) -> Option<u32> {
@@ -3755,5 +4007,22 @@ fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
     let own = leviculum_firmware::identity::report().and_then(|report| report.lxmf);
     if !duplicate && own.as_ref() == Some(destination_hash) {
         leviculum_firmware::feedback::notify();
+    }
+}
+
+/// The thread-watch phase one core event puts the engine in (order 1641):
+/// what a stall or a failed allocation inside `on_event` is reported as.
+fn event_phase(event: &NodeEvent) -> leviculum_firmware::thread_watch::Phase {
+    use leviculum_firmware::thread_watch::Phase;
+    match event {
+        NodeEvent::AnnounceReceived { .. } => Phase::PnAnnounce,
+        NodeEvent::LinkDataReceived { .. }
+        | NodeEvent::RequestReceived { .. }
+        | NodeEvent::ResponseReceived { .. }
+        | NodeEvent::RequestTimedOut { .. } => Phase::PnLinkData,
+        NodeEvent::ResourceAdvertised { .. }
+        | NodeEvent::ResourceCompleted { .. }
+        | NodeEvent::ResourceFailed { .. } => Phase::PnResource,
+        _ => Phase::PnEvents,
     }
 }

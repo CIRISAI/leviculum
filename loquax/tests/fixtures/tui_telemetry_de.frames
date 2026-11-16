@@ -1,0 +1,200 @@
+=== 80x24 ===
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: folded ---
+┌● tui───────────────────┐┌  them─────────────────────────────────── pos 4 min ┐
+│▌them             14:00 ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ leaving the hut now  14:00                         │
+│                        ││                                                    │
+│                        ││ ◎ Live-Position  14:00                             │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: detail ---
+┌ ┌ message ─────────────────────────────────────────────────────────────────┐ ┐
+│▌│from them to you                                                          █ │
+│▌│peer   61ddb79ada973523799227bbaf41e204                                   █ │
+│ │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   █ │
+│ │size   0 bytes                                                            █ │
+│ │signature verified                                                        █ │
+│ │                                                                          █ │
+│ │telemetry                                                                 █ │
+│ │  position  43.77310 N 11.25600 E                                         █ │
+│ │  country   Italy                                                         █ │
+│ │  emergency 112, 113 police, 118 ambulance, 115 fire                      █ │
+│ │  driving   on the right                                                  █ │
+│ │  currency  EUR                                                           █ │
+│ │  magnetic  4.0° east of true north                                       █ │
+│ │  altitude  5.60 m above sea level                                        █ │
+│ │  speed     0.00 m/s                                                      █ │
+│ │  bearing   0.00°                                                         █ │
+│ │  accuracy  ±5 m                                                          █ │
+│ │  fix       2026-10-26 13:56:00                                           █ │
+│ │  time      13:56:00                                                      █ │
+│ │                                                                          █ ┤
+│ │on this device                                                            █ │
+└─└────────────────────────────────────────────────────────────── Esc closes ┘─┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+=== 120x40 ===
+--- frame 1: attached ---
+┌● tui─────────────────────────────┐┌  Unbekannt───────────────────────────────────────────────────────────────────────┐
+│▌Unbekannt                        ││                                                                                  │
+│▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                              Noch keine Nachrichten                              │
+│                                  │├  to Unbekannt──────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: folded ---
+┌● tui─────────────────────────────┐┌  them────────────────────────────────────────────────────────────────────────────┐
+│▌them                       14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
+│▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││ leaving the hut now  14:00                                                       │
+│                                  ││                                                                                  │
+│                                  ││ ◎ Live-Position  14:00                                                           │
+│                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: detail ---
+┌  tui─────────────────────────────┐┌● them────────────────────────────────────────────────────────────────────────────┐
+│▌them                       14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
+│▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                     ┌ message ─────────────────────────────────────────────────────────────────┐                     │
+│                     │from them to you                                                          │                     │
+│                     │peer   61ddb79ada973523799227bbaf41e204                                   │                     │
+│                     │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │                     │
+│                     │size   0 bytes                                                            │                     │
+│                     │signature verified                                                        │                     │
+│                     │                                                                          │                     │
+│                     │telemetry                                                                 │                     │
+│                     │  position  43.77310 N 11.25600 E                                         │                     │
+│                     │  country   Italy                                                         │                     │
+│                     │  emergency 112, 113 police, 118 ambulance, 115 fire                      │                     │
+│                     │  driving   on the right                                                  │                     │
+│                     │  currency  EUR                                                           │                     │
+│                     │  magnetic  4.0° east of true north                                       │                     │
+│                     │  altitude  5.60 m above sea level                                        │                     │
+│                     │  speed     0.00 m/s                                                      │                     │
+│                     │  bearing   0.00°                                                         │                     │
+│                     │  accuracy  ±5 m                                                          │                     │
+│                     │  fix       2026-10-26 13:56:00                                           │                     │
+│                     │  time      13:56:00                                                      │                     │
+│                     │                                                                          │                     │
+│                     │on this device                                                            │                     │
+│                     │14:00:00  received, signature verified                                    │                     │
+│                     └────────────────────────────────────────────────────────────── Esc closes ┘                     │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││ leaving the hut now  14:00                                                       │
+│                                  ││                                                                                  │
+│                                  ││▌◎ Live-Position  14:00                                                           │
+│                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

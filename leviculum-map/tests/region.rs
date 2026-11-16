@@ -15,6 +15,10 @@ use leviculum_mapfill::render::{NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{Profile, Style, BACKGROUND};
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
+/// The cut before 1291, frozen: the version 2 sample whose layout
+/// refuses every truncation (a version 4 file is read while it is
+/// written, `leviculum-mapcut/tests/partial.rs`).
+const OLD_V2: &[u8] = include_bytes!("../fixtures/old/firenze-v2.lmr");
 
 /// On the seam of the region's two z15 tiles, inside its box.
 const CENTRE: LatLon = LatLon {
@@ -85,7 +89,7 @@ fn the_fixture_opens_and_verifies() {
     let r = Region::from_bytes(FLORENCE).expect("open");
     r.verify().expect("verify");
     let h = r.header();
-    assert_eq!((h.min_zoom, h.max_zoom, h.profile, h.tiles), (11, 15, 1, 6));
+    assert_eq!((h.min_zoom, h.max_zoom, h.profile, h.tiles), (11, 15, 2, 6));
     assert_eq!(h.len, FLORENCE.len() as u64);
     assert_eq!(r.attribution(), "© OpenStreetMap contributors");
     assert!(r.notice().contains("Open Database License (ODbL) 1.0"));
@@ -138,11 +142,11 @@ fn florence_region_draws_three_zooms() {
             (
                 15,
                 2,
-                617,
-                435,
-                4868,
-                (727, 2160, 106_801),
-                (1513, 4992, 9348),
+                619,
+                437,
+                6442,
+                (872, 2162, 106_797),
+                (2197, 5011, 9401),
                 44_160
             ),
             (
@@ -150,9 +154,9 @@ fn florence_region_draws_three_zooms() {
                 1,
                 528,
                 458,
-                10_301,
+                11_233,
                 (282, 375, 11_509),
-                (1375, 1646, 3245),
+                (1524, 1652, 3266),
                 5198
             ),
             (11, 1, 325, 310, 5365, (8, 26, 627), (21, 17, 25), 308),
@@ -248,8 +252,8 @@ fn a_view_read_into_buffers_matches_the_view_in_place() {
 
 #[test]
 fn every_truncation_is_an_error() {
-    for cut in 0..FLORENCE.len() {
-        let r = Region::from_bytes(&FLORENCE[..cut]);
+    for cut in 0..OLD_V2.len() {
+        let r = Region::from_bytes(&OLD_V2[..cut]);
         assert!(r.is_err(), "cut at {cut} opened");
     }
 }
@@ -315,8 +319,8 @@ fn corrupted_bytes_are_an_error_not_a_panic() {
     b[0] = b'X';
     assert_eq!(survives(&b).err(), Some(RegionError::Magic));
     let mut b = FLORENCE.to_vec();
-    b[4] = 3;
-    assert_eq!(survives(&b).err(), Some(RegionError::Version(3)));
+    b[4] = 6;
+    assert_eq!(survives(&b).err(), Some(RegionError::Version(6)));
     let mut b = FLORENCE.to_vec();
     b[25] = 17;
     assert_eq!(survives(&b).err(), Some(RegionError::Header("zoom")));

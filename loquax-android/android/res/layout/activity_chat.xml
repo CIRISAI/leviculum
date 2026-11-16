@@ -115,6 +115,44 @@
         android:textSize="12sp"
         android:visibility="gone" />
 
+    <!-- Our position share in this chat (1273): its words from the
+         library, and its Stop, one tap. -->
+    <LinearLayout
+        android:id="@+id/share_chip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bar"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="4dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingEnd="8dp"
+            android:text="⌖"
+            android:textColor="@color/accent"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/share_words"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/text"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/share_stop"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:textColor="@color/accent" />
+    </LinearLayout>
+
     <!-- An unknown sender's first message asks once (1139): "Add" opens
          the choice of a contact, "Not now" never asks again for it. -->
     <LinearLayout
@@ -238,7 +276,54 @@
             android:padding="10dp" />
     </LinearLayout>
 
+    <!-- The photo the camera took (1270), waiting for Send and its caption:
+         its thumbnail, its words and its cross. -->
     <LinearLayout
+        android:id="@+id/staged_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/staged"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:scaleType="centerCrop" />
+
+        <TextView
+            android:id="@+id/staged_words"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingStart="10dp"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
+
+        <ImageButton
+            android:id="@+id/staged_remove"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/scene_unstage"
+            android:padding="10dp" />
+    </LinearLayout>
+
+    <!-- The compose area (1276): the compose row, and the recording bar
+         that takes its place while a voice message records
+         (RecordingBar, made in code). The frame holds a finger that
+         landed on the microphone for the whole gesture. -->
+    <network.leviculum.loquax.RecordFrame
+        android:id="@+id/compose_frame"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/compose_row"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="bottom"
@@ -257,7 +342,7 @@
             android:minHeight="48dp"
             android:orientation="horizontal"
             android:paddingStart="4dp"
-            android:paddingEnd="12dp">
+            android:paddingEnd="4dp">
 
             <ImageButton
                 android:id="@+id/emoji"
@@ -285,7 +370,52 @@
                 android:textColor="@color/text"
                 android:textColorHint="@color/text_secondary"
                 android:textSize="17sp" />
+
+            <!-- Inside the field at its right edge (1270, after Signal): the
+                 position button, the camera, the microphone. Which of them
+                 show is the scene's (the compose node's buttons). -->
+            <ImageButton
+                android:id="@+id/locate"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/scene_locate"
+                android:padding="8dp" />
+
+            <ImageButton
+                android:id="@+id/camera"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/scene_camera"
+                android:padding="8dp" />
+
+            <ImageButton
+                android:id="@+id/record"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/record_voice"
+                android:padding="8dp" />
         </LinearLayout>
+
+        <!-- Outside the field: the round button, the plus while there is
+             nothing to send, Send once there is (1270). Two views, so each
+             has the scene's resource id. -->
+        <ImageButton
+            android:id="@+id/plus"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/send_circle"
+            android:contentDescription="@string/scene_attach"
+            android:padding="13dp" />
 
         <ImageButton
             android:id="@+id/send"
@@ -294,6 +424,8 @@
             android:layout_marginStart="8dp"
             android:background="@drawable/send_circle"
             android:contentDescription="@string/send"
-            android:padding="13dp" />
+            android:padding="13dp"
+            android:visibility="gone" />
     </LinearLayout>
+    </network.leviculum.loquax.RecordFrame>
 </LinearLayout>

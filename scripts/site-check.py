@@ -17,6 +17,9 @@ Two checks, in this order:
    actually produces. The names come from scripts/collect-nightly-debs.sh,
    which stages them under dist/ and is the one place they are decided; a
    page that links `lnsd-nightly-amd64.deb` fails here without a network.
+   The Android APKs come from scripts/build-nightly-apk.sh (1267) and go to
+   the site only, the forge's build having no Android SDK: a forge link to
+   one of them is a finding too.
    Likewise every link into the book, leviculum.network/docs/<path>.html,
    must name a page whose source docs/src/<path>.md exists.
 
@@ -25,15 +28,18 @@ Two checks, in this order:
    external link must answer below 400. Links under
    leviculum.network/releases/ are checked by name only, against the same
    asset list: the site target mirrors the forge's names, and until it is live
-   (see scripts/publish-site.sh) fetching them would only report that.
+   (see scripts/publish-site.sh) fetching them would only report that. The
+   site-only APK links are fetched from the site itself, since no forge
+   asset list can vouch for them.
 
 A URL listed in PENDING_FIRST_PUBLISH may answer 404 without failing, for a
 target that is only there once something has run on the server. Online, its
 status is still fetched and printed, and a 404 there is reported as "not
 published yet" rather than as a finding; any other status of 400 or above
 still fails. The set holds that exemption and nothing else, and an entry
-comes out once the URL has answered 200. It is empty since the book at
-https://leviculum.network/docs/ answered 200 on 2026-10-08 (Codeberg #260).
+comes out once the URL has answered 200. The book's entry came out when
+https://leviculum.network/docs/ answered 200 on 2026-10-08 (Codeberg #260);
+the APKs' went in with 1267, before the first nightly that publishes them.
 
 When the forge cannot be reached at all (no route, no DNS, a timeout), the
 online half is skipped with a message and the script exits 0: an offline
@@ -58,6 +64,7 @@ PAGES = ROOT / "site" / "pages"
 READMES = (ROOT / "README.md", ROOT / "lblogd" / "README.md")
 BOOK_SRC = ROOT / "docs" / "src"
 COLLECT = ROOT / "scripts" / "collect-nightly-debs.sh"
+APK_SCRIPT = ROOT / "scripts" / "build-nightly-apk.sh"
 
 FORGE_PREFIX = "https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/"
 SITE_PREFIX = "https://leviculum.network/releases/nightly/latest/"
@@ -66,7 +73,16 @@ RELEASE_API = "https://codeberg.org/api/v1/repos/Lew_Palm/leviculum/releases/tag
 TIMEOUT = 20
 
 # URLs whose 404 means "not published yet", not "wrong link", with the reason.
-PENDING_FIRST_PUBLISH: dict = {}
+_APK_PENDING = "the first `just nightly-publish` with scripts/build-nightly-apk.sh in it (1267)"
+PENDING_FIRST_PUBLISH: dict = {
+    f"{SITE_PREFIX}{name}": _APK_PENDING
+    for name in (
+        "loquax-nightly-android.apk",
+        "loquax-nightly-android.apk.sha256",
+        "loquax-nightly-android-x86_64.apk",
+        "loquax-nightly-android-x86_64.apk.sha256",
+    )
+}
 
 LINK = re.compile(r"\]\((https?://[^)\s]+)\)")
 BARE_URL = re.compile(r"https?://[^\s)<>\"'`]+")
@@ -95,6 +111,17 @@ def nightly_names(collect_script: str) -> set:
         for literal in re.findall(r'"\$DIST/([A-Za-z0-9][A-Za-z0-9._+-]*)"', line):
             names.add(literal)
     return names | {f"{n}.sha256" for n in names if not n.endswith(".sha256")}
+
+
+def site_only_names(apk_script: str) -> set:
+    """The file names build-nightly-apk.sh stages, from its `stage_apk
+    <target> <built> <published>` lines, each with its .sha256."""
+    names = set()
+    for line in apk_script.splitlines():
+        m = re.match(r"^stage_apk \S+ \S+ (\S+)$", line.strip())
+        if m:
+            names.add(m.group(1))
+    return names | {f"{n}.sha256" for n in names}
 
 
 def page_links(pages: dict) -> list:
@@ -137,11 +164,16 @@ def release_file(url: str):
     return None
 
 
-def offline_findings(links: list, produced: set, book_pages: set) -> list:
+def offline_findings(links: list, produced: set, book_pages: set, site_only: frozenset = frozenset()) -> list:
     findings = []
     for page, url in links:
         name = release_file(url)
-        if name is not None and name not in produced:
+        if name is not None and name in site_only:
+            if url.startswith(FORGE_PREFIX):
+                findings.append(
+                    f"{page}: {url} names {name!r}, which only the site carries, not the forge's release"
+                )
+        elif name is not None and name not in produced:
             findings.append(
                 f"{page}: {url} names {name!r}, which collect-nightly-debs.sh does not produce"
             )
@@ -163,7 +195,7 @@ def fetch(url: str, method: str = "GET") -> tuple:
         raise Offline(f"{url}: {e}") from e
 
 
-def online_findings(links: list) -> list:
+def online_findings(links: list, site_only: frozenset = frozenset()) -> list:
     status, body = fetch(RELEASE_API)
     if status != 200:
         return [f"{RELEASE_API} answered {status}; cannot read the forge's asset list"]
@@ -172,7 +204,7 @@ def online_findings(links: list) -> list:
     checked = set()
     for page, url in links:
         name = release_file(url)
-        if name is not None:
+        if name is not None and name not in site_only:
             if name not in assets:
                 findings.append(f"{page}: {url} names {name!r}, not an asset of the forge's nightly release")
             continue
@@ -269,6 +301,27 @@ def selftest() -> int:
         if bool(finding) != want_finding or bool(note) != want_note:
             print(f"selftest: {url} {status} gave finding={finding!r} note={note!r}")
             ok = False
+    apk_script = (
+        "stage_apk debug loquax-debug.apk loquax-nightly-android.apk\n"
+        "    stage_apk waydroid loquax-debug-x86_64.apk loquax-nightly-android-x86_64.apk\n"
+        'stage_apk() {  # <make target> <name the Makefile builds> <published name>\n'
+    )
+    site_only = frozenset(site_only_names(apk_script))
+    want_site_only = {"loquax-nightly-android.apk", "loquax-nightly-android-x86_64.apk"}
+    want_site_only |= {f"{n}.sha256" for n in want_site_only}
+    if site_only != want_site_only:
+        print(f"selftest: APK names parsed {sorted(site_only)}, expected {sorted(want_site_only)}")
+        ok = False
+    apk_pages = {
+        "good.md": f"[a]({SITE_PREFIX}loquax-nightly-android.apk) [b]({SITE_PREFIX}loquax-nightly-android.apk.sha256)",
+        "forge.md": f"[a]({FORGE_PREFIX}loquax-nightly-android.apk)",
+        "typo.md": f"[a]({SITE_PREFIX}loquax-nightly-arm64.apk)",
+    }
+    findings = offline_findings(page_links(apk_pages), produced, set(), site_only)
+    if (len(findings) != 2 or "forge.md" not in findings[0] or "only the site carries" not in findings[0]
+            or "typo.md" not in findings[1]):
+        print(f"selftest: expected the forge.md and typo.md APK findings, got {findings}")
+        ok = False
     print("site-check selftest:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -286,13 +339,15 @@ def main() -> int:
     readmes = {str(p.relative_to(ROOT)): p.read_text(encoding="utf-8") for p in READMES}
     links = page_links(pages) + readme_links(readmes)
     produced = nightly_names(COLLECT.read_text(encoding="utf-8"))
+    site_only = frozenset(site_only_names(APK_SCRIPT.read_text(encoding="utf-8")))
     book_pages = {str(p.relative_to(BOOK_SRC)) for p in BOOK_SRC.rglob("*.md")}
-    findings = offline_findings(links, produced, book_pages)
+    findings = offline_findings(links, produced, book_pages, site_only)
     print(f"site-check: {len(links)} external link(s) in {len(pages)} page(s) "
           f"and {len(readmes)} README(s); "
-          f"{len(produced)} nightly file name(s) from {COLLECT.relative_to(ROOT)}")
+          f"{len(produced)} nightly file name(s) from {COLLECT.relative_to(ROOT)}, "
+          f"{len(site_only)} site-only from {APK_SCRIPT.relative_to(ROOT)}")
     try:
-        findings += online_findings(links)
+        findings += online_findings(links, site_only)
         online = "checked"
     except Offline as e:
         online = None

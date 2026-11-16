@@ -98,7 +98,7 @@ struct Args {
     config_dir: PathBuf,
     defer_resource_builds: bool,
     /// `-v` / `--verbose` occurrences, `lnsd`'s and `lnpnd`'s spelling
-    /// (`leviculum-cli/src/lnsd.rs:104-109`, `lnpnd/src/main.rs:95-98`).
+    /// (`leviculum-cli/src/lnsd.rs:114-119`, `lnpnd/src/main.rs:110-113`).
     verbose: u8,
     /// `-q` / `--quiet` occurrences.
     quiet: u8,
@@ -133,20 +133,20 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 ///
 /// Info, not debug, for the same reason `lnsd` defaults there: `warn!` — the
 /// level of the one line that says this terminus adopted a proof's hop count
-/// (`node/link_management.rs:1548`) — must be visible without being asked
+/// (`node/link_management.rs:1596`) — must be visible without being asked
 /// for, while the `event=` debug lines are volume and are asked for. Asking
 /// is what every periculum node already does, twice over: the rendered config
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
 /// container environment carries `RUST_LOG=debug`
 /// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
-/// (`transport.rs:10729`) without touching the argv.
+/// (`transport.rs:11161`) without touching the argv.
 const DEFAULT_LOGLEVEL: u8 = 4;
 
 /// Map an RNS log level (0-7) to a tracing env-filter directive.
 ///
 /// tracing has no notice/verbose/extreme, so notice folds into info, verbose
 /// into debug and extreme into trace. The third copy of this ladder
-/// (`leviculum-cli/src/lnsd.rs:347`, `lnpnd/src/config.rs:469`); kept local
+/// (`leviculum-cli/src/lnsd.rs:477`, `lnpnd/src/config.rs:534`); kept local
 /// because this batch is scoped to this crate, and cited from here so a later
 /// consolidation into `leviculum-std` finds all three.
 fn loglevel_filter(level: u8) -> &'static str {
@@ -160,7 +160,7 @@ fn loglevel_filter(level: u8) -> &'static str {
 }
 
 /// The config level shifted by the CLI's net verbosity, clamped to the RNS
-/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:273`). `RUST_LOG` is not
+/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:289`). `RUST_LOG` is not
 /// consulted here: `install_global_subscriber` gives it precedence over
 /// whatever default we hand it.
 fn effective_level(config_loglevel: Option<u8>, verbose: u8, quiet: u8) -> u8 {
@@ -283,7 +283,7 @@ async fn main() -> ExitCode {
 async fn run(args: Args) -> Result<(), String> {
     let daemon_keys = daemon_config_keys(&args.config_dir);
     // The stack's own voice, on stderr: exactly the subscriber `lnsd` installs
-    // (`leviculum-cli/src/lnsd.rs:166`), so `RUST_LOG` wins, `-v`/`-q` shift
+    // (`leviculum-cli/src/lnsd.rs:176`), so `RUST_LOG` wins, `-v`/`-q` shift
     // the config's level, and `LEVICULUM_EVENT_LOG` picks up the structured
     // event layer if it is set. Installed before anything else in `run` so no
     // startup line is lost; `parse_args` failures above it stay plain

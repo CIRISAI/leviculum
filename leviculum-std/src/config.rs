@@ -21,6 +21,11 @@ pub struct Config {
     /// defaults in [`Config::rnsd_default`]. lnsd reads it, rnsd ignores it.
     #[serde(default)]
     pub auto: crate::auto_layer::AutoMedia,
+    /// `[auto] server_list` (#471 step 3): `host:port` entries that replace
+    /// the shipped server list, dialled in their order. `None` without the
+    /// key. lnsd reads it, rnsd ignores it.
+    #[serde(default)]
+    pub auto_server_list: Option<Vec<String>>,
     /// The decision lnsd took from [`Self::auto`], the host marker and the
     /// environment ([`crate::auto_layer::apply`]); `None` for a node built in
     /// code, which has no automatic layer. Not a config key.
@@ -36,11 +41,11 @@ pub struct Config {
 /// `path_choice` as a config value (Codeberg #230): the serde face of
 /// [`leviculum_core::transport::PathChoice`], kept separate because the
 /// core enum is `no_std` and carries no serde.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathChoiceSetting {
-    /// Fewer hops wins — today's rule and Python's, the default.
-    #[default]
+    /// Fewer hops wins — Python's rule, and the medium default on every
+    /// interface but the radio ones.
     Hops,
     /// Hops with the direct link priced by its announce re-hear evidence.
     HopsAndLoss,
@@ -88,6 +93,12 @@ pub struct ReticulumConfig {
     /// tracing filter with CLI `-v/-q` and `RUST_LOG` taking precedence.
     #[serde(default)]
     pub loglevel: Option<u8>,
+    /// `[logging] log_addresses` (order 1678): what the daemon writes where
+    /// a peer's network address would go, a daily pseudonym by default or
+    /// the address itself under `full`. lnsd only; rnsd ignores the key and
+    /// logs addresses raw. See [`crate::peer_tag`].
+    #[serde(default)]
+    pub log_addresses: crate::peer_tag::LogAddresses,
     /// Allow sharing instance across processes via local Unix socket.
     /// When enabled, the daemon listens on `\0rns/{instance_name}` for local clients.
     #[serde(default)]
@@ -228,12 +239,16 @@ pub struct ReticulumConfig {
     #[serde(default)]
     pub path_entries_dump: bool,
     /// Route choice between competing copies of one announce emission
-    /// (Codeberg #230). Leviculum-only key; rnsd reading a shared config
-    /// ignores it, and the default is Python's own rule, so a stock config
-    /// behaves identically on either daemon. See
-    /// [`leviculum_core::transport::PathChoice`].
+    /// (Codeberg #230), as an override over every interface. Leviculum-only
+    /// key; rnsd reading a shared config ignores it. `None` (the key
+    /// absent) leaves each interface on its medium's default since order
+    /// 1380: `hops_and_loss` on the radio interfaces (RNode, BLE), `hops`
+    /// on TCP, UDP, I2P, local IPC, serial, KISS, pipe and AutoInterface.
+    /// The wire is the same either way; only which next hop our own path
+    /// table keeps changes. See [`leviculum_core::transport::PathChoice`]
+    /// and the config page (`docs/src/configuration.md`).
     #[serde(default)]
-    pub path_choice: PathChoiceSetting,
+    pub path_choice: Option<PathChoiceSetting>,
     /// Seconds between this node's management announces, the probe and
     /// remote-management destinations (#449). Leviculum-only key; rnsd
     /// reading a shared config ignores it. Default
@@ -447,10 +462,22 @@ impl ReticulumConfig {
     /// The per-table ceilings this config asks for (Codeberg #421): the named
     /// profile, with any individually configured key overriding it.
     pub fn table_caps(&self) -> TableCaps {
-        let mut caps = match self.storage_profile.as_deref() {
+        self.table_caps_on(self.profile_caps())
+    }
+
+    /// The named profile's ceilings, before any per-table key: the part
+    /// the builder fits to the host's RAM (order 1586,
+    /// [`crate::table_budget::fit`]).
+    pub fn profile_caps(&self) -> TableCaps {
+        match self.storage_profile.as_deref() {
             Some("compact") => TableCaps::compact(),
             _ => TableCaps::desktop(),
-        };
+        }
+    }
+
+    /// `base` with every individually configured ceiling written over it.
+    pub fn table_caps_on(&self, base: TableCaps) -> TableCaps {
+        let mut caps = base;
         if let Some(n) = self.path_table_cap {
             caps.path_cap = n;
         }
@@ -626,6 +653,7 @@ impl Default for ReticulumConfig {
             enable_transport_defaulted: true,
             use_implicit_proof: true,
             loglevel: None,
+            log_addresses: crate::peer_tag::LogAddresses::Pseudonym,
             shared_instance: false,
             instance_name: default_instance_name(),
             shared_instance_type: None,
@@ -644,7 +672,7 @@ impl Default for ReticulumConfig {
             link_establishment_timeout_ms: None,
             max_links: None,
             path_entries_dump: false,
-            path_choice: PathChoiceSetting::default(),
+            path_choice: None,
             mgmt_announce_interval_secs: DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS,
             discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,
@@ -1088,6 +1116,21 @@ pub struct InterfaceConfig {
     #[serde(default)]
     pub test_drop_direct_ingress: bool,
 
+    /// `SerialInterface` only: the board shares one UART between its debug
+    /// text and its HDLC transport under XON/XOFF flow control (the
+    /// ThinkNode M9, `leviculum-nrf/serial-mux`). Every frame then escapes
+    /// 0x11 and 0x13, and the board's own flow bytes are stripped on read
+    /// (`interfaces::serial_mux`).
+    ///
+    /// Unset (`None`) detects it: the bring-up asks the board's capability
+    /// report first and turns the mux on when the report states
+    /// `envelope::FACT_SERIAL_MUX`; a Python `SerialInterface` peer, which
+    /// does not undo an escaped flow byte, and a USB CDC LNode, which sends
+    /// them raw, never state it. `Some` overrides the detection either way.
+    /// No Python equivalent.
+    #[serde(default)]
+    pub serial_mux: Option<bool>,
+
     // RNodeMultiInterface only.
     /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
     /// Each becomes one vport logical interface. Empty for every other type.
@@ -1163,6 +1206,37 @@ pub struct InterfaceConfig {
     /// taking the advertisement off the air; absent is off, the boards'
     /// dark-when-full policy. A measurement knob (752). No reference key.
     pub advertise_when_full: Option<bool>,
+    /// Most connections one source (an IPv4 address, or an IPv6 /64) holds
+    /// on a TCP server at once; a new one past it is closed right after
+    /// accept (1190). Absent is 16, `0` turns the cap off. The total cap of
+    /// a TCP server is `max_connections`. No reference key: Python's
+    /// `TCPServerInterface` accepts every connection.
+    pub max_connections_per_source: Option<usize>,
+    /// Seconds a TCP server connection may stay open without delivering one
+    /// valid HDLC frame (1190). Absent is 120, `0` never closes a silent
+    /// connection. No reference key.
+    pub silent_timeout_secs: Option<u64>,
+    /// The silent timeout above while the server holds more than
+    /// `pressure_fraction` of its total cap (1190). Absent is 10.
+    pub silent_timeout_pressure_secs: Option<u64>,
+    /// Fraction of `max_connections` above which a TCP server is under
+    /// pressure (1190). Absent is 0.8; outside `(0, 1]` is refused.
+    pub pressure_fraction: Option<f64>,
+    /// Seconds a TCP connection stays idle before the kernel sends its
+    /// first keepalive probe, on a TCP client or server section (1176).
+    /// Absent is 5, the reference's `TCP_PROBE_AFTER`; 1 to 32767. No
+    /// reference key: Python fixes the value and ignores the key.
+    pub tcp_keepalive_idle_secs: Option<u64>,
+    /// Seconds between unanswered keepalive probes (1176). Absent is 2
+    /// (`TCP_PROBE_INTERVAL`); 1 to 32767. No reference key.
+    pub tcp_keepalive_interval_secs: Option<u64>,
+    /// Unanswered keepalive probes before the connection is dropped
+    /// (1176). Absent is 12 (`TCP_PROBES`); 1 to 127. No reference key.
+    pub tcp_keepalive_probes: Option<u32>,
+    /// Seconds sent data may stay unacknowledged before the connection is
+    /// dropped (`TCP_USER_TIMEOUT`, 1176). Absent is 24, `0` leaves the
+    /// kernel default. No reference key.
+    pub tcp_user_timeout_secs: Option<u64>,
     /// A TCP server's listener, bound by the caller and handed over instead
     /// of an address (`ReticulumNodeBuilder::add_tcp_server_listener`). Never
     /// a config-file key: a bound socket is not representable there, which is
@@ -1174,6 +1248,31 @@ pub struct InterfaceConfig {
     #[serde(skip)]
     pub prebound_tcp_listener:
         Option<std::sync::Arc<std::sync::Mutex<Option<std::net::TcpListener>>>>,
+    /// The automatic layer's server slot this TCP client dials (#471 step
+    /// 3, [`crate::auto_servers`]): the entry it starts on, and where it
+    /// fails over to. Never a config-file key, skipped by serde like the
+    /// listener above; `None` for every configured section.
+    #[serde(skip)]
+    pub server_slot: Option<crate::auto_servers::ServerSlot>,
+    /// +ciris (#109): the path a `WebSocketClientInterface` requests in its
+    /// opening handshake, config key `path`. Absent is `/`. No reference key.
+    #[serde(default, alias = "path")]
+    pub websocket_path: Option<String>,
+    /// +ciris (#109): whether a `WebSocketClientInterface` dials `wss://`
+    /// (TLS, rustls with the webpki roots), config key `tls`. Absent is no,
+    /// plain `ws://`. No reference key.
+    #[serde(default, alias = "tls")]
+    pub websocket_tls: Option<bool>,
+    /// +ciris (#109): a `WebSocketClientInterface`'s framing, config key
+    /// `framing`: `raw` (subprotocol `rns.raw`, the default) or `hdlc`
+    /// (`rns.hdlc`). No reference key.
+    #[serde(default, alias = "framing")]
+    pub websocket_framing: Option<String>,
+    /// +ciris (#109): a `WebSocketClientInterface`'s whole target as one
+    /// `ws://` or `wss://` URL, config key `url`; it takes the place of
+    /// `target_host`, `target_port`, `path` and `tls`. No reference key.
+    #[serde(default, alias = "url")]
+    pub websocket_url: Option<String>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1318,6 +1417,7 @@ impl Default for InterfaceConfig {
             airtime_limit_long: None,
             csma_enabled: None,
             test_drop_direct_ingress: false,
+            serial_mux: None,
             subinterfaces: Vec::new(),
             max_connections: None,
             min_rssi: None,
@@ -1330,7 +1430,20 @@ impl Default for InterfaceConfig {
             fragment_mtu: None,
             central_links: None,
             advertise_when_full: None,
+            max_connections_per_source: None,
+            silent_timeout_secs: None,
+            silent_timeout_pressure_secs: None,
+            pressure_fraction: None,
+            tcp_keepalive_idle_secs: None,
+            tcp_keepalive_interval_secs: None,
+            tcp_keepalive_probes: None,
+            tcp_user_timeout_secs: None,
             prebound_tcp_listener: None,
+            server_slot: None,
+            websocket_path: None,
+            websocket_tls: None,
+            websocket_framing: None,
+            websocket_url: None,
         }
     }
 }
@@ -1362,7 +1475,8 @@ pub fn ingress_control_default_for_type(interface_type: &str) -> bool {
     let dial_out_point_to_point = interface_type == "TCPClientInterface"
         || interface_type == "BackboneClientInterface"
         || interface_type == "UDPInterface"
-        || interface_type.starts_with("I2P");
+        || interface_type.starts_with("I2P")
+        || interface_type == "WebSocketClientInterface";
     !dial_out_point_to_point
 }
 
@@ -1387,6 +1501,22 @@ impl InterfaceConfig {
             return true;
         }
         ingress_control_default_for_type(&self.interface_type)
+    }
+
+    /// How long an idle TCP connection of this section stays up after its
+    /// peer stopped answering, on Linux and Android, from its `tcp_*` keys
+    /// and today's defaults for the keys it leaves out (1346). `Err` names
+    /// a key whose value the node would refuse at start. With no key set it
+    /// is 26 s: the reference's probe after 5 s, every 2 s, and its 24 s
+    /// user timeout (TCPInterface.py:84-87).
+    pub fn tcp_silent_peer_bound(&self) -> std::result::Result<std::time::Duration, String> {
+        crate::interfaces::tcp::TcpLiveness::from_keys(
+            self.tcp_keepalive_idle_secs,
+            self.tcp_keepalive_interval_secs,
+            self.tcp_keepalive_probes,
+            self.tcp_user_timeout_secs,
+        )
+        .map(|liveness| liveness.silent_peer_bound())
     }
 }
 
@@ -1541,21 +1671,16 @@ impl Config {
 
 /// Pure resolver for the Python-Reticulum config-dir lookup, factored
 /// out so tests can drive it without touching the real filesystem or
-/// mutating `$HOME`.
+/// mutating `$HOME`. The order lives in
+/// [`crate::config_dir::ConfigDirChoice::resolve_with`], which also keeps
+/// the reason a client tool prints on a failure.
 fn resolve_config_dir<F: Fn(&Path) -> bool>(
     system_dir: &Path,
     home_dir: Option<&Path>,
     config_file_exists: F,
 ) -> PathBuf {
-    if config_file_exists(&system_dir.join("config")) {
-        return system_dir.to_path_buf();
-    }
-    let home = home_dir.unwrap_or(Path::new("."));
-    let xdg = home.join(".config/reticulum");
-    if config_file_exists(&xdg.join("config")) {
-        return xdg;
-    }
-    home.join(".reticulum")
+    crate::config_dir::ConfigDirChoice::resolve_with(None, system_dir, home_dir, config_file_exists)
+        .dir
 }
 
 // Minimal home_dir implementation to avoid dirs crate dependency
@@ -1684,7 +1809,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             "reticulum logging interfaces auto\n\
              Default Interface\n\
-             lan=yes servers=no bluetooth=no serial=no\n"
+             lan=yes servers=yes bluetooth=yes serial=yes\n"
         );
     }
 

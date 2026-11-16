@@ -7,7 +7,10 @@
 
 use crate::color::Color;
 use crate::model::{Align, Block, Field, FieldKind, Line, Link, MicronDocument, Span, Style};
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// The persistent parser state, mirroring the reference `default_state`.
 ///
@@ -97,12 +100,12 @@ impl State {
 /// content may legitimately carry, but a tab occupies one cell in the model
 /// and eight columns on the terminal, which desynchronises every width the
 /// renderer computed.
-fn strip_control_chars(input: &str) -> std::borrow::Cow<'_, str> {
+fn strip_control_chars(input: &str) -> alloc::borrow::Cow<'_, str> {
     let unsafe_char = |c: char| c != '\n' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c));
     if !input.chars().any(unsafe_char) {
-        return std::borrow::Cow::Borrowed(input);
+        return alloc::borrow::Cow::Borrowed(input);
     }
-    std::borrow::Cow::Owned(
+    alloc::borrow::Cow::Owned(
         input
             .chars()
             .filter_map(|c| match c {
@@ -143,7 +146,7 @@ pub fn parse(input: &str) -> MicronDocument {
             if was_literal && !state.literal && !literal_lines.is_empty() {
                 bind_and_push(
                     Block::LiteralBlock {
-                        lines: std::mem::take(&mut literal_lines),
+                        lines: core::mem::take(&mut literal_lines),
                     },
                     &mut blocks,
                     &mut anchors,
@@ -202,7 +205,7 @@ pub fn parse(input: &str) -> MicronDocument {
             depth: state.depth,
             align: state.table_align.take(),
             max_width: state.table_max_width.take(),
-            rows: std::mem::take(&mut state.table_buffer),
+            rows: core::mem::take(&mut state.table_buffer),
         };
         bind_and_push(
             block,
@@ -729,7 +732,7 @@ fn read_color(chars: &[char], i: usize, n: usize) -> (String, usize) {
 fn handle_table_toggle(rest: &str, state: &mut State) -> Option<Block> {
     if state.table_mode {
         state.table_mode = false;
-        let rows = std::mem::take(&mut state.table_buffer);
+        let rows = core::mem::take(&mut state.table_buffer);
         let align = state.table_align.take();
         let max_width = state.table_max_width.take();
         if rows.len() < 2 {

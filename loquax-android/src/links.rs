@@ -8,9 +8,14 @@
 //! The file is `address-book` in the app's directory, one line each:
 //!
 //! ```text
+//! since <unix seconds>
 //! link <address> <contact id> <lookup key> <name>
 //! not-now <address>
 //! ```
+//!
+//! `since` is when this device began (1448, walk finding 12): the banner
+//! asks only for a person whose first word came after it, so a history a
+//! new device pulls from its mailbox asks nothing in every chat.
 //!
 //! The lookup key is percent-encoded where it holds a space or a `%`. The
 //! copied thumbnail is `photos/<address>` beside it, the bytes the address
@@ -41,6 +46,9 @@ pub struct Link {
 pub struct Book {
     pub links: BTreeMap<[u8; 16], Link>,
     pub not_now: BTreeSet<[u8; 16]>,
+    /// When this device began, in Unix seconds; `None` in a file from
+    /// before 1448, which the session stamps on its first start.
+    pub since: Option<i64>,
 }
 
 impl Book {
@@ -53,9 +61,20 @@ impl Book {
             .collect()
     }
 
+    /// Whether the banner asks to save a person whose first word, by its
+    /// writer's clock, is `first` (1448): only for a person met after
+    /// this device began. A word without a time asks nothing, nor does a
+    /// device without a beginning, which the session stamps at start.
+    pub fn met_here(&self, first: Option<i64>) -> bool {
+        matches!((self.since, first), (Some(since), Some(first)) if first >= since)
+    }
+
     /// The table as its file says it.
     pub fn text(&self) -> String {
         let mut out = String::from("# Loquax's links to the phone's address book\n");
+        if let Some(since) = self.since {
+            out.push_str(&format!("since {since}\n"));
+        }
         for (peer, link) in &self.links {
             out.push_str(&format!(
                 "link {} {} {} {}\n",
@@ -80,6 +99,13 @@ pub fn parse_book(text: &str) -> Book {
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(secs) = line.strip_prefix("since ") {
+            match secs.trim().parse() {
+                Ok(since) => book.since = Some(since),
+                Err(_) => tracing::warn!("{BOOK_FILE}:{}: not a time", index + 1),
+            }
             continue;
         }
         let mut words = line.splitn(5, ' ');
@@ -218,6 +244,7 @@ mod tests {
             },
         );
         book.not_now.insert(BOB);
+        book.since = Some(1_790_000_000);
         let text = book.text();
         assert!(text.contains("%25%20odd%09key"), "{text}");
         assert_eq!(parse_book(&text), book);
@@ -238,6 +265,22 @@ mod tests {
         assert_eq!(book.links.len(), 1);
         assert_eq!(book.links[&ALICE].name, "Alice Schmidt");
         assert!(book.not_now.contains(&BOB));
+    }
+
+    /// 1448: a person met after the device began is asked about, one from
+    /// the history it pulled is not; without a time or a beginning,
+    /// nothing asks. A bad `since` line costs only itself.
+    #[test]
+    fn the_banner_asks_only_for_a_person_met_on_this_device() {
+        let book = parse_book("since 1790000000\n");
+        assert!(book.met_here(Some(1_790_000_000)));
+        assert!(book.met_here(Some(1_790_000_500)));
+        assert!(!book.met_here(Some(1_789_999_999)), "from the history");
+        assert!(!book.met_here(None), "no time");
+        assert!(!Book::default().met_here(Some(1)), "no beginning");
+        let bad = parse_book(&format!("since soon\nnot-now {}\n", to_hex(&BOB)));
+        assert_eq!(bad.since, None);
+        assert!(bad.not_now.contains(&BOB));
     }
 
     #[test]

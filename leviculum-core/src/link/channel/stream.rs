@@ -209,6 +209,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "stream_id exceeds")]
+    #[cfg_attr(
+        target_family = "wasm",
+        ignore = "+ciris #108: panics abort on wasm32-wasip1"
+    )]
     fn test_stream_data_message_invalid_stream_id() {
         StreamDataMessage::new(STREAM_ID_MAX + 1, vec![], false, false);
     }

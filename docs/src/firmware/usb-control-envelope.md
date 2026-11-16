@@ -55,6 +55,9 @@ Commands (host → board):
 | 0x14 | MGMT_ALLOW_QUERY | empty (a query) — answered with MGMT_ALLOW_REPORT |
 | 0x15 | CHANNEL_STATS_QUERY | empty (a query) — answered with CHANNEL_STATS_REPORT (#636) |
 | 0x16 | PN_LIST          | `[list][count][count × 16]`: replace one propagation-node operator list, `list` 0 static peers, 1 auth allowed, 2 control allowed, at most 16 hashes, `count 0` clears; acked once the store holds it, effective at the next reset (audit 2026-10-12 D4, D18) |
+| 0x17 | POSITION_SHARE   | `[setting]`: whom the `lev.position` announce is readable by, 0 default (sealed to the owner on a tracker, else off), 1 off, 2 owner, 3 everyone; above 3 refused `REFUSE_VALUE`; persisted before the ack, in force at once (order 1301) |
+| 0x18 | FRAME_DUMP       | empty, or `[screen]`: dump the displayed frame as text on the debug stream (`PBM <w> <h>`, `PBR` rows, `PBE <fnv32>`, the format of `loquax-m9/src/dump.rs`); a screen byte first walks the fixture model there (0 chats list, 1 the pinned chat), an unknown one refused `REFUSE_VALUE`; acked before the dump. Only the ThinkNode M9's Loquax image accepts it (order 1361) |
+| 0x19 | HOME_CODE        | the admission code of a Loquax home as `loquax mailbox admit` prints it, UTF-8, at most 512 bytes, with or without its rendezvous list: the board makes a device identity, writes the pending client record and acks, then joins the home over its node; a text that is no code refused `REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`. Sent by `lnflash --home <code> --port <tty>`. Only the ThinkNode M9's Loquax image accepts it (order 1415) |
 
 Responses (board → host):
 
@@ -62,7 +65,7 @@ Responses (board → host):
 |------|-------------------|-------------------------------------------|
 | 0x81 | ACK               | `[acked_type]`                            |
 | 0x82 | REFUSAL           | `[refused_type, reason]`                  |
-| 0x83 | CAPABILITY_REPORT | `[version, accepted types...]`            |
+| 0x83 | CAPABILITY_REPORT | `[version, accepted types...]`, optionally `[0x00, facts...]` behind them — see below |
 | 0x84 | RADIO_REPORT      | the RADIO_CONFIG parameter block the radio is running (#349) |
 | 0x85 | MEDIA_REPORT      | `[running_flags, configured_flags]` in the MEDIA_PROFILE flag encoding |
 | 0x86 | POSITION_SOURCE_REPORT | one flag byte (bit0 fixed position set, bit1 GNSS built in and active) |
@@ -80,8 +83,48 @@ below), `0x07` no calendar clock (the command needs one and the board has
 none yet — seed it with a GNSS fix or `--set-time` and retry), `0x08` not
 running (the value is durably on the flash page and applies at the next
 reset, but the carrier it configures did not come up this boot — see
-below). The version in the capability report (`1`) names the envelope framing itself;
+below), `0x09` persist pending (the value is applied and the page write
+is still being retried when the answer is due; the board logs
+`[TELEMETRY] persist landed <record> after <ms> ms` when it lands, or
+`persist gave up after retries <record>` if it never does).
+
+`0x06` and `0x09` split what one code said until order 1626: `0x06` now
+means the store task **gave up** and a reset loses the value, `0x09` means
+it is **still writing**. The SoftDevice schedules flash access between
+radio events, and a BLE link that is busy or being torn down can hold an
+erase off for seconds (the store retries for twelve rounds, about 12 s
+worst case, longer than any host waits for one answer). A host that needs
+the record durable before a reset re-asks — the query, or the same frame
+again, which a page already carrying the value answers at once — until the
+answer is durable. The version in the capability report (`1`) names the envelope framing itself;
 new frame types extend the accepted list without bumping it.
+
+### Facts in the capability report
+
+A board may state facts about itself behind its accepted types: a `0x00`
+marker (`CAPABILITY_FACTS_MARKER`, the never-accepted `TYPE_UNSPECIFIED`),
+then one byte per fact, each from the reserved range `0xF0..=0xFF`, which no
+frame type will ever take (`CAPABILITY_FACT_RANGE`, `envelope.rs`). A report
+without facts is the report from before them, byte for byte. A host from
+before them reads the marker and the facts as two more accepted types; it
+only ever asks whether one named type is among them
+(`capability_report_accepts`, `periculum/periculum-wire/src/envelope.rs:331-334`;
+lnflash's `probe_capabilities`), and neither `0x00` nor a fact byte is a
+type it asks about, so its answers do not change
+(`an_old_host_reads_a_fact_carrying_report_unchanged`).
+
+| fact | name | meaning |
+|------|------|---------|
+| 0xF0 | SERIAL_MUX | `serial_mux=1`: one UART carries the debug text and the HDLC transport under XON/XOFF (`leviculum-nrf/serial-mux`, the ThinkNode M9). Every host frame must escape 0x11 and 0x13, and the host strips the board's flow bytes. lnsd turns its mux on when it reads this. |
+
+lnsd asks for the report first on a `SerialInterface` whose `serial_mux`
+key is unset, before the radio config, which may carry a 0x13 (`19 dBm`).
+The framed query, `7e a4 a5 04 00 00 7e`, carries no flow byte, so it is
+safe raw on any line. Two queries, one second each
+(`interfaces/serial_mux.rs`, `CAPABILITY_ANSWER_TIMEOUT` and
+`CAPABILITY_QUERY_ATTEMPTS`); the M9 answered in 7 ms in 6 of 6 rig runs
+(1238). A peer that never answers costs the bring-up those 2 s and is
+driven unescaped, as before.
 
 ### DUTY_HOLD (0x8A) — the board says when its LoRa queue is held
 
@@ -388,8 +431,8 @@ One boot state changes the promise: a board whose boot did not bring the
 LoRa carrier up (a `lora=off` media profile in flash) has no LoRa task,
 so no config can be delivered or applied before the next reset. The
 config goes to the flash store, and the answer waits for the confirmed
-page write (#358) — a failed write refuses with `0x06` (persist), a
-confirmed one refuses with `0x08` (**not running**). A refusal rather
+page write (#358) — a failed write refuses with `0x06` (persist), one
+still being retried with `0x09` (persist pending), a confirmed one refuses with `0x08` (**not running**). A refusal rather
 than an ack because the only true claim here is *a reboot comes back on
 this configuration*, which is not the claim an ack makes: until #363 both
 states sent the same three bytes, and a host that reads that ack as "the

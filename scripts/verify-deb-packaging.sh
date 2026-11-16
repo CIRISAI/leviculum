@@ -144,7 +144,7 @@ check_package() {
         | grep -oE '\([a-z][a-z0-9_-]*\)' | tr -d '()' | sort -u || true)"
     for claim in $claimed; do
         claims=$((claims + 1))
-        if ! printf '%s\n' "$contents" | grep -qE " \./usr/bin/${claim}\$"; then
+        if ! grep -qE " \./usr/bin/${claim}\$" <<<"$contents"; then
             fail "Description names ${claim}, which the package does not install"
             unshipped=1
         fi
@@ -172,7 +172,7 @@ check_package() {
     # cargo-deb wrote; assert the result, not the intermediate.
     contains "$contents" "/usr/share/doc/${pkg}/changelog.gz" \
         "ships a changelog under its native name"
-    if echo "$contents" | grep -q "/usr/share/doc/${pkg}/changelog.Debian.gz"; then
+    if grep -q "/usr/share/doc/${pkg}/changelog.Debian.gz" <<<"$contents"; then
         fail "changelog still carries the non-native .Debian infix"
     fi
 
@@ -203,11 +203,30 @@ check_package() {
         # Both spellings mean no interpreter: plain static, and static-pie
         # for a position-independent static binary, which is what rustc
         # produces for the musl targets by default.
-        case "$desc" in
-            *"statically linked"* | *"static-pie linked"*)
-                pass "/usr/bin/${binaries[0]} is statically linked" ;;
-            *) fail "/usr/bin/${binaries[0]} is not static: ${desc#*: }" ;;
-        esac
+        # loquax on amd64 and arm64 is the exception (1342): the window
+        # needs glibc, so it is linked against the floor scripts/build-deb.sh
+        # names, and no symbol it takes may be newer than that.
+        if [ "$pkg" = loquax ] && [ "$ARCH" != armhf ]; then
+            local newest
+            newest="$(readelf --dyn-syms --wide "$tmp/usr/bin/${binaries[0]}" |
+                grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1 || true)"
+            case "$desc" in
+                *"dynamically linked"*) pass "/usr/bin/${binaries[0]} links against glibc" ;;
+                *) fail "/usr/bin/${binaries[0]} is not the glibc build: ${desc#*: }" ;;
+            esac
+            if [ -n "$newest" ] &&
+                [ "$(printf '%s\n' "$newest" GLIBC_2.31 | sort -V | tail -n1)" = GLIBC_2.31 ]; then
+                pass "/usr/bin/${binaries[0]} needs glibc 2.31 at most (newest symbol ${newest})"
+            else
+                fail "/usr/bin/${binaries[0]} needs a glibc past 2.31 (newest symbol ${newest:-none})"
+            fi
+        else
+            case "$desc" in
+                *"statically linked"* | *"static-pie linked"*)
+                    pass "/usr/bin/${binaries[0]} is statically linked" ;;
+                *) fail "/usr/bin/${binaries[0]} is not static: ${desc#*: }" ;;
+            esac
+        fi
         rm -rf "$tmp"
     else
         skip "file(1) not installed; cannot check static linkage"
@@ -310,7 +329,7 @@ check_package() {
         else
             pass "lintian reports no errors"
         fi
-        if echo "$lint_out" | grep -q '^W:'; then
+        if grep -q '^W:' <<<"$lint_out"; then
             echo "$lint_out" | grep '^W:' | sed 's/^/      note: /'
         fi
     else
@@ -330,36 +349,44 @@ check_package() {
 echo "verify-deb-packaging: arch=${ARCH}"
 echo
 
-check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
-contains "$CONFFILES" "/etc/reticulum/config" "registers /etc/reticulum/config as a conffile"
+check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt
+# No stock config (#471, 1510): lnsd writes its first-start file itself, and
+# a shipped one would be "a configuration present", which keeps the
+# automatic layer's servers, BLE and serial off on every package install.
+if grep -q 'etc/reticulum/config' <<<"$CONTENTS$CONFFILES"; then
+    fail "leviculum ships /etc/reticulum/config, which the first-start design says it must not"
+else
+    pass "ships no /etc/reticulum/config (lnsd writes its first-start file)"
+fi
 contains "$CONTENTS" "lnsd.service" "ships the lnsd systemd unit"
 # lnsd ships on mimalloc (#437, 766). Read off the packaged bytes rather than
 # run, so an arm64 package is checked from an amd64 host too; the startup
 # line is in the binary only when it was built on mimalloc. LEVICULUM_ALLOC=
 # system is build-deb.sh's knob and inverts the check.
-check_lnsd_allocator() {
-    local deb tmp want="${LEVICULUM_ALLOC:-mimalloc}"
-    deb="$(find_deb leviculum)"
+# lnpnd likewise since 1592, checked in its own section below.
+check_allocator() {
+    local package="$1" bin="$2" deb tmp want="${LEVICULUM_ALLOC:-mimalloc}"
+    deb="$(find_deb "$package")"
     [ -n "$deb" ] || return 0
     tmp="$(mktemp -d)"
     dpkg-deb -x "$deb" "$tmp"
-    if grep -qaF 'Allocator: mimalloc' "$tmp/usr/bin/lnsd"; then
-        [ "$want" = mimalloc ] && pass "lnsd is built on mimalloc" \
-            || fail "lnsd is built on mimalloc under LEVICULUM_ALLOC=${want}"
+    if grep -qaF 'Allocator: mimalloc' "$tmp/usr/bin/$bin"; then
+        [ "$want" = mimalloc ] && pass "$bin is built on mimalloc" \
+            || fail "$bin is built on mimalloc under LEVICULUM_ALLOC=${want}"
     else
-        [ "$want" = system ] && pass "lnsd is built on the libc allocator (LEVICULUM_ALLOC=system)" \
-            || fail "lnsd is not built on mimalloc (no 'Allocator: mimalloc' in /usr/bin/lnsd)"
+        [ "$want" = system ] && pass "$bin is built on the libc allocator (LEVICULUM_ALLOC=system)" \
+            || fail "$bin is not built on mimalloc (no 'Allocator: mimalloc' in /usr/bin/$bin)"
     fi
     rm -rf "$tmp"
 }
-check_lnsd_allocator
+check_allocator leviculum lnsd
 rm -rf "$CTRL_DIR"
 echo
 
 check_package lnomad lnomad lnomad
 # lnomad is deliberately service-free: it is a terminal browser, and
 # installing it must not add a unit to the system.
-if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+if grep -q 'systemd' <<<"$CONTENTS"; then
     fail "lnomad ships a systemd unit, which it must not"
 else
     pass "ships no systemd unit"
@@ -378,6 +405,9 @@ check_package loquax loquax loquax
 # (`debian-installed`, then `was-enabled`); the enabling fragment has no
 # `debian-installed` test and enables on a fresh install.
 contains "$CONTENTS" "loquax-mailbox.service" "ships the Loquax Mailbox unit"
+# The launcher entry and its icon, the jackdaw (1336).
+contains "$CONTENTS" "./usr/share/applications/loquax.desktop" "ships the launcher entry"
+contains "$CONTENTS" "./usr/share/icons/hicolor/256x256/apps/loquax.png" "ships the 256 px icon"
 LOQUAX_POSTINST="$(cat "$CTRL_DIR/postinst")"
 case "$LOQUAX_POSTINST" in
 *"_dh_action=start"* | *"deb-systemd-invoke start loquax-mailbox.service"* | \
@@ -391,27 +421,151 @@ contains "$LOQUAX_POSTINST" "deb-systemd-invoke try-restart loquax-mailbox.servi
     "postinst try-restarts on upgrade, so a running mailbox survives one"
 contains "$LOQUAX_POSTINST" "chmod 0700 \"\$STATE_DIR\"" \
     "postinst keeps the mailbox's state directory at 0700"
-# The marker is the `Tui` subcommand's doc comment in loquax/src/main.rs,
-# compiled in only with the feature; it has to follow that comment.
-check_loquax_tui() {
-    local deb tmp
+# The messenger alone has nothing to attach to (1265, walk finding 5), so the
+# package pulls in leviculum, whose own postinst enables and starts lnsd.
+LOQUAX_DEPENDS="$(sed -n 's/^Depends: //p' "$CTRL_DIR/control")"
+case ", ${LOQUAX_DEPENDS}," in
+*", leviculum,"* | *", leviculum ("*) pass "loquax depends on leviculum, which brings lnsd" ;;
+*) fail "loquax does not depend on leviculum (Depends: ${LOQUAX_DEPENDS})" ;;
+esac
+# The markers are the `Tui` and `Gui` subcommands' doc comments in
+# loquax/src/main.rs, compiled in only with each feature; they have to follow
+# those comments. amd64's and arm64's package is the glibc build with both
+# frontends (1342), armhf's the musl one with the terminal alone, and the
+# launcher entry is the one that build can open.
+check_loquax_frontends() {
+    local deb tmp entry
     deb="$(find_deb loquax)"
     [ -n "$deb" ] || return 0
     tmp="$(mktemp -d)"
     dpkg-deb -x "$deb" "$tmp"
-    if grep -qaF 'The terminal messenger, as plain `loquax`: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
+    if grep -qaF 'The terminal messenger, as plain `loquax` where there is no display: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
         pass "loquax is built with its tui"
     else
         fail "loquax is built without --features tui; \`loquax tui\` is missing"
     fi
+    entry="$(cat "$tmp/usr/share/applications/loquax.desktop" 2>/dev/null || true)"
+    case "$ARCH" in
+    amd64 | arm64)
+        if grep -qaF 'The messenger in a window, as plain `loquax` on a desktop, attached as the terminal one is' "$tmp/usr/bin/loquax"; then
+            pass "loquax is built with its window"
+        else
+            fail "loquax is built without --features gui; \`loquax gui\` is missing"
+        fi
+        contains "$entry" $'\nExec=loquax gui\n' "the launcher entry opens the window"
+        contains "$entry" $'\nTerminal=false\n' "the launcher entry needs no terminal"
+        contains "$entry" $'\nStartupWMClass=loquax\n' "the launcher entry names the window's class"
+        contains "$(dpkg-deb -f "$deb" Depends)" "libc6 (>= 2.31)" "loquax depends on the glibc it links against"
+        # The window opened on a display and its first frame drawn, from
+        # the packaged bytes: what a test run of the crate cannot show, that
+        # winit finds X11 through dlopen in the shipped binary. No daemon:
+        # the probe does not attach.
+        if [ "$ARCH" != "$(dpkg --print-architecture 2>/dev/null || echo amd64)" ]; then
+            skip "the ${ARCH} window cannot start on this host"
+        elif ! command -v xvfb-run >/dev/null 2>&1; then
+            skip "no xvfb-run; the window's start is unchecked (apt install xvfb)"
+        else
+            local out
+            mkdir -p "$tmp/home"
+            if out="$(HOME="$tmp/home" timeout 60 xvfb-run -a "$tmp/usr/bin/loquax" gui --exit-after-first-frame 2>&1)" &&
+                [[ "$out" == *"the window drew its first frame"* ]]; then
+                pass "the packaged window starts headless under xvfb-run"
+            else
+                fail "the packaged window does not start under xvfb-run: ${out}"
+            fi
+        fi
+        ;;
+    *)
+        ;;
+    esac
+    # 1469, #474: amd64's package carries the x86-64-v3 build beside the
+    # baseline, and the baseline hands itself over to it on a CPU that runs
+    # it (loquax/src/cpu.rs); `--version` of the v3 build ends in
+    # "(x86-64-v3)". No other architecture carries one.
+    local v3="$tmp/usr/lib/loquax/loquax-v3"
+    if [ "$ARCH" = amd64 ]; then
+        if [ -x "$v3" ]; then
+            pass "ships /usr/lib/loquax/loquax-v3"
+        else
+            fail "does not ship /usr/lib/loquax/loquax-v3"
+        fi
+        if grep -qaF '(x86-64-v3)' "$v3" 2>/dev/null; then
+            pass "loquax-v3 is the x86-64-v3 build"
+        else
+            fail "loquax-v3 is not the x86-64-v3 build (no '(x86-64-v3)')"
+        fi
+        if grep -qaF '(x86-64-v3)' "$tmp/usr/bin/loquax"; then
+            fail "/usr/bin/loquax is the x86-64-v3 build; it has to be the baseline"
+        else
+            pass "/usr/bin/loquax is the baseline build"
+        fi
+        local newest
+        newest="$(readelf --dyn-syms --wide "$v3" 2>/dev/null |
+            grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1 || true)"
+        if [ -n "$newest" ] &&
+            [ "$(printf '%s\n' "$newest" GLIBC_2.31 | sort -V | tail -n1)" = GLIBC_2.31 ]; then
+            pass "loquax-v3 needs glibc 2.31 at most (newest symbol ${newest})"
+        else
+            fail "loquax-v3 needs a glibc past 2.31 (newest symbol ${newest:-none})"
+        fi
+        # The hand-over from the packaged bytes, where this host can run
+        # them: the extracted /usr/bin/loquax finds ../lib/loquax/loquax-v3
+        # as the installed one does.
+        if [ "$(dpkg --print-architecture 2>/dev/null || echo amd64)" != amd64 ]; then
+            skip "the amd64 starter cannot run on this host"
+        elif ! grep -qw avx2 /proc/cpuinfo || ! grep -qw bmi2 /proc/cpuinfo || ! grep -qw fma /proc/cpuinfo; then
+            local out
+            out="$(HOME="$tmp/home" "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) fail "the starter handed over on a CPU without x86-64-v3: ${out}" ;;
+            *) pass "the starter keeps the baseline on a CPU without x86-64-v3" ;;
+            esac
+        else
+            local out
+            out="$(HOME="$tmp/home" "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) pass "the starter hands over to loquax-v3 on this x86-64-v3 CPU" ;;
+            *) fail "the starter did not hand over to loquax-v3 on this x86-64-v3 CPU: ${out}" ;;
+            esac
+            out="$(HOME="$tmp/home" LOQUAX_CPU=baseline "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) fail "LOQUAX_CPU=baseline still started loquax-v3: ${out}" ;;
+            *"loquax "*) pass "LOQUAX_CPU=baseline keeps the baseline build" ;;
+            *) fail "loquax --version under LOQUAX_CPU=baseline said: ${out}" ;;
+            esac
+        fi
+    elif [ -e "$v3" ]; then
+        fail "the ${ARCH} package carries loquax-v3, which only amd64 has"
+    else
+        pass "the ${ARCH} package carries no loquax-v3"
+    fi
+    case "$ARCH" in
+    amd64 | arm64) ;;
+    *)
+        if grep -qaF 'The messenger in a window, as plain `loquax` on a desktop' "$tmp/usr/bin/loquax"; then
+            fail "the ${ARCH} loquax carries a window, which its musl build cannot open"
+        else
+            pass "the ${ARCH} loquax is the terminal build"
+        fi
+        contains "$entry" $'\nExec=loquax tui\n' "the launcher entry opens the terminal view"
+        contains "$entry" $'\nTerminal=true\n' "the launcher entry runs in a terminal"
+        ;;
+    esac
     rm -rf "$tmp"
 }
-check_loquax_tui
+check_loquax_frontends
 rm -rf "$CTRL_DIR"
 echo
 
 # amd64 only: packaged from the firmware bundle (scripts/build-lnflash-deb.sh).
-if [ "$ARCH" = amd64 ]; then
+# Only when its .deb is there: check_package skips a missing one, and the
+# checks below would then read the previous package's CONTENTS (loquax's),
+# which a build-deb.sh run without build-lnflash-deb.sh always is.
+if [ "$ARCH" = amd64 ] && [ -z "$(find_deb lnflash)" ]; then
+    echo "== lnflash (amd64)"
+    skip "no lnflash .deb for amd64 under ${DEB_DIR}/ (scripts/build-lnflash-deb.sh builds it)"
+    echo
+elif [ "$ARCH" = amd64 ]; then
     check_package lnflash lnflash lnflash
     # The bundle sits where lnflash looks last (SYSTEM_BUNDLE), with its
     # manifest at the top; build-lnflash-deb.sh has already let the packaged
@@ -420,7 +574,7 @@ if [ "$ARCH" = amd64 ]; then
         "ships the bundle manifest at /usr/share/lnflash"
     contains "$CONTENTS" "_license-agreement.txt" \
         "ships the SoftDevice licence beside the blob"
-    if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+    if grep -q 'systemd' <<<"$CONTENTS"; then
         fail "lnflash ships a systemd unit, which it must not"
     else
         pass "ships no systemd unit"
@@ -462,11 +616,13 @@ contains "$LNPND_POSTINST" "deb-systemd-invoke try-restart lnpnd.service" \
 # No conffile on purpose: the package ships no /etc/lnpnd/config — the
 # daemon writes it on first start, exactly as lxmd does in its config
 # directory, and postinst only provisions the (daemon-owned) directory.
-if printf '%s\n' "$CONTENTS" | grep -q ' \./etc/'; then
+if grep -q ' \./etc/' <<<"$CONTENTS"; then
     fail "lnpnd ships files under /etc, which its first-start design says it must not"
 else
     pass "ships nothing under /etc (first-start config, like lxmd)"
 fi
+# lnpnd ships on mimalloc as lnsd does (1592), read off the bytes the same way.
+check_allocator lnpnd lnpnd
 rm -rf "$CTRL_DIR"
 echo
 
@@ -534,7 +690,7 @@ for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.s
     # match, and under `set -o pipefail` the SIGPIPE it delivers to
     # dpkg-deb would fail the pipeline precisely when the match succeeds.
     listing="$(dpkg-deb -c "$deb")"
-    if printf '%s\n' "$listing" | grep -q " \.${exec_path}\$"; then
+    if grep -q " \.${exec_path}\$" <<<"$listing"; then
         pass "$(basename "$unit") starts ${exec_path}, which ${pkg} ships"
     else
         fail "$(basename "$unit") starts ${exec_path}, which ${pkg} does not ship"

@@ -42,7 +42,7 @@ constraint on peripheral handling, not a hope:
   when nothing answers, the task logs and exits
   (`DetectedKind::None`, `leviculum-nrf/src/display.rs:160-166`).
 - **Fail into the harmless state.** The user button is pulled to its
-  released level (`leviculum-nrf/src/button.rs:46`), so an absent button
+  released level (`leviculum-nrf/src/button.rs:48`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.
@@ -198,7 +198,7 @@ and carrying a second implementation is a design decision, not a port.
 measurement.** It implements `RxPort` and `RxWindowProbe` unchanged
 (`leviculum-lr11xx/README.md:43-45`), and on a ThinkNode M9 its receive
 interrupt word read back `0x38`, preamble, header and `RxDone` latched
-and readable without a clear (`leviculum-lr11xx/README.md:261-267`,
+and readable without a clear (`leviculum-lr11xx/README.md:263-269`,
 section 10, "Verification status"). The port was the driver in full and
 the two crates untouched.
 

@@ -77,3 +77,73 @@ pub fn shared_flash(sd: &'static nrf_softdevice::Softdevice) -> &'static SharedF
     static CELL: static_cell::StaticCell<SharedFlash> = static_cell::StaticCell::new();
     CELL.init(SharedFlash::new(nrf_softdevice::Flash::take(sd)))
 }
+
+/// Which step of one page-save attempt failed, and how it failed (order
+/// 1626).
+///
+/// `nrf-softdevice` (1d813cb, `nrf-softdevice/src/flash.rs`, `erase` and
+/// `write`) folds both SoftDevice failure paths into one
+/// `FlashError::Failed` and drops the numeric code, so the code is read off
+/// the clock instead. The two paths differ by orders of magnitude:
+///
+/// * the SVC itself refuses (`sd_flash_page_erase` / `sd_flash_write`
+///   return `NRF_ERROR_BUSY`, the only code a valid page and aligned buffer
+///   can get, S140 `nrf_soc.h`): the wrapper returns at once, `after_ms` 0;
+/// * the SVC accepts and the SoftDevice later reports
+///   `NRF_EVT_FLASH_OPERATION_ERROR`: its flash timing-event found no slot
+///   between radio events before its own timeout (S140 SoftDevice
+///   Specification, "Flash memory API": "If the protocol radio events are
+///   in a critical state, flash memory accesses may be delayed for a long
+///   period resulting in a time-out event"). The T114 measured 741 ms per
+///   attempt this way while a BLE link was being torn down.
+#[cfg(feature = "softdevice")]
+#[derive(Clone, Copy)]
+pub struct StepFault {
+    pub step: &'static str,
+    pub after_ms: u64,
+}
+
+#[cfg(feature = "softdevice")]
+impl StepFault {
+    /// `refused` for the synchronous SVC error, `evt-error` for the
+    /// SoftDevice's flash time-out event; see the type's docs.
+    pub fn sd(&self) -> &'static str {
+        if self.after_ms < 2 {
+            "refused"
+        } else {
+            "evt-error"
+        }
+    }
+}
+
+/// Run one flash step and, if it fails, say which step and after how long.
+#[cfg(feature = "softdevice")]
+pub async fn timed<E>(
+    step: &'static str,
+    op: impl core::future::Future<Output = Result<(), E>>,
+) -> Result<(), StepFault> {
+    let start = embassy_time::Instant::now();
+    op.await.map_err(|_| StepFault {
+        step,
+        after_ms: start.elapsed().as_millis(),
+    })
+}
+
+/// The `persist write failed` line both page stores print, with the step,
+/// the SoftDevice path and the time spent waiting for the shared flash
+/// handle, so a bench run names the mechanism without a debugger.
+#[cfg(feature = "softdevice")]
+pub fn log_step_fault(prefix: &str, attempt: u8, of: u8, fault: StepFault, lock_ms: u64) {
+    crate::log::log_fmt(
+        prefix,
+        format_args!(
+            "persist write failed, attempt {}/{} step={} sd={} after_ms={} lock_ms={}",
+            attempt,
+            of,
+            fault.step,
+            fault.sd(),
+            fault.after_ms,
+            lock_ms
+        ),
+    );
+}

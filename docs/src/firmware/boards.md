@@ -26,20 +26,20 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:458`) |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:462`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/node_loop.rs:439-456`) and
-`leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
+`set_interface_name` (`leviculum-nrf/src/node_loop.rs:443-460`, the T114
+and the RAK4631 alike). The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/node_loop.rs:848`.)
+`leviculum-nrf/src/node_loop.rs:871`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/node_loop.rs:337`),
-`leviculum-nrf/src/bin/rak4631.rs:199`)
+(`enable_transport` (`leviculum-nrf/src/node_loop.rs:337`), on the
+shared node loop every board binary moves onto)
 
 A board does not accept compressed resources. The firmware builds
 `leviculum-core` without its `compression` feature
@@ -47,7 +47,7 @@ A board does not accept compressed resources. The firmware builds
 megabytes of working memory against a 96 KiB heap. A board therefore
 refuses a compressed advertisement at once with a receiver cancel, before
 it requests a single part, and the sender fails that transfer immediately
-(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:3098`;
+(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:3208`;
 the refusal logs `RESOURCE_ADV_REFUSED reason=compressed` where tracing is
 compiled in). A Python sender compresses by default whenever bz2 shrinks
 the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);
@@ -472,7 +472,7 @@ discriminator before anything may be written.
 
 Our RAK build sets the SX1262 TCXO to 3.3 V, following the RNode
 firmware, which selects `MODE_TCXO_3_3V_6X` for this board
-(`leviculum-nrf/src/boards/rak4631.rs:190`). Meshtastic and MeshCore
+(`leviculum-nrf/src/boards/rak4631.rs:216`). Meshtastic and MeshCore
 both run the same module at 1.8 V. The value lives in the module, so it
 applies to every carrier in family A equally. Our Pocket V2 works with
 3.3 V, but the divergence against two references is unresolved and should
@@ -525,15 +525,16 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:89`,
-> `leviculum-nrf/src/bin/rak4631.rs:410`). The Cargo `softdevice`
+> (through `node_loop::ble_up`, `leviculum-nrf/src/node_loop.rs:567`,
+> `leviculum-nrf/src/bin/t114.rs:100`,
+> `leviculum-nrf/src/bin/rak4631.rs:129`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
 > features (`leviculum-nrf/Cargo.toml:380`,
 > `leviculum-nrf/Cargo.toml:208`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
 (`leviculum-nrf/Cargo.toml:443-453`) and spawned only when that feature
-is on (`leviculum-nrf/src/bin/rak4631.rs:337-372`). Because each of them
+is on (`leviculum-nrf/src/bin/rak4631.rs:140-205`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
 Pocket-V2-only image.
@@ -543,24 +544,22 @@ The mapping from board to binary and features used by the flash recipes:
 | Board | Binary | Features |
 |-------|--------|----------|
 | Heltec Mesh Node T114 | `t114` | `bsp-t114` |
-| RAK4631 (bare module) | `rak4631` | `bsp-rak4631` |
-| WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
+| RAK4631, the WisMesh Pocket V2 and a bare module alike | `rak4631` | `bsp-rak4631,rak-baseboard` |
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:2092`, `Justfile:2120`,
-`Justfile:2134`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2220`, `Justfile:2251`,
+`Justfile:2267`.)
 
 ### What the `lnflash` bundle carries
 
 The distributable bundle carries an image for both families: `bsp-t114`
 for the T114 and `bsp-rak4631,rak-baseboard` for the RAK4630 module
-(Codeberg #261). The RAK row it ships is the last one in the table above,
-not the middle one — the bare module runs the baseboard image, and the
-paragraph above is why. There is deliberately no way for a user to choose
-between them: the manifest cannot express two images for one `Board-ID`,
-because a question nobody can answer from looking at their board is not a
-question worth asking.
+(Codeberg #261). The RAK row it ships is the one in the table above: the
+bare module runs the baseboard image, and the paragraph above is why.
+There is deliberately no second image for a user to choose: the manifest
+cannot express two images for one `Board-ID`, because a question nobody
+can answer from looking at their board is not a question worth asking.
 
 Which boards the bundle knows at all is `lnflash/catalogue.toml`, and it
 is a shorter list than the tables above on purpose. A row here says our
@@ -616,9 +615,8 @@ RNode configuration on the same LoRa network.
 | TX power | 22 dBm |
 
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
-`eu_medium` (`leviculum-nrf/src/lora.rs:595-634`), applied at
-`leviculum-nrf/src/node_loop.rs:474` and
-`leviculum-nrf/src/bin/rak4631.rs:402`.)
+`eu_medium` (`leviculum-nrf/src/lora.rs:641-680`), applied at
+`leviculum-nrf/src/node_loop.rs:478` on every board on the shared loop.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

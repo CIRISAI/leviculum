@@ -1,10 +1,10 @@
 [package]
 name = "leviculum-esp"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
-description = "Reticulum firmware for ESP32-class boards (Heltec WiFi LoRa 32 V4)"
+description = "Reticulum firmware for ESP32-class boards (Heltec WiFi LoRa 32 V4, ThinkNode M9)"
 
 # leviculum-esp is excluded from the root workspace and is its own
 # workspace root, exactly as `leviculum-nrf` is. Two reasons, and the
@@ -45,14 +45,78 @@ esp-hal = { version = "1.2.1", features = ["esp32s3", "unstable"] }
 # Without it `espflash save-image` produces an image the ROM refuses.
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 
+# The flash behind the partition table and the stores in it (1414,
+# `src/flash.rs`): the node's identity and the Loquax client record. The
+# version esp-bootloader-esp-idf already pulls for the same chip.
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
+# The single-UART rules the M9's one port runs under since its frames carry
+# the node (1414): the flow-byte escape for every frame, and the
+# serial interface's HW_MTU. `no_std`, no dependencies but the core.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
+# The lock the UART's receive interrupt and the loop share its keep under
+# (1440); esp-hal provides the implementation. The version esp-hal uses.
+critical-section = "1.2"
+# Raw register access for the parked spin (1613, `src/corepark.rs`): the
+# UART FIFOs it polls while the cache is off and the park interrupt's
+# latch. esp-hal's own register_block() stays crate-private, and the spin
+# must not call into driver code anyway. The version esp-hal pins.
+esp32s3 = "0.36.0"
+# The per-core heap pools' lock (1594, `src/pools.rs`): interrupts off on
+# this core without the cross-core critical section. The version esp-hal
+# uses.
+esp-sync = { version = "0.3.0", features = ["esp32s3"] }
+# `CryptoRngCore`, named in the node's type; esp-hal's `Trng` implements it
+# through `unstable`. The version the core resolves to.
+rand_core = { version = "0.6", default-features = false }
+
 # The SX1262 buses are async, because `leviculum_core::sx126x`'s traits
 # are. `Spi<'_, Async>` implements `embedded_hal_async::spi::SpiBus`.
 embedded-hal-async = "1"
-# Same allocator crate and same configuration as `leviculum-nrf`.
+# The LR1110's pins and bus errors in embedded-hal's names (1478b,
+# `src/m9_radio.rs`); the version leviculum-lr11xx takes.
+embedded-hal = "1"
+# `leviculum-lr11xx` waits on embassy-time; the ESP firmware has no
+# executor and implements the driver over esp-hal's clock (1478b,
+# `src/time_driver.rs`). Both already in the graph through the driver.
+embassy-time = "0.5"
+embassy-time-driver = "0.2"
+# The allocator.
 # `leviculum-core` is `no_std + alloc`, so linking it into a binary
 # requires a `#[global_allocator]` whether or not anything allocates yet.
 # esp-hal registers the `critical_section::Impl` the heap needs.
-embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
+# `tlsf` (rlsf), not `llff` (1569): llff is one free list, walked on
+# every alloc and every free under the one cross-core critical section,
+# and the walk grows with the heap's churn — the M9's full pull starved
+# its UI core in exactly that walk (leviculum-heap-lab/tests/pull.rs
+# measures the same fold under both: llff grows 14x from 400 to 4000
+# entries, tlsf stays flat). Tlsf allocates and frees in constant time.
+# rlsf directly, not embedded-alloc's TlsfHeap wrapper (1574): that one
+# keeps rlsf's 4228 B control block in its static, in `.bss`, which on the
+# ESP32-S3 comes off core 0's stack; `src/pool_tlsf.rs` places it inside
+# the heap region instead. `unstable` for `Tlsf::iter_blocks` (heap_free),
+# as embedded-alloc enabled it.
+rlsf = { version = "0.2.3", default-features = false, features = ["unstable"] }
+
+# The ThinkNode M9's Loquax image (order 1361): the renderer, the fixture
+# model, the keyboard decoder, the frame dump and the census, all `no_std`
+# and the same code the host pins its goldens with (`loquax-m9/tests/`).
+# The loquax core comes through it, without `std`.
+loquax-m9 = { path = "../loquax-m9" }
+loquax = { path = "../loquax", default-features = false }
+# The key events the pairing screen reads (1415), the type the keyboard
+# driver hands out.
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The AG3352's boot init (1477): the T1000-E's `$PAIR` sequence behind
+# the M9's sleep lock, pure and host-tested beside the nRF firmware.
+leviculum-gnss-init = { path = "../leviculum-nrf/gnss-init" }
+# The LR1110's board facts (1478): the M9's `Board` value, its RF switch
+# and its PA table, in the driver's own types, so the build checks them
+# against the driver the T1000-E runs and the next step drives the radio
+# with.
+leviculum-lr11xx = { path = "../leviculum-lr11xx" }
+# The map regions' area in flash (1477): the directory the board reads
+# and `lnflash --region` writes, one parser both sides.
+leviculum-map = { path = "../leviculum-map" }
 
 # esp-bootloader-esp-idf is used only through `esp_app_desc!()`, which
 # expands to a static in a named link section; cargo-machete cannot see
@@ -74,3 +138,11 @@ debug = true         # emit the DWARF in the first place
 [[bin]]
 name = "heltec_v4"
 path = "src/bin/heltec_v4.rs"
+
+# The ThinkNode M9 as a Loquax handheld (order 1361): the renderer on the
+# panel, the keyboard, and since 1414 a Reticulum node on its serial port
+# and a client of its home; no radio yet. `just build-m9` builds it with
+# `partitions-m9.csv`.
+[[bin]]
+name = "thinknode_m9"
+path = "src/bin/thinknode_m9.rs"

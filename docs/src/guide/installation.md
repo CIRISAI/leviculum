@@ -48,6 +48,13 @@ with `sudo apt install ./<file>.deb`.
 | `lblogd` | `lblogd-nightly-{amd64,arm64}.deb` | `lblogd`, the blog server | starts its service on `127.0.0.1:8180` |
 | `lnflash` | `lnflash-nightly-amd64.deb` | `lnflash`, and the firmware bundle under `/usr/share/lnflash` | nothing; run it as root |
 
+Of the Python-RNS client tools, `rnsd`, `rnstatus`, `rncp`, `rnprobe` and
+`rnpath` have a Leviculum counterpart today (`lnsd`, `lnstatus`, `lncp`,
+`lnprobe`, `lnpath`), each taking the reference tool's arguments with the
+reference meanings; `lndecode`, the frame decoder, has no reference
+counterpart. A counterpart exists when a user or a test needs one, not for
+every reference tool by default.
+
 Each package carries the manual pages of its programs. Every program but
 `lnsd`'s clients needs a running shared instance for its mesh side: `lnsd`
 from `leviculum`, or the Python `rnsd`. `lnflash` exists for amd64 only, like
@@ -92,9 +99,16 @@ Verify the build; the output carries the version and the build commit:
 ./target/x86_64-unknown-linux-musl/release/lnsd
 ```
 
-The daemon resolves its config directory in the same order as Python
-Reticulum (`configdir`, `RNS/Reticulum.py:231`), implemented in
-`default_config_dir` (`leviculum-std/src/config.rs:1518`):
+Add `-v` (debug) or `-vv` (trace) for more verbose logging.
+
+## Configuration directory
+
+This is the one statement of the lookup order; the man pages and the
+quickstart point here. Without `--config`, the daemon and every client
+tool (`lnstatus`, `lnpath`, `lnprobe`, `lncp`, `lnmgmt`, `lnstest`)
+take the first of these, in the same order as Python Reticulum
+(`configdir`, `RNS/Reticulum.py:231`), implemented in
+`default_config_dir` (`leviculum-std/src/config.rs:1648`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists. This is what
    the `.deb` package sets up.
@@ -102,7 +116,24 @@ Reticulum (`configdir`, `RNS/Reticulum.py:231`), implemented in
 3. `~/.reticulum` — the fallback, and where a source build with no
    prior config ends up.
 
-Add `-v` (debug) or `-vv` (trace) for more verbose logging.
+The order is what lets Python clients find the system daemon without
+flags, so it does not change. When a client tool cannot reach or
+authenticate to the daemon, it says which directory it took and why,
+the socket it dialled, and every other candidate that holds a `config`,
+with the `--config` that would select it. `lnstatus` goes one step
+further on a refused key: it tries the other candidates' RPC keys
+against the same socket, read-only, and names the one the daemon
+accepts. The usual case is a host where the package's
+`/etc/reticulum/config` exists while your own `lnsd` runs on
+`~/.reticulum`:
+
+```text
+Could not get RNS status
+(configuration error: shared-instance RPC error: authentication failed)
+config /etc/reticulum (taken because /etc/reticulum/config exists), socket @rns/default
+~/.reticulum also holds a config; if your daemon runs on it, pass --config /home/you/.reticulum
+the daemon on @rns/default answers to ~/.reticulum's key; pass --config /home/you/.reticulum
+```
 
 ## Development
 

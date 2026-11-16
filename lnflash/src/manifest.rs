@@ -68,12 +68,21 @@ pub const MANIFEST_NAME: &str = "manifest.toml";
 pub const FIRMWARE_DIR: &str = "firmware";
 /// Last resort in the resolution order, for a distro-packaged install.
 pub const SYSTEM_BUNDLE: &str = "/usr/share/lnflash";
+/// Where a person without a bundle gets one, said with [`Error::NoBundle`]
+/// (#476): a zero-config tool that stops on a missing file has to name the
+/// file's source, not only the places it was not.
+pub const BUNDLE_SOURCE: &str = "A bundle comes with the lnflash package, which installs it \
+     in /usr/share/lnflash, or in lnflash-nightly-amd64.tar.gz, unpacked and run in place; both \
+     are at https://leviculum.network/releases/nightly/latest/. --bundle names one anywhere else.";
 /// Environment override, second in the resolution order.
 pub const BUNDLE_ENV: &str = "LNFLASH_BUNDLE";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no bundle found; looked in {}", .0.join(", "))]
+    #[error(
+        "no bundle found; looked in {}. {BUNDLE_SOURCE}",
+        .0.join(", ")
+    )]
     NoBundle(Vec<String>),
     #[error("reading {path}: {source}")]
     Io {
@@ -254,33 +263,6 @@ pub struct Board {
     /// "control only" cannot be arrived at by forgetting something.
     #[serde(default)]
     pub not_flashable: Option<String>,
-    /// How the ESP32 ROM's serial loader is reached on this board: the chip
-    /// and the line speed its USB-UART bridge holds. A hardware fact, so it
-    /// may stand beside `not_flashable` — the ThinkNode M9's entry states it
-    /// before any bundle carries an image for the board (Codeberg #473).
-    #[serde(default)]
-    pub esp: Option<EspRom>,
-}
-
-/// What `[board.<name>.esp]` states, for [`crate::esp`].
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EspRom {
-    /// `--chip`, one of [`crate::esp::CHIPS`], and the same string as the
-    /// board's `family`.
-    pub chip: String,
-    /// The fastest rate the board's bridge carries without losing bytes,
-    /// one of [`crate::esp::BAUDS`]. 230400 on the M9's CH340K, measured.
-    pub baud: u32,
-}
-
-impl EspRom {
-    pub fn params(&self) -> crate::esp::Params {
-        crate::esp::Params {
-            chip: self.chip.clone(),
-            baud: self.baud,
-        }
-    }
 }
 
 /// What writing an image to one board takes — the remaining three axes and
@@ -774,28 +756,6 @@ fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
         // The ROM loader's facts. `family` is informational everywhere else,
         // but here the two would name the chip twice, and a pair that
         // disagrees has no right answer.
-        if let Some(esp) = &board.esp {
-            if !crate::esp::CHIPS.contains(&esp.chip.as_str()) {
-                return Err(bad(format!(
-                    "board {name}: esp.chip {:?} is not one the ROM-loader transport knows ({})",
-                    esp.chip,
-                    crate::esp::CHIPS.join(", ")
-                )));
-            }
-            if esp.chip != board.family {
-                return Err(bad(format!(
-                    "board {name}: esp.chip {:?} and family {:?} name different chips",
-                    esp.chip, board.family
-                )));
-            }
-            if !crate::esp::BAUDS.contains(&esp.baud) {
-                return Err(bad(format!(
-                    "board {name}: esp.baud {} is not a rate the ROM loader and the flashers \
-                     share",
-                    esp.baud
-                )));
-            }
-        }
         let Some(flashing) = board.flashing() else {
             continue;
         };
@@ -1910,6 +1870,24 @@ convert = "hex-to-uf2"
     }
 
     #[test]
+    fn no_bundle_present_says_where_to_get_one() {
+        // #476: the zero-config run that finds no bundle says where one
+        // comes from, not only where it was not.
+        let base = TempDir::new().unwrap();
+        let err = locate_with(&roots_under(base.path()), None)
+            .unwrap_err()
+            .to_string();
+        for needle in [
+            "the lnflash package, which installs it in /usr/share/lnflash",
+            "lnflash-nightly-amd64.tar.gz, unpacked and run in place",
+            "https://leviculum.network/releases/nightly/latest/",
+            "--bundle names one anywhere else",
+        ] {
+            assert!(err.contains(needle), "{needle:?} missing from: {err}");
+        }
+    }
+
+    #[test]
     fn the_process_roots_end_at_the_distro_path() {
         // The only fact the TempDir roots above cannot carry: production
         // walks to /usr/share/lnflash. Building the roots reads no file.
@@ -1959,70 +1937,5 @@ convert = "hex-to-uf2"
         fs::create_dir(&beside).unwrap();
         fs::write(beside.join(MANIFEST_NAME), "").unwrap();
         assert_eq!(locate_with(&roots, Some(&missing)).unwrap(), beside);
-    }
-
-    // -----------------------------------------------------------------
-    // The ESP32 ROM loader's facts (Codeberg #473)
-    // -----------------------------------------------------------------
-
-    /// The compiled-in catalogue plus one control-only ESP32-S3 board shaped
-    /// like the ThinkNode M9's future entry, with `esp_lines` as its
-    /// `[board.m9.esp]` body.
-    fn with_esp_board(family: &str, esp_lines: &str) -> Result<Catalogue, Error> {
-        let block = format!(
-            "[board.m9]\nfamily = \"{family}\"\ncandidate_usb = [\"1a86:7522\"]\n\
-             not_flashable = \"no bundle carries an image for it yet\"\n\n\
-             [board.m9.esp]\n{esp_lines}\n\n[board.t114]\nfamily    = \"nrf52840\""
-        );
-        Catalogue::builtin_with("[board.t114]\nfamily    = \"nrf52840\"", &block)
-    }
-
-    #[test]
-    fn an_esp_board_states_its_rom_loader_beside_not_flashable() {
-        let catalogue = with_esp_board("esp32s3", "chip = \"esp32s3\"\nbaud = 230400").unwrap();
-        let board = catalogue.board("m9").unwrap();
-        assert!(board.flashing().is_none(), "still control-only");
-        let params = board.esp.as_ref().unwrap().params();
-        assert_eq!(
-            params,
-            crate::esp::Params {
-                chip: "esp32s3".into(),
-                baud: 230_400
-            }
-        );
-        // And no board that states nothing gains an esp section.
-        assert!(catalogue.board("t114").unwrap().esp.is_none());
-    }
-
-    #[test]
-    fn an_esp_section_that_contradicts_the_family_will_not_load() {
-        match with_esp_board("esp32s3", "chip = \"esp32c3\"\nbaud = 230400") {
-            Err(Error::Invalid { message, .. }) => {
-                assert!(message.contains("name different chips"), "{message}")
-            }
-            other => panic!("expected Invalid, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_esp_rate_the_loader_does_not_share_or_an_unknown_chip_will_not_load() {
-        match with_esp_board("esp32s3", "chip = \"esp32s3\"\nbaud = 250000") {
-            Err(Error::Invalid { message, .. }) => assert!(message.contains("250000"), "{message}"),
-            other => panic!("expected Invalid, got {other:?}"),
-        }
-        match with_esp_board("esp8266", "chip = \"esp8266\"\nbaud = 115200") {
-            Err(Error::Invalid { message, .. }) => {
-                assert!(message.contains("ROM-loader transport knows"), "{message}")
-            }
-            other => panic!("expected Invalid, got {other:?}"),
-        }
-        // A misspelt key is a parse error, not a silently default rate.
-        assert!(matches!(
-            with_esp_board(
-                "esp32s3",
-                "chip = \"esp32s3\"\nbaud = 230400\nbuad = 921600"
-            ),
-            Err(Error::Toml { .. })
-        ));
     }
 }

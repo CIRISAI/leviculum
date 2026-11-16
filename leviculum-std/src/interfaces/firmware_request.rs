@@ -2,7 +2,7 @@
 //!
 //! The vocabulary and the broadcast a caller (lnsd's signal handlers) uses to
 //! ask every serial interface in this process for a frame on its board's data
-//! port; the io task of `serial::spawn_serial_interface` subscribes. Kept
+//! port; each serial interface subscribes when its port opens. Kept
 //! outside the `serial` feature so a build without it still answers each
 //! signal, with "0 interfaces reached", instead of dying of the signal's
 //! default action (#463).

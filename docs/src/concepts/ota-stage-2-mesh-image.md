@@ -1,6 +1,10 @@
 # OTA stage 2: the image itself over the mesh
 
-**Status: concept, not scheduled. Conditional on hardware two of our
+**Status: design record, struck from the register 2026-11-09 (Lew); the
+PN store moved to internal flash since, so the QSPI region conflict it
+discusses is moot.**
+
+**Original status: concept, not scheduled. Conditional on hardware two of our
 three boards do not have.**
 
 [OTA stage 1](ota-stage-1-ble-dfu.md) moves the *decision* over the mesh
@@ -51,7 +55,7 @@ not read off a header — three units answered nothing to `05h`, `9Fh`,
 `90h` or the datasheet reset while every pin followed our drive, and both
 board files state `qspi_part: None`
 (`leviculum-nrf/src/boards/t114.rs:198`,
-`leviculum-nrf/src/boards/rak4631.rs:192`). The `EXTERNAL_FLASH_DEVICES`
+`leviculum-nrf/src/boards/rak4631.rs:218`). The `EXTERNAL_FLASH_DEVICES`
 lines in the vendor variant headers that once suggested otherwise sit
 under comments denying the part — RAK's own reads "No onboard flash"
 (`leviculum-nrf/src/boards/rak4631.rs:148-149`) — and
@@ -190,7 +194,7 @@ held 51 662 B live before Codeberg #384 B1 and 29 842 B after it, and
 before either, a board died on a 5 446 B allocation between serving a
 request and answering it — `PN_GET … bytes=5376` as the last line of one
 boot and `PANIC_PMRT … "memory allocation of 5446 bytes failed"` on the
-next (`leviculum-nrf/heap-budget/src/lib.rs:206-231`, pinned by
+next (`leviculum-nrf/heap-budget/src/lib.rs:251-276`, pinned by
 `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`). A
 path that holds one whole copy of 5 KB killed a board; 605 KB is not a
 question of tuning.
@@ -214,7 +218,7 @@ the copier touches the application window:
 | Field | Why it is there |
 | --- | --- |
 | magic + format version | A staging region holding a foreign or half-written thing reads as foreign, the same argument the boot record makes for its own magic (`leviculum-nrf/src/boot_count.rs`) |
-| board family | An image for another pinout family bricks this board. The flash runner already refuses a wrong-SoftDevice board and a wrong UF2 volume before writing (`nrf-sd-guard`, `Justfile:263`); this is the same refusal, without an operator to read it |
+| board family | An image for another pinout family bricks this board. The flash runner already refuses a wrong-SoftDevice board and a wrong UF2 volume before writing (`nrf-sd-guard`, `Justfile:278`); this is the same refusal, without an operator to read it |
 | image length | Bounds the copy, and is what "the transfer is complete" is decided against |
 | version | What the board says it is running, and what a rollback is a rollback *from* |
 | hash over the image | Catches the interrupted transfer and the bad sector |
@@ -325,7 +329,7 @@ Scaling to the 619 264 B image is a factor of 12.1:
 
 869.463 MHz — our default carrier — sits in the 869.4–869.65 MHz
 sub-band, whose lawful duty cycle is 10 %
-(`etsi_eu868_duty_cycle`, `leviculum-core/src/rnode.rs:1571`;
+(`etsi_eu868_duty_cycle`, `leviculum-core/src/rnode.rs:1537`;
 [Regulatory airtime](regulatory-airtime.md)). Ten percent of an hour is
 360 s of airtime, so 1 750–2 000 s of airtime is five hours of wall clock
 however fast the modem is. **The PHY does not change the answer; the

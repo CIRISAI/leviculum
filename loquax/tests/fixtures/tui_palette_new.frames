@@ -1,0 +1,68 @@
+--- empty
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation starts││                                                    │
+│one with a contact's    ││                                                    │
+│code.                   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- palette
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation s┌ commands ────────────────────────────┐                   │
+│one with a contact'│>                                     │                   │
+│code.              │▸ send  Enter                         │                   │
+│                   │  new conversation                    │                   │
+│                   │  add contact                         │                   │
+│                   │  my code  P                          │                   │
+│                   │  fetch  F5                           │                   │
+│                   │  quit  q                             │                   │
+│                   │  help  ?                             │                   │
+│                   │  focus conversations                 │                   │
+│                   │  focus messages  Enter               │ Alt-Enter newline ┤
+│                   │  focus compose  i                    │                   │
+└────────────── / se│  next conversation  Alt-↓            │───────────────────┘
+Enter run │ Esc clos└  previous conversation  Alt-↑────────┘
+--- asking
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation s┌ commands ────────────────────────────┐                   │
+│one with a contact'│>                                     │                   │
+│code.              │Your contact's code or address        │                   │
+│                   │Enter opens the conversation          │                   │
+│                   └──────────────────────────────────────┘                   │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter run │ Esc close
+--- naming
+┌  Loquax (connecting)───┐┌  Unknown ·4ca1  Two contacts have no name yet──────┐
+│ Unknown ·bebe          ││                                                    │
+│                   ┌ commands ────────────────────────────┐                   │
+│                   │>                                     │                   │
+│▌Unknown ·4ca1     │your name for Unknown ·4ca1           │                   │
+│▌                  │Enter sets it, empty clears it        │                   │
+│                   └──────────────────────────────────────┘                   │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                      ┌────────────────────────────┐│
+│                        ││                      │⚠ That is not a Loquax code.││
+│                        ││                  No m└────────────────────────────┘│
+│                        │├● to Unknown ·4ca1── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter run │ Esc close

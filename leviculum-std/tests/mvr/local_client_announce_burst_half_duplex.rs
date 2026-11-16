@@ -37,10 +37,10 @@
 //! it, on 2026-09-23: `interfaces/rnode.rs::tx_hold` holds the next frame
 //! for the previous one's airtime plus the firmware's DIFS and its longest
 //! contention draw, computed per frame from the running PHY and the modem's
-//! own reported CSMA figures. (Not
-//! `leviculum_core::rnode::compute_spacing_ms`, which assumes a fixed 24 ms
-//! slot and adds a flat margin; that one still has no caller, and wiring it
-//! in was Bug #25, attempted in c2eba153 and reverted in 12f99a02.) The
+//! own reported CSMA figures. (Not core's `compute_spacing_ms`, which
+//! assumed a fixed 24 ms slot and added a flat margin; wiring it in was
+//! Bug #25, attempted in c2eba153 and reverted in 12f99a02, and the
+//! caller-less function was removed in 1638.) The
 //! floor this test asserts is therefore far below what the interface now
 //! spaces by, which is the direction that keeps it honest: it still fails if
 //! the spacing disappears.

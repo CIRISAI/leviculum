@@ -44,8 +44,10 @@ pub struct NodeCoreBuilder {
     respond_to_probes: bool,
     remote_management: bool,
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
+    remote_dfu: bool,
     max_incoming_resource_size: usize,
     max_incoming_resources_per_link: usize,
+    decompresses: bool,
     resource_window_policy: WindowPolicy,
     peer_up_pull_names: Option<Vec<alloc::string::String>>,
 }
@@ -66,8 +68,10 @@ impl NodeCoreBuilder {
             respond_to_probes: false,
             remote_management: false,
             remote_management_allowed: Vec::new(),
+            remote_dfu: false,
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
             max_incoming_resources_per_link: RESOURCE_MAX_INCOMING_PER_LINK,
+            decompresses: cfg!(feature = "compression"),
             resource_window_policy: WindowPolicy::default(),
             peer_up_pull_names: None,
         }
@@ -190,12 +194,14 @@ impl NodeCoreBuilder {
     }
 
     /// Route-choice rule for competing copies of one announce emission
-    /// (Codeberg #230). Default [`PathChoice::Hops`], today's hop-count
-    /// rule; [`PathChoice::HopsAndLoss`] prices a marginal direct link by
+    /// (Codeberg #230), as an override over every interface's medium
+    /// default. Unset, each interface runs the rule its medium declared
+    /// (`Transport::set_interface_path_choice`), hop count where it declared
+    /// none; [`PathChoice::HopsAndLoss`] prices a marginal direct link by
     /// its announce re-hear evidence. See
     /// [`TransportConfig::path_choice`](crate::transport::TransportConfig::path_choice).
     pub fn path_choice(mut self, choice: PathChoice) -> Self {
-        self.transport_config.path_choice = choice;
+        self.transport_config.path_choice = Some(choice);
         self
     }
 
@@ -271,6 +277,18 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Also serve `/dfu` on the remote-management destination, under the
+    /// same allow-list as `/status` (OTA stage 1, Codeberg #235).
+    ///
+    /// Only a node that can actually enter a bootloader asks for this: the
+    /// nRF52 boards. A daemon never does, so `lnsd` does not answer a verb it
+    /// could not carry out. Without [`Self::remote_management`] this does
+    /// nothing. See [`crate::node::remote_dfu`].
+    pub fn remote_dfu(mut self, enable: bool) -> Self {
+        self.remote_dfu = enable;
+        self
+    }
+
     /// Set the maximum incoming resource size in bytes.
     ///
     /// Resources advertised with `transfer_size` above this limit are
@@ -285,10 +303,25 @@ impl NodeCoreBuilder {
     ///
     /// Default: [`RESOURCE_MAX_INCOMING_PER_LINK`]. An advertisement beyond
     /// the bound is refused with a receiver cancel (RCL) at once. Zero is
-    /// read as one: a link that could carry none could never receive. The
+    /// read as one: a link that could carry none could never receive; past
+    /// 65 535 is read as 65 535, the node keeps the bound in 16 bits. The
     /// firmware sets one, the transfer its heap budget prices.
     pub fn max_incoming_resources_per_link(mut self, count: usize) -> Self {
-        self.max_incoming_resources_per_link = count.max(1);
+        self.max_incoming_resources_per_link = count.clamp(1, usize::from(u16::MAX));
+        self
+    }
+
+    /// Whether this node takes compressed incoming resources.
+    ///
+    /// Default: whether the build links the decompressor (the
+    /// `compression` feature). `false` makes a node refuse every
+    /// compressed advertisement with an RCL at once, as every board build
+    /// does: a host test builds a board-shaped receiver with it (1459,
+    /// the M9 refusing its home's compressed `/sync` answer). `true`
+    /// without the feature stays `false`, a build that cannot decompress
+    /// never says it can.
+    pub fn decompresses(mut self, on: bool) -> Self {
+        self.decompresses = on && cfg!(feature = "compression");
         self
     }
 
@@ -351,14 +384,16 @@ impl NodeCoreBuilder {
             clock,
             storage,
         );
-        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.max_incoming_resources_per_link =
+            u16::try_from(self.max_incoming_resources_per_link).unwrap_or(u16::MAX);
+        node.decompresses = self.decompresses;
 
         if self.respond_to_probes {
             node.enable_probe_responder();
         }
 
         if self.remote_management {
-            node.enable_remote_management(self.remote_management_allowed);
+            node.enable_remote_management(self.remote_management_allowed, self.remote_dfu);
         }
 
         if let Some(names) = self.peer_up_pull_names {
@@ -425,14 +460,16 @@ impl NodeCoreBuilder {
             clock,
             storage,
         ));
-        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.max_incoming_resources_per_link =
+            u16::try_from(self.max_incoming_resources_per_link).unwrap_or(u16::MAX);
+        node.decompresses = self.decompresses;
 
         if self.respond_to_probes {
             node.enable_probe_responder();
         }
 
         if self.remote_management {
-            node.enable_remote_management(self.remote_management_allowed);
+            node.enable_remote_management(self.remote_management_allowed, self.remote_dfu);
         }
 
         if let Some(names) = self.peer_up_pull_names {

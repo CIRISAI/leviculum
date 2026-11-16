@@ -14,7 +14,7 @@ use clap::{ArgAction, Parser};
 use tracing_subscriber::EnvFilter;
 
 use leviculum_core::constants::DEFAULT_PER_HOP_TIMEOUT;
-use leviculum_std::config::Config;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::driver::{EventReceiver, ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::{Destination, DestinationHash, DestinationType, Direction, NodeEvent};
 
@@ -62,6 +62,11 @@ struct Args {
     /// Increase verbosity
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
 
     /// Full destination name in dotted notation
     full_name: Option<String>,
@@ -165,12 +170,28 @@ async fn run(args: Args) -> i32 {
     let size = args.size.unwrap_or(DEFAULT_PROBE_SIZE);
     let more_output = args.verbose > 0;
 
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
+    // Find the shared instance, or start lnsd as our child (#471 step 4),
+    // held to the end of `run`: the daemon it started goes with us. A
+    // started lnsd wrote its first-start file into an empty directory, so
+    // the config is read again.
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    ) {
+        Ok(instance) => instance,
+        Err(e) => {
+            eprintln!("lnprobe: {e}\n{}", choice.hint_for(&instance_name));
+            return EXIT_NO_PATH;
+        }
+    };
+    let config = config.or_else(|| daemon_rpc::load_config(&config_dir));
     // The authkey is only needed for the informational RPC verbs
     // (first_hop_timeout, next_hop); probing itself runs over the packet
     // path. Missing identity file degrades those verbs, never the probe.
@@ -182,7 +203,7 @@ async fn run(args: Args) -> i32 {
     let mut node = match build_client(&instance_name, &storage_path).await {
         Ok(node) => node,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e}\n{}", choice.hint_for(&instance_name));
             return EXIT_NO_PATH;
         }
     };

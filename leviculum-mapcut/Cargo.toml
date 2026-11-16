@@ -39,3 +39,12 @@ ureq = { version = "3", default-features = false, features = ["rustls"], optiona
 
 [dev-dependencies]
 tinymvt = "0.3"
+# The junction goldens of `tests/geometry.rs` (1707) draw through the
+# map's own painter and hold PNG pictures, as leviculum-map's goldens do.
+embedded-graphics = "0.8"
+png = "0.18"
+
+# The measurement of a region arriving over a slow link (1291).
+[[example]]
+name = "arrive"
+required-features = ["http"]

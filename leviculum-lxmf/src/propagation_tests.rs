@@ -442,3 +442,30 @@ fn host_serves_the_get_exchange_with_public_codecs() {
     let wire = ann.encode().expect("encode");
     assert_eq!(PropagationNodeAnnounce::decode(&wire).expect("decode"), ann);
 }
+
+/// The announced name is read from `PN_META_NAME` as the reference writes it
+/// (UTF-8 bytes) or as a msgpack string; no entry, another kind or bytes
+/// that are not UTF-8 are no name.
+#[test]
+fn an_announce_names_its_node_under_pn_meta_name() {
+    let with = |metadata: Vec<MetadataEntry>| PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 1_700_000_000,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 16,
+        stamp_cost_flexibility: 3,
+        peering_cost: 18,
+        metadata,
+    };
+    let bin = with(vec![(1, vec![0xc4, 4, b'N', b'o', b'd', b'e'])]);
+    let decoded = PropagationNodeAnnounce::decode(&bin.encode().unwrap()).unwrap();
+    assert_eq!(decoded.name().as_deref(), Some("Node"));
+    let str = with(vec![(1, vec![0xa4, b'H', b'o', b'm', b'e'])]);
+    assert_eq!(str.name().as_deref(), Some("Home"));
+    assert_eq!(with(Vec::new()).name(), None);
+    assert_eq!(with(vec![(0xFF, vec![0xa1, b'x'])]).name(), None);
+    assert_eq!(with(vec![(1, vec![0x07])]).name(), None);
+    assert_eq!(with(vec![(1, vec![0xc4, 1, 0xff])]).name(), None);
+}

@@ -1,11 +1,10 @@
 package network.leviculum.loquax;
 
 import android.content.Context;
+import android.util.Log;
 import android.view.View;
 import android.widget.TextView;
 import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Map;
@@ -17,44 +16,20 @@ final class Ui {
 
     private Ui() {}
 
-    /** Whole days from `then` to `now` by the calendar, 0 for the same day. */
-    static int daysBetween(long thenSecs, long nowSecs) {
-        Calendar a = Calendar.getInstance();
-        a.setTimeInMillis(thenSecs * 1000);
-        Calendar b = Calendar.getInstance();
-        b.setTimeInMillis(nowSecs * 1000);
-        int days = 0;
-        while (a.get(Calendar.YEAR) < b.get(Calendar.YEAR)
-                || a.get(Calendar.DAY_OF_YEAR) < b.get(Calendar.DAY_OF_YEAR)
-                && a.get(Calendar.YEAR) == b.get(Calendar.YEAR)) {
-            a.add(Calendar.DAY_OF_YEAR, 1);
-            days++;
-            if (days > 7) {
-                return days;
-            }
-        }
-        return days;
+    /** A time of day, in the phone's locale: 18:34 or 6:34 PM. */
+    /**
+     * A place, degrees times a million, as the Maps page names a region
+     * (1201): "52.52° N, 13.40° E", two decimals, in the phone's way of
+     * writing them.
+     */
+    static String place(long latE6, long lonE6) {
+        return String.format(java.util.Locale.getDefault(), "%.2f° %s, %.2f° %s",
+                Math.abs(latE6) / 1e6, latE6 < 0 ? "S" : "N",
+                Math.abs(lonE6) / 1e6, lonE6 < 0 ? "W" : "E");
     }
 
-    /** A time of day, in the phone's locale: 18:34 or 6:34 PM. */
     static String clock(long unixSecs) {
         return DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(unixSecs * 1000));
-    }
-
-    /** The chat's day separator (1129): today, yesterday, the weekday within a week, then the date. */
-    static String day(Context context, long unixSecs, long nowSecs) {
-        int days = daysBetween(unixSecs, nowSecs);
-        if (days == 0) {
-            return context.getString(R.string.today);
-        }
-        if (days == 1) {
-            return context.getString(R.string.yesterday);
-        }
-        Date at = new Date(unixSecs * 1000);
-        if (days < 7) {
-            return new SimpleDateFormat("EEEE", Locale.getDefault()).format(at);
-        }
-        return DateFormat.getDateInstance(DateFormat.MEDIUM).format(at);
     }
 
     /** Within the last hour, how long ago in words ("59 Min."); null otherwise. */
@@ -85,49 +60,17 @@ final class Ui {
     }
 
     /**
-     * The conversation list's time (1130): now under a minute, minutes
-     * under an hour, hours under a day, then the weekday within the week,
-     * then the date, the year only when it is not this one. A time ahead of
-     * the phone's clock is now.
-     */
-    static String listTime(Context context, long unixSecs, long nowSecs) {
-        if (unixSecs <= 0) {
-            return "";
-        }
-        long secs = nowSecs - unixSecs;
-        if (secs < 60) {
-            return context.getString(R.string.just_now);
-        }
-        if (secs < 3600) {
-            return context.getString(R.string.minutes_ago, (int) (secs / 60));
-        }
-        if (secs < 86_400) {
-            return context.getString(R.string.list_hours, (int) (secs / 3600));
-        }
-        Date at = new Date(unixSecs * 1000);
-        if (daysBetween(unixSecs, nowSecs) < 7) {
-            return new SimpleDateFormat("EEE", Locale.getDefault()).format(at);
-        }
-        Calendar then = Calendar.getInstance();
-        then.setTime(at);
-        Calendar now = Calendar.getInstance();
-        now.setTimeInMillis(nowSecs * 1000);
-        if (then.get(Calendar.YEAR) == now.get(Calendar.YEAR)) {
-            String pattern = android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "dMMM");
-            return new SimpleDateFormat(pattern, Locale.getDefault()).format(at);
-        }
-        return DateFormat.getDateInstance(DateFormat.SHORT).format(at);
-    }
-
-    /**
      * The list's line under a name (1130): a position report and a
      * reaction in the phone's language, a text as it came. An older
      * library without `kind` gives its English line.
      */
     static String preview(Context context, Map<String, Object> row) {
         String kind = Core.str(row, "kind");
-        if ("position".equals(kind)) {
-            return context.getString(R.string.position);
+        String live = Core.str(row, "live");
+        if ("position".equals(kind) && !live.isEmpty()) {
+            // Whether the position is alive, never how many came (1209),
+            // in the library's words (1217): `📍 live` or `📍 3 h ago`.
+            return "\uD83D\uDCCD " + live;
         }
         String reaction = Core.str(row, "reaction");
         if ("reaction".equals(kind) && !reaction.isEmpty()) {
@@ -136,13 +79,21 @@ final class Ui {
         return Core.str(row, "last");
     }
 
-    /** The delivery of one of ours, in words. */
-    static String state(Context context, String state) {
+    /**
+     * The delivery of one of ours as a screen reader says it (1232):
+     * `readAt` is the reader's time for "read", unix seconds.
+     */
+    static String state(Context context, String state, long readAt) {
         switch (state) {
-            case "queued": return context.getString(R.string.state_queued);
             case "sending": return context.getString(R.string.state_sending);
-            case "sent": return context.getString(R.string.state_sent);
+            case "unconfirmed": return context.getString(R.string.state_unconfirmed);
+            case "mailbox": return context.getString(R.string.state_mailbox);
+            case "arrived": return context.getString(R.string.state_arrived);
             case "delivered": return context.getString(R.string.state_delivered);
+            // 0 is a read at no known time (1506, an import's): "Read".
+            case "read": return readAt > 0
+                    ? context.getString(R.string.state_read, clock(readAt))
+                    : context.getString(R.string.state_read_untimed);
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }
@@ -161,7 +112,10 @@ final class Ui {
      * {@link #LINE_MS}, so the line never says an old result.
      */
     static boolean stays(Map<String, Object> event) {
-        return "sync".equals(Core.str(event, "t")) && "running".equals(Core.str(event, "state"));
+        String kind = Core.str(event, "t");
+        String state = Core.str(event, "state");
+        return ("sync".equals(kind) && "running".equals(state))
+                || ("network".equals(kind) && "reconnecting".equals(state));
     }
 
     /**
@@ -201,12 +155,27 @@ final class Ui {
                 return context.getString(R.string.pulling);
             }
             if ("done".equals(state)) {
-                String detail = Core.str(event, "detail");
-                return "0".equals(detail)
+                // The count comes as its digits (Event::Sync's detail).
+                int count;
+                try {
+                    count = Integer.parseInt(Core.str(event, "detail"));
+                } catch (NumberFormatException none) {
+                    count = 0;
+                }
+                return count == 0
                         ? context.getString(R.string.pulled_nothing)
-                        : context.getString(R.string.pulled, detail);
+                        : context.getResources().getQuantityString(R.plurals.pulled, count, count);
             }
-            return context.getString(R.string.pull_failed, Core.str(event, "detail"));
+            // The library's words are for the log; the line says it tries again
+            // (a down link in front pulls every minute, a wake pulls at once).
+            Log.i(PhotoView.TAG, "pull failed: " + Core.str(event, "detail"));
+            return context.getString(R.string.pull_failed);
+        }
+        if ("network".equals(kind)) {
+            // "Reconnecting…" stays until the connection is back, then the
+            // line is gone (1298).
+            return "reconnecting".equals(Core.str(event, "state"))
+                    ? context.getString(R.string.reconnecting) : "";
         }
         if ("stopped".equals(kind)) {
             String detail = Core.str(event, "detail");

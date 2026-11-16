@@ -47,6 +47,21 @@ minutes after it is written rather than an hour into the land gate, and the
 workspace has no cfg-gated ignored test today (checked 2026-09-23, the two
 censuses agree unit for unit).
 
+A whole TARGET behind `required-features` is the same disagreement one level
+up, and that one this script does follow: the binary census builds
+`cargo test --workspace` with default features, so a target whose required
+features that build does not switch on is never linked and has no unit there.
+`enabled_features` works out, from `cargo metadata`, which features of each
+workspace package that build turns on (its defaults, what workspace dependents
+ask of it, and everything those reach through `dep/feature`), and a target
+whose required features are not all among them is skipped, its files with it.
+Where the arithmetic cannot tell (a `dep?/feature`, an optional dependency) it
+counts the feature as on: a wrong guess then shows as a red mismatch here,
+never as a silently skipped test. Order 1658: the mailbox growth soak
+(`-p loquax --test mailbox_growth_soak`, required-features = ["tui"]) was
+pinned to satisfy this gate, and the binary census, which never sees the
+unit, sent the land gate on dcb99b75 red on the pin.
+
 Usage:
     python3 scripts/check-ignored-counts-source.py           # the gate
     python3 scripts/check-ignored-counts-source.py --print   # the census
@@ -94,10 +109,55 @@ def cargo_metadata() -> dict:
     return json.loads(proc.stdout)
 
 
+# The selector of a target the default-features workspace build never links.
+# Its files are claimed (so the lib's `src/` does not swallow a skipped
+# `src/bin/x.rs`) and then not counted.
+SKIPPED = ""
+
+
+def enabled_features(meta: dict) -> dict[str, set[str]]:
+    """The features of each workspace package that `cargo test --workspace`
+    with default features switches on, unified across the workspace."""
+    packages = {p["name"]: p for p in meta["packages"]}
+    enabled: dict[str, set[str]] = {name: set() for name in packages}
+    queue: list[tuple[str, str]] = [(name, "default") for name in packages]
+
+    for pkg in packages.values():
+        for dep in pkg["dependencies"]:
+            if dep["name"] not in packages or dep.get("optional"):
+                continue
+            queue += [(dep["name"], f) for f in dep.get("features", [])]
+            if dep.get("uses_default_features", True):
+                queue.append((dep["name"], "default"))
+
+    while queue:
+        name, feature = queue.pop()
+        if feature in enabled[name]:
+            continue
+        enabled[name].add(feature)
+        pkg = packages[name]
+        # A dependency is named in a feature by its rename if it has one.
+        local = {d.get("rename") or d["name"]: d["name"] for d in pkg["dependencies"]}
+        for entry in pkg["features"].get(feature, []):
+            if entry.startswith("dep:"):
+                continue
+            if "/" in entry:
+                dep, _, sub = entry.partition("/")
+                dep = local.get(dep.rstrip("?"))
+                if dep in packages:
+                    queue.append((dep, sub))
+                continue
+            if entry in pkg["features"]:
+                queue.append((name, entry))
+    return enabled
+
+
 def targets() -> tuple[list[tuple[Path, Path, bool, str]], dict[Path, str]]:
     """(module root, src_path, is-crate-root, selector) per target, and the
-    package directory each doc-test unit belongs to."""
+    package directory each doc-test unit belongs to. A target the default
+    workspace build does not link carries the selector SKIPPED."""
     meta = cargo_metadata()
+    enabled = enabled_features(meta)
     units: list[tuple[Path, Path, bool, str]] = []
     doc_units: dict[Path, str] = {}
     for pkg in meta["packages"]:
@@ -108,7 +168,13 @@ def targets() -> tuple[list[tuple[Path, Path, bool, str]], dict[Path, str]]:
             src = Path(target["src_path"])
             root_is_crate = src.stem in ("lib", "main")
             root = src.parent if root_is_crate else src.parent / src.stem
-            units.append((root, src, root_is_crate, selector_for(pkg["name"], target)))
+            required = set(target.get("required-features", []))
+            selector = (
+                selector_for(pkg["name"], target)
+                if required <= enabled[pkg["name"]]
+                else SKIPPED
+            )
+            units.append((root, src, root_is_crate, selector))
             is_lib = "lib" in target["kind"] or "proc-macro" in target["kind"]
             if is_lib and target.get("doctest", True):
                 doc_units[pkg_dir] = f"-p {pkg['name']} --doc"
@@ -178,6 +244,8 @@ def census() -> tuple[dict[str, int], list[Path]]:
         selector = owner(path, units)
         if selector is None:
             unattributed.append(path)
+            continue
+        if selector == SKIPPED:
             continue
         if attrs:
             counts[selector] = counts.get(selector, 0) + attrs

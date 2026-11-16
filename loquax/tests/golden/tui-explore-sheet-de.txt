@@ -1,0 +1,24 @@
+Entdecken
+┌● Zuletzt gesehen─────────────────────────────────────────────────────────────┐
+│▏Suchen                                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌  ────────────────────────────────────────────────────────────────────────────┐
+│RNS Moscow                                                                    │
+│noch nicht gesehen                                                            │
+│                                                                              │
+│▌[ Diesen Server für Räume nutzen ]                                           │
+│  Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne     │
+│  Namen.                                                                      │
+│                                                                              │
+│Seine Räume                                                                   │
+│Frage den Server nach seinen Räumen…                                          │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter use or join │ ↑↓ move │ Esc close

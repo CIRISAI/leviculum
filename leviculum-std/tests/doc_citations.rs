@@ -152,9 +152,27 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     "periculum/",
     "ble-reticulum/",
     "columba/",
+    // Sideband, the other LXMF messenger whose voice messages we play
+    // (1222): cited from a clone of github.com/markqvist/Sideband at
+    // ef572b5 (2026-10-01), which no host keeps beside this tree.
+    "Sideband/",
+    // SebastianObi's LXMF-Tools, whose distribution-group bot the relayed
+    // posts of 1482 are read after: cited from a clone of
+    // github.com/SebastianObi/LXMF-Tools at 6ec9528 (2025-03-19), which no
+    // host keeps beside this tree.
+    "LXMF-Tools/",
     // A crates.io dependency, cited by the nRF gate scripts. Its source is
     // under `~/.cargo`, never in this tree, so it can only be counted.
     "nrf-softdevice/",
+    // The Adafruit nRF52 bootloader the boards carry (1601, OTA stage 1):
+    // cited from a clone of github.com/adafruit/Adafruit_nRF52_Bootloader at
+    // tag 0.9.0 (a73fe207), which no host keeps beside this tree.
+    "Adafruit_nRF52_Bootloader/",
+    // i2pd, the I2P router the I2P interface talks SAM to (1654, its
+    // five-second session linger): cited from a clone of
+    // github.com/PurpleI2P/i2pd at tag 2.56.0 (fb90b01f), the version
+    // Debian ships, which no host keeps beside this tree.
+    "i2pd/",
 ];
 
 /// The vendored references. A citation into one of these that is not
@@ -196,8 +214,13 @@ const SOURCE_CRATES: &[&str] = &[
 /// ordinary string literal. A blocklist rather than an extension allowlist on
 /// purpose: an allowlist silently drops a citation into a file type nobody
 /// thought of, this can only produce visible noise.
+///
+/// `network` is our own server's top-level domain, the shipped server list's
+/// first entry (`auto_servers.rs`, #471 step 3); `example` and `invalid` are
+/// the RFC 2606 and RFC 6761 names tests and cells dial.
 const NON_FILE_EXTENSIONS: &[&str] = &[
-    "com", "net", "org", "io", "dev", "local", "onion", "i2p", "de",
+    "com", "net", "org", "io", "dev", "local", "onion", "i2p", "de", "network", "example",
+    "invalid",
 ];
 
 /// Directories never walked, for either the corpus or the resolution index.
@@ -345,7 +368,7 @@ fn ident_regexes() -> [Regex; 4] {
 }
 
 /// A backticked token that is itself a citation: `Destination.py:322`,
-/// `Justfile:1737`. Tables list these next to each other, so without this
+/// `Justfile:1823`. Tables list these next to each other, so without this
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
@@ -943,7 +966,7 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
                 .into_owned()
         })
         .collect();
-    // Bare filenames like `transport.rs:542` resolve by suffix.
+    // Bare filenames like `transport.rs:599` resolve by suffix.
     let resolve = |cited: &str| -> Vec<&str> {
         let suffix = format!("/{cited}");
         rel_files
@@ -1978,7 +2001,7 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`Transport.outbound()` is the loop, and (",
         // A citation next to a citation, the shape a comparison table has.
         "| Self-announce one-shot | `Destination.py:322`, ",
-        "the recipe moved (`Justfile:1737`, ",
+        "the recipe moved (`Justfile:1823`, ",
         // A token with no letter in its last segment cannot be searched
         // for as an identifier.
         "the VID:PID `1209:0001` (",

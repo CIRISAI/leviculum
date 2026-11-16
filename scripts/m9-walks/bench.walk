@@ -1,0 +1,76 @@
+# The M9 bench walk (order 1533), the one the periculum hardware cell
+# `m9_walk` runs and the reviewer runs by hand after a landing:
+#   bash scripts/m9-walk.sh --rig <rig folder> --walk scripts/m9-walks/bench.walk [--image <bench elf>]
+# Grammar and bars: scripts/m9-walk.py. Every dump is for the agent's eye
+# (walk.md lists them in order); the expects are what a script can hold
+# without one.
+#
+# The board is a device of the bench home (1562, scripts/m9-bench-home.sh:
+# the 1489 fixture, its long chat Anna's 1200 messages), never Lew's: the
+# walk opens chats, and m9-walk.py refuses it before the first key on a
+# board whose client record names another home. One of the list's first
+# eight rows is a chat longer than one screen. Two boots before this file
+# starts: the second is a resumed restore under 2 s.
+
+# The list.
+wait page=chats
+expect cursor=0
+dump 01-list
+idle 10
+
+# Open the long chat: each of the first eight rows opened and left, then
+# the one with the most lines above its screen (1542: window 11a opened
+# row 0, four bubbles, and the held scrolls below tested nothing).
+open longest 8
+wait page=chat
+expect top>0
+dump 02-chat
+
+# Scroll three pages back, a held ring up each (an answer every 200 ms).
+hold ring_up 2000
+expect top changed
+dump 03-chat-page-1
+hold ring_up 2000
+expect top changed
+dump 04-chat-page-2
+hold ring_up 2000
+expect top changed
+dump 05-chat-page-3
+
+# Back to the list.
+key back
+wait page=chats
+expect log "[PAGE] name=chats"
+
+# The map, zoomed twice with T and Y (the keys the 2026-11-07 decisions
+# give the zoom). The key's first flush may be the hint row's; the zoom's
+# [PAGE] line comes after it, and `expect zoom changed` waits up to 1 s
+# for it (1554).
+key map
+wait page=map
+dump 06-map
+key t
+expect zoom changed
+dump 07-map-zoom-t
+key y
+expect zoom changed
+dump 08-map-zoom-y
+key back
+wait page=chats
+
+# The house page (1532, 1561): the house key opens the settings at once
+# (no gap: the controller repeats no held key, so the 300 ms bar of 1532
+# went); Back leaves them for the list.
+key home
+wait page=house
+dump 09-house
+key back
+wait page=chats
+
+# A reboot, and the list again.
+reboot
+wait page=chats
+expect cursor=0
+dump 10-list-after-reboot
+idle 10
+measure

@@ -1,0 +1,426 @@
+{
+  "card": null,
+  "chat": null,
+  "chips": [],
+  "class": "Compact",
+  "explore": {
+    "pages": {
+      "address": null,
+      "as_of": null,
+      "az": false,
+      "empty": null,
+      "groups": [
+        {
+          "heading": {
+            "args": [],
+            "key": "explore_bookmarks"
+          },
+          "rows": [
+            {
+              "bookmarked": true,
+              "cursor": true,
+              "dest": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
+              "hops": {
+                "args": [],
+                "key": "explore_hop"
+              },
+              "label": {
+                "raw": "Relay Süd"
+              },
+              "seen": {
+                "args": [
+                  2
+                ],
+                "key": "explore_seen_days"
+              },
+              "url": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c:/page/index.mu"
+            }
+          ]
+        },
+        {
+          "heading": {
+            "args": [],
+            "key": "explore_today"
+          },
+          "rows": [
+            {
+              "bookmarked": false,
+              "cursor": false,
+              "dest": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+              "hops": {
+                "args": [
+                  2
+                ],
+                "key": "explore_hops"
+              },
+              "label": {
+                "raw": "Marcel's node"
+              },
+              "seen": {
+                "args": [
+                  10
+                ],
+                "key": "explore_seen_minutes"
+              },
+              "url": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a:/page/index.mu"
+            },
+            {
+              "bookmarked": false,
+              "cursor": false,
+              "dest": "41414141414141414141414141414141",
+              "hops": {
+                "args": [
+                  4
+                ],
+                "key": "explore_hops"
+              },
+              "label": {
+                "raw": "Bergwacht"
+              },
+              "seen": {
+                "args": [
+                  5
+                ],
+                "key": "explore_seen_hours"
+              },
+              "url": "41414141414141414141414141414141:/page/index.mu"
+            }
+          ]
+        },
+        {
+          "heading": {
+            "args": [],
+            "key": "explore_this_week"
+          },
+          "rows": [
+            {
+              "bookmarked": false,
+              "cursor": false,
+              "dest": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+              "hops": null,
+              "label": {
+                "args": [],
+                "key": "explore_unnamed_page"
+              },
+              "seen": {
+                "args": [
+                  5
+                ],
+                "key": "explore_seen_days"
+              },
+              "url": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d:/page/index.mu"
+            }
+          ]
+        }
+      ],
+      "off": null,
+      "placeholder": {
+        "args": [],
+        "key": "explore_search_hint"
+      },
+      "query": "",
+      "sort": {
+        "args": [],
+        "key": "explore_sort_seen"
+      },
+      "title": {
+        "args": [],
+        "key": "explore_pages"
+      }
+    },
+    "rooms": {
+      "hubs": [
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "99999999999999999999999999999999",
+          "name": {
+            "raw": "Werkstatt"
+          },
+          "seen": {
+            "args": [
+              1
+            ],
+            "key": "explore_seen_minutes"
+          },
+          "value": {
+            "args": [
+              3
+            ],
+            "key": "rooms_hub_hops"
+          }
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "42a97b1b07147b898f78a610dfbba587",
+          "name": {
+            "raw": "RNS Moscow"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "fcf451c9dd57fb262f30bf60ba9aa562",
+          "name": {
+            "raw": "Cascadia"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "0de5818cbe93fedab3ce82d02750aa9c",
+          "name": {
+            "raw": "Chatsurfer"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "741da32223fa46db2f284ca9c20496b1",
+          "name": {
+            "raw": "CTRS"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "68dda18a26508d81b53fb94407882121",
+          "name": {
+            "raw": "Minuteman"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "6ffeb457f58d8bd2041b3585caa9cc1e",
+          "name": {
+            "raw": "RMAP.WORLD Hub"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "ceadff8d8ee0e319ec2b9b456b650c10",
+          "name": {
+            "raw": "Save Europe"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "4f07b6e366835a159519cc854a57c9f7",
+          "name": {
+            "raw": "SoCal Public"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "472c760aa181f889902959e9d6de5ac7",
+          "name": {
+            "raw": "UTN Oregon"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        },
+        {
+          "chosen": false,
+          "cursor": false,
+          "hash": "e7fd7f9efd6608ca4ade879d18646eed",
+          "name": {
+            "raw": "HADARC"
+          },
+          "seen": {
+            "args": [],
+            "key": "explore_not_seen"
+          },
+          "value": null
+        }
+      ],
+      "joined": [],
+      "joined_cursor": null,
+      "joined_empty": {
+        "args": [],
+        "key": "explore_no_joined"
+      },
+      "open_rooms": null,
+      "servers_empty": null,
+      "servers_title": {
+        "args": [],
+        "key": "explore_servers"
+      },
+      "title": {
+        "args": [],
+        "key": "explore_rooms"
+      }
+    },
+    "sheet": null
+  },
+  "list": null,
+  "screen": "explore",
+  "sheet": null,
+  "tabs": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "tabs",
+      "role": "tab_bar",
+      "selected": false
+    },
+    "active": "Explore",
+    "id": "tabs",
+    "items": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_chats"
+          },
+          "resource": "tab_chats",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Chats)",
+          "label_key": "tab_chats"
+        },
+        "badge": null,
+        "id": "Chats",
+        "label": {
+          "args": [],
+          "key": "tab_chats"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "map"
+          },
+          "resource": "tab_map",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Map)",
+          "label_key": "map"
+        },
+        "badge": null,
+        "id": "Map",
+        "label": {
+          "args": [],
+          "key": "map"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": true
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
+      }
+    ]
+  },
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_explore"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
+      }
+    },
+    "title": {
+      "args": [],
+      "key": "tab_explore"
+    }
+  },
+  "whereabouts": null
+}

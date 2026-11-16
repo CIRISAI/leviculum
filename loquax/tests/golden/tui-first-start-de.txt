@@ -1,0 +1,24 @@
+┌● Mia───────────────────┐┌  messages──────────────────────────────────────────┐
+│Noch keine              ││                                                    │
+│Unterhaltungen: :new    ││                                                    │
+│conversation beginnt    ││                                                    │
+│eine mit dem Code eines ││                                                    │
+│Kontakts.               ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

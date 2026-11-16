@@ -68,7 +68,7 @@ Nothing is written before all of that has been shown and confirmed.
 device, and `lnflash` mounts it itself rather than assuming a desktop
 automounter that a headless host does not have. Without root it will
 identify the attached boards and then stop.
-(`lnflash/src/main.rs:37-38`)
+(`lnflash/src/main.rs:44-45`)
 
 **One key press is sometimes unavoidable.** Getting into the bootloader
 by software has to be implemented by whatever firmware is currently
@@ -98,13 +98,13 @@ waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:42-472`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:54-508`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 
 The bundle is looked for in this order: `--bundle PATH`, then
 `$LNFLASH_BUNDLE`, then the directory holding the binary, then
-`/usr/share/lnflash`. (`lnflash/src/main.rs:42-45`)
+`/usr/share/lnflash`. (`lnflash/src/main.rs:54-57`)
 
 The full user-facing text ships inside the bundle as its `README`
 (`lnflash/payload/README-bundle.md`), including what the alarming but
@@ -259,7 +259,9 @@ debug info does not bloat what lands on the device.
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:2089-2090`)
+hand the board's binary and features to `scripts/nrf-flash.sh`, which
+runs cargo in `leviculum-nrf` through `scripts/nrf-rustflags.sh`.
+(`Justfile:2214-2217`)
 
 A plain build (no flash) is:
 
@@ -267,17 +269,25 @@ A plain build (no flash) is:
 cargo build --release
 ```
 
-(`leviculum-nrf/README.md:23`)
+(The build line: `leviculum-nrf/README.md:23`.)
 
-Flashing wraps `cargo run`: the runner builds the release binary, then
-copies the resulting UF2 onto each board's UF2 bootloader drive. The
-UF2 conversion and copy happen inside the `cargo run` step — a bare
-`cargo build` produces only the ELF.
+Flashing goes through `scripts/nrf-flash.sh`: it builds the release
+binary at the fixed build path of `scripts/nrf-rustflags.sh`, in a
+private mount namespace, so a clone of the same commit builds the same
+bytes; it prints the image as `NRF_IMAGE bin= sha256= bytes=`, so a
+reviewer's own build of the commit can be compared before the board
+takes it; then it hands the ELF to `leviculum-nrf/tools/uf2-runner.sh`,
+outside that namespace, which converts it to UF2 and copies it onto each
+board's UF2 bootloader drive. A bare `cargo build` produces only the ELF.
+A host without unprivileged user namespaces builds in place, and the
+build says that image is not the reproducible one.
 
 > Build the firmware with `cargo build --release`. Flash with `just
-> flash` (from the repo root), which wraps `cargo run --release --bin
-> t114`.
-> (`leviculum-nrf/README.md:23`)
+> flash` (from the repo root), which runs `scripts/nrf-flash.sh t114
+> bsp-t114`: it builds at the fixed path of `scripts/nrf-rustflags.sh`,
+> so a clone of the same commit builds the same bytes, prints the
+> image's sha256, and hands the ELF to `tools/uf2-runner.sh`.
+> (`leviculum-nrf/README.md:23`, quoted whole.)
 
 ### Touch-free vs. manual double-tap
 
@@ -299,12 +309,12 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2116-2118`, `Justfile:2180-2189`. See
+automatically. (`Justfile:2242-2244`, `Justfile:2334-2343`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
 
-Each recipe below is quoted from the `Justfile`. The cargo invocation is
+Each recipe below is quoted from the `Justfile`. The build invocation is
 **derived from source — requires the physical device** to actually write
 firmware (it builds the same on any host, but only does something useful
 with a board attached).
@@ -316,10 +326,10 @@ deliberate: if only one were flashed, a later multi-node test could run
 against mixed firmware versions. Use this as your default for T114s.
 
 ```sh
-cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
+bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2091-2093`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:2218-2220`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -334,23 +344,25 @@ just flash-one /dev/ttyACM3
 Expands to:
 
 ```sh
-cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
+LEVICULUM_FLASH_ONLY=<PORT> bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2100-2105`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2226-2231`; usage forms `leviculum-nrf/README.md:31-36`)
 
-### `just flash-rak4631` — every RAK4631 (bare module)
+### `just flash-rak4631` — every RAK4631
 
-Flashes every attached RAK4631 / WisMesh Pocket V2 with the bare-module
-build (no baseboard peripherals).
+Flashes every attached RAK4631 / WisMesh Pocket V2 with the baseboard
+build, the one the `lnflash` bundle ships. Until 2026-10-28 this recipe
+flashed the bare-module build; Lew retired that build then (D5 of the
+node-loop diff), since the baseboard image runs on a bare module unharmed.
 
 ```sh
-cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
+LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2119-2121`)
+(`Justfile:2243-2251`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -364,26 +376,27 @@ just flash-rak4631-one /dev/leviculum-rak-transport
 Expands to:
 
 ```sh
-cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
+LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2123-2127`)
+(`Justfile:2253-2257`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
 Flashes with all RAK19026 baseboard peripherals enabled (display, GNSS,
 battery). `--features rak-baseboard` aggregates the three baseboard
-features. Use this for a complete WisMesh Pocket V2.
+features. The same image `just flash-rak4631` flashes since the bare
+build was retired; the name stays for the hands and scripts that know it.
 
 ```sh
-cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
+LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2129-2135`; `rak-baseboard` aggregate
+(`Justfile:2259-2267`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -406,7 +419,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2180-2189`)
+(`Justfile:2334-2343`)
 
 ### SenseCAP T1000-E: serial DFU
 
@@ -478,9 +491,11 @@ Debian's `esptool` 4.7.0 lacks the ESP32-S3 stub and fails with
 `stub_flasher_32s3.json` not found, so give it `--no-stub` or use
 `espflash` or the pinned `esptool` that `scripts/install-esptool.sh`
 installs. On the M9 keep the line at 230400 baud; its CH340K loses bytes
-at 460800 and above. `lnflash` has the transport (`lnflash/src/esp.rs`)
-but no ESP32 board in its catalogue yet, so these boards are flashed by
-hand or by recipe for now.
+at 460800 and above. `lnflash` does not flash ESP32 boards: it names
+one it finds on the bus and leaves it alone. Its ROM-loader transport,
+which no board ever reached, was removed with #476 and can be restored
+from commit 39071420 when the M9 entry lands; until then these boards
+are flashed by hand or by recipe.
 
 ## A note on disconnecting consumers
 

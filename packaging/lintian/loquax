@@ -1,4 +1,4 @@
-# musl-static binary; see packaging/lintian/lblogd for the reasoning
+# The armhf build is a musl-static binary; see packaging/lintian/lblogd for the reasoning
 # behind all three overrides.
 loquax: unstripped-binary-or-object [usr/bin/loquax]
 loquax: shared-library-lacks-prerequisites [usr/bin/loquax]

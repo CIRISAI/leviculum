@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:589`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:645`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -46,13 +46,13 @@ timer expired  ─► handle_timeout()            ├─► TickOutput { actions
 The three entry points (signatures in the
 [reference](rust-api-spec.md#nodecorer-c-s)):
 
-- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1186`. Feed one
+- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1244`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2973`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:3174`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:3004`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:3205`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/node_loop.rs:857-862`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/node_loop.rs:915-938`). The board selects over ten event
+(`leviculum-nrf/src/node_loop.rs:880-885`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/node_loop.rs:938-965`). The board selects over ten event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 
@@ -126,7 +126,7 @@ Three things to notice:
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
    (or a slice of your own interface type, through `AsInterface`) to the
-   generic `dispatch_actions` (`leviculum-core/src/transport.rs:771`). Broadcast
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:828`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -161,7 +161,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:402`), which
+use `build_boxed` (`leviculum-core/src/node/builder.rs:437`), which
 configures through the box. `Box::new(builder.build(..))` holds a full-size
 `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that was upwards of 40 KB twice over — it gave the T114 a
@@ -195,13 +195,13 @@ impl Clock for EmbassyClock {
 ```
 
 `now_secs`, `has_elapsed`, and `deadline` have default implementations
-(`leviculum-core/src/traits.rs:581-593`); you only provide `now_ms`. It must be
+(`leviculum-core/src/traits.rs:583-595`); you only provide `now_ms`. It must be
 monotonic.
 
 ### `Interface`
 
 The **send side** of an interface — `id`, `name`, `mtu`, `is_online`, and the
-non-blocking `try_send` (`leviculum-core/src/traits.rs:359`). The receive side is
+non-blocking `try_send` (`leviculum-core/src/traits.rs:361`). The receive side is
 deliberately *not* in the trait: receiving is platform-specific (an interrupt, a
 DMA buffer, an Embassy channel), and you feed received bytes into the core via
 `handle_packet` yourself. `try_send` returns `InterfaceError::BufferFull`
@@ -228,14 +228,14 @@ impl Interface for MyRadio {
 ```
 
 A constrained medium (LoRa) overrides `next_slot_ms`
-(`leviculum-core/src/traits.rs:475`) to report the next airtime-fit time, so the
+(`leviculum-core/src/traits.rs:477`) to report the next airtime-fit time, so the
 core schedules retries against capacity without knowing any radio physics — the
 [interface-isolation rule](choosing-a-layer.md). For a fast link the default
 ("always ready") is correct.
 
 An interface that carries several point-to-point links behind one
 `InterfaceId` (BLE) overrides `try_send_to_peer`
-(`leviculum-core/src/traits.rs:411`): the core passes the 16-byte
+(`leviculum-core/src/traits.rs:413`): the core passes the 16-byte
 identity of the peer it addressed the packet at — the same value the
 interface reports on peer-up/peer-lost — or `None` for a broadcast.
 The interface maps that identity to its own link(s); the core never
@@ -245,10 +245,10 @@ a single-peer interface implements nothing.
 ### `Storage`
 
 Key-value persistence for the path table, link table, announce caches,
-identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:610`). It
+identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:612`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:1072`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:1074`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

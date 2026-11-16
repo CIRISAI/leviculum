@@ -1,0 +1,253 @@
+=== first ===
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: delivered ---
+┌  tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
+│▌du: are you at the fi… ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││               are you at the field site?  12:00 ✓  │
+│                        │├● to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: cut off ---
+┌  tui───────────────────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│ Bob              12:00 ││                                                    │
+│ yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                ┌──────────────────┐│
+│                        ││                    ── Today ── │✓ message from Bob││
+│                        ││              leaving in ten  di└──────────────────┘│
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== second ===
+--- frame 1: restarted ---
+┌● tui───────────────────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│ Bob              12:00 ││                                                    │
+│ yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                           leaving in ten  12:00 ◷  │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: ledger ---
+┌  tui───────────────────┐┌● Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│ Bob              12:00 ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to Unbekannt                                                     │ │
+│ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
+│ │id     none yet: the router has not queued it                             │ │
+│ │size   14 bytes                                                           │ │
+│ │state  waiting to be sent                                                 │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │12:00:00  queued                                                          │ │
+│ │12:00:00  trying direct                                                   │ │
+│ │12:00:00  Loquax restarted: no longer being sent                          │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                          ▌leaving in ten  12:00 ◷  │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: bob ---
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│ Unbekannt        12:00 ││                                                    │
+│ du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│▌Bob              12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││               are you at the field site?  12:00 ✓  │
+│                        ││                                                    │
+│                        ││ yes, from ten  12:00                               │
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: pinned ---
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ Unbekannt        12:00 ││                                                    │
+│ du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││               are you at the field si┌────────────┐│
+│                        ││                                      │✓ pinned Bob││
+│                        ││ yes, from ten  12:00                 └────────────┘│
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 5: asked ---
+┌  tui───────────────────┐┌● Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ Unbekannt        12:00 ││                                                    │
+│ du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│   ┌─────────────────────────────────────────────────────────────────────────┐│
+│   │⚠ delete this message from this device? y deletes, any other key keeps it││
+│   └─────────────────────────────────────────────────────────────────────────┘│
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: deleted ---
+┌  tui───────────────────┐┌● Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
+│▌du: are you at the fi… ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ Unbekannt        12:00 ││                                                    │
+│ du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                ┌──────────────────────────────────┐│
+│                        ││                │✓ message deleted from this device││
+│                        ││              ▌a└──────────────────────────────────┘│
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+=== third ===
+--- frame 1: again ---
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
+│▌du: are you at the fi… ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ Unbekannt        12:00 ││                                                    │
+│ du: leaving in ten     ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││               are you at the field site?  12:00 ✓  │
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

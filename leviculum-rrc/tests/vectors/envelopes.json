@@ -1,0 +1,755 @@
+{
+  "schema": 1,
+  "generator": "rrcd 0.3.2 (kc1awv/rrcd f6d7e9d72bf83c70d7a9373ae8c5edaa052a7bf2) with cbor2 5.6.5, against periculum's rrc_client.py, over RNS 1.5.2",
+  "category": "rrc_envelope",
+  "vectors": [
+    {
+      "name": "hello_up",
+      "description": "client to hub HELLO, keys v,t,id,ts,src,body,nick, body map, from cell rrc_room_two_clients",
+      "type": "HELLO",
+      "code": 1,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body",
+        "nick"
+      ],
+      "body": "map",
+      "cbor": "a7000101010248d7b7eb31c257258e031b000001a1a103ff500450a319ce51314e3e736389a91ada0d1bec06a3006d7065726963756c756d2d7272630163302e3102a00765616c696365",
+      "cbor_len": 74,
+      "wire_len": 147,
+      "decoded": {
+        "0": 1,
+        "1": 1,
+        "2": {
+          "bytes": "d7b7eb31c257258e"
+        },
+        "3": 1793702756176,
+        "4": {
+          "bytes": "a319ce51314e3e736389a91ada0d1bec"
+        },
+        "6": {
+          "0": "periculum-rrc",
+          "1": "0.1",
+          "2": {}
+        },
+        "7": "alice"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "welcome_down",
+      "description": "hub to client WELCOME, keys v,t,id,ts,src,body, body map, from cell rrc_room_two_clients",
+      "type": "WELCOME",
+      "code": 2,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body"
+      ],
+      "body": "map",
+      "cbor": "a6000101020248d9ccf29b5ca7961c031b000001a1a103ff510450076b76c29219f0cac81fb511039a6ad506a400697065726963756c756d0165302e332e3202a301f502f500f503a50018200118400219015e0318200418f0",
+      "cbor_len": 89,
+      "wire_len": 163,
+      "decoded": {
+        "0": 1,
+        "1": 2,
+        "2": {
+          "bytes": "d9ccf29b5ca7961c"
+        },
+        "3": 1793702756177,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "6": {
+          "0": "periculum",
+          "1": "0.3.2",
+          "2": {
+            "1": true,
+            "2": true,
+            "0": true
+          },
+          "3": {
+            "0": 32,
+            "1": 64,
+            "2": 350,
+            "3": 32,
+            "4": 240
+          }
+        }
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "join_up",
+      "description": "client to hub JOIN, keys v,t,id,ts,src,room, body none, from cell rrc_room_two_clients",
+      "type": "JOIN",
+      "code": 10,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room"
+      ],
+      "body": "none",
+      "cbor": "a60001010a0248e8d03d650a7801ef031b000001a1a10404c80450a319ce51314e3e736389a91ada0d1bec0564236c6162",
+      "cbor_len": 49,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 10,
+        "2": {
+          "bytes": "e8d03d650a7801ef"
+        },
+        "3": 1793702757576,
+        "4": {
+          "bytes": "a319ce51314e3e736389a91ada0d1bec"
+        },
+        "5": "#lab"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "join_up_2",
+      "description": "client to hub JOIN, keys v,t,id,ts,src,room,body, body text, from cell rrc_room_key_join",
+      "type": "JOIN",
+      "code": 10,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body"
+      ],
+      "body": "text",
+      "cbor": "a70001010a024894f1c5d4463f46c1031b000001a1a10477220450fb0b5f34b1901fb06149f71324d39a130564236c61620666736573616d65",
+      "cbor_len": 57,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 10,
+        "2": {
+          "bytes": "94f1c5d4463f46c1"
+        },
+        "3": 1793702786850,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab",
+        "6": "sesame"
+      },
+      "cell": "rrc_room_key_join",
+      "client": "bob"
+    },
+    {
+      "name": "joined_down",
+      "description": "hub to client JOINED, keys v,t,id,ts,src,room, body none, from cell rrc_room_two_clients",
+      "type": "JOINED",
+      "code": 11,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room"
+      ],
+      "body": "none",
+      "cbor": "a60001010b0248782a3c534698b3a4031b000001a1a10404c90450076b76c29219f0cac81fb511039a6ad50564236c6162",
+      "cbor_len": 49,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 11,
+        "2": {
+          "bytes": "782a3c534698b3a4"
+        },
+        "3": 1793702757577,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "joined_down_2",
+      "description": "hub to client JOINED, keys v,t,id,ts,src,room,nick, body none, from cell rrc_room_two_clients",
+      "type": "JOINED",
+      "code": 11,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "nick"
+      ],
+      "body": "none",
+      "cbor": "a70001010b02487c586c56e9644e79031b000001a1a10405a10450076b76c29219f0cac81fb511039a6ad50564236c61620763626f62",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 11,
+        "2": {
+          "bytes": "7c586c56e9644e79"
+        },
+        "3": 1793702757793,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "part_up",
+      "description": "client to hub PART, keys v,t,id,ts,src,room, body none, from cell rrc_room_two_clients",
+      "type": "PART",
+      "code": 12,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room"
+      ],
+      "body": "none",
+      "cbor": "a60001010c0248dae9ea13a0d533f4031b000001a1a10448ea0450fb0b5f34b1901fb06149f71324d39a130564236c6162",
+      "cbor_len": 49,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 12,
+        "2": {
+          "bytes": "dae9ea13a0d533f4"
+        },
+        "3": 1793702775018,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "parted_down",
+      "description": "hub to client PARTED, keys v,t,id,ts,src,room, body none, from cell rrc_room_two_clients",
+      "type": "PARTED",
+      "code": 13,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room"
+      ],
+      "body": "none",
+      "cbor": "a60001010d0248f4eaf5b1e6c8905c031b000001a1a10448ea0450076b76c29219f0cac81fb511039a6ad50564236c6162",
+      "cbor_len": 49,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 13,
+        "2": {
+          "bytes": "f4eaf5b1e6c8905c"
+        },
+        "3": 1793702775018,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "parted_down_2",
+      "description": "hub to client PARTED, keys v,t,id,ts,src,room,nick, body none, from cell rrc_room_two_clients",
+      "type": "PARTED",
+      "code": 13,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "nick"
+      ],
+      "body": "none",
+      "cbor": "a70001010d02489e2f84d7a88d3648031b000001a1a10448ea0450076b76c29219f0cac81fb511039a6ad50564236c61620763626f62",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 13,
+        "2": {
+          "bytes": "9e2f84d7a88d3648"
+        },
+        "3": 1793702775018,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "msg_up",
+      "description": "client to hub MSG, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "MSG",
+      "code": 20,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a80001011402483b26973de23018f6031b000001a1a10405f40450a319ce51314e3e736389a91ada0d1bec0564236c616206781f727263206c696e652c207468697274792d6f6e65206279746573206c6f6e670765616c696365",
+      "cbor_len": 90,
+      "wire_len": 163,
+      "decoded": {
+        "0": 1,
+        "1": 20,
+        "2": {
+          "bytes": "3b26973de23018f6"
+        },
+        "3": 1793702757876,
+        "4": {
+          "bytes": "a319ce51314e3e736389a91ada0d1bec"
+        },
+        "5": "#lab",
+        "6": "rrc line, thirty-one bytes long",
+        "7": "alice"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "msg_down",
+      "description": "hub to client MSG, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "MSG",
+      "code": 20,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a80001011402483b26973de23018f6031b000001a1a10405f40450a319ce51314e3e736389a91ada0d1bec0564236c616206781f727263206c696e652c207468697274792d6f6e65206279746573206c6f6e670765616c696365",
+      "cbor_len": 90,
+      "wire_len": 163,
+      "decoded": {
+        "0": 1,
+        "1": 20,
+        "2": {
+          "bytes": "3b26973de23018f6"
+        },
+        "3": 1793702757876,
+        "4": {
+          "bytes": "a319ce51314e3e736389a91ada0d1bec"
+        },
+        "5": "#lab",
+        "6": "rrc line, thirty-one bytes long",
+        "7": "alice"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "notice_up",
+      "description": "client to hub NOTICE, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "NOTICE",
+      "code": 21,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a8000101150248595fcc797c65c414031b000001a1a10406cd0450fb0b5f34b1901fb06149f71324d39a130564236c6162066861206e6f746963650763626f62",
+      "cbor_len": 64,
+      "wire_len": 147,
+      "decoded": {
+        "0": 1,
+        "1": 21,
+        "2": {
+          "bytes": "595fcc797c65c414"
+        },
+        "3": 1793702758093,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab",
+        "6": "a notice",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "notice_down",
+      "description": "hub to client NOTICE, keys v,t,id,ts,src,room,body, body text, from cell rrc_room_two_clients",
+      "type": "NOTICE",
+      "code": 21,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body"
+      ],
+      "body": "text",
+      "cbor": "a7000101150248100e77bdb78cbeb1031b000001a1a10404c90450076b76c29219f0cac81fb511039a6ad50564236c6162067832726f6f6d20236c61623a20756e726567697374657265643b206d6f64653d286e6f6e65293b20746f7069633d286e6f6e6529",
+      "cbor_len": 102,
+      "wire_len": 179,
+      "decoded": {
+        "0": 1,
+        "1": 21,
+        "2": {
+          "bytes": "100e77bdb78cbeb1"
+        },
+        "3": 1793702757577,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab",
+        "6": "room #lab: unregistered; mode=(none); topic=(none)"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "notice_down_2",
+      "description": "hub to client NOTICE, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "NOTICE",
+      "code": 21,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a8000101150248595fcc797c65c414031b000001a1a10406cd0450fb0b5f34b1901fb06149f71324d39a130564236c6162066861206e6f746963650763626f62",
+      "cbor_len": 64,
+      "wire_len": 147,
+      "decoded": {
+        "0": 1,
+        "1": 21,
+        "2": {
+          "bytes": "595fcc797c65c414"
+        },
+        "3": 1793702758093,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab",
+        "6": "a notice",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "action_up",
+      "description": "client to hub ACTION, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "ACTION",
+      "code": 22,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a800010116024873e7601d0fcc9cd4031b000001a1a10406cd0450fb0b5f34b1901fb06149f71324d39a130564236c6162066577617665730763626f62",
+      "cbor_len": 61,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 22,
+        "2": {
+          "bytes": "73e7601d0fcc9cd4"
+        },
+        "3": 1793702758093,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab",
+        "6": "waves",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "action_down",
+      "description": "hub to client ACTION, keys v,t,id,ts,src,room,body,nick, body text, from cell rrc_room_two_clients",
+      "type": "ACTION",
+      "code": 22,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body",
+        "nick"
+      ],
+      "body": "text",
+      "cbor": "a800010116024873e7601d0fcc9cd4031b000001a1a10406cd0450fb0b5f34b1901fb06149f71324d39a130564236c6162066577617665730763626f62",
+      "cbor_len": 61,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 22,
+        "2": {
+          "bytes": "73e7601d0fcc9cd4"
+        },
+        "3": 1793702758093,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "5": "#lab",
+        "6": "waves",
+        "7": "bob"
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "ping_up",
+      "description": "client to hub PING, keys v,t,id,ts,src,body, body uint, from cell rrc_room_two_clients",
+      "type": "PING",
+      "code": 30,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body"
+      ],
+      "body": "uint",
+      "cbor": "a6000101181e0248a49c1d6317819d66031b000001a1a10407f90450fb0b5f34b1901fb06149f71324d39a13061b000001a1a10407f9",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 30,
+        "2": {
+          "bytes": "a49c1d6317819d66"
+        },
+        "3": 1793702758393,
+        "4": {
+          "bytes": "fb0b5f34b1901fb06149f71324d39a13"
+        },
+        "6": 1793702758393
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "ping_down",
+      "description": "hub to client PING, keys v,t,id,ts,src,body, body float, from cell rrc_room_two_clients",
+      "type": "PING",
+      "code": 30,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body"
+      ],
+      "body": "float",
+      "cbor": "a6000101181e0248c329021129533672031b000001a1a104487d0450076b76c29219f0cac81fb511039a6ad506fb4122511a1ed26661",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 30,
+        "2": {
+          "bytes": "c329021129533672"
+        },
+        "3": 1793702774909,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "6": 600205.060198974
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "pong_up",
+      "description": "client to hub PONG, keys v,t,id,ts,src,body, body float, from cell rrc_room_two_clients",
+      "type": "PONG",
+      "code": 31,
+      "direction": "client_to_hub",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body"
+      ],
+      "body": "float",
+      "cbor": "a6000101181f024899744ac81834db0d031b000001a1a104487e0450a319ce51314e3e736389a91ada0d1bec06fb4122511a1ed26661",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 31,
+        "2": {
+          "bytes": "99744ac81834db0d"
+        },
+        "3": 1793702774910,
+        "4": {
+          "bytes": "a319ce51314e3e736389a91ada0d1bec"
+        },
+        "6": 600205.060198974
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "alice"
+    },
+    {
+      "name": "pong_down",
+      "description": "hub to client PONG, keys v,t,id,ts,src,body, body uint, from cell rrc_room_two_clients",
+      "type": "PONG",
+      "code": 31,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "body"
+      ],
+      "body": "uint",
+      "cbor": "a6000101181f0248a09f64db46ca1f48031b000001a1a10407fa0450076b76c29219f0cac81fb511039a6ad5061b000001a1a10407f9",
+      "cbor_len": 54,
+      "wire_len": 131,
+      "decoded": {
+        "0": 1,
+        "1": 31,
+        "2": {
+          "bytes": "a09f64db46ca1f48"
+        },
+        "3": 1793702758394,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "6": 1793702758393
+      },
+      "cell": "rrc_room_two_clients",
+      "client": "bob"
+    },
+    {
+      "name": "error_down",
+      "description": "hub to client ERROR, keys v,t,id,ts,src,room,body, body text, from cell rrc_room_key_refused",
+      "type": "ERROR",
+      "code": 40,
+      "direction": "hub_to_client",
+      "keys": [
+        "v",
+        "t",
+        "id",
+        "ts",
+        "src",
+        "room",
+        "body"
+      ],
+      "body": "text",
+      "cbor": "a700010118280248ad6e354c01a20a01031b000001a1a104a5060450076b76c29219f0cac81fb511039a6ad50564236c6162066c626164206b657920282b6b29",
+      "cbor_len": 64,
+      "wire_len": 147,
+      "decoded": {
+        "0": 1,
+        "1": 40,
+        "2": {
+          "bytes": "ad6e354c01a20a01"
+        },
+        "3": 1793702798598,
+        "4": {
+          "bytes": "076b76c29219f0cac81fb511039a6ad5"
+        },
+        "5": "#lab",
+        "6": "bad key (+k)"
+      },
+      "cell": "rrc_room_key_refused",
+      "client": "bob"
+    }
+  ]
+}

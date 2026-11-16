@@ -605,7 +605,10 @@ impl Raw {
 /// sees that it may never have left.
 pub fn delivery_of(state: &str) -> DeliveryState {
     match state {
-        "delivered" | "read" => DeliveryState::Delivered,
+        // Ratspeak's delivered is a proof, its mailbox's or its device's:
+        // one tick (1462). Read was on the device.
+        "delivered" => DeliveryState::Arrived,
+        "read" => DeliveryState::Delivered,
         "propagated" | "propagating" => DeliveryState::InMailbox,
         "sent" => DeliveryState::Sent,
         "rejected" => DeliveryState::Rejected,
@@ -638,7 +641,8 @@ mod tests {
 
     #[test]
     fn the_states_map_to_what_a_reader_can_trust() {
-        assert_eq!(delivery_of("delivered"), DeliveryState::Delivered);
+        assert_eq!(delivery_of("delivered"), DeliveryState::Arrived);
+        assert_eq!(delivery_of("read"), DeliveryState::Delivered);
         assert_eq!(delivery_of("propagated"), DeliveryState::InMailbox);
         assert_eq!(delivery_of("sent"), DeliveryState::Sent);
         assert_eq!(delivery_of("sending"), DeliveryState::Failed);

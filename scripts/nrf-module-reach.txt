@@ -3,77 +3,82 @@
 # difference from the tree. One line per file under leviculum-nrf/src and
 # leviculum-nrf/firmware/src: path (lines): the `crate::<name>` names it
 # reaches, its own module excluded. See the script's header for the rules.
-src/announce.rs (587): log lora pn telemetry
+src/announce.rs (630): log lora pn position telemetry
 src/banner.rs (56): log_critical media name
 src/battery.rs (324):
 src/bin/qspi-selftest.rs (634):
-src/bin/rak4631.rs (1470):
+src/bin/rak4631.rs (218):
 src/bin/sd-ram-probe.rs (294):
-src/bin/solarnode.rs (1494):
-src/bin/t1000e.rs (1367): feedback
-src/bin/t114.rs (218):
-src/ble/columba.rs (3225): info log radio_store warn
-src/ble/mod.rs (899): info log media radio_store transport_stats warn
+src/bin/solarnode.rs (1600):
+src/bin/t1000e.rs (1473): feedback
+src/bin/t114.rs (229):
+src/ble/columba.rs (3244): info log radio_store warn
+src/ble/err_text.rs (101):
+src/ble/mod.rs (900): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (84): lora qspi radio_store telemetry
-src/boards/rak4631.rs (208):
-src/boards/solarnode.rs (410): lora qspi vext
-src/boards/t1000e.rs (372): button feedback radio
-src/boards/t114.rs (225): st7789
+src/boards/rak4631.rs (275): power
+src/boards/solarnode.rs (431): lora power qspi vext
+src/boards/t1000e.rs (394): button feedback power radio
+src/boards/t114.rs (259): power st7789
 src/boot_count.rs (96): boot_trace radio_store record_store
 src/boot_trace.rs (27):
-src/button.rs (86):
+src/button.rs (107): power
 src/chtm.rs (71): log lora sx1262
 src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
-src/feedback.rs (274): led log
-src/flash.rs (79):
+src/feedback.rs (289): led log
+src/flash.rs (149): log
 src/gnss.rs (598): boards log log_critical vext
-src/heap_census.rs (398): log pn
-src/led.rs (48): feedback log
-src/lib.rs (739): log log_critical
-src/lora.rs (2710): announce chtm events log media pn radio radio_store set_irq_priorities
+src/heap_census.rs (479): log pn
+src/led.rs (52): feedback log
+src/lib.rs (757): log log_critical
+src/lora.rs (2757): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (288): log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log
 src/name.rs (259): ble log media telemetry
-src/node_loop.rs (1503): announce banner ble ble_peripherals boards boot_count boot_trace button events feedback flash gnss heap_census init_heap init_vbus log log_boot_diagnostics log_stack lora media mgmt name paint_stack pn radio radio_store record_store remote_status rng set_irq_priorities spawn_diagnostics_tasks store_spike take_hardfault_postmortem take_panic_postmortem telemetry time_floor transport_stats usb
+src/node_loop.rs (1598): announce banner ble ble_peripherals boards boot_count boot_trace button events feedback flash gnss heap_census init_heap init_vbus log log_boot_diagnostics log_stack lora media mgmt name paint_stack pn position radio radio_store record_store remote_dfu remote_status rng set_irq_priorities spawn_diagnostics_tasks store_spike take_hardfault_postmortem take_panic_postmortem telemetry time_floor transport_stats usb
 src/panel_facts.rs (30): lora pn
-src/pn.rs (3759): announce events heap_census log lora name record_store telemetry usb
+src/pn.rs (4028): announce events heap_census log lora name record_store telemetry usb
+src/position.rs (502): announce chtm log name telemetry
+src/power.rs (261): boards button log usb
 src/qspi.rs (1188): log
 src/radio.rs (218): boards log lora sx1262
-src/radio_store.rs (197): boards flash log telemetry
+src/radio_store.rs (209): boards flash log telemetry
 src/record_store.rs (216): ble flash pn usb
-src/remote_status.rs (138): log lora
+src/remote_dfu.rs (167): log lora usb
+src/remote_status.rs (146): log lora
 src/rng.rs (214): log
 src/st7789.rs (408): log log_stack panel_facts vext
 src/store_spike.rs (164): flash log record_store
 src/sx1262.rs (1713): chtm log lora
-src/telemetry.rs (2062): ble flash log lora media name pn radio_store
+src/telemetry.rs (2158): ble flash log lora media name pn position radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
-src/usb.rs (1487): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
+src/usb.rs (1586): banner ble boards chtm heap_census log lora media mgmt name pn position postmortem_query radio_store record_store remote_dfu reset_stack_watermark telemetry
 src/vext.rs (87): boards log
 firmware/src/battery.rs (468): board_state fakes log seams
-firmware/src/ble_link.rs (1117): fakes iface_bytes log media seams
+firmware/src/ble_link.rs (1126): fakes iface_bytes log media seams
 firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (152): log
-firmware/src/button.rs (380): board_state display fakes feedback log seams
+firmware/src/button.rs (447): board_state display fakes feedback log seams
 firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log
-firmware/src/display.rs (409): board_state button fakes log seams
+firmware/src/display.rs (421): board_state button fakes log seams thread_watch
 firmware/src/entropy.rs (148): iface_bytes seams
 firmware/src/fakes.rs (644): ble_link feedback seams
-firmware/src/feedback.rs (453): board_state button entropy fakes log seams
-firmware/src/heap.rs (120): log
+firmware/src/feedback.rs (460): board_state button entropy fakes log seams
+firmware/src/heap.rs (434): log postmortem thread_watch
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (177):
 firmware/src/interface.rs (77): iface_bytes log
-firmware/src/lib.rs (81):
-firmware/src/log.rs (402):
+firmware/src/lib.rs (82):
+firmware/src/log.rs (433):
 firmware/src/media.rs (62): log
-firmware/src/postmortem.rs (437): boot_trace log
+firmware/src/postmortem.rs (501): boot_trace heap log thread_watch
 firmware/src/record_store.rs (665): fakes log seams
 firmware/src/seams.rs (318): battery ble_link button clock display feedback
+firmware/src/thread_watch.rs (512): heap log postmortem
 firmware/src/time_floor.rs (209): log seams

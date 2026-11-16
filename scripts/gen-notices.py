@@ -81,10 +81,12 @@ class Graph:
 
 
 # Every feature a package build turns on: loquax/tui is build-deb.sh's
-# FEATURES, the heap-accounting pair its rebuild of lnsd and lnpnd for the
-# heap-accounting variants.
+# FEATURES, loquax/gui with it its DESKTOP_FEATURES (the window in the amd64
+# and arm64 packages, 1342), the heap-accounting pair its rebuild of lnsd and
+# lnpnd for the heap-accounting variants.
 HOST_FEATURES = [
     "loquax/tui",
+    "loquax/gui",
     "leviculum-cli/heap-accounting",
     "lnpnd/heap-accounting",
 ]
@@ -96,14 +98,20 @@ def deb_features_covered():
 
     The harvest list above is a second statement of what the packages are
     built with. This keeps it honest against the first: a feature added to
-    build-deb.sh's FEATURES array and not here would ship crates without
-    their notices, the gap qrcodegen fell into (1124).
+    build-deb.sh's FEATURES or DESKTOP_FEATURES array and not here would
+    ship crates without their notices, the gap qrcodegen fell into (1124).
     """
-    match = re.search(r"^FEATURES=\((.*)\)$", BUILD_DEB.read_text(), re.M)
-    if match is None:
-        raise SystemExit(f"error: no FEATURES=(...) line in {BUILD_DEB.relative_to(ROOT)}")
-    words = match.group(1).split()
+    text = BUILD_DEB.read_text()
+    for name in ("FEATURES", "DESKTOP_FEATURES"):
+        if re.search(rf"^{name}=\((.*)\)$", text, re.M) is None:
+            raise SystemExit(f"error: no {name}=(...) line in {BUILD_DEB.relative_to(ROOT)}")
+    words = []
+    for match in re.finditer(r"^(?:DESKTOP_)?FEATURES=\((.*)\)$", text, re.M):
+        words += match.group(1).replace('"', " ").split()
     shipped = {f for w, f in zip(words, words[1:]) if w == "--features"}
+    # A quoted list is one word to bash and several here: every word after
+    # `--features` up to the next flag is a feature list.
+    shipped |= {w for w in words if "/" in w and not w.startswith("-")}
     for word in shipped:
         missing = set(word.split(",")) - set(HOST_FEATURES)
         if missing:
@@ -139,7 +147,7 @@ GRAPHS = [
         feature_args=["--features", ",".join(HOST_FEATURES)],
         blurb=(
             "Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,\n"
-            "lnomad, lblogd, lnpnd, loquax and lnflash. Built for\n"
+            "lnmgmt, lnomad, lblogd, lnpnd, loquax and lnflash. Built for\n"
             "x86_64-unknown-linux-musl and aarch64-unknown-linux-musl."
         ),
     ),

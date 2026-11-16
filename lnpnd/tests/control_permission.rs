@@ -48,14 +48,6 @@ use lnpnd::engine::{Engine, EngineConfig, EngineEvent};
 /// held: a dropped receiver turns every engine event into a send error.
 type EngineEvents = std::sync::mpsc::Receiver<EngineEvent>;
 
-/// A port nothing is listening on right now.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// lnpnd's production engine, configured the way an ordinary
 /// installation is: `control_allowed` empty, because the packaged config
 /// is written from `--exampleconfig`, which leaves the key commented out
@@ -79,24 +71,30 @@ fn production_engine(identity: Identity) -> (Engine<MemoryPropagationStore>, Eng
 }
 
 /// The daemon over TCP: one node, one engine, a listener a client dials.
+///
+/// The listener binds port 0 and the address it got is returned: a number
+/// picked by binding 0 and letting go is free for anyone until the node binds
+/// it again, and it lies in the kernel's ephemeral range, where the next
+/// outgoing connection on the host may take it (1711).
 async fn daemon_node(
     identity: Identity,
-    addr: SocketAddr,
     dir: &std::path::Path,
-) -> (ReticulumNode, EngineEvents) {
+) -> (ReticulumNode, EngineEvents, SocketAddr) {
     let (engine, events) = production_engine(identity);
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .storage_path(dir.to_path_buf())
-        .add_tcp_server(addr)
+        .add_tcp_server(SocketAddr::from(([127, 0, 0, 1], 0)))
         .core_processor(engine)
         .build()
         .await
         .expect("build the daemon node");
     node.start().await.expect("start the daemon node");
+    let [addr] = <[SocketAddr; 1]>::try_from(node.tcp_listen_addrs())
+        .unwrap_or_else(|addrs| panic!("one TCP listener expected, got {addrs:?}"));
     // The caller holds the receiver: a dropped one makes every engine
     // event a send error, which is not what this test wants to measure.
-    (node, events)
+    (node, events, addr)
 }
 
 async fn client_node(addr: SocketAddr, dir: &std::path::Path) -> ReticulumNode {
@@ -171,12 +169,10 @@ async fn control_request(
 /// it.
 #[tokio::test]
 async fn the_nodes_own_identity_is_served_and_a_stranger_is_told_no() {
-    let port = free_port();
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let node_identity = leviculum_std::generate_identity();
 
     let daemon_dir = tempfile::tempdir().expect("tempdir daemon");
-    let (mut daemon, _events) = daemon_node(node_identity.clone(), addr, daemon_dir.path()).await;
+    let (mut daemon, _events, addr) = daemon_node(node_identity.clone(), daemon_dir.path()).await;
 
     let client_dir = tempfile::tempdir().expect("tempdir client");
     let mut client = client_node(addr, client_dir.path()).await;

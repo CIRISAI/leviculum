@@ -174,25 +174,71 @@ pub fn decode_status_resource(data: &[u8]) -> Result<(serde_json::Value, Option<
     extract_response(response)
 }
 
-/// Run the full `rnstatus -R` flow against a remote transport instance and
-/// return its status bundle (stats dict + optional link count).
+/// What a remote-management request brought back, before any verb reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManagementReply {
+    /// A single RESPONSE packet: one msgpack value, the response itself.
+    Packet(Vec<u8>),
+    /// A response Resource, assembled: msgpack `[request_id, response]`.
+    Resource(Vec<u8>),
+}
+
+/// Why a remote-management request ended without a reply. Each verb words
+/// these for its own user ([`fetch_remote_status`] keeps `rnstatus -R`'s
+/// messages; `lnmgmt` says what a timeout means for `/dfu`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManagementError {
+    /// No path to the management destination within the budget.
+    PathTimedOut,
+    /// The request's own timer fired with no response. A `/status` server
+    /// drops a refused request silently, so for that verb this is what an
+    /// authentication failure looks like.
+    RequestTimedOut,
+    /// The budget ran out while waiting for the reply.
+    DeadlineExpired,
+    /// The reply was coming as a Resource, and that transfer failed.
+    TransferFailed,
+    /// Anything else, worded already: no identity to recall, the link closed,
+    /// the event channel gone.
+    Failed(String),
+}
+
+impl ManagementError {
+    /// Whether the request ended because a budget ran out, as opposed to the
+    /// remote or the local node saying no.
+    pub fn is_timeout(&self) -> bool {
+        matches!(
+            self,
+            ManagementError::PathTimedOut
+                | ManagementError::RequestTimedOut
+                | ManagementError::DeadlineExpired
+        )
+    }
+}
+
+/// Send one request to a remote transport instance's
+/// `rnstransport.remote.management` destination and return its reply: the
+/// flow `rnstatus -R` runs for `/status` (path, recall the identity, link,
+/// identify with the management identity, request), for any `path`.
 ///
 /// `identity_hash` is the remote transport instance's identity hash (the `-R`
-/// argument). `identity` is the local management identity (`-i`) proven to the
-/// remote via `link.identify` so it passes the `remote_management_allowed`
-/// allow-list. `include_lstats` maps to `-l` (request the link count too).
+/// argument of both `lnstatus` and `lnmgmt`). `identity` is the local
+/// management identity proven to the remote via `link.identify`, so it passes
+/// the remote's allow-list. The link is closed again on every outcome.
 ///
 /// `node` must already be started (its transport provides reachability to the
 /// remote) and `events` must be its event receiver.
-pub async fn fetch_remote_status(
+#[allow(clippy::too_many_arguments)]
+pub async fn request_on_management(
     node: &ReticulumNode,
     events: &mut EventReceiver,
     identity_hash: &[u8; 16],
     identity: &Identity,
-    include_lstats: bool,
+    path: &str,
+    data: Option<&[u8]>,
     timeout: Duration,
     quiet: bool,
-) -> Result<(serde_json::Value, Option<i64>), String> {
+) -> Result<ManagementReply, ManagementError> {
     let dest_hash = mgmt_destination_hash(identity_hash);
 
     // 1. Ensure a path to the remote management destination. `wait_for_path`
@@ -207,16 +253,18 @@ pub async fn fetch_remote_status(
         if !node
             .wait_for_path(&dest_hash, timeout, PATH_RETRY_INTERVAL)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| ManagementError::Failed(e.to_string()))?
         {
-            return Err("Path request timed out".to_string());
+            return Err(ManagementError::PathTimedOut);
         }
     }
 
     // 2. Recall the remote identity and extract its Ed25519 signing key.
     let remote_identity = node.get_identity(&dest_hash).ok_or_else(|| {
-        "Could not recall remote identity (no announce received for the management destination)"
-            .to_string()
+        ManagementError::Failed(
+            "Could not recall remote identity (no announce received for the management destination)"
+                .to_string(),
+        )
     })?;
     let pk = remote_identity.public_key_bytes();
     let mut signing_key = [0u8; 32];
@@ -229,14 +277,16 @@ pub async fn fetch_remote_status(
     let _handle = node
         .connect(&dest_hash, &signing_key)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ManagementError::Failed(e.to_string()))?;
     let link_id = loop {
         match events.recv().await {
             Some(NodeEvent::LinkEstablished { link_id, .. }) => break link_id,
             Some(NodeEvent::LinkClosed { .. }) => {
-                return Err("The link was closed before it could be established".to_string());
+                return Err(ManagementError::Failed(
+                    "The link was closed before it could be established".to_string(),
+                ));
             }
-            None => return Err("Event channel closed".to_string()),
+            None => return Err(ManagementError::Failed("Event channel closed".to_string())),
             _ => {}
         }
     };
@@ -246,35 +296,76 @@ pub async fn fetch_remote_status(
     // which a daemon can afford and a board cannot: a T114 serves four links,
     // and four queries in a row left the fifth refused for budget
     // (lnode_remote_status, 2026-10-06).
-    let result = query_on_link(
-        node,
-        events,
-        &link_id,
-        identity,
-        include_lstats,
-        timeout,
-        quiet,
-    )
-    .await;
+    let result =
+        request_on_link(node, events, &link_id, identity, path, data, timeout, quiet).await;
     let _ = node.close_link(&link_id).await;
     result
 }
 
-/// Steps 4-6 of [`fetch_remote_status`] on an established link: identify,
-/// request `/status`, and await the bundle. The caller closes the link.
-async fn query_on_link(
+/// Run the full `rnstatus -R` flow against a remote transport instance and
+/// return its status bundle (stats dict + optional link count).
+///
+/// `include_lstats` maps to `-l` (request the link count too); the rest is
+/// [`request_on_management`] for `/status`, with `rnstatus -R`'s wording for
+/// each way it can end.
+pub async fn fetch_remote_status(
     node: &ReticulumNode,
     events: &mut EventReceiver,
-    link_id: &LinkId,
+    identity_hash: &[u8; 16],
     identity: &Identity,
     include_lstats: bool,
     timeout: Duration,
     quiet: bool,
 ) -> Result<(serde_json::Value, Option<i64>), String> {
+    let req_data = encode_status_request(include_lstats);
+    let reply = request_on_management(
+        node,
+        events,
+        identity_hash,
+        identity,
+        "/status",
+        Some(&req_data),
+        timeout,
+        quiet,
+    )
+    .await
+    .map_err(status_error_message)?;
+    match reply {
+        ManagementReply::Packet(data) => decode_status_response(&data),
+        ManagementReply::Resource(data) => decode_status_resource(&data),
+    }
+}
+
+/// `rnstatus -R`'s message for each way a `/status` request ends unanswered.
+fn status_error_message(error: ManagementError) -> String {
+    match error {
+        ManagementError::PathTimedOut => "Path request timed out".to_string(),
+        ManagementError::RequestTimedOut => {
+            "The remote status request failed. Likely authentication failure.".to_string()
+        }
+        ManagementError::DeadlineExpired => "The remote status request timed out".to_string(),
+        ManagementError::TransferFailed => "The remote status transfer failed".to_string(),
+        ManagementError::Failed(message) => message,
+    }
+}
+
+/// Steps 4-6 of [`request_on_management`] on an established link: identify,
+/// send the request, and await the reply. The caller closes the link.
+#[allow(clippy::too_many_arguments)]
+async fn request_on_link(
+    node: &ReticulumNode,
+    events: &mut EventReceiver,
+    link_id: &LinkId,
+    identity: &Identity,
+    path: &str,
+    data: Option<&[u8]>,
+    timeout: Duration,
+    quiet: bool,
+) -> Result<ManagementReply, ManagementError> {
     // 4. Identify with the management identity (allow-list authentication).
     node.identify_link(link_id, identity)
         .await
-        .map_err(|e| format!("could not identify to remote: {e}"))?;
+        .map_err(|e| ManagementError::Failed(format!("could not identify to remote: {e}")))?;
 
     // A real interface-stats bundle exceeds the link MDU (~431 B), so Python
     // returns it as a response Resource rather than a single RESPONSE packet
@@ -284,22 +375,16 @@ async fn query_on_link(
         link_id,
         leviculum_core::resource::ResourceStrategy::AcceptAll,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ManagementError::Failed(e.to_string()))?;
 
-    // 5. Issue the `/status` request over the link.
+    // 5. Issue the request over the link.
     if !quiet {
         eprintln!("Sending request...");
     }
-    let req_data = encode_status_request(include_lstats);
     let request_id = node
-        .send_request(
-            link_id,
-            "/status",
-            Some(&req_data),
-            Some(timeout.as_millis() as u64),
-        )
+        .send_request(link_id, path, data, Some(timeout.as_millis() as u64))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ManagementError::Failed(e.to_string()))?;
 
     // 6. Await the response. A small response arrives as a single RESPONSE
     // packet (`ResponseReceived`); a large one arrives as an accepted resource
@@ -309,7 +394,7 @@ async fn query_on_link(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("The remote status request timed out".to_string());
+            return Err(ManagementError::DeadlineExpired);
         }
         match tokio::time::timeout(remaining, events.recv()).await {
             Ok(Some(NodeEvent::ResponseReceived {
@@ -317,7 +402,7 @@ async fn query_on_link(
                 response_data,
                 ..
             })) if rid == request_id => {
-                return decode_status_response(&response_data);
+                return Ok(ManagementReply::Packet(response_data));
             }
             Ok(Some(NodeEvent::ResourceCompleted {
                 link_id: rlink,
@@ -329,25 +414,25 @@ async fn query_on_link(
             })) if rlink == *link_id => {
                 resource_buf.extend_from_slice(&data);
                 if segment_index >= total_segments {
-                    return decode_status_resource(&resource_buf);
+                    return Ok(ManagementReply::Resource(resource_buf));
                 }
             }
             Ok(Some(NodeEvent::ResourceFailed { link_id: rlink, .. })) if rlink == *link_id => {
-                return Err("The remote status transfer failed".to_string());
+                return Err(ManagementError::TransferFailed);
             }
             Ok(Some(NodeEvent::RequestTimedOut {
                 request_id: rid, ..
             })) if rid == request_id => {
-                return Err(
-                    "The remote status request failed. Likely authentication failure.".to_string(),
-                );
+                return Err(ManagementError::RequestTimedOut);
             }
             Ok(Some(NodeEvent::LinkClosed { .. })) => {
-                return Err("The link was closed by the server, exiting now".to_string());
+                return Err(ManagementError::Failed(
+                    "The link was closed by the server, exiting now".to_string(),
+                ));
             }
             Ok(Some(_)) => continue,
-            Ok(None) => return Err("Event channel closed".to_string()),
-            Err(_) => return Err("The remote status request timed out".to_string()),
+            Ok(None) => return Err(ManagementError::Failed("Event channel closed".to_string())),
+            Err(_) => return Err(ManagementError::DeadlineExpired),
         }
     }
 }

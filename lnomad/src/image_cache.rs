@@ -18,6 +18,8 @@
 //! writing every picture a stranger's node served into a cache directory is a
 //! decision for the reader to make, not one to make on their behalf.
 
+use alloc::vec::Vec;
+
 use crate::url::Target;
 
 /// The default budget: 10 MB, in the decimal sense the option is spelled in.

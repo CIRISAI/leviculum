@@ -87,6 +87,11 @@ pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceD
             desc.spreadingfactor = Some(cfg.spreading_factor? as u64);
             desc.codingrate = Some(cfg.coding_rate? as u64);
         }
+        // An I2P interface publishes its b32 (Discovery.py:143), which only
+        // the running endpoint knows; the announcer fills it in
+        // (`publishes_runtime_address`). A section that is not connectable
+        // publishes none, as in the reference.
+        "I2PInterface" => {}
         // The TNC's radio settings are not readable through KISS, so they come
         // from the `discovery_*` keys and none is required (Discovery.py:158-162).
         "KISSInterface" => {
@@ -109,6 +114,13 @@ pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceD
         desc.ifac_netkey = cfg.passphrase.clone();
     }
     Some(desc)
+}
+
+/// Whether a discoverable section's announce carries an address only its
+/// running interface learns: a connectable I2P interface's b32, known from its
+/// key, which a fresh node gets from its first `SESSION CREATE`.
+pub(crate) fn publishes_runtime_address(cfg: &InterfaceConfig) -> bool {
+    cfg.interface_type == "I2PInterface" && cfg.connectable.unwrap_or(false)
 }
 
 /// Current wall-clock as Unix-epoch seconds (matches Python `time.time()`).

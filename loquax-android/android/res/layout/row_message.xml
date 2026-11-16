@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- One bubble: the day above it when a day begins, the body with its time
-     and mark inside, a reply's quote above the body, the reactions as pills
-     over its bottom edge. The row's gravity puts ours right and theirs
-     left; ChatActivity sets the gaps, the corners and the colours. -->
+<!-- One bubble: the day above it when a day begins; inside it a reply's
+     quote, a photo's thumbnail (1220), files (1221) or a voice message
+     (1222), the body under them (none when the scene has no words, 1268),
+     the time and mark closing the last row; the reactions as pills over
+     its bottom edge. The row's gravity puts ours right and theirs left;
+     ChatActivity sets the gaps, the corners and the colours. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -30,6 +32,35 @@
         android:paddingEnd="12dp"
         android:paddingBottom="8dp">
 
+        <!-- A photo (1220): the library's thumbnail, first in the bubble
+             (1268); a tap shows it whole. -->
+        <ImageView
+            android:id="@+id/photo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <!-- Files (1221): a row each, its name and size; a tap opens
+             it, a long press shares it. -->
+        <LinearLayout
+            android:id="@+id/files"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+        <!-- A voice message (1222): the play or pause button, the level
+             bar and the length; ChatActivity fills it from the row. -->
+        <LinearLayout
+            android:id="@+id/voice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingEnd="8dp"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/body"
             android:layout_width="wrap_content"
@@ -51,7 +82,8 @@
                 android:textSize="12sp" />
 
             <ImageView
-                android:id="@+id/mark"
+                android:id="@+id/state_clock"
+                android:tag="mark"
                 android:layout_width="16dp"
                 android:layout_height="16dp"
                 android:layout_marginStart="4dp" />

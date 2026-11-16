@@ -91,13 +91,22 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
     let _ = writeln!(out);
 
     // --- Config ---
-    let config_dir = opts
-        .config_dir
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // The directory, why it was taken, and the other candidates holding a
+    // config (order 1675): a diag of the wrong directory says so.
+    let choice = leviculum_std::config_dir::ConfigDirChoice::resolve(opts.config_dir.as_deref());
+    let config_dir = choice.dir.clone();
     let config_file = config_dir.join("config");
     section_header(&mut out, "Config");
     let _ = writeln!(out, "config dir:  {}", config_dir.display());
+    let _ = writeln!(out, "{}", choice.why());
+    for other in &choice.others {
+        let _ = writeln!(
+            out,
+            "{} also holds a config; if your daemon runs on it, pass --config {}",
+            choice.short(other),
+            other.display()
+        );
+    }
     let _ = writeln!(out, "config file: {}", config_file.display());
     let loaded_config: Option<Config> = if config_file.exists() {
         match Config::load(&config_file) {
@@ -167,7 +176,12 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
                     id_path.display()
                 );
                 let _ = writeln!(out);
-                append_rpc_section(&mut out, &instance_name, &authkey).await;
+                // Order 1678: the daemon's live answers name a connected
+                // client by its address; the bundle is a file, so it carries
+                // the client's log tag instead.
+                let mut rpc = String::new();
+                let stats = append_rpc_section(&mut rpc, &instance_name, &authkey).await;
+                out.push_str(&scrub_addresses(&rpc, stats.as_ref()));
             }
             Err(msg) => {
                 let _ = writeln!(out, "cannot derive RPC authkey: {msg}");
@@ -184,7 +198,11 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
 
     // --- Event log ---
     section_header(&mut out, "Recent events");
-    let _ = writeln!(out, "{}", event_log_section(opts.event_log.as_deref()));
+    let _ = writeln!(
+        out,
+        "{}",
+        scrub_addresses(&event_log_section(opts.event_log.as_deref()), None)
+    );
     let _ = writeln!(out);
 
     let _ = writeln!(out, "===== end of diagnostic bundle =====");
@@ -297,15 +315,22 @@ fn render_interface_config(out: &mut String, iface: &InterfaceConfig) {
 // RPC / daemon view
 // ---------------------------------------------------------------------------
 
-async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8]) {
+/// Append the daemon's live view and return its `interface_stats` answer,
+/// which [`scrub_addresses`] takes the client tags from.
+async fn append_rpc_section(
+    out: &mut String,
+    instance_name: &str,
+    authkey: &[u8],
+) -> Option<serde_json::Value> {
     // interface_stats
     let _ = writeln!(out, "## interface_stats");
-    match leviculum_std::rpc_query(instance_name, authkey, "interface_stats").await {
+    let stats = match leviculum_std::rpc_query(instance_name, authkey, "interface_stats").await {
         Ok(v) => {
             render_interface_stats_summary(out, &v);
             let _ = writeln!(out);
             let _ = writeln!(out, "raw:");
             let _ = writeln!(out, "{}", pretty_json(&v));
+            Some(v)
         }
         Err(e) => {
             let _ = writeln!(out, "<unavailable: {e}>");
@@ -314,8 +339,9 @@ async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8
                 "(is lnsd running with `shared_instance = true`, and is this the \
                  right --instance-name / -c config dir?)"
             );
+            None
         }
-    }
+    };
     let _ = writeln!(out);
 
     // path_table
@@ -365,6 +391,114 @@ async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8
             );
         }
     }
+    stats
+}
+
+/// What the bundle writes in place of a client's address.
+const ADDRESS_PLACEHOLDER: &str = "<address>";
+
+/// Replace every IP address in `text` (order 1678): with `src=<tag>` where
+/// `stats` serves the tag of the connection whose name carries it, with
+/// [`ADDRESS_PLACEHOLDER`] everywhere else. A port glued to an IPv4 address
+/// goes with it. The unspecified addresses (`0.0.0.0`, `::`) are a bind
+/// wildcard and name nobody, so they stay.
+///
+/// The daemon logs a client only by its tag; its live RPC answers still name
+/// it by address, which is what `lnstatus` shows while the connection lives.
+/// The bundle is a file and leaves the host, so it must hold no address.
+pub fn scrub_addresses(text: &str, stats: Option<&serde_json::Value>) -> String {
+    let mut tags: std::collections::HashMap<std::net::IpAddr, String> =
+        std::collections::HashMap::new();
+    if let Some(list) = stats
+        .and_then(|v| v.get("interfaces"))
+        .and_then(|x| x.as_array())
+    {
+        for iface in list {
+            let (Some(name), Some(tag)) = (
+                iface.get("name").and_then(|x| x.as_str()),
+                iface.get("src_tag").and_then(|x| x.as_str()),
+            ) else {
+                continue;
+            };
+            for_each_address(name, |_, ip| {
+                tags.insert(ip, tag.to_string());
+            });
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for_each_address(text, |range, ip| {
+        out.push_str(&text[last..range.start]);
+        match tags.get(&ip) {
+            Some(tag) => {
+                let _ = write!(out, "src={tag}");
+            }
+            None => out.push_str(ADDRESS_PLACEHOLDER),
+        }
+        last = range.end;
+    });
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Call `f` with the byte range and the address of every IP address in
+/// `text`, in order: a maximal run of hex digits, dots and colons that
+/// parses as an address, as an IPv4 address with a port, or as an IPv6
+/// address with a port glued on after a colon. A bracketed IPv6 address
+/// takes its brackets and a following `:port` into the range. The
+/// unspecified addresses are skipped.
+fn for_each_address(text: &str, mut f: impl FnMut(std::ops::Range<usize>, std::net::IpAddr)) {
+    let is_addr_char = |c: char| c.is_ascii_hexdigit() || c == '.' || c == ':';
+    let mut start = None;
+    // Where the last reported range ended: a range never starts before it.
+    let mut taken = 0;
+    // A trailing sentinel closes the last run.
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        match (start, is_addr_char(c)) {
+            (None, true) if i >= taken => start = Some(i),
+            (Some(s), false) => {
+                start = None;
+                let run = &text[s..i];
+                let Some(ip) = parse_address_run(run).filter(|ip| !ip.is_unspecified()) else {
+                    continue;
+                };
+                let mut range = s..i;
+                if s > 0 && text[..s].ends_with('[') && text[i..].starts_with(']') {
+                    range = s - 1..i + 1;
+                    let rest = &text[range.end..];
+                    if let Some(after) = rest.strip_prefix(':') {
+                        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+                        if digits > 0 {
+                            range.end += 1 + digits;
+                        }
+                    }
+                }
+                taken = range.end;
+                f(range, ip);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_address_run(run: &str) -> Option<std::net::IpAddr> {
+    if let Ok(ip) = run.parse::<std::net::IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(a) = run.parse::<std::net::SocketAddrV4>() {
+        return Some(std::net::IpAddr::V4(*a.ip()));
+    }
+    // `2001:db8::7:40001`: a port glued to an IPv6 address without brackets.
+    let (head, port) = run.rsplit_once(':')?;
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    head.parse::<std::net::Ipv6Addr>()
+        .ok()
+        .map(std::net::IpAddr::V6)
 }
 
 fn render_link_table_summary(out: &mut String, v: &serde_json::Value) {
@@ -770,6 +904,81 @@ tx_power = 7
         // Last line present, an early (truncated) line absent.
         assert!(bundle.contains(&format!("EVENT_{}", EVENT_LOG_TAIL_LINES + 49)));
         assert!(!bundle.contains("EVENT_0 node=local"));
+    }
+
+    /// Order 1678: no client address leaves in a bundle. The shapes are the
+    /// daemon's own: a spawned TCP connection named by address with its
+    /// `src_tag` beside it, the path table naming the same connection, an
+    /// IPv6 client, a client rnsd serves with no tag.
+    #[test]
+    fn scrub_puts_the_tag_in_place_of_a_client_address() {
+        let stats = serde_json::json!({"interfaces": [
+            {"name": "TCPServerInterface[Srv/0.0.0.0:4242]"},
+            {"name": "TCPInterface[Client on Srv/127.0.0.1:40000]", "src_tag": "ab12cd34"},
+            {"name": "TCPInterface[Client on Srv/[2001:db8::7]:40001]", "src_tag": "0badc0de"},
+            {"name": "TCPInterface[Client on Srv/198.51.100.9:40002]"},
+            {"name": "TCPInterface[Client on Srv/2001:db8::99:40003]"},
+        ]});
+        let text = format!(
+            "{}\npath via TCPInterface[Client on Srv/127.0.0.1:40000] hash deadbeefcafe 12:30:45\n",
+            pretty_json(&stats)
+        );
+        let scrubbed = scrub_addresses(&text, Some(&stats));
+        for literal in [
+            "127.0.0.1",
+            "2001:db8::7",
+            "198.51.100.9",
+            "2001:db8::99",
+            "40000",
+            "40001",
+            "40002",
+            "40003",
+        ] {
+            assert!(
+                !scrubbed.contains(literal),
+                "{literal} left in:\n{scrubbed}"
+            );
+        }
+        assert!(
+            scrubbed.contains("Client on Srv/src=ab12cd34]"),
+            "{scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("Client on Srv/src=0badc0de]"),
+            "{scrubbed}"
+        );
+        assert!(scrubbed.contains("Client on Srv/<address>]"), "{scrubbed}");
+        assert!(
+            scrubbed.contains("TCPServerInterface[Srv/0.0.0.0:4242]"),
+            "the bind wildcard names nobody and stays: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("hash deadbeefcafe 12:30:45"),
+            "{scrubbed}"
+        );
+        assert_eq!(
+            scrubbed.matches("src=ab12cd34").count(),
+            2,
+            "the row's name and the path table line: {scrubbed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_log_tail_carries_no_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.log");
+        std::fs::write(
+            &log_path,
+            "TCP_SOURCE_CAPPED iface=Srv source=192.0.2.44 held=16 t=1\n\
+             TCP_SILENT_CLOSED iface=Srv source=ab12cd34 after_s=120 t=2\n",
+        )
+        .unwrap();
+        let mut opts = opts_for(None, true);
+        opts.event_log = Some(log_path);
+        let bundle = build_bundle(&opts).await;
+        assert!(!bundle.contains("192.0.2.44"), "{bundle}");
+        assert!(bundle.contains("source=<address> held=16"), "{bundle}");
+        assert!(bundle.contains("source=ab12cd34 after_s=120"), "{bundle}");
     }
 
     #[test]

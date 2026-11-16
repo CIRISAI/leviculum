@@ -189,7 +189,7 @@ log "[CI_HW] flashing LNodes from HEAD $head_sha"
 # desktop-flash default on hamster keeps 30.
 #
 # T114 fleet, then Pocket-V2 fleet. Each just-target builds the embedded
-# firmware (cargo run) and touch-flashes every attached board of that
+# firmware (scripts/nrf-flash.sh) and touch-flashes every attached board of that
 # kind. A failing fleet warns + notifies but does not abort; a hard flash
 # failure marks the board UNVERIFIED (collected in flash_failed_ids) so the
 # verdict goes RED rather than silently testing whatever firmware remains.
@@ -261,7 +261,7 @@ for id in "${flashed_ids[@]}"; do
         1209:0002) board=rak4631 ;;
         *)         continue ;;
     esac
-    if printf '%s\n' "${flash_failed_ids[@]:-}" | grep -qxF "$id"; then
+    if grep -qxF "$id" <<<"$(printf '%s\n' "${flash_failed_ids[@]:-}")"; then
         log "[CI_HW] WARN: $board ($id) hard flash failure — firmware UNVERIFIED; run will be RED"
         echo "FW_UNVERIFIED $id"
         continue

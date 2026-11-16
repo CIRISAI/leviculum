@@ -365,7 +365,7 @@ WARN level, on the same target as `LORA_TX` and `LORA_CHTM`, and
 counted as `tx_unaccounted` in the interface stats. Every ambiguity
 resolves away from the accusation, because a false one would poison the
 instrument (`judge_airtime`,
-`leviculum-std/src/interfaces/rnode.rs:1497`): any rise at all counts as
+`leviculum-std/src/interfaces/rnode.rs:1506`): any rise at all counts as
 keyed, a falling ledger is read as a bin ageing out of the two-bin
 window rather than as a swallowed frame, a rise in `airtime_long`
 absolves even when the short window has not moved, a DCD busy fraction
@@ -382,7 +382,7 @@ it; the second verdict counts the frame as lost instead
 (`RNODE_TX_QUEUE_DROP ... reason=unaccounted_twice`). What a re-hand
 costs the far end is one duplicate, and the dedup cache drops it on
 arrival (`has_packet_hash`,
-`leviculum-core/src/transport.rs:4539`, which emits `DEDUP_DROP`). The
+`leviculum-core/src/transport.rs:4735`, which emits `DEDUP_DROP`). The
 classes that cache exempts -- announces, and link requests and proofs
 addressed to us -- are exactly the classes whose retries the stack
 already expects, so a second copy there is processed as a retry rather
@@ -578,6 +578,74 @@ is identical over all three; only the physical transport differs.
 - Detect wait: 5.0s
 - Uses `bleak` Python library for BLE access
 - Write chunk size limited to `max_write_without_response_size`
+
+### 2.5 The firmware we patch: Heltec V4 packet RSSI
+
+Every RNode on the rig runs Mark's signed release, written back by `just
+flash-rnode`, except one board we carry a patch for. The patches live in
+`scripts/patches/rnode-firmware-*.patch`; `just rnode-firmware-setup` installs
+the pinned toolchain (arduino-cli, ESP32 core 2.0.17, libraries) and `just
+rnode-firmware-build heltec-v4` copies the `reference/RNode_Firmware`
+submodule into `target/rnode-firmware/`, applies the patches and compiles
+with the upstream Makefile's own `firmware-heltec32_v4` command line.
+`just flash-rnode-built <port>` writes only the app region at 0x10000 and
+stores the new image's hash as the EEPROM target, so bootloader, console,
+signature and provisioning stay as the release left them.
+`scripts/build-rnode-firmware.sh` carries the pins and the reasons.
+
+**The patch.** The Heltec V4 has an external LNA in front of its SX1262:
+17 dB on the GC1109 front end, 21 dB on the KCT8103L of v4.3
+(`reference/RNode_Firmware/Boards.h:391`). Upstream subtracts that gain in
+`currentRssi()` (`reference/RNode_Firmware/sx126x.cpp:529`) and in
+`packetRssi()` (`reference/RNode_Firmware/sx126x.cpp:545`), but not in the
+overload `packetRssi(uint8_t pkt_snr_raw)`
+(`reference/RNode_Firmware/sx126x.cpp:555`), and the ESP32 receive path
+calls exactly that overload (`reference/RNode_Firmware/RNode_Firmware.ino:470`),
+whose value becomes `last_rssi` and so `CMD_STAT_RSSI`. Every packet the
+V4 received was reported with the LNA gain still in it, and `periculum rig
+levels` measured it 21 dB hotter than its peers heard it in every round
+(2026-10-31), so its RSSI was "not trusted". Our patch adds the same
+`lora_lna_gain` subtraction to the overload. Upstream HEAD still has the gap;
+we do not report upstream. Measured after the patch (2026-11-01, order
+1260): the V4's receive bias fell from +21.0 dB to +0.5 dB over eight
+pairs. The noise floor and CSMA readings were never affected, because
+`currentRssi()` was already right; nRF52 and AVR RNodes take the argument-free
+`packetRssi()` and were right too.
+
+**A board in TNC mode ignores the host's radio settings until its radio
+restarts.** For a day the V4 looked deaf for minutes after every boot, and
+Mark's 1.86 image did the same. It was not the radio and not the patch: the
+V4's EEPROM held a TNC configuration (869.463 MHz, SF8, 22 dBm). With one,
+the firmware loads it at boot, sets `op_mode = MODE_TNC` and starts the
+radio on it (`reference/RNode_Firmware/RNode_Firmware.ino:1554-1557`).
+From then on every host setter only stores the value: the frequency
+handler applies it under `if (op_mode == MODE_HOST)`
+(`reference/RNode_Firmware/RNode_Firmware.ino:830`), and bandwidth, power,
+SF and CR are guarded the same way. `op_mode` never returns to host mode.
+The stored set reaches the radio only through `startRadio()`, which runs
+`begin()` and applies all of it, and only when the radio is off
+(`reference/RNode_Firmware/RNode_Firmware.ino:510`). A host that writes
+the parameters and then `RADIO_STATE_ON` onto a running TNC board, as
+Python's `initRadio` does
+(`reference/Reticulum/RNS/Interfaces/RNodeInterface.py:470-478`), gets
+every readback echoed as asked while the board stays on its EEPROM PHY:
+it decodes nothing from the cell and sends at 22 dBm where the cell asked
+for 2 (peers read it up to +3 dBm). Our lnsd is immune, because it sends
+`RADIO_STATE_OFF` first (`leviculum-std/src/interfaces/rnode.rs:1986`);
+raw KISS drivers that do not, and periculum's listener after a fresh
+boot, were hit. "Works again after minutes" was whichever run first
+turned the radio off and on.
+
+Measured 2026-11-01 (order 1271), against the Heltec V3: five boots in
+TNC mode, 0 of 9 probes either way at t+5 s and t+120 s; at the EEPROM
+PHY in the same minute, 9 of 9 both ways; after one `RADIO_STATE_OFF`,
+9 of 9 at the cell's PHY. Then `rnodeconf -N` (normal, host-controlled
+mode, as every other rig RNode already was): ten of ten boots, five hard
+and five soft, 9 of 9 both ways from t+5 s. The rig's V4 now runs in
+normal mode; a board put back into TNC mode (`rnodeconf -T`) brings the
+effect back. `scripts/build-rnode-firmware.sh build heltec-v4 --diag`
+builds the instrumented image that measured the PA detection on the way
+(KCT8103L on every boot, never flipping); it is never flashed by default.
 
 ---
 

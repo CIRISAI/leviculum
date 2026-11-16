@@ -14,7 +14,7 @@
 //!
 //! A frame takes the tiles its view needs from the cache and draws the
 //! missing ones on worker threads, one [`Painter`] each, as many as the
-//! host has cores up to [`WORKERS`]. A frame may be told to draw only a
+//! process may run on ([`crate::picture::cores`]). A frame may be told to draw only a
 //! few ([`Frame::render_limit`]): the ones it leaves are taken from
 //! other zooms' tiles that are cached, scaled, so a pinch that crosses a
 //! step keeps showing the map until the new step's tiles land (1143): the
@@ -32,7 +32,10 @@
 //!
 //! The cache is dropped when the maps directory changes (its epoch) and
 //! when the style does (the light or dark table, the line widths of the
-//! screen's density). [`BUDGET_MB`] bounds it; a prefetched tile no frame
+//! screen's density). A tile drawn while a region in it was still being
+//! written, some of its data stood in for ([`crate::picture::Drawn::pending`],
+//! 1291), is held until the region gains tiles ([`Maps::progress`]) and
+//! then drawn again, so the map fills in while the region arrives. [`BUDGET_MB`] bounds it; a prefetched tile no frame
 //! used yet goes first, then the least recently used.
 //!
 //! A view at rest prefetches (1135): [`plan`] lists the zoom out of the
@@ -50,6 +53,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::vec::Vec;
 
+use leviculum_map::blend::{Blend, Shape};
 use leviculum_map::draw::Ink;
 use leviculum_map::mercator::World;
 use leviculum_map::outline;
@@ -67,8 +71,6 @@ pub const TILE: u32 = 256;
 /// The cache's bound: 384 tiles of 256 KiB, a 1080 x 2400 screen with a
 /// quarter screen of margin three times over.
 pub const BUDGET_MB: usize = 96;
-/// The most worker threads a frame draws its missing tiles on.
-pub const WORKERS: usize = 8;
 /// A tile's bytes.
 pub const TILE_BYTES: usize = (TILE * TILE * 4) as usize;
 /// Tiles one view at rest prefetches at most (1135): 32 MB, about the
@@ -90,6 +92,14 @@ const MOTION_GAP_MS: u64 = 250;
 pub const COARSER_STEPS: u8 = 3;
 /// The finer steps likewise: two, 4x4 tiles scaled into one.
 pub const FINER_STEPS: u8 = 2;
+/// The steps from its own whose tiles a frame at rest that owes none
+/// keeps (1797): the step out and the step in, which the prefetch draws
+/// for the next pinch ([`plan`]). The others belong to views the user
+/// left. Held to the budget, they kept the phone's map 80 MB above its
+/// start after a zoom out to the world and back at Lew's 1224 x 2197
+/// (`loquax-android/tests/map_heap.rs`, on the host, 2026-11-13), on the
+/// day the low-memory killer ended Loquax in the foreground.
+pub const NEAR_STEPS: u8 = 1;
 
 /// What tells one tile from another: where it is, and what it was drawn
 /// in.
@@ -150,6 +160,12 @@ struct Entry {
     /// Drawn ahead by [`TileCache::prefetch`] and not used by a frame
     /// since: evicted first.
     prefetched: bool,
+    /// Drawn while a region in it was still arriving (1291): dropped on
+    /// the next progress.
+    provisional: bool,
+    /// Drawn without its edges smoothed, while the view moved at a rung
+    /// that leaves them out (1422): a frame that smooths draws it again.
+    draft: bool,
 }
 
 /// What the cache did since it was made.
@@ -161,6 +177,8 @@ pub struct Stats {
     pub misses: u64,
     /// Tiles a frame drew.
     pub rendered: u64,
+    /// Draft tiles a smoothing frame drew again (1422).
+    pub smoothed: u64,
     /// Tiles drawn ahead by [`TileCache::prefetch`].
     pub prefetched: u64,
     /// Hits on a prefetched tile no frame had used before.
@@ -169,6 +187,12 @@ pub struct Stats {
     pub evicted: u64,
     /// Times the whole cache was dropped: a new epoch or style.
     pub cleared: u64,
+    /// Provisional tiles dropped to be drawn again as a region arrived
+    /// (1291).
+    pub redrawn: u64,
+    /// Tiles a frame at rest dropped for being more than a step from its
+    /// zoom (1797, [`NEAR_STEPS`]).
+    pub left_behind: u64,
     /// Microseconds the workers spent drawing tiles, each worker's own
     /// time summed: on one worker the CPU a cold frame's tiles cost; on
     /// more it is that or above, as the workers share cores.
@@ -198,6 +222,13 @@ pub struct Frame {
     /// not all of them: a tile wholly outside that is not held is neither
     /// drawn nor owed, its pixels water (1163).
     pub asked: Option<[u32; 4]>,
+    /// Tiles missing drawn with their edges smoothed
+    /// ([`Painter::draw_rgba`]); without, as drafts (1422).
+    pub smooth: bool,
+    /// The drafts held drawn again, smoothed, as far as the render limit
+    /// leaves room; the others shown as they are and owed. Asks
+    /// [`smooth`](Self::smooth) too.
+    pub resmooth: bool,
 }
 
 impl Frame {
@@ -223,6 +254,10 @@ pub struct TileCache {
     maps: Maps,
     budget: usize,
     epoch: u64,
+    /// The maps' progress the provisional tiles were drawn at.
+    progress: u64,
+    /// Provisional tiles the last frame showed.
+    filling: usize,
     style: Option<(Style, u32)>,
     entries: HashMap<TileKey, Entry>,
     bytes: usize,
@@ -232,6 +267,15 @@ pub struct TileCache {
     shown_from: u64,
     painters: Vec<Painter>,
     workers: usize,
+    /// Blend world views through this projection (1710), `None` for
+    /// Mercator throughout: a frame the blend holds is drawn whole by a
+    /// painter instead of composed from tiles — no square tile of one
+    /// step can show a curved picture. The painters themselves keep
+    /// drawing tiles Mercator-linear.
+    world_shape: Option<Shape>,
+    /// The screen the frames are drawn for ([`set_screen`](Self::set_screen)):
+    /// a frame with margins blends at the screen's `t` (1796).
+    screen: Option<(u32, u32)>,
     pub stats: Stats,
     /// A frame's buffer handed back ([`recycle`](Self::recycle)), composed
     /// into next.
@@ -245,12 +289,11 @@ pub struct TileCache {
 impl TileCache {
     /// A cache over `maps` of at most `budget` bytes.
     pub fn new(maps: Maps, budget: usize) -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .clamp(1, WORKERS);
+        let workers = crate::picture::cores();
         Self {
             epoch: maps.epoch(),
+            progress: maps.progress(),
+            filling: 0,
             maps,
             budget,
             style: None,
@@ -260,6 +303,8 @@ impl TileCache {
             shown_from: 0,
             painters: Vec::new(),
             workers,
+            world_shape: None,
+            screen: None,
             stats: Stats::default(),
             spare: Vec::new(),
             #[cfg(test)]
@@ -276,6 +321,46 @@ impl TileCache {
     /// Draw on `n` threads at most (at least one).
     pub fn set_workers(&mut self, n: usize) {
         self.workers = n.max(1);
+    }
+
+    /// Blend world views through `shape` (1710), or through none.
+    pub fn set_world_shape(&mut self, shape: Option<Shape>) {
+        self.world_shape = shape;
+    }
+
+    /// The screen the next frames are drawn for, `None` for frames that
+    /// are their screen. A frame with margins past the screen is larger
+    /// than it, and the blend's start follows the size
+    /// ([`world_floor`](leviculum_map::blend::world_floor), 1796): without
+    /// this a frame with margins would still curve where the screen's view
+    /// is Mercator already, and be placed as a flat one.
+    pub fn set_screen(&mut self, screen: Option<(u32, u32)>) {
+        self.screen = screen;
+    }
+
+    /// The blended mapping of `view` when the blend holds there: the
+    /// shape is set, `t` is below one at the view's exact zoom, and no
+    /// region reaches into it (the painter's own check, so the frame and
+    /// the whole-view drawers agree on the condition). The blend carries
+    /// the view's own size and the screen's `t`
+    /// ([`set_screen`](Self::set_screen)); the region check widens to the
+    /// whole zoom below, which only errs towards Mercator.
+    pub fn world_blend(&mut self, view: &ExactView) -> Option<Blend> {
+        let shape = self.world_shape?;
+        let zoom = view.zoom();
+        let (w, h) = view.size();
+        let (sw, sh) = self.screen.unwrap_or((w, h));
+        let t = Blend::new(shape, view.centre, zoom, sw, sh).t();
+        let blend = Blend::with_t(shape, view.centre, zoom, w, h, t);
+        if blend.t() >= 1.0 {
+            return None;
+        }
+        if self.painters.is_empty() {
+            self.painters.push(Painter::new(self.maps.clone()));
+        }
+        let floor = view.tile_zoom().min(zoom as u8);
+        let whole = view.at_zoom(floor);
+        self.painters[0].world_only(&whole).then_some(blend)
     }
 
     pub fn workers(&self) -> usize {
@@ -310,13 +395,28 @@ impl TileCache {
         self.entries.contains_key(key)
     }
 
+    /// Tiles the last frame showed that were drawn while a region in them
+    /// was still arriving (1291): the frame is drawn again as it gains
+    /// tiles.
+    pub fn filling(&self) -> usize {
+        self.filling
+    }
+
     /// Drop the cache when the directory or the style changed since the
-    /// last frame.
+    /// last frame, and the provisional tiles when a region gained tiles.
     fn check(&mut self, style: Style, percent: u32) {
         let epoch = self.maps.epoch();
         if epoch != self.epoch {
             self.epoch = epoch;
             self.clear();
+        }
+        let progress = self.maps.progress();
+        if progress != self.progress {
+            self.progress = progress;
+            let before = self.entries.len();
+            self.entries.retain(|_, e| !e.provisional);
+            self.bytes = self.entries.values().map(|e| e.rgba.len()).sum();
+            self.stats.redrawn += (before - self.entries.len()) as u64;
         }
         if self.style.is_some_and(|s| s != (style, percent)) {
             self.clear();
@@ -365,6 +465,20 @@ impl TileCache {
         if rgba.len() != w as usize * h as usize * 4 {
             return None;
         }
+        // A world view the blend holds (1710) is drawn whole, Equal
+        // Earth or the globe flowing into Mercator: no square tile of
+        // one step can compose the curved picture, and the outline is
+        // cheap enough to draw each frame.
+        if let Some(blend) = self.world_blend(&frame.view) {
+            // Straight into `rgba` (1797): no frame-sized buffer beside it.
+            let smooth = frame.smooth || frame.resmooth;
+            let drawn =
+                self.painters[0].draw_world_onto(&blend, Ink::Colour, frame.style, smooth, rgba);
+            if !frame.moving {
+                self.keep_near(frame.zoom);
+            }
+            return drawn;
+        }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);
         // The pixels each tile column and row is sampled for: what a tile
@@ -395,14 +509,37 @@ impl TileCache {
         }
         let limit = frame.render_limit.unwrap_or(usize::MAX).min(missing.len());
         let (draw, left) = missing.split_at(limit);
-        let wanted: Vec<TileKey> = draw.iter().filter_map(|&i| keys[i]).collect();
-        let drawn = self.render(&wanted);
-        self.stats.rendered += drawn.len() as u64;
-        for (&i, (key, rgba, attribution)) in draw.iter().zip(drawn) {
+        // The drafts a smoothing frame draws again, within what the limit
+        // leaves; the others are shown as they are and owed (1422).
+        let drafts: Vec<usize> = match frame.resmooth {
+            true => keys
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.is_some_and(|k| self.entries.get(&k).is_some_and(|e| e.draft)))
+                .map(|(i, _)| i)
+                .collect(),
+            false => Vec::new(),
+        };
+        let room = frame
+            .render_limit
+            .unwrap_or(usize::MAX)
+            .saturating_sub(draw.len());
+        let (redraw, drafts_left) = drafts.split_at(room.min(drafts.len()));
+        let wanted: Vec<TileKey> = draw.iter().chain(redraw).filter_map(|&i| keys[i]).collect();
+        let smooth = frame.smooth || frame.resmooth;
+        let drawn = self.render(&wanted, smooth);
+        self.stats.rendered += draw.len() as u64;
+        self.stats.smoothed += redraw.len() as u64;
+        for (&i, (key, rgba, attribution, provisional)) in draw.iter().chain(redraw).zip(drawn) {
             let tile = (Arc::new(rgba), Arc::<str>::from(attribution));
-            self.put(key, tile.0.clone(), tile.1.clone());
+            self.put(key, tile.0.clone(), tile.1.clone(), provisional, !smooth);
             got[i] = Some(tile);
         }
+        self.filling = keys
+            .iter()
+            .flatten()
+            .filter(|k| self.entries.get(k).is_some_and(|e| e.provisional))
+            .count();
         // Every tile there: the grid writes every pixel, so the buffer
         // need not start blank and nothing is left to cover after.
         let whole = got.iter().all(Option::is_some);
@@ -420,7 +557,12 @@ impl TileCache {
             .map(|(_, a)| a)
             .find(|a| a.as_ref() != outline::ATTRIBUTION)
             .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Some((attribution, left.len()))
+        let owed = left.len() + drafts_left.len();
+        // At rest and whole, no tile of another step stands in any more.
+        if !frame.moving && owed == 0 {
+            self.keep_near(frame.zoom);
+        }
+        Some((attribution, owed))
     }
 
     /// The tiles `got` over `rgba`, the stand ins and the outline where
@@ -578,7 +720,14 @@ impl TileCache {
         Some((entry.rgba.clone(), entry.attribution.clone()))
     }
 
-    fn put(&mut self, key: TileKey, rgba: Arc<Vec<u8>>, attribution: Arc<str>) {
+    fn put(
+        &mut self,
+        key: TileKey,
+        rgba: Arc<Vec<u8>>,
+        attribution: Arc<str>,
+        provisional: bool,
+        draft: bool,
+    ) {
         self.tick += 1;
         self.bytes += rgba.len();
         let old = self.entries.insert(
@@ -588,6 +737,8 @@ impl TileCache {
                 attribution,
                 used: self.tick,
                 prefetched: false,
+                provisional,
+                draft,
             },
         );
         if let Some(old) = old {
@@ -598,6 +749,24 @@ impl TileCache {
                 break;
             }
         }
+    }
+
+    /// Drop the tiles more than [`NEAR_STEPS`] from `zoom`, after a frame
+    /// at rest there that owes no tile (a world frame owes none): it needs
+    /// no stand in any more, the prefetch draws the steps next to it, and
+    /// the others only hold memory (1797).
+    fn keep_near(&mut self, zoom: u8) {
+        let before = self.entries.len();
+        let mut bytes = self.bytes;
+        self.entries.retain(|key, e| {
+            let near = key.zoom.abs_diff(zoom) <= NEAR_STEPS;
+            if !near {
+                bytes -= e.rgba.len();
+            }
+            near
+        });
+        self.bytes = bytes;
+        self.stats.left_behind += (before - self.entries.len()) as u64;
     }
 
     /// Drop the entry `may` allows that goes first: a prefetched one no
@@ -621,7 +790,13 @@ impl TileCache {
 
     /// Hold a prefetched tile, making room only from tiles neither the
     /// last frame showed nor a prefetch since drew. Whether it is held.
-    fn put_prefetched(&mut self, key: TileKey, rgba: Vec<u8>, attribution: String) -> bool {
+    fn put_prefetched(
+        &mut self,
+        key: TileKey,
+        rgba: Vec<u8>,
+        attribution: String,
+        provisional: bool,
+    ) -> bool {
         let shown_from = self.shown_from;
         while self.bytes + rgba.len() > self.budget {
             if !self.evict(|e| e.used < shown_from) {
@@ -637,6 +812,8 @@ impl TileCache {
                 attribution: Arc::from(attribution),
                 used: self.tick,
                 prefetched: true,
+                provisional,
+                draft: false,
             },
         );
         if let Some(old) = old {
@@ -672,8 +849,8 @@ impl TileCache {
             batch.push(want.key);
         }
         let mut stored = 0;
-        for (key, rgba, attribution) in self.render(&batch) {
-            if !self.put_prefetched(key, rgba, attribution) {
+        for (key, rgba, attribution, provisional) in self.render(&batch, true) {
+            if !self.put_prefetched(key, rgba, attribution, provisional) {
                 plan.next = plan.wants.len();
                 break;
             }
@@ -688,7 +865,7 @@ impl TileCache {
     }
 
     /// Draw `keys`, split over the workers, each with its own painter.
-    fn render(&mut self, keys: &[TileKey]) -> Vec<(TileKey, Vec<u8>, String)> {
+    fn render(&mut self, keys: &[TileKey], smooth: bool) -> Vec<Rendered> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -699,7 +876,10 @@ impl TileCache {
         // Each worker's own time drawing: its share of the CPU.
         let timed = |painter: &mut Painter, chunk: &[TileKey]| {
             let started = Instant::now();
-            let drawn: Vec<_> = chunk.iter().map(|k| draw_tile(painter, k)).collect();
+            let drawn: Vec<_> = chunk
+                .iter()
+                .map(|k| draw_tile(painter, k, smooth))
+                .collect();
             let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
             (drawn, us)
         };
@@ -823,14 +1003,7 @@ fn outline_under(
     let (bw, bh) = base.size();
     let mut fb = vec![0u16; bw as usize * bh as usize];
     if let Some(mut target) = Fb::new(&mut fb, bw, bh) {
-        let Ok(_) = outline::draw(
-            outline::WORLD_50M,
-            outline::BORDERS_50M,
-            &base,
-            Ink::Colour,
-            theme,
-            &mut target,
-        );
+        let Ok(_) = outline::draw_world(&outline::WORLD, &base, Ink::Colour, theme, &mut target);
     }
     let s = view.scale_at(z);
     let (w, h) = view.size();
@@ -863,8 +1036,13 @@ fn outline_under(
     by_rows(rgba, w, workers, one_row);
 }
 
-/// The tile of `key` drawn: RGBA and its credit.
-fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String) {
+/// A tile drawn: its key, RGBA, its credit, and whether a region in it
+/// was still arriving.
+type Rendered = (TileKey, Vec<u8>, String, bool);
+
+/// The tile of `key` drawn: RGBA, its credit, and whether a region in it
+/// was still arriving (1291).
+fn draw_tile(painter: &mut Painter, key: &TileKey, smooth: bool) -> Rendered {
     let shift = 24 - u32::from(key.zoom);
     let mid = |t: u32| ((u64::from(t) * u64::from(TILE) + u64::from(TILE / 2)) << shift) as u32;
     let view = Viewport::new(
@@ -876,27 +1054,9 @@ fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String)
         TILE,
         TILE,
     );
-    let drawn = painter.draw(&view, Ink::Colour, key.style, key.percent);
-    (*key, to_rgba(&drawn.fb), drawn.attribution)
-}
-
-/// A drawn tile's big endian Rgb565 pixels as opaque RGBA, the bytes
-/// [`opaque`] gives each, in one pass over a buffer of the final size: a
-/// pixel pushed at a time through the colour types cost about a fifth of
-/// a cold frame's tile time (the render study of 2026-10-30).
-fn to_rgba(fb: &[u16]) -> Vec<u8> {
-    let mut rgba = vec![0u8; fb.len() * 4];
-    for (out, &px) in rgba.chunks_exact_mut(4).zip(fb) {
-        let v = u16::from_be(px);
-        let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
-        out.copy_from_slice(&[
-            ((r << 3) | (r >> 2)) as u8,
-            ((g << 2) | (g >> 4)) as u8,
-            ((b << 3) | (b >> 2)) as u8,
-            0xff,
-        ]);
-    }
-    rgba
+    // Straight into RGBA (1422): no Rgb565 buffer, no pass to widen it.
+    let drawn = painter.draw_rgba(&view, Ink::Colour, key.style, key.percent, smooth);
+    (*key, drawn.rgba, drawn.attribution, drawn.pending > 0)
 }
 
 /// The pan's velocity, a moving average in screen pixels a second that
@@ -906,6 +1066,9 @@ fn to_rgba(fb: &[u16]) -> Vec<u8> {
 pub struct Motion {
     velocity: (f64, f64),
     at_ms: Option<u64>,
+    /// When the first frame since the last pan was asked: the heading
+    /// the prefetch plans by is frozen there (1189).
+    asked_ms: Option<u64>,
     /// The last zoom the fingers made went out.
     pub zoomed_out: bool,
 }
@@ -922,6 +1085,15 @@ impl Motion {
         let (ix, iy) = (dx * 1000.0 / dt, dy * 1000.0 / dt);
         self.velocity = (vx + a * (ix - vx), vy + a * (iy - vy));
         self.at_ms = Some(now_ms);
+        self.asked_ms = None;
+    }
+
+    /// A frame was asked at `now_ms`. The first since the last pan
+    /// freezes the heading [`rest_heading`](Self::rest_heading) gives:
+    /// the finger's last direction, not what is left of it once a slow
+    /// renderer has drawn the frame at rest (1189).
+    pub fn asked(&mut self, now_ms: u64) {
+        self.asked_ms.get_or_insert(now_ms);
     }
 
     /// The fingers zoomed by `by_milli` thousandths of a step.
@@ -945,6 +1117,13 @@ impl Motion {
     pub fn heading(&self, now_ms: u64) -> Option<(f64, f64)> {
         let (vx, vy) = self.velocity(now_ms);
         (vx.hypot(vy) >= MOTION_FLOOR).then_some((vx, vy))
+    }
+
+    /// The heading a prefetch at `now_ms` plans by: the one when the
+    /// first frame since the last pan was asked ([`asked`](Self::asked)),
+    /// the one at `now_ms` when none was.
+    pub fn rest_heading(&self, now_ms: u64) -> Option<(f64, f64)> {
+        self.heading(self.asked_ms.map_or(now_ms, |at| at.min(now_ms)))
     }
 }
 
@@ -1418,6 +1597,8 @@ mod tests {
             fallback: None,
             moving: false,
             asked: None,
+            smooth: true,
+            resmooth: true,
         }
     }
 
@@ -1432,7 +1613,8 @@ mod tests {
     }
 
     /// At a whole step the composed frame is the view drawn whole, pixel
-    /// for pixel but where a line's antialiased end meets a seam.
+    /// for pixel but where a line's antialiased end meets a seam; the
+    /// edges smoothed in both (1422).
     #[test]
     fn a_composed_frame_is_the_view_drawn_whole() {
         let (_dir, maps) = maps();
@@ -1444,10 +1626,17 @@ mod tests {
         let composed = cache.compose(&frame(view, z));
         assert_eq!(composed.missing, 0);
         let mut painter = Painter::new(maps);
-        let whole = painter.draw(&Viewport::new(centre, z, w, h), Ink::Colour, Style::PC, 100);
+        let whole = painter.draw_rgba(
+            &Viewport::new(centre, z, w, h),
+            Ink::Colour,
+            Style::PC,
+            100,
+            true,
+        );
         let mut differ = 0usize;
-        for (i, &px) in whole.fb.iter().enumerate() {
-            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
+        let pixels = whole.rgba.len() / 4;
+        for (i, px) in whole.rgba.chunks_exact(4).enumerate() {
+            let [r, g, b] = [px[0], px[1], px[2]];
             let got = &composed.rgba[i * 4..i * 4 + 3];
             let d = got
                 .iter()
@@ -1459,12 +1648,8 @@ mod tests {
                 differ += 1;
             }
         }
-        let share = differ as f64 / whole.fb.len() as f64;
-        assert!(
-            share < 0.002,
-            "{differ} pixels of {} differ",
-            whole.fb.len()
-        );
+        let share = differ as f64 / pixels as f64;
+        assert!(share < 0.002, "{differ} pixels of {pixels} differ");
         assert_eq!(composed.attribution, whole.attribution);
     }
 
@@ -1561,14 +1746,8 @@ mod tests {
             let whole = view.whole().expect("a whole step");
             let mut fb = vec![0u16; 400 * 300];
             let mut target = Fb::new(&mut fb, 400, 300).expect("a frame");
-            let Ok(_) = outline::draw(
-                outline::WORLD_50M,
-                outline::BORDERS_50M,
-                &whole,
-                Ink::Colour,
-                theme,
-                &mut target,
-            );
+            let Ok(_) =
+                outline::draw_world(&outline::WORLD, &whole, Ink::Colour, theme, &mut target);
             let drawn: Vec<u8> = fb.iter().flat_map(|&p| opaque(p)).collect();
             assert!(blank.rgba == drawn, "the outline, {theme:?}");
 
@@ -1631,6 +1810,38 @@ mod tests {
         let coarse = cache.compose(&frame(view, 14));
         let shown = owed(&mut cache, view, 15);
         assert!(shown.rgba == coarse.rgba, "the coarser step first");
+    }
+
+    /// A frame at rest that owes no tile keeps the tiles of its own step
+    /// and the steps next to it, and drops those of the views the user
+    /// left (1797); a moving frame, and one at rest that still owes tiles
+    /// and stands in for them, drop nothing.
+    #[test]
+    fn a_frame_at_rest_keeps_the_steps_next_to_its_own() {
+        let (_dir, maps) = maps();
+        let view = ExactView::new(duomo(), 14 * MILLI, 300, 300);
+        let mut cache = TileCache::new(maps, BUDGET_MB << 20);
+        let zooms = |cache: &TileCache| {
+            let mut z: Vec<u8> = cache.entries.keys().map(|k| k.zoom).collect();
+            z.sort_unstable();
+            z.dedup();
+            z
+        };
+        for z in [11, 12, 13, 15, 16] {
+            cache.compose(&Frame {
+                moving: true,
+                ..frame(view, z)
+            });
+        }
+        assert_eq!(zooms(&cache), vec![11, 12, 13, 15, 16], "moving: all kept");
+        owed(&mut cache, view, 14);
+        assert_eq!(cache.stats.left_behind, 0, "owing tiles: all kept");
+        let shown = cache.compose(&frame(view, 14));
+        assert_eq!(shown.missing, 0);
+        assert_eq!(zooms(&cache), vec![13, 14, 15]);
+        assert!(cache.stats.left_behind > 0);
+        let held: usize = cache.entries.values().map(|e| e.rgba.len()).sum();
+        assert_eq!(cache.bytes, held, "the count follows the tiles");
     }
 
     /// Part of a frame cached: the tiles held show, the stand ins fill
@@ -1744,6 +1955,8 @@ mod tests {
         let asked = Frame {
             moving: true,
             asked: Some([400, 400, 500, 500]),
+            smooth: true,
+            resmooth: true,
             ..frame(view, 15)
         };
         let grid = Grid::of(&view, 15);
@@ -1897,6 +2110,24 @@ mod tests {
         );
     }
 
+    /// The heading a prefetch plans by is the one when the first frame
+    /// since the last pan was asked; a later ask moves it no further, a
+    /// pan lets it go (1189).
+    #[test]
+    fn the_rest_heading_freezes_at_the_first_ask() {
+        let mut m = Motion::default();
+        for i in 0..20 {
+            m.pan(0.0, -80.0, i * 16);
+        }
+        assert!(m.rest_heading(320 + 3000).is_none(), "no ask, no freeze");
+        m.asked(320);
+        m.asked(2000);
+        assert_eq!(m.rest_heading(320 + 3000), m.heading(320));
+        assert!(m.rest_heading(320 + 3000).is_some());
+        m.pan(0.0, 0.0, 3320);
+        assert_eq!(m.rest_heading(3320 + 3000), None);
+    }
+
     /// The velocity decays at rest: no direction a few seconds after the
     /// finger stopped.
     #[test]
@@ -2001,12 +2232,33 @@ mod tests {
         assert!(cache.bytes() <= room * TILE_BYTES);
     }
 
-    /// The one pass to RGBA is [`opaque`]'s bytes for every colour.
+    /// 1422: a tile drawn straight into RGBA is the Rgb565 picture of the
+    /// same view, every pixel [`opaque`]'s bytes for it, at three zooms
+    /// and both themes, the buildings' fill and edge included.
     #[test]
-    fn the_direct_rgba_loop_gives_every_colour_as_opaque_does() {
-        let all: Vec<u16> = (0..=u16::MAX).collect();
-        let want: Vec<u8> = all.iter().flat_map(|&p| opaque(p)).collect();
-        assert!(to_rgba(&all) == want, "a colour differs");
+    fn a_tile_drawn_in_rgba_is_the_rgb565_tile_widened() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-map/fixtures/buildings/firenze.lmr");
+        std::fs::copy(fixture, dir.path().join("firenze.lmr")).expect("the region");
+        let mut painter = Painter::new(Maps::new(Some(dir.path().to_path_buf())));
+        for z in [13u8, 15, 17] {
+            for style in [
+                Style::PC,
+                Style {
+                    theme: MapTheme::Dark,
+                    ..Style::PC
+                },
+            ] {
+                let view = Viewport::new(duomo(), z, TILE, TILE);
+                let fb = painter.draw(&view, Ink::Colour, style, 100).fb;
+                let want: Vec<u8> = fb.iter().flat_map(|&p| opaque(p)).collect();
+                let got = painter
+                    .draw_rgba(&view, Ink::Colour, style, 100, false)
+                    .rgba;
+                assert!(got == want, "z{z} {:?}: a pixel differs", style.theme);
+            }
+        }
     }
 
     /// A painter that kept its filler's storage from tile to tile, after a
@@ -2026,8 +2278,8 @@ mod tests {
         }
         assert!(keys.len() > 20, "{} tiles", keys.len());
         for key in &keys {
-            let again = draw_tile(&mut kept, key);
-            let fresh = draw_tile(&mut Painter::new(maps.clone()), key);
+            let again = draw_tile(&mut kept, key, true);
+            let fresh = draw_tile(&mut Painter::new(maps.clone()), key, true);
             assert!(again == fresh, "tile {key:?} differs");
         }
     }

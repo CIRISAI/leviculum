@@ -250,6 +250,8 @@ struct HeldMove {
     commit: bool,
     /// When it started waiting, for [`DEFERRED_MOVE_TIMEOUT_MS`].
     since_ms: u64,
+    /// +ciris (leviculum#107): the MTU the link moves at.
+    mtu: u32,
 }
 
 /// The node's direct-link state.
@@ -286,6 +288,10 @@ pub(crate) struct DirectLinks {
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
     pub(super) jobs: VecDeque<DirectLinkJob>,
+    /// +ciris (leviculum#107), tests only: send COMPLETE without the path
+    /// MTU, as a peer from before the field does.
+    #[cfg(test)]
+    pub(super) legacy_complete: bool,
 }
 
 impl DirectLinks {
@@ -325,7 +331,7 @@ impl DirectLinks {
         // have cut for the MTU this link left, or the one it is moving to.
         let other = self.mtu_before_move.get(link_id).copied().or_else(|| {
             self.is_moving(link_id)
-                .then_some(crate::direct_link::DIRECT_LINK_MTU.min(mtu))
+                .then_some(self.move_mtu(link_id).min(mtu))
         });
         let other = other.filter(|o| *o != mtu).map(resource_sdu);
         crate::resource::incoming::resolve_part_size(adv, resource_sdu(mtu), other)
@@ -333,9 +339,9 @@ impl DirectLinks {
 
     /// Lower the link for a direct interface, keeping what it had: a peer
     /// may have cut a resource for it (leviculum#98).
-    fn lower_for_move(&mut self, link_id: LinkId, link: &mut crate::link::Link) {
+    fn lower_for_move(&mut self, link_id: LinkId, link: &mut crate::link::Link, mtu: u32) {
         let before = link.negotiated_mtu();
-        link.lower_mtu(crate::direct_link::DIRECT_LINK_MTU);
+        link.lower_mtu(mtu);
         if link.negotiated_mtu() < before {
             self.mtu_before_move.entry(link_id).or_insert(before);
         }
@@ -608,8 +614,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         match self.direct_links.link_of_session(session) {
             Some(link_id) => {
+                let path_mtu = interface_index.and_then(|i| self.direct_path_mtu(i));
                 let steps = match self.direct_links.sessions.get_mut(&link_id) {
-                    Some(s) => s.punched(interface_index.is_some(), now_ms),
+                    Some(s) => s.punched_with_mtu(interface_index.is_some(), path_mtu, now_ms),
                     None => Vec::new(),
                 };
                 if steps.contains(&Step::Established) {
@@ -679,8 +686,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         commit: bool,
         now_ms: u64,
     ) {
-        if !self.resources_in_flight(&link_id) {
-            self.attach_direct_link(link_id, session, index, proposed, now_ms);
+        // +ciris (leviculum#107): settled by the session's COMPLETEs.
+        let mtu = self.direct_links.move_mtu(&link_id);
+        if !self.resources_in_flight(&link_id, mtu) {
+            self.attach_direct_link(link_id, session, index, proposed, mtu, now_ms);
             return;
         }
         crate::tracing::info!(
@@ -698,6 +707,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 proposed,
                 commit,
                 since_ms: now_ms,
+                mtu,
             },
         );
     }
@@ -732,7 +742,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         if held.commit {
             if let Some(link) = self.links.get_mut(&link_id) {
-                self.direct_links.lower_for_move(link_id, link);
+                self.direct_links.lower_for_move(link_id, link, held.mtu);
             }
         }
         if failure != Failure::PeerFellBack {
@@ -740,6 +750,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 &link_id,
                 &Signal::Complete {
                     session: held.session,
+                    mtu: None,
                 },
                 now_ms,
             );
@@ -759,6 +770,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         session: SessionId,
         index: usize,
         proposed: bool,
+        mtu: u32,
         now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -780,8 +792,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // A link that came up over TCP may have negotiated far more than a
         // UDP datagram on the open internet carries. Both ends lower it to
         // the same ceiling here, as rns-rs does, so they keep agreeing on the
-        // link MDU (leviculum#70 review). Never raised.
-        self.direct_links.lower_for_move(link_id, link);
+        // link MDU (leviculum#70 review). Never raised. +ciris
+        // (leviculum#107): the ceiling is the probed path MTU when both ends
+        // sent theirs, `DIRECT_LINK_MTU` otherwise.
+        self.direct_links.lower_for_move(link_id, link, mtu);
         // The direct path just proved itself both ways; do not let a stale
         // timer that was running on the relayed path fire against it.
         link.record_inbound(now_ms);
@@ -872,7 +886,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             host_payload,
         } = signal
         else {
-            if let Signal::Complete { session } = &signal {
+            if let Signal::Complete { session, .. } = &signal {
                 self.direct_link_nudged(&link_id, session);
             }
             if matches!(
@@ -1447,13 +1461,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let ready: Vec<LinkId> = self
             .direct_links
             .deferred
-            .keys()
-            .copied()
-            .filter(|link_id| !self.resources_in_flight(link_id))
+            .iter()
+            .filter(|(link_id, h)| !self.resources_in_flight(link_id, h.mtu))
+            .map(|(link_id, _)| *link_id)
             .collect();
         for link_id in ready {
             if let Some(held) = self.direct_links.deferred.remove(&link_id) {
-                self.attach_direct_link(link_id, held.session, held.index, held.proposed, now_ms);
+                let (session, index, proposed) = (held.session, held.index, held.proposed);
+                self.attach_direct_link(link_id, session, index, proposed, held.mtu, now_ms);
             }
         }
         // Whatever holds a move, it does not hold it forever (leviculum#98).
@@ -1506,8 +1521,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Whether the link carries anything sized for its present MTU that the
     /// direct path could not: a resource transfer under way either way, or a
     /// channel message still awaiting its proof that is larger than the
-    /// channel can send at `DIRECT_LINK_MTU`.
-    fn resources_in_flight(&self, link_id: &LinkId) -> bool {
+    /// channel can send at `mtu`, the MTU it moves at.
+    fn resources_in_flight(&self, link_id: &LinkId, mtu: u32) -> bool {
         self.links.get(link_id).is_some_and(|link| {
             link.outgoing_resource().is_some()
                 || link.has_incoming_resource()
@@ -1516,7 +1531,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // on #78).
                 || link.has_pending_resource()
                 || link.channel().is_some_and(|ch| {
-                    ch.outstanding_exceeds_mtu(crate::direct_link::DIRECT_LINK_MTU)
+                    ch.outstanding_exceeds_mtu(mtu)
                 })
         }) || self
             .assembling_resources
@@ -1692,6 +1707,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     &attachment.link_id,
                     &Signal::Complete {
                         session: attachment.session,
+                        mtu: None,
                     },
                     now_ms,
                 );
@@ -1904,5 +1920,40 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.events.extend(out.events);
         }
         self.process_events_and_actions()
+    }
+}
+
+impl DirectLinks {
+    /// +ciris (leviculum#107): the MTU a link moving now moves at: what its
+    /// held move settled, or what its session's COMPLETEs agree, or
+    /// `DIRECT_LINK_MTU`, the ceiling both ends used before the path MTU rode
+    /// the COMPLETE.
+    fn move_mtu(&self, link_id: &LinkId) -> u32 {
+        if let Some(held) = self.deferred.get(link_id) {
+            return held.mtu;
+        }
+        self.sessions
+            .get(link_id)
+            .map_or(crate::direct_link::DIRECT_LINK_MTU, Session::move_mtu)
+    }
+}
+
+impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
+    /// +ciris (leviculum#107): the path MTU this node's COMPLETE carries for
+    /// the punched interface `index`: what the driver's probe found, which it
+    /// registered as the interface's MTU, capped at `DIRECT_LINK_MTU`. An
+    /// interface registered with none had no probe step acked, so the path
+    /// is held to the base MTU.
+    fn direct_path_mtu(&self, index: usize) -> Option<u32> {
+        #[cfg(test)]
+        if self.direct_links.legacy_complete {
+            return None;
+        }
+        let base = crate::constants::MTU as u32;
+        Some(
+            self.transport
+                .interface_hw_mtu(index)
+                .map_or(base, |m| m.min(crate::direct_link::DIRECT_LINK_MTU)),
+        )
     }
 }

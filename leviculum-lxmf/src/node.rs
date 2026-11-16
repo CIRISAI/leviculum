@@ -213,6 +213,28 @@ pub enum LxmfNodeEvent {
         method: DeliveryMethod,
         reason: InboundRejection,
     },
+    /// The core asks for the proof of a delivery packet, and the node holds
+    /// proofs ([`LxmfNode::hold_proofs`]): nothing was sent, the proof is
+    /// the caller's to send with [`LxmfNode::prove`] once the message is
+    /// kept.
+    ProofRequested(InboundProof),
+}
+
+/// The proof of one inbound delivery packet, not yet sent: what
+/// [`LxmfNode::prove`] needs to send it later. A single packet's proof goes
+/// back at the peer it arrived from (#376); a link packet's on its link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundProof {
+    Packet {
+        packet_hash: [u8; 32],
+        destination_hash: DestinationHash,
+        interface_index: usize,
+        peer: Option<[u8; 16]>,
+    },
+    Link {
+        link_id: LinkId,
+        packet_hash: [u8; 32],
+    },
 }
 
 /// Combined output of one LXMF adapter operation.
@@ -390,6 +412,9 @@ pub struct LxmfNode {
     resources: BTreeMap<LinkId, PendingResource>,
     incoming_resources: BTreeMap<LinkId, IncomingResourceAssembly>,
     incoming_resource_transfers: BTreeMap<[u8; 32], IncomingResourceTransfer>,
+    /// Whether delivery proofs are handed to the caller rather than sent
+    /// ([`Self::hold_proofs`]).
+    holds_proofs: bool,
 }
 
 impl LxmfNode {
@@ -564,6 +589,7 @@ impl LxmfNode {
             resources: BTreeMap::new(),
             incoming_resources: BTreeMap::new(),
             incoming_resource_transfers: BTreeMap::new(),
+            holds_proofs: false,
         }
     }
 
@@ -993,6 +1019,75 @@ impl LxmfNode {
         }
     }
 
+    /// Hand the proofs of inbound delivery packets to the caller instead of
+    /// sending them: a node that keeps what it receives (a home node's
+    /// archive) proves a message only once it is kept, so a sender is never
+    /// told DELIVERED for a message a crash or a full disk then lost.
+    ///
+    /// The delivery destination and every backchannel link already
+    /// identified turn to `ProofStrategy::App` (a link identified later
+    /// starts so), so the core asks rather than proves on arrival, and every request comes out as
+    /// [`LxmfNodeEvent::ProofRequested`]. A single packet's request follows
+    /// its `PacketReceived`; a link packet's precedes its
+    /// `LinkDataReceived`, as the core emits them. A Resource's proof is
+    /// the core's own and is not held.
+    ///
+    /// Wire and semantics are unchanged: the same proof goes out, later.
+    pub fn hold_proofs<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+    ) -> Result<(), LxmfNodeError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        node.destination_mut(&self.delivery_destination)
+            .ok_or(LxmfNodeError::InvalidDeliveryDestination)?
+            .set_proof_strategy(ProofStrategy::App);
+        self.holds_proofs = true;
+        for link_id in &self.identified_links {
+            if let Some(link) = node.link_mut(link_id) {
+                link.set_proof_strategy(ProofStrategy::App);
+            }
+        }
+        Ok(())
+    }
+
+    /// Send one proof of an inbound delivery packet: at once for a node that
+    /// does not hold proofs, or later for one that does
+    /// ([`Self::hold_proofs`]).
+    pub fn prove<R, C, S>(
+        node: &mut NodeCore<R, C, S>,
+        proof: &InboundProof,
+    ) -> Result<TickOutput, LxmfNodeError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        match proof {
+            // #376: prove back at the peer the message arrived from, not at
+            // every link on the carrier. On a BLE mesh the proof for a
+            // delivered LXMF message would otherwise reach the neighbour
+            // boards too, which forward it.
+            InboundProof::Packet {
+                packet_hash,
+                destination_hash,
+                interface_index,
+                peer,
+            } => node
+                .send_proof_on_peer(packet_hash, destination_hash, *interface_index, *peer)
+                .map_err(|_| LxmfNodeError::ProofFailed),
+            InboundProof::Link {
+                link_id,
+                packet_hash,
+            } => node
+                .send_data_proof(link_id, packet_hash)
+                .map_err(|_| LxmfNodeError::ProofFailed),
+        }
+    }
+
     /// Consume one NodeCore event and return any follow-up NodeCore actions and
     /// LXMF-level events.
     pub fn handle_event<R, C, S>(
@@ -1094,23 +1189,31 @@ impl LxmfNode {
                 interface_index,
                 peer,
             } if *destination_hash == self.delivery_destination => {
-                // #376: prove back at the peer the message arrived from,
-                // not at every link on the carrier. On a BLE mesh the
-                // proof for a delivered LXMF message would otherwise
-                // reach the neighbour boards too, which forward it.
-                output.core.merge(
-                    node.send_proof_on_peer(packet_hash, destination_hash, *interface_index, *peer)
-                        .map_err(|_| LxmfNodeError::ProofFailed)?,
-                );
+                let proof = InboundProof::Packet {
+                    packet_hash: *packet_hash,
+                    destination_hash: *destination_hash,
+                    interface_index: *interface_index,
+                    peer: *peer,
+                };
+                if self.holds_proofs {
+                    output.events.push(LxmfNodeEvent::ProofRequested(proof));
+                } else {
+                    output.core.merge(Self::prove(node, &proof)?);
+                }
             }
             NodeEvent::LinkProofRequested {
                 link_id,
                 packet_hash,
             } if self.lxmf_links.contains(link_id) => {
-                output.core.merge(
-                    node.send_data_proof(link_id, packet_hash)
-                        .map_err(|_| LxmfNodeError::ProofFailed)?,
-                );
+                let proof = InboundProof::Link {
+                    link_id: *link_id,
+                    packet_hash: *packet_hash,
+                };
+                if self.holds_proofs {
+                    output.events.push(LxmfNodeEvent::ProofRequested(proof));
+                } else {
+                    output.core.merge(Self::prove(node, &proof)?);
+                }
             }
             NodeEvent::PacketReceived {
                 destination, data, ..
@@ -1513,6 +1616,24 @@ impl LxmfNode {
         if let Ok(follow_up) = node.identify_link(&link_id, &identity) {
             self.identified_links.insert(link_id);
             output.merge(follow_up);
+            // From here the peer delivers to us on this link too, and its
+            // packets must be proven as on a link to our delivery
+            // destination; an initiator's link starts with `None`. Python
+            // gives it `delivery_packet`, which proves every packet
+            // (`reference/LXMF/LXMF/LXMRouter.py:1926-1927,2708-2710`).
+            if let Some(link) = node.link_mut(&link_id) {
+                link.set_proof_strategy(self.delivery_proof_strategy());
+            }
+        }
+    }
+
+    /// How a packet delivered to us is proven: by the core at once, or by
+    /// the caller once it is kept ([`Self::hold_proofs`]).
+    fn delivery_proof_strategy(&self) -> ProofStrategy {
+        if self.holds_proofs {
+            ProofStrategy::App
+        } else {
+            ProofStrategy::All
         }
     }
 }
@@ -2587,6 +2708,118 @@ mod tests {
                     && received.content.len() == 700
         )));
     }
+
+    /// A introduces itself on its own link to B, then B answers over that
+    /// backchannel with a single packet; whether A proves the answer at
+    /// once or holds the proof until it is kept (1312, a home node), B
+    /// learns DELIVERED from that first packet's proof, not from a retry.
+    fn backchannel_packet_is_proven(holds: bool) {
+        let mut a = peer(21);
+        let mut b = peer(111);
+        if holds {
+            a.lxmf.hold_proofs(&mut a.node).expect("hold proofs");
+        }
+        exchange_announces(&mut a, &mut b);
+
+        let mut a_events = Vec::new();
+        let mut b_events = Vec::new();
+        let (_, link_output) = a
+            .lxmf
+            .ensure_direct_link(&mut a.node, b.destination)
+            .expect("establish direct link");
+        pump(
+            &mut a,
+            &mut b,
+            take_packets(link_output.core.actions),
+            &mut a_events,
+            &mut b_events,
+        );
+        let introduction = message(
+            b.destination,
+            &a.signing_identity,
+            a.destination,
+            DeliveryMethod::Direct,
+            12,
+        );
+        let sent = a
+            .lxmf
+            .send(&mut a.node, &introduction)
+            .expect("send introduction");
+        pump(
+            &mut a,
+            &mut b,
+            take_packets(sent.core.actions),
+            &mut a_events,
+            &mut b_events,
+        );
+        let link = a.lxmf.direct_link(&b.destination).expect("a's link");
+        assert_eq!(b.lxmf.direct_link(&a.destination), Some(link));
+
+        let answer = message(
+            a.destination,
+            &b.signing_identity,
+            b.destination,
+            DeliveryMethod::Direct,
+            12,
+        );
+        assert_eq!(
+            LxmfNode::representation(&answer).expect("representation"),
+            DeliveryRepresentation::DirectPacket
+        );
+        let sent = b.lxmf.send(&mut b.node, &answer).expect("send answer");
+        pump(
+            &mut b,
+            &mut a,
+            take_packets(sent.core.actions),
+            &mut b_events,
+            &mut a_events,
+        );
+        assert!(a_events.iter().any(|event| matches!(
+            event,
+            LxmfNodeEvent::MessageReceived(received) if received.message_id == answer.message_id
+        )));
+        let delivered = |events: &[LxmfNodeEvent]| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    LxmfNodeEvent::Delivered { message_id } if *message_id == answer.message_id
+                )
+            })
+        };
+        if holds {
+            assert!(!delivered(&b_events), "proven before it was kept");
+            let proof =
+                a_events
+                    .iter()
+                    .find_map(|event| match event {
+                        LxmfNodeEvent::ProofRequested(
+                            proof @ InboundProof::Link { link_id, .. },
+                        ) if *link_id == link => Some(*proof),
+                        _ => None,
+                    })
+                    .expect("the answer's proof is held");
+            let proven = LxmfNode::prove(&mut a.node, &proof).expect("prove");
+            pump(
+                &mut a,
+                &mut b,
+                take_packets(proven.actions),
+                &mut a_events,
+                &mut b_events,
+            );
+        }
+        assert!(delivered(&b_events), "the backchannel answer is unproven");
+    }
+
+    #[test]
+    fn a_backchannel_packet_is_proven() {
+        backchannel_packet_is_proven(false);
+    }
+
+    #[test]
+    fn a_held_backchannel_packet_is_proven_once_released() {
+        backchannel_packet_is_proven(true);
+    }
+
     /// Reports what each delivery representation costs a caller that holds the
     /// core, so `docs/src/concepts/core-lock-budget.md` can cite the adapter's
     /// numbers instead of assuming them (Codeberg #196).

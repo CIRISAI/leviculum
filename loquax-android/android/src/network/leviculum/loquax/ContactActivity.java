@@ -29,9 +29,10 @@ import java.util.Map;
  * name or avatar opens, and the chat menu's "Contact info": the avatar
  * and the name, which opens the linked contact; round buttons to mute,
  * search the conversation, open the map at the newest position and share
- * the address; rows for the nickname, the notifications, the phone
- * contact and the identity to compare in person; what this phone knows of
- * reaching the peer; its positions; block and delete at the bottom.
+ * the address; rows for the nickname, the notifications and the phone
+ * contact; Advanced, collapsed (1283, walk finding 29): the identity to
+ * compare in person and what this phone knows of reaching the peer; its
+ * positions; block and delete at the bottom.
  *
  * Pin, mute, archive and block reach every device of the home through the
  * home node; verified stays on this phone. What the chat itself has to do
@@ -50,6 +51,8 @@ public class ContactActivity extends Activity implements Events.Listener {
     private String peer;
     private Map<String, Object> detail = Core.map();
     private LinearLayout body;
+    /** Whether Advanced is open, kept across a refresh. */
+    private boolean advancedOpen;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
@@ -78,6 +81,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         screen.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
         ScrollView scroll = new ScrollView(this);
+        scroll.setId(R.id.contact_scroll);
         body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(0, 0, 0, dp(32));
@@ -103,13 +107,23 @@ public class ContactActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        Core.front(true);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(true);
+            }
+        });
         refresh();
     }
 
     @Override
     protected void onPause() {
-        Core.front(false);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
         super.onPause();
     }
@@ -124,8 +138,43 @@ public class ContactActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** A question for the screen is with the engine, and another is owed after it. */
+    private boolean asking;
+    private boolean askOwed;
+
+    /**
+     * The contact again, asked on the engine's thread (1464): one question
+     * at a time, and the events that came while it was out make one more.
+     */
     private void refresh() {
-        Map<String, Object> answer = Core.detail(peer);
+        if (asking) {
+            askOwed = true;
+            return;
+        }
+        asking = true;
+        final String of = peer;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.detail(of);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                asking = false;
+                if (isDestroyed() || isFinishing()) {
+                    return;
+                }
+                show(answer);
+                if (askOwed) {
+                    askOwed = false;
+                    refresh();
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> answer) {
         if (answer.containsKey("error")) {
             Toast.makeText(this, Core.str(answer, "error"), Toast.LENGTH_LONG).show();
             finish();
@@ -136,7 +185,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         head();
         actions();
         settings();
-        network();
+        advanced();
         positions();
         bottom();
     }
@@ -203,7 +252,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         body.addView(row, matchWrap());
     }
 
-    /** Nickname, notifications, phone contact, identity. */
+    /** Nickname, notifications, phone contact. */
     private void settings() {
         String petname = Core.str(detail, "petname");
         setting("✏️", getString(R.string.nickname),
@@ -227,7 +276,38 @@ public class ContactActivity extends Activity implements Events.Listener {
                         phoneContact();
                     }
                 });
-        identity();
+    }
+
+    /** Advanced, collapsed: the identity and the network, which need Reticulum words. */
+    private void advanced() {
+        final TextView header = text(getString(R.string.advanced) + (advancedOpen ? "  ▴" : "  ▾"),
+                16, R.color.text);
+        header.setId(R.id.contact_advanced);
+        header.setPadding(dp(16), dp(24), dp(16), dp(12));
+        header.setBackgroundResource(android.R.drawable.list_selector_background);
+        body.addView(header, matchWrap());
+        final LinearLayout fold = new LinearLayout(this);
+        fold.setId(R.id.contact_advanced_body);
+        fold.setOrientation(LinearLayout.VERTICAL);
+        fold.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
+        body.addView(fold, matchWrap());
+        header.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                advancedOpen = !advancedOpen;
+                fold.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
+                header.setText(getString(R.string.advanced) + (advancedOpen ? "  ▴" : "  ▾"));
+            }
+        });
+        // The rows add themselves to `body`: point it at the fold meanwhile.
+        LinearLayout outer = body;
+        body = fold;
+        try {
+            identity();
+            network();
+        } finally {
+            body = outer;
+        }
     }
 
     /** The address in groups, its QR code, why to compare, and the verified switch. */
@@ -261,8 +341,18 @@ public class ContactActivity extends Activity implements Events.Listener {
                 new Runnable() {
                     @Override
                     public void run() {
-                        Core.verify(peer, !verified);
-                        refresh();
+                        final String to = peer;
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.verify(to, !verified);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                refresh();
+                            }
+                        });
                     }
                 });
     }
@@ -296,7 +386,7 @@ public class ContactActivity extends Activity implements Events.Listener {
             long at = Core.num(fix, "at");
             String place = String.format(Locale.ROOT, "%.5f, %.5f",
                     Core.num(fix, "lat_e6") / 1e6, Core.num(fix, "lon_e6") / 1e6);
-            setting("📍", Ui.day(this, at, now) + " " + Ui.clock(at),
+            setting("📍", Core.str(fix, "day") + " " + Ui.clock(at),
                     place + " · " + Ui.age(this, at, now), new Runnable() {
                         @Override
                         public void run() {
@@ -315,8 +405,18 @@ public class ContactActivity extends Activity implements Events.Listener {
             @Override
             public void onClick(View v) {
                 if (blocked) {
-                    Core.block(peer, false);
-                    refresh();
+                    final String to = peer;
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.block(to, false);
+                        }
+                    }, new Engine.Said() {
+                        @Override
+                        public void said(String error) {
+                            refresh();
+                        }
+                    });
                 } else {
                     askBlock();
                 }
@@ -340,11 +440,21 @@ public class ContactActivity extends Activity implements Events.Listener {
                 .setPositiveButton(R.string.block, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        String error = Core.block(peer, true);
-                        Toast.makeText(ContactActivity.this,
-                                error != null ? error : getString(R.string.blocked_done, name),
-                                Toast.LENGTH_SHORT).show();
-                        back(THEN_CLOSE);
+                        final String to = peer;
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.block(to, true);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                Toast.makeText(ContactActivity.this,
+                                        error != null ? error : getString(R.string.blocked_done, name),
+                                        Toast.LENGTH_SHORT).show();
+                                back(THEN_CLOSE);
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
@@ -373,8 +483,17 @@ public class ContactActivity extends Activity implements Events.Listener {
         DialogInterface.OnClickListener here = new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface d, int which) {
-                Core.forget(peer, false);
-                done.run();
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.forget(peer, false);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        done.run();
+                    }
+                });
             }
         };
         if (homeClient) {
@@ -382,8 +501,17 @@ public class ContactActivity extends Activity implements Events.Listener {
                     .setPositiveButton(R.string.delete_home, new DialogInterface.OnClickListener() {
                         @Override
                         public void onClick(DialogInterface d, int which) {
-                            Core.forget(peer, true);
-                            done.run();
+                            Engine.run(new Engine.Call() {
+                                @Override
+                                public String run() {
+                                    return Core.forget(peer, true);
+                                }
+                            }, new Engine.Said() {
+                                @Override
+                                public void said(String error) {
+                                    done.run();
+                                }
+                            });
                         }
                     });
         } else {
@@ -406,8 +534,17 @@ public class ContactActivity extends Activity implements Events.Listener {
     static void muteDialog(final Activity activity, final String peer, boolean muted,
             final Runnable done) {
         if (muted) {
-            Core.mute(peer, 0);
-            done.run();
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.mute(peer, 0);
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    done.run();
+                }
+            });
             return;
         }
         String[] choices = {
@@ -419,8 +556,18 @@ public class ContactActivity extends Activity implements Events.Listener {
                 .setItems(choices, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        Core.mute(peer, MUTES[which]);
-                        done.run();
+                        final long until = MUTES[which];
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.mute(peer, until);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                done.run();
+                            }
+                        });
                     }
                 })
                 .show();
@@ -455,8 +602,19 @@ public class ContactActivity extends Activity implements Events.Listener {
                 .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        Core.rename(peer, field.getText().toString());
-                        refresh();
+                        final String to = peer;
+                        final String name = field.getText().toString();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.rename(to, name);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                refresh();
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)

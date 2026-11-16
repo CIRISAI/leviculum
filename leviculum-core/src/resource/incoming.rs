@@ -676,7 +676,7 @@ impl IncomingResource {
                 wmax = self.window_state.window_max(),
                 rate = sample.first_part_rate,
                 outst = missing_parts,
-                t = round_elapsed_ms,
+                took_ms = round_elapsed_ms,
             );
 
             // Check if ALL parts received
@@ -2292,7 +2292,7 @@ mod tests {
             "wmax=10",
             "rate=9280",
             "outst=4",
-            "t=50",
+            "took_ms=50",
         ] {
             assert!(line.contains(key), "RESOURCE_RW missing {key}: {line}");
         }

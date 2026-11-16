@@ -1,0 +1,150 @@
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: before the load ---
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
+│▌them             14:00 ││  ·        · ·                        · ·        ·  │
+│▌◎ position · live   ⌖  ││ ·        ·             100 m            ·        · │
+│                        ││·       ·         · · ·      · · ·         ·       ·│
+│                        ││       ·        ·                  ·        ·       │
+│                        ││     ··       ··                    ··       ··     │
+│                        ││     ·       ·        · 50 m ·        ·       ·     │
+│                        ││    ·       ·       ·          ·       ·       ·    │
+│                        ││    ·      ·       ·            ·       ·      ·    │
+│                        ││    ·      ·      ·              ·      ·      ·    │
+│                        ││    ·      ·      ·       ◉ them · vor 4 Min.  ·    │
+│                        ││    ·      ·       ·            ·       ·      ·    │
+│                        ││    ·       ·       ··        ··       ·       ·    │
+│                        ││     ·       ·         · ·· ·         ·       ·     │
+│                        ││      ·       ··                    ··       ·      │
+│                        ││       ·        ·                  ·        ·       │
+│                        ││·       ·         · · ·      · · ·         ·       ·│
+│                        ││ ·       ··             · ··             ··       · │
+│                        ││  ·         ·                          ·         ·  │
+│                        ││Keine Karte für diese Gegend geladen · Ringe 50 m um│
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 3: after the load ---
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+│▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣤⣀             ⢀⠇          ⠹⣧⡀              │
+│                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
+│                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
+│                        ││                       ⠈⢆             ⠘⣷⡄     ⢀⣀⣤⡶⠾⠛│
+│                        ││                        ⠈⢆             ⠘⢿⡄ ⢀⣴⡾⠛⠋⠁   │
+│                        ││                         ⠘⡆             ⠈⢿⣾⠟⠁       │
+│                        ││                          ⠘⢆             ⠈⣿⡄        │
+│                        ││                           ⠈⠢⡀            ⢸⣷        │
+│                        ││                          ◉ them · vor 4 Min.       │
+│                        ││                              ⢘⠄          ⣼⠏        │
+│                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
+│                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
+│                        ││                     ⣀⠤⠒⠉           ⢀⣴⠟⠋            │
+│                        ││                 ⣀⠤⠒⠉             ⣠⡾⠟⠁              │
+│                        ││            ⢀⣠⣴⠾⠋              ⢀⣴⡿⠋                 │
+│                        ││         ⣀⣤⡶⠟⠋⠁              ⣠⣶⠟⠁                   │
+│                        ││     ⢀⣤⣶⠟⠋⠁               ⢀⣤⡾⠋⠁                     │
+│                        ││                       © OpenStreetMap contributors │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 4: held already ---
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+│▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣤⣀             ⢀⠇          ⠹⣧⡀              │
+│                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
+│                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
+│                        ││                       ⠈⢆             ⠘⣷⡄     ⢀⣀⣤⡶⠾⠛│
+│                        ││                        ⠈⢆             ⠘⢿⡄ ⢀⣴⡾⠛⠋⠁   │
+│                        ││                         ⠘⡆             ⠈⢿⣾⠟⠁       │
+│                        ││                          ⠘⢆             ⠈⣿⡄        │
+│                        ││                           ⠈⠢⡀            ⢸⣷        │
+│                        ││                          ◉ them · vor 4 Min.       │
+│                        ││                              ⢘⠄          ⣼⠏        │
+│                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
+│                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
+│                        ││                     ⣀⠤⠒⠉           ⢀⣴⠟⠋            │
+│                        ││                 ⣀⠤⠒⠉             ⣠⡾⠟⠁              │
+│                        ││            ⢀⣠⣴⠾⠋              ⢀⣴⡿⠋                 │
+│                        ││         ⣀⣤⡶⠟⠋⠁   ┌────────────────────────────────┐│
+│                        ││     ⢀⣤⣶⠟⠋⠁       │✓ the map here is loaded already││
+│                        ││                  └────────────────────────────────┘│
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 5: loading the area ---
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
+│▌them             14:00 ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                   Florenz                          │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                          ◉ them · vor 4 Min.       │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                      Natural Earth │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 6: the area loaded ---
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                          ◉ them · vor 4 Min.       │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                       © OpenStreetMap contributors │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit

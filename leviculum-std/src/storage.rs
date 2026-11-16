@@ -30,7 +30,6 @@ use crate::file_known_destinations_store::FileKnownDestinationsStore;
 use crate::file_packet_hash_store::FilePacketHashStore;
 use crate::file_ratchet_store::FileRatchetStore;
 use crate::known_destinations::{KnownDestEntry, KnownDestUseState, PACKET_HASH_LEN};
-use leviculum_core::known_destinations::KnownDestinationsStore;
 use leviculum_core::packet_hash_store::PacketHashStore;
 use leviculum_core::ratchet_store::RatchetStore;
 
@@ -66,6 +65,10 @@ pub struct Storage {
     // Spelled out rather than `KnownDestTable`: the census test finds
     // collections by their type name.
     known_dest_entries: Arc<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>>,
+    // How many of them memory keeps (order 1585): the identity ceiling, the
+    // newest by announce time. The file keeps them all; a flush merges
+    // those memory let go of back into it from disk.
+    known_dest_cap: usize,
     // Packet hash state (two-generation rotation)
     packet_cache: HashSet<[u8; 32]>,
     packet_cache_prev: HashSet<[u8; 32]>,
@@ -145,33 +148,24 @@ impl Storage {
 
         let mut inner = MemoryStorage::with_caps(caps);
 
-        // Load known_destinations via store
-        let mut kd_store = FileKnownDestinationsStore::new(&base_path);
-        let known_dest_entries = match kd_store.load_all() {
-            Ok(entries) => {
-                if !entries.is_empty() {
-                    tracing::info!("Loaded {} known destinations from storage", entries.len());
-                }
-                entries
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load known_destinations: {e}");
-                BTreeMap::new()
-            }
-        };
+        // Memory keeps the newest `identity_cap` (order 1585): a node that
+        // learned 80 000 destinations held every one of them here for its
+        // whole run, beside the identity table's own 50 000.
+        let known_dest_cap = caps.identity_cap;
+        let known_dest_entries = load_newest_known_destinations(&base_path, known_dest_cap);
 
-        // Feed identities into runtime storage (leviculum#49). Pins first, so
-        // the identity cap knows what it may not evict; then oldest to newest,
-        // so a file larger than the cap keeps its most recent entries rather
-        // than whichever hashes happen to sort last.
-        for (hash, entry) in &known_dest_entries {
+        // Pins first (leviculum#49), so the identity cap knows what it may not
+        // evict.
+        for (hash, entry) in known_dest_entries.iter() {
             if matches!(entry.use_state, KnownDestUseState::Retained) {
                 inner.seed_retained_known_dest(*hash);
             }
         }
-        let mut by_recency: Vec<_> = known_dest_entries.iter().collect();
-        by_recency.sort_by(|a, b| known_dest_recency(a.1).total_cmp(&known_dest_recency(b.1)));
-        for (hash, entry) in by_recency {
+        // Feed identities into runtime storage, oldest first, so the
+        // identity table's own ceiling lets go of the oldest.
+        let mut by_age: Vec<_> = known_dest_entries.iter().collect();
+        by_age.sort_by(|a, b| a.1.timestamp.total_cmp(&b.1.timestamp));
+        for (hash, entry) in by_age {
             if let Ok(identity) = Identity::from_public_key_bytes(&entry.public_key) {
                 CoreStorage::set_identity(&mut inner, *hash, identity);
             }
@@ -184,7 +178,14 @@ impl Storage {
                 if !hashes.is_empty() {
                     tracing::info!("Loaded {} packet hashes from storage", hashes.len());
                 }
-                hashes.into_iter().collect()
+                // The file holds both generations, the newer first; a file
+                // written under a larger ceiling (the desktop 100 000 a
+                // client ran before order 1586) comes in as one generation
+                // of this one.
+                hashes
+                    .into_iter()
+                    .take((packet_hash_cap / 2).max(1))
+                    .collect()
             }
             Err(e) => {
                 tracing::warn!("Failed to load packet_hashlist: {e}");
@@ -216,6 +217,7 @@ impl Storage {
             inner,
             ratchet_store,
             known_dest_entries: Arc::new(known_dest_entries),
+            known_dest_cap,
             packet_cache,
             packet_cache_prev: HashSet::new(),
             packet_hash_cap,
@@ -341,49 +343,6 @@ fn wallclock_secs_to_mono_ms(secs: f64, mono_offset_ms: u64) -> u64 {
     wallclock_ms.saturating_sub(mono_offset_ms)
 }
 
-/// When a known destination was last in evidence: its last use when that is
-/// later than when it was remembered (leviculum#49).
-fn known_dest_recency(entry: &KnownDestEntry) -> f64 {
-    match entry.use_state {
-        KnownDestUseState::Used(used) => used.max(entry.timestamp),
-        _ => entry.timestamp,
-    }
-}
-
-/// Hold a known-destinations map to `cap` (leviculum#49) and return how many
-/// entries were pruned.
-///
-/// Capacity pressure falls on the unretained population only. A retained
-/// entry is the application's word that the destination is load-bearing
-/// (Python's `-1` use-state), so it is never pruned, even past the cap. The
-/// rest are ranked with `preferred` entries first (the destinations the node
-/// holds live right now), then most recent, and the tail beyond the room left
-/// is dropped. Recency, not hash order and not a clock-based expiry: nothing
-/// is pruned while the map fits.
-fn prune_known_destinations(
-    entries: &mut BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>,
-    cap: usize,
-    preferred: impl Fn(&[u8; TRUNCATED_HASHBYTES]) -> bool,
-) -> usize {
-    if entries.len() <= cap {
-        return 0;
-    }
-    let is_retained = |e: &KnownDestEntry| matches!(e.use_state, KnownDestUseState::Retained);
-    let retained = entries.values().filter(|e| is_retained(e)).count();
-    let room = cap.saturating_sub(retained);
-    let mut ranked: Vec<([u8; TRUNCATED_HASHBYTES], bool, f64)> = entries
-        .iter()
-        .filter(|(_, e)| !is_retained(e))
-        .map(|(hash, e)| (*hash, preferred(hash), known_dest_recency(e)))
-        .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
-    let before = entries.len();
-    for (hash, _, _) in ranked.into_iter().skip(room) {
-        entries.remove(&hash);
-    }
-    before - entries.len()
-}
-
 /// Atomic write: write to .tmp then rename into place.
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let temp_path = path.with_extension("tmp");
@@ -467,9 +426,15 @@ pub fn narrow_secret_mode(path: &Path) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        // Both errors name the file: an EPERM on a key another user owns
+        // (a client tool reading `/etc/reticulum`'s identity) said only
+        // "Operation not permitted" before (order 1675).
+        let named =
+            |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let mode = std::fs::metadata(path).map_err(named)?.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(named)?;
             tracing::warn!(
                 "{} holds a private key and was mode {mode:03o}; narrowed to 600",
                 path.display()
@@ -569,6 +534,85 @@ pub(crate) type FlushIoHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 /// for this node, minus the entries only another process wrote there.
 type KnownDestTable = BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>;
 
+/// The `cap` entries of `table` with the newest announce time (order 1585).
+///
+/// The fold adds every identity the node remembered since the last flush
+/// and dropped none, so without this the table grew with uptime while the
+/// identity table beside it stayed at its ceiling. What goes here stays in
+/// the file: the next flush merges it back from disk.
+///
+/// +ciris (leviculum#49): a pinned entry (`KnownDestUseState::Retained`) is
+/// kept whatever its age, beside the newest `cap` of the rest. A pin is the
+/// application's word that it needs the identity recallable now (CIRISEdge
+/// encrypts to pinned contacts), so leaving it on disk only is not enough.
+/// Pins count against `cap`, as in the core's identity table; pins alone past
+/// it keep the newest `cap` of them, and the rest stay in the file.
+fn newest_known_destinations(table: KnownDestTable, cap: usize) -> KnownDestTable {
+    let pinned = |e: &KnownDestEntry| matches!(e.use_state, KnownDestUseState::Retained);
+    if table.values().any(pinned) {
+        let (pins, rest): (KnownDestTable, KnownDestTable) =
+            table.into_iter().partition(|(_, e)| pinned(e));
+        let mut kept = newest_by_announce(pins, cap);
+        kept.extend(newest_by_announce(rest, cap.saturating_sub(kept.len())));
+        return kept;
+    }
+    newest_by_announce(table, cap)
+}
+
+fn newest_by_announce(table: KnownDestTable, cap: usize) -> KnownDestTable {
+    if table.len() <= cap {
+        return table;
+    }
+    if cap == 0 {
+        return KnownDestTable::new();
+    }
+    let mut stamps: Vec<f64> = table.values().map(|entry| entry.timestamp).collect();
+    let cut = stamps.len() - cap;
+    stamps.select_nth_unstable_by(cut, f64::total_cmp);
+    let floor = stamps[cut];
+    // Entries at the floor's own time are kept until the cap is met.
+    let mut room = cap - table.values().filter(|e| e.timestamp > floor).count();
+    table
+        .into_iter()
+        .filter(|(_, entry)| {
+            if entry.timestamp > floor {
+                return true;
+            }
+            if entry.timestamp == floor && room > 0 {
+                room -= 1;
+                return true;
+            }
+            false
+        })
+        .collect()
+}
+
+/// The newest `cap` entries of the `known_destinations` file, read one entry
+/// at a time and trimmed whenever twice `cap` are held, so loading costs
+/// memory in the cap and not in the file (order 1749: the whole-file decode
+/// this replaced held 59 MB for the mailbox's 9 MB file). An unreadable file
+/// loads as far as it reads.
+fn load_newest_known_destinations(base_path: &Path, cap: usize) -> KnownDestTable {
+    let mut table = KnownDestTable::new();
+    let mut read = 0usize;
+    let trim_at = cap.saturating_mul(2).max(1);
+    let loaded = FileKnownDestinationsStore::new(base_path).for_each(|hash, entry| {
+        read += 1;
+        table.insert(hash, entry);
+        if table.len() >= trim_at {
+            table = newest_known_destinations(std::mem::take(&mut table), cap);
+        }
+        Ok(())
+    });
+    if let Err(e) = loaded {
+        tracing::warn!("Failed to load known_destinations: {e}");
+    }
+    if read > 0 {
+        tracing::info!("Loaded {read} known destinations from storage");
+    }
+    newest_known_destinations(table, cap)
+}
+
 /// Runtime identities read per core-lock hold when a flush collects them
 /// (leviculum#563).
 ///
@@ -616,10 +660,10 @@ struct IdentityFlush {
     /// The last destination hash collected, where the next slice resumes.
     cursor: Option<[u8; TRUNCATED_HASHBYTES]>,
     collected: bool,
-    /// The identity cap the file is held to (leviculum#49).
-    cap: usize,
-    /// Cumulative identity-cap evictions, reported with a prune.
-    evictions: u64,
+    /// How many entries only the file holds stay in it (order 1749): the
+    /// node's own memory cap, so the file holds at most twice what memory
+    /// does.
+    disk_only_cap: usize,
 }
 
 /// What a flush needs of one runtime identity, read under the lock.
@@ -677,44 +721,15 @@ impl FlushSnapshot {
         if let Some(flush) = self.identities {
             debug_assert!(flush.collected, "a flush writes only collected identities");
             let generation = flush.generation;
-            let (cap, evictions) = (flush.cap, flush.evictions);
-            // The destinations the node holds live, preferred when the table
-            // is held to the cap (leviculum#49).
-            let ours: std::collections::HashSet<[u8; TRUNCATED_HASHBYTES]> =
-                flush.runtime.iter().map(|r| r.hash).collect();
-            let mut merged = fold_runtime_identities(&flush.table, flush.runtime, flush.timestamp);
+            let merged = fold_runtime_identities(&flush.table, flush.runtime, flush.timestamp);
             drop(flush.table);
-            let pruned = prune_known_destinations(&mut merged, cap, |h| ours.contains(h));
 
             // Merge with on-disk entries (preserving entries added by other
-            // processes, matching Python behavior). They go into the file
-            // only: the in-memory table never held them, so they leave it
-            // again after the write. Then hold the result to the cap
-            // (leviculum#49): an entry evicted under pressure is the least
-            // recent, so it falls off the file instead of coming back from it
-            // at every flush. Below the cap nothing changes.
-            let mut kd_store = FileKnownDestinationsStore::new(&self.base_path);
-            let mut from_disk = Vec::new();
-            if let Ok(disk_entries) = kd_store.load_all() {
-                for (hash, entry) in disk_entries {
-                    if let std::collections::btree_map::Entry::Vacant(slot) = merged.entry(hash) {
-                        slot.insert(entry);
-                        from_disk.push(hash);
-                    }
-                }
-            }
-            let pruned = pruned + prune_known_destinations(&mut merged, cap, |h| ours.contains(h));
-            from_disk.retain(|h| merged.contains_key(h));
-            if pruned > 0 {
-                tracing::warn!(
-                    event = "KNOWN_DESTINATIONS_PRUNED",
-                    pruned,
-                    kept = merged.len(),
-                    cap,
-                    identity_evictions = evictions,
-                );
-            }
-            match kd_store.save_all(&merged) {
+            // processes, matching Python behavior) by streaming the old file
+            // into the new one (order 1749). They go into the file only: the
+            // in-memory table never held them.
+            let kd_store = FileKnownDestinationsStore::new(&self.base_path);
+            match kd_store.merge_and_save(&merged, flush.timestamp, flush.disk_only_cap) {
                 Ok(()) => {
                     outcome.identities_written = Some(generation);
                     tracing::debug!("Saved {} known destinations to storage", merged.len());
@@ -722,9 +737,6 @@ impl FlushSnapshot {
                 Err(e) => {
                     tracing::error!("Failed to save known_destinations: {e}");
                 }
-            }
-            for hash in &from_disk {
-                merged.remove(hash);
             }
             outcome.known_dest_entries = Some((generation, merged));
         }
@@ -834,8 +846,7 @@ impl Storage {
             runtime: Vec::new(),
             cursor: None,
             collected: false,
-            cap: self.inner.caps().identity_cap,
-            evictions: self.inner.identity_evictions(),
+            disk_only_cap: self.known_dest_cap,
         });
 
         let packet_hashes = if self.packet_hashes_dirty {
@@ -924,6 +935,7 @@ impl Storage {
         outcome.known_dest_entries.map(|(generation, folded)| {
             self.remembered_at
                 .retain(|_, (_, stamped)| *stamped > generation);
+            let folded = newest_known_destinations(folded, self.known_dest_cap);
             std::mem::replace(&mut self.known_dest_entries, Arc::new(folded))
         })
     }
@@ -947,7 +959,10 @@ impl leviculum_core::traits::Storage for Storage {
     }
     fn add_packet_hash(&mut self, hash: [u8; 32]) {
         self.packet_cache.insert(hash);
-        if self.packet_cache.len() > self.packet_hash_cap / 2 {
+        // At the ceiling, not one past it: the census states half the cap
+        // as each generation's ceiling, and the growth soak found the
+        // previous generation one over it (order 1586).
+        if self.packet_cache.len() >= (self.packet_hash_cap / 2).max(1) {
             std::mem::swap(&mut self.packet_cache, &mut self.packet_cache_prev);
             self.packet_cache.clear();
         }
@@ -1228,6 +1243,18 @@ impl leviculum_core::traits::Storage for Storage {
         self.identities_gen = self.identities_gen.wrapping_add(1);
         self.remembered_at
             .insert(dest_hash, (unix_timestamp_secs(), self.identities_gen));
+        // Bounded by the identity table (order 1585): the stamps were
+        // dropped only by the hourly flush's fold, so a node hearing the
+        // network's announces held one for every identity of the hour,
+        // 111 kB/min at 40 announces a second in the mailbox soak. A stamp
+        // whose identity the table let go of is never folded, since the
+        // fold reads the table; once the stamps reach twice the table's
+        // ceiling those go, which keeps the work amortised.
+        if self.remembered_at.len() > 2 * self.known_dest_cap.max(1) {
+            let inner = &self.inner;
+            self.remembered_at
+                .retain(|hash, _| inner.get_identity(hash).is_some());
+        }
     }
 
     // Cleanup
@@ -1334,13 +1361,19 @@ impl leviculum_core::traits::Storage for Storage {
                 _ => row,
             })
             .collect();
-        counts.push(CollectionCount::unbounded(
+        // Both are bounded since order 1585, and the census says so with
+        // the rule's own figures (order 1586): memory keeps the newest
+        // `known_dest_cap` known destinations at load and after every
+        // flush, and the stamps go once they pass twice that.
+        counts.push(CollectionCount::bounded(
             "known_dest_entries",
             self.known_dest_entries.len(),
+            self.known_dest_cap,
         ));
-        counts.push(CollectionCount::unbounded(
+        counts.push(CollectionCount::bounded(
             "remembered_at",
             self.remembered_at.len(),
+            2 * self.known_dest_cap.max(1),
         ));
         counts
     }
@@ -1551,11 +1584,31 @@ impl leviculum_core::traits::Storage for Storage {
 mod tests {
     use super::*;
 
+    /// Order 1675: a key the tool cannot inspect or narrow names its path.
+    /// Before, `lnpath` on a host with another user's `/etc/reticulum`
+    /// printed "failed to load identity: Operation not permitted" and no
+    /// file. A missing file stands in for the EPERM: same `?`, same wrap.
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
+    #[test]
+    fn narrow_secret_mode_errors_name_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("transport_identity");
+        let err = narrow_secret_mode(&path).expect_err("no such file");
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "{err}"
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
     use crate::file_ratchet_store::{RATCHETKEYS_DIR, RATCHETS_DIR};
     use crate::known_destinations::{
-        decode_known_destinations, encode_known_destinations, KNOWN_DESTINATIONS_FILE,
+        decode_known_destinations, disk_only_entry_is_kept, encode_known_destinations,
+        write_known_destination, write_known_destinations_header, KNOWN_DESTINATIONS_FILE,
     };
     use crate::packet_hashlist::{encode_packet_hashlist, PACKET_HASHLIST_FILE};
+    use leviculum_core::known_destinations::KnownDestinationsStore;
 
     // ─── leviculum#49: known-destinations capacity backpressure ─────────
 
@@ -1580,11 +1633,6 @@ mod tests {
         }
     }
 
-    fn read_kd_file(path: &Path) -> BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry> {
-        let bytes = std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).expect("file written");
-        decode_known_destinations(&bytes).expect("file decodes")
-    }
-
     #[test]
     fn identity_evictions_counts_cap_evictions_through_the_std_storage() {
         let path =
@@ -1602,39 +1650,6 @@ mod tests {
             "two pushed out of a cap of one"
         );
         let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn pruning_keeps_retained_then_live_then_most_recent() {
-        let mut m = BTreeMap::new();
-        m.insert(kd_hash(1), kd_entry(1.0, KnownDestUseState::Retained));
-        for n in 2..=6u8 {
-            m.insert(
-                kd_hash(n),
-                kd_entry(f64::from(n), KnownDestUseState::NeverUsed),
-            );
-        }
-        // An old entry used recently ranks by its use, not its age.
-        m.insert(kd_hash(7), kd_entry(0.5, KnownDestUseState::Used(100.0)));
-
-        // Nothing is pruned while the map fits.
-        let mut fits = m.clone();
-        assert_eq!(prune_known_destinations(&mut fits, 7, |_| false), 0);
-
-        // Cap 4: the pin, the live entry, then the two most recent.
-        let pruned = prune_known_destinations(&mut m, 4, |h| *h == kd_hash(2));
-        assert_eq!(pruned, 3);
-        let kept: std::collections::BTreeSet<_> = m.keys().copied().collect();
-        let want: std::collections::BTreeSet<_> =
-            [kd_hash(1), kd_hash(2), kd_hash(7), kd_hash(6)].into();
-        assert_eq!(kept, want);
-
-        // A pin is never pruned, even when pins alone exceed the cap.
-        let mut pins = BTreeMap::new();
-        for n in 1..=3u8 {
-            pins.insert(kd_hash(n), kd_entry(1.0, KnownDestUseState::Retained));
-        }
-        assert_eq!(prune_known_destinations(&mut pins, 1, |_| false), 0);
     }
 
     #[test]
@@ -1666,62 +1681,6 @@ mod tests {
             !known(2) && !known(3) && !known(4),
             "the oldest unpinned go"
         );
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn a_flush_holds_the_file_to_the_cap_and_evictions_stay_evicted() {
-        let path =
-            std::env::temp_dir().join(format!("reticulum_test_49_flush_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        let mut m = BTreeMap::new();
-        m.insert(kd_hash(1), kd_entry(1.0, KnownDestUseState::Retained));
-        for n in 2..=6u8 {
-            m.insert(
-                kd_hash(n),
-                kd_entry(f64::from(n), KnownDestUseState::NeverUsed),
-            );
-        }
-        std::fs::write(
-            path.join(KNOWN_DESTINATIONS_FILE),
-            encode_known_destinations(&m).unwrap(),
-        )
-        .unwrap();
-
-        {
-            let mut storage = Storage::new_with_caps(&path, caps_with_identity_cap(3)).unwrap();
-            // Two fresh announces push two more out of the runtime cap.
-            for n in [0x70u8, 0x71] {
-                let id = Identity::generate(&mut rand_core::OsRng);
-                CoreStorage::set_identity(&mut storage, kd_hash(n), id);
-            }
-            CoreStorage::flush(&mut storage);
-            let file = read_kd_file(&path);
-            assert_eq!(
-                file.len(),
-                3,
-                "the file is held to the cap: {:?}",
-                file.keys()
-            );
-            assert!(file.contains_key(&kd_hash(1)), "the pin is written back");
-            assert!(matches!(
-                file[&kd_hash(1)].use_state,
-                KnownDestUseState::Retained
-            ));
-            assert!(file.contains_key(&kd_hash(0x70)) && file.contains_key(&kd_hash(0x71)));
-
-            // A second flush does not bring the evicted back from the file.
-            let id = Identity::generate(&mut rand_core::OsRng);
-            CoreStorage::set_identity(&mut storage, kd_hash(0x71), id);
-            CoreStorage::flush(&mut storage);
-            let again = read_kd_file(&path);
-            assert_eq!(again.len(), 3);
-            assert!(
-                !again.contains_key(&kd_hash(6)),
-                "an evicted entry stays evicted"
-            );
-        }
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2077,6 +2036,125 @@ mod tests {
         );
     }
 
+    /// Order 1585: memory keeps the newest `identity_cap` known
+    /// destinations, at load and after every flush. Order 1749: the file
+    /// keeps what memory holds and, of the rest, what the reference's cull
+    /// keeps: here the pinned one, not the never-used one silent since 1970.
+    #[test]
+    fn memory_keeps_the_newest_known_destinations_and_the_file_what_the_cull_keeps() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let path = tempfile::tempdir().unwrap();
+        let caps = TableCaps {
+            identity_cap: 3,
+            ..TableCaps::desktop()
+        };
+        let entry = |at: f64| KnownDestEntry {
+            timestamp: at,
+            packet_hash: vec![0; PACKET_HASH_LEN],
+            public_key: Identity::generate(&mut rand_core::OsRng).public_key_bytes(),
+            app_data: None,
+            use_state: KnownDestUseState::default(),
+        };
+        {
+            let mut storage = Storage::new_with_caps(&path, TableCaps::desktop()).unwrap();
+            for n in 0..5u8 {
+                let mut e = entry(1000.0 + f64::from(n));
+                if n == 0 {
+                    e.use_state = KnownDestUseState::Retained;
+                }
+                Arc::make_mut(&mut storage.known_dest_entries).insert([n; TRUNCATED_HASHBYTES], e);
+            }
+            storage.identities_dirty = true;
+            CoreStorage::flush(&mut storage);
+        }
+        let mut storage = Storage::new_with_caps(&path, caps).unwrap();
+        let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
+        // +ciris (leviculum#49): the pin stays in memory too, inside the cap.
+        assert_eq!(kept, [0, 3, 4], "the pin and the two newest stay in memory");
+        // Three fresh identities in a run, then a flush: still three.
+        for n in 10..13u8 {
+            CoreStorage::set_identity(
+                &mut storage,
+                [n; TRUNCATED_HASHBYTES],
+                Identity::generate(&mut rand_core::OsRng),
+            );
+        }
+        CoreStorage::flush(&mut storage);
+        assert_eq!(storage.known_dest_entries.len(), 3);
+        let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
+        assert_eq!(
+            kept,
+            [0, 11, 12],
+            "the fresh ones replace the old; the pin stays"
+        );
+        // The file: what the flush held, the pin among them. +ciris
+        // (leviculum#49): the pin takes a slot of the cap, so 2 never comes
+        // back into memory and the cull drops it as never used, and 10 is
+        // evicted from the identity table before the flush folds it.
+        let on_disk = FileKnownDestinationsStore::new(path.path())
+            .load_all()
+            .unwrap();
+        let on_disk: Vec<u8> = on_disk.keys().map(|k| k[0]).collect();
+        assert_eq!(
+            on_disk,
+            [0, 3, 4, 11, 12],
+            "the pinned entry stays, the stale never-used one goes"
+        );
+    }
+
+    /// Order 1585: the remember stamps are held to what the identity
+    /// table still holds, not to an hour of announces.
+    #[test]
+    fn remember_stamps_are_held_to_the_identity_table() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let path = tempfile::tempdir().unwrap();
+        let caps = TableCaps {
+            identity_cap: 3,
+            ..TableCaps::desktop()
+        };
+        let mut storage = Storage::new_with_caps(&path, caps).unwrap();
+        for n in 0..50u8 {
+            CoreStorage::set_identity(
+                &mut storage,
+                [n; TRUNCATED_HASHBYTES],
+                Identity::generate(&mut rand_core::OsRng),
+            );
+        }
+        assert!(
+            storage.remembered_at.len() <= 6,
+            "{} stamps for a table of 3",
+            storage.remembered_at.len()
+        );
+        // The newest identity keeps its stamp for the fold.
+        assert!(storage
+            .remembered_at
+            .contains_key(&[49; TRUNCATED_HASHBYTES]));
+    }
+
+    #[test]
+    fn newest_known_destinations_keeps_ties_up_to_the_cap() {
+        let entry = |at: f64| KnownDestEntry {
+            timestamp: at,
+            packet_hash: vec![0; PACKET_HASH_LEN],
+            public_key: [0; 64],
+            app_data: None,
+            use_state: KnownDestUseState::default(),
+        };
+        let table: KnownDestTable = (0..6u8)
+            .map(|n| {
+                (
+                    [n; TRUNCATED_HASHBYTES],
+                    entry(if n < 4 { 5.0 } else { 9.0 }),
+                )
+            })
+            .collect();
+        assert_eq!(newest_known_destinations(table.clone(), 3).len(), 3);
+        assert_eq!(newest_known_destinations(table.clone(), 6).len(), 6);
+        assert_eq!(newest_known_destinations(table, 0).len(), 0);
+    }
+
     #[test]
     fn test_flush_updates_timestamp_on_existing_entry() {
         use leviculum_core::traits::Storage as CoreStorage;
@@ -2419,11 +2497,12 @@ mod tests {
         // Override cap to a small value for testing
         storage.packet_hash_cap = 10;
 
-        // Add 6 hashes (exceeds half of 10 = 5), triggers rotation
+        // Add 6 hashes: the 5th fills half of 10 and rotates
         for i in 0..6u8 {
             let mut hash = [0u8; 32];
             hash[0] = i;
             CoreStorage::add_packet_hash(&mut storage, hash);
+            assert!(storage.packet_cache.len() < 5 && storage.packet_cache_prev.len() <= 5);
         }
 
         // All 6 should still be findable (5 in prev, 1 in current after rotation)
@@ -2436,13 +2515,12 @@ mod tests {
             );
         }
 
-        // Current should have 1 entry (the 6th hash, after rotation cleared current)
-        // Wait, 6th hash triggers rotation, then gets inserted? No:
-        // add_packet_hash inserts first, then checks. So after inserting 6th:
-        // current has 6, exceeds 5, rotation happens: current(6) -> prev, current cleared.
-        // So current=0, prev=6. The 6th hash is in prev.
-        assert_eq!(storage.packet_cache.len(), 0);
-        assert_eq!(storage.packet_cache_prev.len(), 6);
+        // add_packet_hash inserts first, then checks: the 5th insert fills
+        // the generation to its ceiling of 5 and rotates it, so no
+        // generation ever holds more than the ceiling the census states
+        // (order 1586); the 6th lands in the fresh one.
+        assert_eq!(storage.packet_cache.len(), 1);
+        assert_eq!(storage.packet_cache_prev.len(), 5);
     }
 
     #[test]
@@ -2464,12 +2542,10 @@ mod tests {
 
             CoreStorage::add_packet_hash(&mut storage, hash_a);
             CoreStorage::add_packet_hash(&mut storage, hash_b);
-            // After 2 inserts: current has 2, but cap/2=2, so 2 > 2 is false, no rotation yet
-            // Actually: len() > cap/2 means 2 > 2 which is false, no rotation
-            // Add a third to trigger rotation
+            // The second insert fills cap/2 = 2 and rotates: prev=[A,B].
             let hash_c = [0xCC; 32];
             CoreStorage::add_packet_hash(&mut storage, hash_c);
-            // Now current had 3, 3 > 2, rotation: prev=[A,B,C], current=[]
+            // current=[C]
 
             CoreStorage::flush(&mut storage);
         }
@@ -2738,14 +2814,23 @@ mod tests {
                     use_state: KnownDestUseState::default(),
                 });
         }
-        let mut merged = entries.clone();
+        // The file since order 1749: the table in key order, then the
+        // entries only the old file had that the cull keeps, in file order.
         let disk = FileKnownDestinationsStore::new(&storage.base_path)
             .load_all()
             .unwrap_or_default();
-        for (hash, entry) in disk {
-            merged.entry(hash).or_insert(entry);
+        let kept: Vec<_> = disk
+            .iter()
+            .filter(|(hash, entry)| {
+                !entries.contains_key(*hash) && disk_only_entry_is_kept(entry, timestamp)
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        write_known_destinations_header(&mut bytes, entries.len() + kept.len()).unwrap();
+        for (hash, entry) in entries.iter().chain(kept) {
+            write_known_destination(&mut bytes, hash, entry).unwrap();
         }
-        (entries, encode_known_destinations(&merged).unwrap())
+        (entries, bytes)
     }
 
     /// leviculum#563: the sliced, off-lock flush writes byte for byte the
@@ -2812,18 +2897,24 @@ mod tests {
                 _ => {}
             }
         }
-        // Another process's entry, on disk only.
+        // Another process's entries, on disk only: one the cull keeps
+        // (pinned) and one it drops (never used, silent since 1970).
         let mut foreign = BTreeMap::new();
-        foreign.insert(
-            [0xF0; TRUNCATED_HASHBYTES],
-            KnownDestEntry {
-                timestamp: 5.0,
-                packet_hash: vec![0xF0; PACKET_HASH_LEN],
-                public_key: [0xF0; IDENTITY_KEY_SIZE],
-                app_data: Some(b"foreign".to_vec()),
-                use_state: KnownDestUseState::default(),
-            },
-        );
+        for (tag, use_state) in [
+            (0xF0, KnownDestUseState::Retained),
+            (0xF1, KnownDestUseState::NeverUsed),
+        ] {
+            foreign.insert(
+                [tag; TRUNCATED_HASHBYTES],
+                KnownDestEntry {
+                    timestamp: 5.0,
+                    packet_hash: vec![tag; PACKET_HASH_LEN],
+                    public_key: [tag; IDENTITY_KEY_SIZE],
+                    app_data: Some(b"foreign".to_vec()),
+                    use_state,
+                },
+            );
+        }
         storage
             .write_root(
                 KNOWN_DESTINATIONS_FILE,
@@ -2859,5 +2950,47 @@ mod tests {
         assert!(!storage
             .known_dest_entries
             .contains_key(&[0xF0; TRUNCATED_HASHBYTES]));
+        let file = decode_known_destinations(&written).unwrap();
+        assert!(
+            file.contains_key(&[0xF0; TRUNCATED_HASHBYTES]),
+            "pinned foreign kept"
+        );
+        assert!(
+            !file.contains_key(&[0xF1; TRUNCATED_HASHBYTES]),
+            "stale foreign dropped"
+        );
+    }
+
+    /// Order 1586: a hash list written under a larger ceiling (a client
+    /// that ran the desktop 100 000 before) loads as one generation of
+    /// this one, not as a generation the census reports over its ceiling.
+    #[test]
+    fn a_hash_list_from_a_larger_ceiling_loads_at_this_one() {
+        use leviculum_core::traits::Storage as CoreStorage;
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_hash_ceiling_")
+            .tempdir()
+            .unwrap();
+        {
+            let mut storage = Storage::new(&path).unwrap();
+            for i in 0..1000u32 {
+                let mut hash = [0u8; 32];
+                hash[..4].copy_from_slice(&i.to_be_bytes());
+                CoreStorage::add_packet_hash(&mut storage, hash);
+            }
+            CoreStorage::flush(&mut storage);
+        }
+        let storage = Storage::new_with_limits(&path, TableCaps::desktop(), 64).unwrap();
+        assert_eq!(storage.packet_cache.len(), 32);
+        for row in CoreStorage::collection_counts(&storage) {
+            if let Some(cap) = row.capacity {
+                assert!(
+                    row.entries <= cap,
+                    "{} {} over {cap}",
+                    row.name,
+                    row.entries
+                );
+            }
+        }
     }
 }

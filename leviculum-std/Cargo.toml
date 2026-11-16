@@ -12,7 +12,7 @@ description = "Standard library extensions for reticulum - networking, file I/O,
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [features]
-default = ["compression", "ble", "serial"]
+default = ["compression", "ble", "serial", "i2p", "websocket"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)
 compression = ["leviculum-core/compression"]
 # The Columba BLE interface (`interfaces::ble`, `BLEInterface`): bluer and
@@ -24,7 +24,12 @@ ble = ["dep:bluer", "dep:dbus"]
 # `RNodeMultiInterface`, `KISSInterface`/`AX25KISSInterface` and
 # `PipeInterface`, and tokio-serial under them. Off, each of those sections is
 # a config error naming this feature (#463).
-serial = ["dep:tokio-serial"]
+serial = ["dep:tokio-serial", "dep:leviculum-serial-mux"]
+# `I2PInterface` (`interfaces::i2p`), SAM v3 spoken directly over tokio. It
+# gates no dependency, only the interface's code, so a minimal build can leave
+# it out (1576); off, an `I2PInterface` section is a config error naming this
+# feature, as for the two families above.
+i2p = []
 # Off by default. The census gap line subtracts the counting shim's measured
 # live bytes (`heap_accounting::live_bytes`) instead of the modelled total.
 # Only meaningful in a binary that installs `CountingAllocator` as its global
@@ -33,6 +38,13 @@ serial = ["dep:tokio-serial"]
 # (`LEVICULUM_HEAP_SAMPLE`, 508), which needs `backtrace` to walk and name the
 # stacks; a build without the feature does not link it.
 heap-accounting = ["dep:backtrace"]
+# +ciris (#109): `WebSocketServerInterface` and `WebSocketClientInterface`
+# (`interfaces::websocket`), one Reticulum packet per binary message, so a
+# browser node can reach the mesh. The client speaks `wss://` through rustls
+# on ring with the webpki roots, the TLS stack the rest of the workspace
+# uses; no native-tls, no system CA files. Off, both sections are a config
+# error naming this feature.
+websocket = ["dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots"]
 # INTERNAL. Enables the `cf_*` test targets, which exist to NOT compile: they
 # are the enforcement of the two prohibitions the core-lock budget places on
 # anything the event loop calls (Codeberg #196). Never enable it in a build you
@@ -55,6 +67,9 @@ socket2.workspace = true
 libc.workspace = true
 # `serial` only; see it.
 tokio-serial = { workspace = true, optional = true }
+# `serial` only: the single-UART contract's flow-byte escape and strip, the
+# same functions the board's writer uses (`interfaces::serial_mux`).
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux", optional = true }
 tracing = { workspace = true, features = ["std"] }
 # The metrics facade (leviculum#77, CIRISServer FSD UNIFIED_TELEMETRY §5):
 # libraries emit through it, the host installs the recorder and exporter.
@@ -80,6 +95,7 @@ serde_json = "1"
 sha2 = { workspace = true, features = ["std"] }
 hmac.workspace = true
 md-5.workspace = true
+rmp = { workspace = true, features = ["std"] }
 rmp-serde.workspace = true
 rmpv.workspace = true
 toml.workspace = true
@@ -122,6 +138,10 @@ critical-section = { version = "1", features = ["std"] }
 # `heap-accounting` only: the call-site sampler walks the stack without
 # allocating (`trace_unsynchronized`) and names the frames at census time.
 backtrace = { version = "0.3", optional = true }
+# `websocket` only (#109); see it.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 # md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
 # package name as unused because grepping the sources finds `md5::` but
@@ -153,7 +173,9 @@ tempfile = "3"
 # lnomad is the NomadNet browser backend; its shared-instance fetch path is
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
-lnomad = { path = "../lnomad", default-features = false }
+# `std` is asked for by name: since slice 4a the fetch module sits behind it,
+# and it adds neither interface family, so the minimal cut is unchanged.
+lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 # The `lncp` transfer logic, driven directly by the interop suite so the test
 # exercises the tool's own push loop rather than a copy of it. Dev-only cycle,
 # same shape as lnomad above.

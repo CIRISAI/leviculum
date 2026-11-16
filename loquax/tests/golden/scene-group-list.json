@@ -1,0 +1,462 @@
+{
+  "card": null,
+  "chat": null,
+  "chips": [],
+  "class": "Compact",
+  "list": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "list",
+      "role": "list",
+      "selected": false
+    },
+    "empty": {
+      "args": [],
+      "key": "no_conversations"
+    },
+    "id": "list",
+    "rows": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Lew, Lew invited you to Verein"
+          },
+          "resource": "row_41414141414141414141414141414141",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65] }",
+          "label_key": "scene_open"
+        },
+        "at": 1800000240,
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "L",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_41414141414141414141414141414141",
+        "kind": "text",
+        "last": "Lew invited you to Verein",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": null,
+          "state": "stale"
+        },
+        "mark": null,
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Lew",
+        "ours": false,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 2,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Verein"
+          },
+          "resource": "row_52525252525252525252525252525252",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82] }",
+          "label_key": "scene_open"
+        },
+        "at": null,
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "V",
+          "ring": null
+        },
+        "draft": null,
+        "group": {
+          "members": 0,
+          "standing": "invited",
+          "words": {
+            "args": [],
+            "key": "group_invitation"
+          }
+        },
+        "id": "row_52525252525252525252525252525252",
+        "kind": "",
+        "last": "",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": null,
+          "state": "stale"
+        },
+        "mark": null,
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Verein",
+        "ours": false,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Familie, Anna: Danke!"
+          },
+          "resource": "row_51515151515151515151515151515151",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81] }",
+          "label_key": "scene_open"
+        },
+        "at": 1800000180,
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "3",
+          "ring": null
+        },
+        "draft": null,
+        "group": {
+          "members": 3,
+          "standing": "joined",
+          "words": {
+            "args": [
+              3
+            ],
+            "key": "group_member_count"
+          }
+        },
+        "id": "row_51515151515151515151515151515151",
+        "kind": "text",
+        "last": "Anna: Danke!",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": null,
+          "state": "stale"
+        },
+        "mark": null,
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Familie",
+        "ours": false,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Bob"
+          },
+          "resource": "row_43434343434343434343434343434343",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67] }",
+          "label_key": "scene_open"
+        },
+        "at": null,
+        "avatar": {
+          "bg": "2f7a6e",
+          "fg": "ffffff",
+          "initials": "B",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_43434343434343434343434343434343",
+        "kind": "",
+        "last": "",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": null,
+          "state": "stale"
+        },
+        "mark": null,
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Bob",
+        "ours": false,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      }
+    ]
+  },
+  "screen": "chats",
+  "sheet": null,
+  "tabs": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "tabs",
+      "role": "tab_bar",
+      "selected": false
+    },
+    "active": "Chats",
+    "id": "tabs",
+    "items": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [
+              1
+            ],
+            "key": "tab_chats_unread"
+          },
+          "resource": "tab_chats",
+          "role": "tab",
+          "selected": true
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Chats)",
+          "label_key": "tab_chats"
+        },
+        "badge": 1,
+        "id": "Chats",
+        "label": {
+          "args": [],
+          "key": "tab_chats"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "map"
+          },
+          "resource": "tab_map",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Map)",
+          "label_key": "map"
+        },
+        "badge": null,
+        "id": "Map",
+        "label": {
+          "args": [],
+          "key": "map"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
+      }
+    ]
+  },
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "Search",
+        "label_key": "search"
+      },
+      {
+        "enabled": true,
+        "intent": "NewConversation",
+        "label_key": "scene_new_conversation"
+      }
+    ],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
+      }
+    },
+    "title": {
+      "args": [],
+      "key": "tab_chats"
+    }
+  },
+  "whereabouts": null
+}

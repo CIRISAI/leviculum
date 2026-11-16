@@ -215,3 +215,47 @@ fn direct_delivery_to_a_departed_recipient_fails_when_paths_go_unanswered() {
     let elapsed = harness.run_to_failure(4 * failure_bound_ms());
     assert!(elapsed.is_some_and(|elapsed| elapsed <= failure_bound_ms()));
 }
+
+/// A direct leg to a recipient whose key this node never held (nobody
+/// announced it, so no path either) ends `Failed` after 60 s: each of the
+/// [`MAX_DELIVERY_ATTEMPTS`] attempts is refused as an unknown peer and
+/// waits [`DELIVERY_RETRY_WAIT_MS`], which the [`PROCESSING_INTERVAL_MS`]
+/// cadence of the router's passes rounds up to 12 s. The home node's answer
+/// bound (`loquax/src/home/outgoing.rs`, `ANSWER_SECS`) sits below this one
+/// (1331), so which of the two ends such a leg does not hang on the phase.
+#[test]
+fn a_direct_leg_to_a_recipient_nobody_announced_fails_after_sixty_seconds() {
+    let mut harness = Harness::new(false);
+    let recipient = LxmfNode::delivery_destination(identity(harness.recipient_seed))
+        .expect("recipient delivery destination");
+    let message = Message::create(
+        recipient.hash().into_bytes(),
+        [0x11; 16],
+        &identity(1),
+        WALL_UNIX as f64,
+        b"title".to_vec(),
+        b"to a recipient nobody announced".to_vec(),
+        Vec::new(),
+        DeliveryMethod::Direct,
+    )
+    .expect("message");
+    let id = message.message_id;
+    let output = harness
+        .router
+        .enqueue(&harness.node, message)
+        .expect("enqueue");
+    harness.events.extend(output.events);
+    harness.absorb_core(output.core);
+    let start = harness.clock.get();
+    while !harness.failed(&id) {
+        assert!(harness.clock.get() - start < 120_000, "no Failed in 120 s");
+        harness.step(250);
+    }
+    let rounded = DELIVERY_RETRY_WAIT_MS.div_ceil(PROCESSING_INTERVAL_MS) * PROCESSING_INTERVAL_MS;
+    assert_eq!(rounded, 12_000);
+    let elapsed = harness.clock.get() - start;
+    assert!(
+        elapsed.abs_diff(u64::from(MAX_DELIVERY_ATTEMPTS) * rounded) <= PROCESSING_INTERVAL_MS,
+        "failed after {elapsed} ms"
+    );
+}

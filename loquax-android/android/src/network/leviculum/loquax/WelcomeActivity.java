@@ -41,7 +41,10 @@ import java.util.Map;
  *
  * Beside the choice, "I already have a Loquax address": a backup line,
  * from its file, scanned off the paper or typed, and its passphrase, then the
- * phone's mailbox with that address.
+ * phone's mailbox with that address; a warning first when that address
+ * answers on another device right now (1281). And "Move from my old phone"
+ * (1281): the code the old phone's profile shows, scanned or pasted, then
+ * the phone's mailbox with everything the old one held.
  *
  * Shown while the phone neither holds a mailbox nor reads one; the first
  * screen sends it here. A code pasted for a computer's mailbox goes to the
@@ -56,11 +59,19 @@ public class WelcomeActivity extends Activity {
     private static final int STARTING = 3;
     private static final int ADDRESS = 4;
     private static final int RESTORE = 5;
+    /** Another device's mailbox (1264): a phone's "Link a device" code, or a computer's. */
+    private static final int JOINING = 6;
+    /** The old phone's mailbox to move here (1281): its "Move to a new phone" code. */
+    private static final int MOVING_IN = 7;
     private static final int ASK_NOTIFICATIONS = 1;
     private static final int ASK_BATTERY = 2;
     private static final int OPEN_BACKUP = 3;
     private static final int SCAN_CODE = 4;
     private static final int SCAN_BACKUP = 5;
+    private static final int SCAN_MOVE = 6;
+    /** The extra that opens a page directly; {@link #ADDRESS_PAGE} is the one there is. */
+    static final String SHOW = "show";
+    static final String ADDRESS_PAGE = "address";
 
     private ScrollView frame;
     private int page = CHOICE;
@@ -72,6 +83,11 @@ public class WelcomeActivity extends Activity {
     private String restore;
     private String passphrase;
     private EditText backupLine;
+    /** The old phone's move code (1281); null for no move. */
+    private String moving;
+    /** Restore though the address answers elsewhere: the user chose to after the warning (1281). */
+    private boolean anyway;
+    private EditText moveCode;
 
     /** Whether the phone holds a mailbox or reads one: then the first start is over. */
     static boolean settled(Activity screen) {
@@ -89,6 +105,12 @@ public class WelcomeActivity extends Activity {
         if (savedInstanceState != null) {
             page = savedInstanceState.getInt(PAGE, CHOICE);
             here = savedInstanceState.getBoolean(WHERE_HERE, true);
+        } else if (ADDRESS_PAGE.equals(getIntent().getStringExtra(SHOW))) {
+            // The address page of a session that runs: after the first
+            // join of a mailbox elsewhere (walk finding 13), and the device
+            // walk's way to the first start's QR (1263), in the debug APK,
+            // where this screen is exported.
+            page = ADDRESS;
         }
         // Recreated while starting or after: the session runs or ran in
         // the library; asking it again answers for the running one.
@@ -111,6 +133,9 @@ public class WelcomeActivity extends Activity {
         if (page == RESTORE) {
             failed = null;
             show(CHOICE);
+        } else if (page == JOINING || page == MOVING_IN) {
+            failed = null;
+            show(CHOICE);
         } else if (page == COMPUTER || page == BACKGROUND) {
             show(page == BACKGROUND && !here ? COMPUTER : CHOICE);
         } else {
@@ -128,7 +153,13 @@ public class WelcomeActivity extends Activity {
                 choice(body);
                 break;
             case COMPUTER:
-                computer(body);
+                computer(body, false);
+                break;
+            case JOINING:
+                computer(body, true);
+                break;
+            case MOVING_IN:
+                movingIn(body);
                 break;
             case BACKGROUND:
                 background(body);
@@ -148,13 +179,18 @@ public class WelcomeActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** Welcome, and where the mailbox lives; the phone's warnings while it is chosen. */
+    /**
+     * Welcome, and where the mailbox lives; the phone's warnings while it is chosen. One primary
+     * button, "Continue" whatever is chosen, and the three special ways below it as links (1448,
+     * walk finding 15: four equally grey buttons, the fourth cut off, the primary one renamed with
+     * the choice). Sized to fit a 5.6 inch phone without scrolling.
+     */
     private void choice(LinearLayout body) {
-        body.addView(text(getString(R.string.app_name), 30, R.color.text, true), matchWrap());
-        body.addView(gap(text(getString(R.string.welcome_tagline), 16, R.color.text_secondary,
-                false), 4, 24), matchWrap());
-        body.addView(text(getString(R.string.where_title), 22, R.color.text, true), matchWrap());
-        body.addView(gap(text(getString(R.string.where_text), 15, R.color.text, false), 8, 12),
+        body.addView(text(getString(R.string.app_name), 28, R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(R.string.welcome_tagline), 15, R.color.text_secondary,
+                false), 2, 16), matchWrap());
+        body.addView(text(getString(R.string.where_title), 21, R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(R.string.where_text), 15, R.color.text, false), 4, 4),
                 matchWrap());
         final RadioGroup group = new RadioGroup(this);
         final RadioButton phone = option(getString(R.string.where_phone));
@@ -166,24 +202,22 @@ public class WelcomeActivity extends Activity {
         body.addView(group, matchWrap());
         final LinearLayout warnings = new LinearLayout(this);
         warnings.setOrientation(LinearLayout.VERTICAL);
-        warnings.setPadding(dp(8), dp(12), 0, 0);
-        warnings.addView(text(getString(R.string.here_title), 17, R.color.text, true), matchWrap());
-        for (int line : new int[] {R.string.here_background, R.string.here_offline,
-                R.string.here_backup}) {
-            warnings.addView(gap(text("• " + getString(line), 15, R.color.text, false), 6, 0),
+        warnings.setPadding(dp(8), dp(4), 0, 0);
+        for (int line : new int[] {R.string.here_background, R.string.here_backup}) {
+            warnings.addView(gap(text("• " + getString(line), 14, R.color.text, false), 4, 0),
                     matchWrap());
         }
         body.addView(warnings, matchWrap());
         body.addView(gap(text(getString(R.string.where_later), 14, R.color.text_secondary,
-                false), 16, 8), matchWrap());
-        final Button next = button(getString(here ? R.string.use_this_phone : R.string.next));
-        body.addView(next, wrap());
+                false), 12, 12), matchWrap());
+        Button next = primary(getString(R.string.next));
+        next.setId(R.id.where_next);
+        body.addView(next, fullWidth());
         group.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(RadioGroup g, int checked) {
                 here = checked == phone.getId();
                 warnings.setVisibility(here ? View.VISIBLE : View.GONE);
-                next.setText(here ? R.string.use_this_phone : R.string.next);
             }
         });
         group.check(here ? phone.getId() : computer.getId());
@@ -191,17 +225,41 @@ public class WelcomeActivity extends Activity {
             @Override
             public void onClick(View v) {
                 restore = null;
+                moving = null;
                 show(here ? BACKGROUND : COMPUTER);
             }
         });
-        Button have = button(getString(R.string.have_address));
+        TextView join = link(getString(R.string.join_existing));
+        join.setId(R.id.where_join);
+        join.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                here = false;
+                restore = null;
+                moving = null;
+                show(JOINING);
+            }
+        });
+        body.addView(gap(join, 16, 10), matchWrap());
+        TextView move = link(getString(R.string.move_from_old));
+        move.setId(R.id.where_move);
+        move.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                restore = null;
+                failed = null;
+                show(MOVING_IN);
+            }
+        });
+        body.addView(move, matchWrap());
+        TextView have = link(getString(R.string.have_address));
         have.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 show(RESTORE);
             }
         });
-        body.addView(have, wrap());
+        body.addView(have, matchWrap());
     }
 
     /** An address from a backup: its line and its passphrase. */
@@ -257,6 +315,8 @@ public class WelcomeActivity extends Activity {
                 }
                 restore = line;
                 passphrase = secret.getText().toString();
+                moving = null;
+                anyway = false;
                 failed = null;
                 here = true;
                 show(BACKGROUND);
@@ -271,13 +331,68 @@ public class WelcomeActivity extends Activity {
         return at < 0 ? "" : text.substring(at).trim();
     }
 
-    /** The mailbox on a computer: what to do there, and the code it shows. */
-    private void computer(LinearLayout body) {
-        body.addView(text(getString(R.string.computer_title), 22, R.color.text, true), matchWrap());
-        body.addView(gap(text(getString(R.string.computer_text), 15, R.color.text, false), 8, 16),
-                matchWrap());
-        if (ScanActivity.available(this)) {
-            Button scan = button(getString(R.string.scan_code));
+    /**
+     * The mailbox on a computer: what to do there, and the code it shows; `joining`, a mailbox that
+     * already runs on another device (1264), whose "Link a device" shows the same code.
+     *
+     * The computer's way is three steps (1448, walk finding 15): the install page as a link that
+     * opens, the command as a block of its own in a fixed font that copies on a tap, and "a code
+     * appears there", which says where. Scanning is the primary button.
+     */
+    private void computer(LinearLayout body, boolean joining) {
+        body.addView(text(getString(joining ? R.string.join_existing : R.string.computer_title), 22,
+                R.color.text, true), matchWrap());
+        if (joining) {
+            body.addView(gap(text(getString(R.string.join_existing_text), 15, R.color.text, false),
+                    8, 16), matchWrap());
+        } else {
+            body.addView(gap(text(getString(R.string.computer_install), 15, R.color.text, false),
+                    12, 0), matchWrap());
+            final String site = getString(R.string.computer_install_link);
+            TextView open = link(site.replaceFirst("^https://", ""));
+            open.setId(R.id.computer_link);
+            open.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(site)));
+                    } catch (RuntimeException none) {
+                        // No browser: the address stays readable on screen.
+                    }
+                }
+            });
+            body.addView(open, matchWrap());
+            body.addView(gap(text(getString(R.string.computer_run), 15, R.color.text, false), 8, 6),
+                    matchWrap());
+            final String command = getString(R.string.computer_command);
+            TextView block = text(command, 16, R.color.text, false);
+            block.setId(R.id.computer_command);
+            block.setTypeface(Typeface.MONOSPACE);
+            block.setTextIsSelectable(true);
+            block.setBackgroundColor(getColor(R.color.bar));
+            block.setPadding(dp(12), dp(10), dp(12), dp(10));
+            block.setContentDescription(command);
+            block.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    android.content.ClipboardManager clipboard =
+                            getSystemService(android.content.ClipboardManager.class);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(
+                                android.content.ClipData.newPlainText("loquax", command));
+                        android.widget.Toast.makeText(WelcomeActivity.this,
+                                R.string.computer_command_copied,
+                                android.widget.Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+            body.addView(block, matchWrap());
+            body.addView(gap(text(getString(R.string.computer_code), 15, R.color.text, false), 8,
+                    16), matchWrap());
+        }
+        boolean scanning = ScanActivity.available(this);
+        if (scanning) {
+            Button scan = primary(getString(R.string.scan_code));
             scan.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -285,18 +400,28 @@ public class WelcomeActivity extends Activity {
                             .putExtra(ScanActivity.PREFIX, "lqxh1"), SCAN_CODE);
                 }
             });
-            body.addView(scan, wrap());
+            body.addView(scan, fullWidth());
         }
-        Button paste = button(getString(R.string.paste_code));
-        paste.setOnClickListener(new View.OnClickListener() {
+        View.OnClickListener pasting = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 startActivity(new Intent(WelcomeActivity.this, MainActivity.class)
                         .putExtra(MainActivity.JOIN, true));
             }
-        });
-        body.addView(paste, wrap());
-        Button until = button(getString(R.string.phone_until_then));
+        };
+        if (scanning) {
+            TextView paste = link(getString(R.string.paste_code));
+            paste.setOnClickListener(pasting);
+            body.addView(gap(paste, 12, 10), matchWrap());
+        } else {
+            Button paste = primary(getString(R.string.paste_code));
+            paste.setOnClickListener(pasting);
+            body.addView(paste, fullWidth());
+        }
+        if (joining) {
+            return;
+        }
+        TextView until = link(getString(R.string.phone_until_then));
         until.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -304,7 +429,61 @@ public class WelcomeActivity extends Activity {
                 show(BACKGROUND);
             }
         });
-        body.addView(until, wrap());
+        body.addView(until, matchWrap());
+    }
+
+    /**
+     * Move from the old phone (1281, walk finding 24): scan or paste the code its "Move to a new
+     * phone" shows; this phone becomes the mailbox with everything the old one held.
+     */
+    private void movingIn(LinearLayout body) {
+        body.addView(text(getString(R.string.move_from_old), 22, R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(R.string.move_from_old_text), 15, R.color.text, false), 8, 16),
+                matchWrap());
+        if (ScanActivity.available(this)) {
+            Button scan = button(getString(R.string.scan_code));
+            scan.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivityForResult(new Intent(WelcomeActivity.this, ScanActivity.class)
+                            .putExtra(ScanActivity.PREFIX, "lqxh1"), SCAN_MOVE);
+                }
+            });
+            body.addView(scan, wrap());
+        }
+        moveCode = new EditText(this);
+        moveCode.setId(R.id.move_paste);
+        moveCode.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        moveCode.setHint("lqxh1…");
+        if (moving != null) {
+            moveCode.setText(moving);
+        }
+        body.addView(moveCode, matchWrap());
+        if (failed != null) {
+            body.addView(gap(text(failed, 15, R.color.text, false), 8, 0), matchWrap());
+        }
+        Button go = button(getString(R.string.move_go));
+        go.setId(R.id.move_go);
+        go.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                moveWith(moveCode.getText().toString());
+            }
+        });
+        body.addView(go, wrap());
+    }
+
+    /** Move with the code `text` holds: the background page, then the start that takes it over. */
+    private void moveWith(String text) {
+        String code = text.trim();
+        if (code.isEmpty()) {
+            return;
+        }
+        moving = code;
+        restore = null;
+        failed = null;
+        here = true;
+        show(BACKGROUND);
     }
 
     /** Why the app asks to stay in the background, before Android's two dialogs. */
@@ -368,6 +547,8 @@ public class WelcomeActivity extends Activity {
         } else if (request == SCAN_BACKUP && result == RESULT_OK && data != null
                 && backupLine != null) {
             backupLine.setText(backupLine(String.valueOf(data.getStringExtra(ScanActivity.TEXT))));
+        } else if (request == SCAN_MOVE && result == RESULT_OK && data != null) {
+            moveWith(String.valueOf(data.getStringExtra(ScanActivity.TEXT)));
         } else if (request == SCAN_CODE && result == RESULT_OK && data != null) {
             // The join itself is the first screen's, as for a pasted code.
             startActivity(new Intent(this, MainActivity.class)
@@ -402,7 +583,10 @@ public class WelcomeActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Map<String, Object> started = Core.startHere(dir, restore, passphrase);
+                Core.sense(getApplicationContext());
+                final Map<String, Object> started = moving != null
+                        ? Core.moveIn(dir, moving, Build.MODEL)
+                        : Core.startHere(dir, restore, passphrase, anyway);
                 final Map<String, Object> mine = Core.bool(started, "ok") ? Core.me() : null;
                 runOnUiThread(new Runnable() {
                     @Override
@@ -417,16 +601,55 @@ public class WelcomeActivity extends Activity {
     private void started(Map<String, Object> started, Map<String, Object> mine) {
         if (!Core.bool(started, "ok")) {
             failed = Core.str(started, "error");
+            String need = Core.str(started, "need");
+            if ("live".equals(need)) {
+                warnLive(failed);
+                return;
+            }
+            if (moving != null) {
+                // A move that did not take: its page again, the code kept;
+                // the old phone still has everything.
+                show(MOVING_IN);
+                return;
+            }
             // A backup that did not open: its screen again, the line kept.
-            show("passphrase".equals(Core.str(started, "need")) ? RESTORE : STARTING);
+            show("passphrase".equals(need) ? RESTORE : STARTING);
             return;
         }
         restore = null;
         passphrase = null;
+        moving = null;
+        anyway = false;
         Events.start();
         LoquaxService.start(this);
         me = mine;
         show(ADDRESS);
+    }
+
+    /**
+     * The backup's address answers on another device right now (1281): restoring it here too loses
+     * messages on both. Cancel goes back to the choice; Restore anyway starts again past the guard.
+     */
+    private void warnLive(String said) {
+        show(RESTORE);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(R.string.restore_live_title)
+                .setMessage(said)
+                .setNegativeButton(android.R.string.cancel, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface shown, int which) {
+                        failed = null;
+                        show(CHOICE);
+                    }
+                })
+                .setPositiveButton(R.string.restore_anyway, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface shown, int which) {
+                        anyway = true;
+                        start();
+                    }
+                })
+                .show();
     }
 
     /** While the mailbox starts, and why it did not. */
@@ -448,11 +671,31 @@ public class WelcomeActivity extends Activity {
         body.addView(again, wrap());
     }
 
-    /** The address to give people, the name for others, the backup. */
+    /** The name for others, the address to give people, the backup. */
     private void address(LinearLayout body) {
-        body.addView(text(getString(R.string.address_title), 22, R.color.text, true), matchWrap());
+        final boolean phone = Core.bool(me, "here");
+        if (phone) {
+            // The page's one field, first (walk finding 9): friends see this
+            // name, not the address's digits. Prefilled from the phone
+            // owner's card where Android lets us read it; empty is allowed.
+            body.addView(text(getString(R.string.name_for_others), 15, R.color.text, false),
+                    matchWrap());
+            name = new EditText(this);
+            name.setId(R.id.welcome_name);
+            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+            name.setSingleLine(true);
+            name.setHint(R.string.profile_name_hint);
+            String kept = Core.str(me, "name");
+            name.setText(kept.isEmpty() ? Book.ownerName(this) : kept);
+            body.addView(name, matchWrap());
+        }
+        body.addView(gap(text(getString(R.string.address_title), 22, R.color.text, true), 16, 0),
+                matchWrap());
+        // The contact code's QR, the profile's (1263): a friend's scanner
+        // takes it.
         ImageView qr = QrCode.view(this, me, dp(240), Core.str(me, "fingerprint"));
         if (qr != null) {
+            qr.setId(R.id.welcome_qr);
             LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(dp(240), dp(240));
             at.gravity = Gravity.CENTER_HORIZONTAL;
             at.topMargin = dp(16);
@@ -467,12 +710,13 @@ public class WelcomeActivity extends Activity {
                 false), 4, 16), matchWrap());
         LinearLayout row = new LinearLayout(this);
         Button share = button(getString(R.string.share));
+        share.setId(R.id.welcome_share);
         share.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 Intent send = new Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "address"));
+                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "lxma"));
                 startActivity(Intent.createChooser(send, getString(R.string.share)));
             }
         });
@@ -486,15 +730,7 @@ public class WelcomeActivity extends Activity {
         });
         row.addView(write, wrap());
         body.addView(row, matchWrap());
-        final boolean phone = Core.bool(me, "here");
         if (phone) {
-            body.addView(gap(text(getString(R.string.name_for_others), 15, R.color.text, false),
-                    20, 0), matchWrap());
-            name = new EditText(this);
-            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-            name.setHint(R.string.optional);
-            name.setText(Core.str(me, "name"));
-            body.addView(name, matchWrap());
             Button backup = button(getString(R.string.backup_address));
             backup.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -557,6 +793,39 @@ public class WelcomeActivity extends Activity {
         TextView view = text(words, 14, R.color.text_secondary, false);
         view.setPadding(dp(32), 0, 0, dp(8));
         return view;
+    }
+
+    /** The page's one primary button: filled in the send green, white words (6.4:1). */
+    private Button primary(String words) {
+        Button button = button(words);
+        button.setBackgroundTintList(
+                android.content.res.ColorStateList.valueOf(getColor(R.color.send)));
+        button.setTextColor(getColor(R.color.on_send));
+        button.setTextSize(16);
+        return button;
+    }
+
+    /** A way beside the primary one: words in the accent that tap, a finger's height. */
+    private TextView link(String words) {
+        TextView view = text(words, 16, R.color.accent, false);
+        view.setMinHeight(dp(44));
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setPadding(0, dp(6), 0, dp(6));
+        view.setBackgroundResource(selectable());
+        view.setClickable(true);
+        return view;
+    }
+
+    private int selectable() {
+        android.util.TypedValue value = new android.util.TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, value, true);
+        return value.resourceId;
+    }
+
+    private LinearLayout.LayoutParams fullWidth() {
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(8);
+        return params;
     }
 
     private Button button(String words) {

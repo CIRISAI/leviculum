@@ -40,8 +40,8 @@
 //! `NodeCore::send_resource` (141 ms for 1 MiB), is never reached: the router
 //! drives resource sends through the three-phase form itself.
 
-use std::cell::Cell;
-use std::collections::{HashSet, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Instant;
 
@@ -52,7 +52,8 @@ use leviculum_core::{DestinationHash, Storage as _};
 use leviculum_lxmf::constants::FIELD_TELEMETRY;
 use leviculum_lxmf::msgpack;
 use leviculum_lxmf::router::{
-    LxmfRouter, PropagationClientConfig, RouterConfig, RouterError, RouterEvent, RouterOutput,
+    LxmfRouter, MessageState, PropagationClientConfig, RouterConfig, RouterError, RouterEvent,
+    RouterOutput,
 };
 use leviculum_lxmf::{
     announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, Field, LxmfNode, LxmfNodeConfig,
@@ -439,6 +440,14 @@ pub struct LxmfHelperProcessor {
     /// or `None` when it is waiting on none. A `Cell` because the round ends
     /// inside [`Self::report`], which runs under `absorb`'s shared borrow.
     pending_sync: Cell<Option<u64>>,
+    /// The destination of every message `send` queued that has not yet
+    /// reached a terminal state, by message id. The router's
+    /// `MessageState` event names only the id, and `lxmf_msg_delivered`
+    /// names the destination the way Python's does
+    /// (`periculum/assets/scripts/lxmf_node.py:722-735`). A `RefCell` for
+    /// the same reason as `pending_sync`: the state change arrives inside
+    /// [`Self::report`].
+    sent: RefCell<HashMap<[u8; 32], [u8; 16]>>,
 }
 
 /// The embedded propagation node and its event drain.
@@ -480,6 +489,7 @@ impl LxmfHelperProcessor {
             builds_inflight: HashSet::new(),
             pn: None,
             pending_sync: Cell::new(None),
+            sent: RefCell::new(HashMap::new()),
         }
     }
 
@@ -649,6 +659,44 @@ impl LxmfHelperProcessor {
                     ],
                 );
             }
+            // The delivery proof came back: the router turned the message
+            // DELIVERED (`leviculum_lxmf::router`, `LxmfNodeEvent::Delivered`),
+            // once, as it removed it from the outbound queue. Reported with
+            // the keys of Python's `report_delivery`
+            // (`periculum/assets/scripts/lxmf_node.py:722-735`), state in
+            // decimal like Python's `message.state`.
+            RouterEvent::MessageState {
+                message_id,
+                state: MessageState::Delivered,
+            } => match self.sent.borrow_mut().remove(&message_id) {
+                Some(dst) => self.emitter.event(
+                    "lxmf_msg_delivered",
+                    &[
+                        ("dst", hex_encode(&dst)),
+                        ("state", (MessageState::Delivered as u8).to_string()),
+                        ("hash", hex_encode(&message_id)),
+                    ],
+                ),
+                None => self.emitter.log(format!(
+                    "[lxmf-node] delivered a message this helper did not send: {}",
+                    hex_encode(&message_id)
+                )),
+            },
+            // Any other terminal state ends the wait for a proof; the entry
+            // goes so the map holds only messages still in flight. Still a
+            // diagnostic, like every state change below.
+            other @ RouterEvent::MessageState {
+                message_id,
+                state:
+                    MessageState::AwaitingCollection
+                    | MessageState::Rejected
+                    | MessageState::Cancelled
+                    | MessageState::Failed,
+            } => {
+                self.sent.borrow_mut().remove(&message_id);
+                self.emitter
+                    .log(format!("[lxmf-node] router event: {other:?}"));
+            }
             RouterEvent::ResourceBuildPending(id) => {
                 // Announcement only. The handoff itself is drained from
                 // `take_resource_builds` at the end of the hook
@@ -678,7 +726,8 @@ impl LxmfHelperProcessor {
             // any of them, and adding events the driver does not know would
             // be a second protocol rather than the same one — a delivery that
             // never completes is meant to surface as the peer's
-            // `lxmf_assert_received` timing out, not as a new event name.
+            // `lxmf_assert_received` timing out, or as the sender's missing
+            // `lxmf_msg_delivered`, not as a new event name.
             other => self
                 .emitter
                 .log(format!("[lxmf-node] router event: {other:?}")),
@@ -1020,12 +1069,16 @@ impl LxmfHelperProcessor {
             self.emitter.error("propagation node already enabled");
             return;
         }
-        // The interop helper keeps the costs its scenarios were written
-        // against, 0 and 0, rather than the role's shipped 13 / 1: a cell
-        // that wants costs names them as `pn_enable` options.
+        // Costs 0 and 0, what the cells were written against, not the
+        // role's 13 / 1; a cell names others as `pn_enable` options. The
+        // Python helper's router runs flexibility 3 (`PROPAGATION_COST_FLEX`,
+        // `reference/LXMF/LXMF/LXMRouter.py:53`), the role 0 since 1294.
+        // Size limits stay the role's default, lxmd's 256 KB and 40 times
+        // that, as the Python helper's stock router announces (order 1664).
         let mut node_config = PropagationNodeConfig {
             name: Some(self.config.display_name.clone()),
             stamp_cost: 0,
+            stamp_cost_flexibility: 3,
             peering_cost: 0,
             ..PropagationNodeConfig::default()
         };
@@ -1262,13 +1315,22 @@ impl LxmfHelperProcessor {
                 return;
             }
         };
+        let message_id = message.message_id;
         match ready.router.enqueue(core, message) {
             Ok(output) => {
+                // Recorded before `absorb`, which is where a state change for
+                // this message could first be reported.
+                self.sent.borrow_mut().insert(message_id, peer);
                 self.absorb(ready, core, output, out);
                 let mut event = vec![("dst", hex_encode(&peer)), ("body_b64", body_b64)];
                 if let Some(label) = fields_label {
                     event.push(("fields", label.to_string()));
                 }
+                // The hash Python's helper appends too
+                // (`periculum/assets/scripts/lxmf_node.py:846-851`): it is what
+                // ties this send to its `lxmf_msg_delivered`, so a proof's
+                // latency is measured from this message and not an earlier one.
+                event.push(("hash", hex_encode(&message_id)));
                 self.emitter.event("lxmf_msg_sent", &event);
             }
             Err(e) => self
@@ -1688,6 +1750,53 @@ mod tests {
         ] {
             assert!(row.contains(token), "no {token} in {row}");
         }
+    }
+
+    /// The proof seam: `RouterEvent::MessageState` with `Delivered` for a
+    /// message `send` queued prints one `lxmf_msg_delivered`, keyed like
+    /// Python's, and nothing else does. The positive control is the second
+    /// message, which goes `Sent` and then `Failed` and is never proven:
+    /// it must print nothing, or the line would be measuring the seam and
+    /// not the proof. That the router raises the state on a real proof is
+    /// `tests/two_node_loopback.rs`.
+    #[test]
+    fn a_proven_message_is_reported_delivered_once_and_an_unproven_one_never() {
+        let (processor, lines_rx) = helper("proof-test");
+        let proven = [0xa1u8; 32];
+        let unproven = [0xb2u8; 32];
+        let peer = [0x33u8; 16];
+        processor.sent.borrow_mut().insert(proven, peer);
+        processor.sent.borrow_mut().insert(unproven, peer);
+
+        for (message_id, state) in [
+            (unproven, MessageState::Sent),
+            (unproven, MessageState::Failed),
+            (proven, MessageState::Sent),
+            (proven, MessageState::Delivered),
+            // A second report of the same proof, and the late proof of a
+            // message that already failed: neither is a new delivery.
+            (proven, MessageState::Delivered),
+            (unproven, MessageState::Delivered),
+        ] {
+            processor.report(RouterEvent::MessageState { message_id, state });
+        }
+
+        let delivered: Vec<String> = drain_events(&lines_rx)
+            .into_iter()
+            .filter(|line| line.starts_with("EVENT lxmf_msg_delivered "))
+            .collect();
+        assert_eq!(delivered.len(), 1, "one proof, one line: {delivered:?}");
+        let line = &delivered[0];
+        let expected = format!(
+            "EVENT lxmf_msg_delivered dst={} state=8 hash={} t=",
+            hex_encode(&peer),
+            hex_encode(&proven)
+        );
+        assert!(line.starts_with(&expected), "{line} is not {expected}<ms>");
+        assert!(
+            processor.sent.borrow().is_empty(),
+            "both messages reached a terminal state and must have left the map"
+        );
     }
 
     fn drain_events(lines_rx: &std::sync::mpsc::Receiver<Out>) -> Vec<String> {

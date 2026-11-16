@@ -1,0 +1,79 @@
+# The M9 sim's walk over the fixture (1530): a board without a client
+# record, as it comes off the flasher. Run by `just m9-sim-walk`, grammar in
+# loquax-m9/src/bin/loquax-m9-sim/script.rs; every dump is for the eye.
+
+# The pairing, then Back to the fixture's list.
+dump 00-pairing.png
+back
+dump 01-chats.png
+
+# A chat, scrolled back by a held ring up, and left.
+down
+down
+enter
+dump 02-chat.png
+hold up 1000
+dump 03-chat-scrolled.png
+back
+
+# The map: its words stand by the clock, then T and Y.
+map
+dump 04-map-open.png
+wait 7000
+dump 05-map.png
+t
+dump 06-map-t.png
+y
+dump 07-map-y.png
+
+# The bubbles back to the list, the square bubble to compose, a line typed.
+f1
+f3
+text Hallo M9
+dump 08-compose.png
+back
+
+# The house key (1532, 1561): a press opens the settings at once (the
+# controller repeats no held key, so there is no hold to wait for). Left
+# steps the type's value, Enter confirms it: very small. Right twice and
+# Enter: large. A step Back drops keeps the size; Back again closes.
+home
+dump 09-house.png
+left
+dump 09-house-stepped.png
+enter
+dump 09-house-tiny.png
+right
+right
+enter
+dump 09-house-large.png
+left
+back
+back
+dump 09-chat-large.png
+# Enter steps round the values from large to very small, Enter confirms.
+home
+enter
+enter
+dump 09-chat-tiny-house.png
+back
+dump 09-chat-tiny.png
+home
+right
+enter
+back
+dump 09-chat-small.png
+
+# Every screen the goldens pin, through the board's FRAME_DUMP path.
+screen chats 10-chats.png
+screen chat 11-chat.png
+screen groups 12-groups.png
+screen invite 13-invite.png
+screen members 14-members.png
+screen admin 15-admin.png
+screen ask 16-ask.png
+screen pick 17-pick.png
+screen name 18-name.png
+screen map 19-map.png
+screen pan 20-pan.png
+screen pairing 21-pairing.png

@@ -70,7 +70,12 @@ run   leviculum-std   msgpack_single_decoder     # reads leviculum-core's source
 run   leviculum-std   nrf_boot_no_spin           # reads leviculum-nrf/src/bin/*.rs; no nop spin above 10 000 may hold the executor at boot
 run   leviculum-std   rak4631_gnss_pulse_pin     # reads the RAK firmware sources; the GNSS task claims no pulse pin and nothing claims P0.17
 run   leviculum-std   t114_boot_lines            # reads the T114 binary, the shared node loop and the board file; the boot lines are the pre-move ones plus D2 and D7
+run   leviculum-std   rak4631_boot_lines         # reads the RAK4631 binary, the shared node loop and the board file; the boot lines are the pre-move ones with D1, D2, D5 to D8 applied
+skip  leviculum-ui-iced desktop_theme              # its subject is the code (the desktop tone stream), and it opens a D-Bus connection
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
+run   lnflash         bootloader_update          # reads memory.x and the RAK4631 pages against the vendored bootloader UF2: a moved page fails on push
+run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
+run   loquax          golden_index               # reads docs/src/concepts/loquax-ui.md and the golden directories of loquax, loquax-m9 and loquax-android; the index names every golden file and only those
 
 # --------------------------------------------------------------- skip --------
 
@@ -93,6 +98,7 @@ skip  lblogd          watch_posts                # filesystem watcher: tokio run
 skip  lblogd          web_plain                  # binds a TCP socket under a tokio runtime
 skip  leviculum-cli   client_tools               # spawns lnsd and the client tools
 skip  leviculum-cli   lnsd_instance_conflict     # spawns two daemons and waits for one to refuse
+skip  leviculum-cli   find_or_start              # spawns lnsd through find_or_start and dials its socket
 skip  leviculum-cli   lnsd_without_interface_features # spawns lnsd built without ble or serial (just lnsd-minimal)
 skip  leviculum-cli   selftest_ratchet_message_count # spawns lnsd and runs the selftest binary twice against it
 skip  leviculum-cli   storage_path_from_config   # spawns lnsd against a temp-dir config
@@ -116,16 +122,25 @@ skip  leviculum-ffi   ffi_interop                # drives a live node through th
 skip  leviculum-ffi   ffi_property               # property-based FFI fuzzing; subject is the code
 skip  leviculum-ffi   ffi_unit                   # in-process FFI unit suite; subject is the code
 skip  leviculum-ffi   port_race                  # binds sockets to race two port allocations
+skip  leviculum-heap-lab placement             # TLSF control-block placement on a host region; subject is the allocator code
+skip  leviculum-heap-lab pull                  # the M9 pull workload timed under two heaps; subject is the code, and a third of a second
+skip  leviculum-heap-lab pools                 # the per-core pools' routing with threads; subject is the allocator code
+skip  leviculum-heap-lab rebuild               # the M9 rebuild's largest heap block under TLSF; subject is the code, and over a second
 skip  leviculum-lxmf  announce_name_airtime      # airtime arithmetic; subject is the code
 skip  leviculum-lxmf  control_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  delivery_promise           # delivery state machine; subject is the code
 skip  leviculum-lxmf  direct_delivery_attempts   # delivery state machine; subject is the code
 skip  leviculum-lxmf  foreign_payload_encodings  # decodes foreign payloads; subject is the decoder
 skip  leviculum-lxmf  generated_field_pins       # pins generated field values; subject is the generator
+skip  leviculum-lxmf  held_proof_lost_link       # held-proof release over a closed link; subject is the router
 skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject is the code
+skip  leviculum-lxmf  lev_position_airtime       # airtime arithmetic of the position announce; subject is the code
+skip  leviculum-lxmf  lev_vectors                # vector corpus of the lev namespace; subject is the codec
+skip  leviculum-lxmf  lev_status_reference       # spawns python3 over reference/ on our announce; subject is the encoder
 skip  leviculum-lxmf  message_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  propagation_client         # propagation client logic; subject is the code
 skip  leviculum-lxmf  propagation_node           # propagation node logic; subject is the code
+skip  leviculum-lxmf  proof_after_keep           # proof held until kept; subject is the router
 skip  leviculum-lxmf  reaction_vectors           # vector corpus; subject is the codec
 skip  leviculum-lxmf  reply_vectors              # vector corpus; subject is the codec
 skip  leviculum-lxmf  peer_sync_batch            # outbound sync batch and its streamed envelope; subject is the code
@@ -140,6 +155,7 @@ skip  leviculum-lxmf  telemetry_request          # telemetry request codec; subj
 skip  leviculum-lxmf  telemetry_roundtrip        # telemetry roundtrip; subject is the codec
 skip  leviculum-lxmf  telemetry_vectors          # vector corpus; subject is the codec
 skip  leviculum-lxmf  timebase_jump              # clock-jump behaviour; subject is the code
+skip  leviculum-lxmf  two_homes                  # two-home losses as red mvrs; subject is the code
 skip  leviculum-lxmf  wall_clock_producer        # reads a fixture, but the subject is the producer
 skip  leviculum-lxmf-node control_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
@@ -152,19 +168,34 @@ skip  leviculum-lxmf-node telemetry_loopback     # tokio runtime, two nodes over
 skip  leviculum-lxmf-node tracing_reaches_stderr # runs the shipped lxmf-node executable as a process, plus a shared-instance daemon
 skip  leviculum-lxmf-node two_node_loopback      # tokio runtime, two nodes, sleeps
 skip  leviculum-map golden                    # golden renders and cell dumps per profile at pinned counts; subject is the draw
+skip  leviculum-map countries                 # point in the committed country rings and the facts table at pinned counts; subject is the lookup
+skip  leviculum-map declination               # WMM2025 against NOAA's published test values; subject is the field model
+skip  leviculum-map geoid                     # reads the committed geoid table, but the subject is the interpolation against EGM2008 reference values
 skip  leviculum-map labels                    # the pin label rule in cells and pixels; subject is the code
+skip  leviculum-map buildings                 # the building section format and its reader; subject is the code
 skip  leviculum-map lmr2                      # reads the committed region for its names, but the subject is the label format and the reader
+skip  leviculum-map pois                      # the poi section format and its reader; subject is the code
 skip  leviculum-map projection                # in-process projection and viewport arithmetic; subject is the code
+skip  leviculum-map blend                   # the blended world projection in-process: ramps, areas, inverses; subject is the code
+skip  leviculum-map globe                   # the globe's horizon cut, ground, names and turn in-process; subject is the code
 skip  leviculum-map region                    # reads the committed region, but the subject is the reader and the draw (golden counts)
+skip  leviculum-map timezones                 # the zone lookup, TZif and POSIX readers and the board table; reads host tzdata, takes seconds; subject is the code
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
+skip  leviculum-map elevation               # reads the committed Erg Chebbi height pack, but the subject is the height format and its reader
+skip  leviculum-map elevation_alloc         # the height reader against hostile lengths under a counting allocator; subject is the code
+skip  leviculum-map-tool heights            # the GLO-30 height cut over synthetic cells written to a temp dir; subject is the code
 skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
+skip  leviculum-mapcut geometry               # cuts the fixture and holds joins, buffers and goldens; subject is the code
 skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load
+skip  leviculum-mapcut partial                # cuts in memory and reads every round back; subject is the writer and the reader
 skip  leviculum-mapcut pmtiles                # writes a temp archive and reads it back; subject is the reader
 skip  leviculum-mapcut simplify               # in-process geometry arithmetic; subject is the code
 skip  leviculum-mapfill fill                   # pixel-exact reference images; subject is the filler
 skip  leviculum-mapfill fixture                # reads the committed fixture, but the subject is the render pipeline (a golden count)
 skip  leviculum-mapfill frame                  # in-process framebuffer; subject is the code
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
+skip  leviculum-rrc   session                   # replays recorded envelopes; the subject is the session code
+skip  leviculum-rrc   vectors                   # a vector corpus; the subject is the codec
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
 skip  leviculum-std   ble_handshake_primer       # btvirt + bluetoothd, no daemon; the #[ignore]d 1004 reproduction, run by name
@@ -172,6 +203,7 @@ skip  leviculum-std   ble_adapter_return         # btvirt + two lnsd + bluetooth
 skip  leviculum-std   ble_link_gap_floor         # btvirt + two lnsd + bluetoothd; an #[ignore]d measurement grid, run by name
 skip  leviculum-std   ble_returning_peer_resight # btvirt + two lnsd + bluetoothd; the #[ignore]d #443 reproduction, run by name
 skip  leviculum-std   ble_stranger_identity      # btvirt + one lnsd + bluetoothd; the #[ignore]d 996 reproduction, run by name
+skip  leviculum-std   known_destinations_flush_memory # the CODE: flush and load peaks, retention, and a SIGKILLed child process; about 2 s
 skip  leviculum-std   cf_await_in_processor      # compile-fail fixture, empty without its feature; check-processor-seam owns it
 skip  leviculum-std   cf_dispatch_from_handle    # compile-fail fixture; check-processor-seam owns it
 skip  leviculum-std   cf_drop_dispatch_result    # compile-fail fixture; check-processor-seam owns it
@@ -180,6 +212,7 @@ skip  leviculum-std   destination_lifecycle      # binds sockets under a tokio r
 skip  leviculum-std   discovery_autoconnect      # tokio runtime, discovery over real interfaces
 skip  leviculum-std   doc_citations              # in class, but already run by the citation-guard step of `just fast`
 skip  leviculum-std   event_log_callsite_filter  # in-process event-log filtering; subject is the code
+skip  leviculum-std   event_log_line_hook        # in-process line hook and its target filter; subject is the code
 skip  leviculum-std   event_log_multiprocess     # spawns a second process to share the log
 skip  leviculum-std   event_log_rotation         # spawns processes, sleeps, rotates real files
 skip  leviculum-std   event_log_subscriber       # long in-process subscriber suite; seconds, and needs --test-threads=1
@@ -204,10 +237,12 @@ skip  leviculum-std   obs_iface_name_whitespace  # drives the real emit sites in
 skip  leviculum-std   obs_outbound_route_events  # drives the real emit sites in-process; subject is the code
 skip  leviculum-std   port_alloc_multiprocess    # spawns processes to race port allocation
 skip  leviculum-std   public_node_config_acceptance # builds node configs in temp dirs; subject is the config builder
+skip  leviculum-std   remote_dfu_sender          # two in-process nodes over TCP loopback; subject is the /dfu sender
 skip  leviculum-std   rnsd_interop               # drives Python rnsd over sockets; Tier 1
 skip  leviculum-std   shared_instance_client_count # tokio runtime with a shared instance
 skip  leviculum-std   shared_instance_conflict   # tokio runtime with two competing instances
 skip  leviculum-std   supervised_spawn           # already run by the `supervised-spawn` step of `just fast`
+skip  leviculum-std   tcp_accept_backoff         # opens sockets and lowers the process descriptor limit; subject is the TCP accept loop
 skip  lndecode        agrees_with_the_writer     # decoder/writer agreement; subject is the code
 skip  lndecode        cli                        # spawns the lndecode binary
 skip  lnflash         cli                        # spawns the lnflash binary against temp dirs
@@ -215,15 +250,80 @@ skip  lnflash         vendored_softdevice        # close to the line: reads the 
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
 skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
+skip  loquax           mailbox_census             # spawns `loquax mailbox run` beside an in-process shared instance, signals it, measures its CPU
+skip  loquax           mailbox_growth_soak        # a two-hour soak: spawns `loquax mailbox run` under announce load on a shared instance
+skip  loquax           rooms_hub                  # nodes, a daemon and a fake hub over sockets; subject is the hub link
+skip  loquax           mailbox_setup              # spawns the loquax binary over a temporary home; subject is the code; loquax-tui
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary
 skip  loquax           stamp_timing               # tokio runtime around the stamp solver
 skip  loquax           tui_snapshot               # spawns loquax tui against an in-process daemon over sockets
+skip  loquax           scene_golden               # a golden of the scene built from the ugly store; subject is the code; loquax-tui
+skip  loquax           operation_counts           # the core and the terminal pass counted over the real fixture against their bars (1489); subject is the code; loquax-tui
+skip  loquax           mailbox_receipts           # read receipts through the mailbox, in process with signed LXMF; subject is the code; loquax-tui
+skip  loquax           device_receipts            # the ticks across writer, recipient and mailbox, in process with signed LXMF; subject is the code; loquax-tui
+skip  loquax           relay_group                # a relay bot's copies to Loquax members, in process with signed LXMF; subject is the code; loquax-tui
+skip  loquax           wire_props                 # property tests of the home wire's codecs; subject is the code; loquax-tui
+skip  loquax           mailbox_mesh               # a mailbox on its own node through in-process relays over loopback TCP sockets (1354); subject is the code; loquax-tui
+skip  loquax-android   browse                     # the Browse tab's verbs and scene through the facade in Java's bytes (1337); subject is the code
+skip  loquax-android   browse_census              # counts the Browse tab's heap with a global allocator (1337); subject is the code
+skip  loquax-android   browse_fetch               # the Browse tab's fetch through the phone's own node against an in-process transport and page node over loopback TCP (1337); subject is the code
+skip  loquax-android   browse_first_link          # the first fetch behind a relay that mends its path, through in-process relays over loopback TCP for about a minute (1669); subject is the code
+skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
+skip  loquax-android   explore                    # the Explore tab's verbs, order under a finger and server sheet through the facade in Java's bytes (1618); subject is the code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
+skip  loquax-android   fling                      # starts javac and java on Fling.java and its host test; subject is the code
+skip  loquax-android   glyph                      # Glyph.java against the core's mark shapes, and the shapes rasterised; subject is the code
+skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
+skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
+skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
+skip  loquax-android   mailbox_page               # the mailbox page (1642) in Java's bytes and its words against two goldens; subject is the code
+skip  loquax-android   m9_fold_census             # a pulled page's fold split into unpack, step, note and route by time and allocator calls and bytes, and folded in chunks (1575); subject is the code
+skip  loquax-android   m9_list_window             # rows built and allocator calls per draw of the M9's list, 302 conversations against 30 (1595); subject is the code
+skip  loquax-android   name_lookups               # a list row's name questions counted in allocator calls for 32 and 1000 names (1581); subject is the code
+skip  loquax-android   operation_counts           # a phone session over the real fixture, a key in compose counted against its bar (1489); subject is the code, starts a node
+skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
+skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
+skip  loquax-android   m9_board_client            # the M9's core-node executor against an in-process mailbox and transport node over loopback TCP, the line written as the board writes its UART (1414); subject is the code
+skip  loquax-android   m9_join_cells              # the cells of the M9 joining its home (1415): the board's client over the M9's line against an in-process mailbox and transport node, a good, a wrong and an expired code, no home, a cut line, a second device; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
+skip  loquax-android   map_fills                  # the map frame drawn into a Bitmap of the size Java asks, and the world at its smallest, through the facade (1796); subject is the code
+skip  loquax-android   map_heap                   # the live heap of the map facade across zoom-outs to the world and back at 1224 x 2197 (1797), counted by the allocator shim; subject is the code, and it takes about a minute
+skip  loquax-android   render_walk                # the render walk's rules on a Florence frame drawn through the facade into a Java-sized Bitmap (1801); subject is the code
+skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
+skip  loquax-android   profile                    # the profile's words through the facade in Java's bytes, and its golden (1443); subject is the code
+skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link
+skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
+skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
+run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
+run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
+run   loquax-android   ui_thread                  # reads the app's Java sources, the manifest and Core.java's builders and asserts no command is called outside the engine's thread (1446)
+skip  loquax-m9        golden                     # the M9 chats list drawn into the 320x240 frame and pinned as PNG (1351); subject is the renderer
+skip  loquax-m9        firmware                   # the M9 image's fixture screens drawn, dumped and read back against PNG goldens (1361); subject is the renderer and the dump
+skip  loquax-m9        groups                     # the M9's group screens and their key table walked through the model, frames drawn against each other (1366); subject is the renderer and the keys
+skip  loquax-m9        map                        # the M9's map screen, its key table and pins walked through the model, frames drawn against each other (1375); subject is the renderer and the keys
+skip  loquax-m9        home                       # the M9 as a device of its home: the top bar's word, the pairing screen, pulled pages folded into the chats and a typed line become a send (1415); subject is the code
+skip  loquax-m9        splash                     # the M9's power-on splash drawn against its PNG golden and the backlight order checked on a recording panel (1485); subject is the code
+skip  loquax-m9        turn                       # a list draw and a page take at 4000 entries held to their cost at 400, the full scene as control (1463); subject is the code, and it times
+skip  loquax-m9        operation_counts           # a key down the M9 list counted over the real fixture against its bar (1489); subject is the code
+skip  loquax-m9        restore_counts             # the M9 restore, a pulled page and one new message counted over a 1489-shaped store, the per-entry fold as control (1514); subject is the code
+skip  loquax-m9        page                       # the M9 [PAGE] line walked over the fixture with the board's keys and one renderer: page, cursor, top, zoom (1533); subject is the code
+skip  loquax-m9        gnss                       # the M9 receiver's sentences parsed, its sky and duty walked and the map's corner drawn against PNG goldens (1477); subject is the code
+skip  loquax-m9        read                       # the M9 reads by its viewport: the board's draw says the bubbles whose last line showed, the dwell sees them, the seen mark is routed and kept over a reboot, each with its control (1541); subject is the code
+skip  loquax-m9        bench                      # the bench never touches a real chat: arrivals into "Bench" only, a release restore lists none, no mark to the home, bench forget takes 1540's and the flagged out (1562); subject is the code
+skip  loquax-m9        drain                      # the UI core's drain played over a test clock: a budget per turn, a key yields the fold, pages counted once and rows once a page, the unbudgeted loop as control (1575); subject is the code
+skip  loquax-m9        unshown                    # every M9 key in the open chat and on the list leaves no model state the M9 does not draw, the terminal's `I` as control (1612); subject is the code
+skip  loquax-m9        oplog                      # the bench image's [FLASH] ring fed a real forget and rebuild over a 1489-shaped store, the old ring of 32 as control (1622); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
+skip  lnomad          scene_golden               # a golden scene list; the subject is the scene builder
+skip  lnmapd          store_format               # cuts the grunewald fixture into a signed store; subject is the store code
+skip  lnmapd          fetch_budget               # the budgeted prefix fetch over a fake clock; subject is the client code
+skip  lnmapd          http_serve                 # binds loopback sockets under a tokio runtime; origin and front-door cache
+skip  lnmapd          node_integ                 # tokio runtime, in-process daemon, IPC and the lev.maps node
+skip  lnmapd          lnmapcut_bin               # spawns the lnmapcut binary over a temp store
+skip  lnmapd          store_elevation            # splits the committed Erg Chebbi height pack into a signed store and spawns lnmapcut; subject is the store code
 skip  lnpnd           client_verbose_stderr      # spawns the shipped binary to read its stderr: a process, so not admissible however fast
 skip  lnpnd           control_permission         # binds sockets under a tokio runtime
 skip  lnpnd           event_log_analysis         # spawns the lnpnd binary over a temp-dir log
@@ -233,7 +333,10 @@ skip  lnpnd           lxmd_messagestore_path     # spawns python3 to have the re
 skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
 skip  lnpnd           sigterm_flushes_storage    # spawns the daemon against a shared-instance socket and signals it
 skip  lnpnd           sigusr1_census             # spawns the daemon against a shared-instance socket and signals it for its census
+skip  lnpnd           pn_growth_soak             # a 20-minute soak: spawns the daemon on a 300 000-file store with 14 peers on a shared instance
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
 skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
+skip  lnpnd           store_index_at_start       # spawns the daemon three times against a shared-instance socket and signals it
+skip  lnpnd           store_index_census         # its subject is the code: a store built in a temp dir against a counting allocator, 2 s
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

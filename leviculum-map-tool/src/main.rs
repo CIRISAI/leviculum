@@ -11,6 +11,7 @@ use leviculum_map::draw::{draw_in, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Bounds, Region};
 use leviculum_map::viewport::Viewport;
+use leviculum_map_tool::heights::{cut_heights, DemSource, DirSource, HeightOptions, HttpSource};
 use leviculum_mapcut::cut::{cut, CutOptions, ZoomStats};
 use leviculum_mapcut::http::HttpRange;
 use leviculum_mapcut::pmtiles::{Archive, RangeRead};
@@ -48,7 +49,7 @@ enum Cmd {
         min_zoom: u8,
         #[arg(long, default_value_t = 15)]
         max_zoom: u8,
-        #[arg(long, default_value_t = leviculum_map::profile::CUT_1)]
+        #[arg(long, default_value_t = leviculum_map::profile::CUT_2)]
         profile: u8,
         /// Worker threads; the output does not depend on it.
         #[arg(long)]
@@ -57,6 +58,15 @@ enum Cmd {
         /// where they differ; without it the local names alone.
         #[arg(long)]
         locale: Option<String>,
+        /// Cut the z15 tiles' building footprints into building sections
+        /// (region version 3); `--buildings false` writes version 2.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        buildings: bool,
+        /// Cut every point of interest of the deepest zoom into poi
+        /// sections, with the travel attributes the source carries
+        /// (region version 5, 1685); `--pois false` writes version 4.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pois: bool,
     },
     /// Copy the tiles of a box of a PMTiles archive into a smaller one, as
     /// they are: the test fixture of the autoload (leviculum-mapcut/fixtures).
@@ -72,6 +82,37 @@ enum Cmd {
         #[arg(long, default_value_t = 15)]
         max_zoom: u8,
     },
+    /// Cut a height pack from Copernicus GLO-30 (1740): z12 tiles of whole
+    /// metres in z9 blocks, the directory piece first.
+    Heights {
+        #[arg(short, long)]
+        output: PathBuf,
+        /// west,south,east,north in degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        bbox: String,
+        /// A directory of GLO-30 cells or an `http(s)://` base laid out as
+        /// the public bucket is.
+        #[arg(long, default_value = leviculum_map_tool::heights::GLO30_HTTP)]
+        source: String,
+        #[arg(long, default_value_t = leviculum_map::elevation::TILE_ZOOM)]
+        tile_zoom: u8,
+        #[arg(long, default_value_t = leviculum_map::elevation::BLOCK_ZOOM)]
+        block_zoom: u8,
+        /// zstd level of the tile frames.
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+        /// Worker threads; the output does not depend on it.
+        #[arg(long)]
+        threads: Option<usize>,
+        /// Take cells the source does not have as sea (0 m). Without it a
+        /// box meeting one fails, naming every absent cell: GLO-30 also
+        /// withholds some land cells.
+        #[arg(long)]
+        absent_is_sea: bool,
+    },
+    /// Check a height pack whole and time its decode: every stored tile,
+    /// and every derived tile from the block zoom down.
+    HeightsInfo { pack: PathBuf },
     /// Print a region's header and per-zoom sizes, after checking it whole.
     Info { region: PathBuf },
     /// Print the names a region holds at one zoom, a line each.
@@ -114,6 +155,89 @@ fn parse_bbox(s: &str) -> Res<Bounds> {
     })
 }
 
+fn cmd_heights(output: &Path, bbox: &str, source: &str, mut options: HeightOptions) -> Res<()> {
+    let b = parse_bbox(bbox)?;
+    let deg = |v: i32| f64::from(v) / 1e7;
+    options.bbox = [deg(b.west), deg(b.south), deg(b.east), deg(b.north)];
+    let source: Box<dyn DemSource> =
+        if source.starts_with("http://") || source.starts_with("https://") {
+            Box::new(HttpSource::new(source))
+        } else {
+            Box::new(DirSource(PathBuf::from(source)))
+        };
+    let t0 = Instant::now();
+    let mut out = BufWriter::new(File::create(output)?);
+    let s = cut_heights(source.as_ref(), &options, &mut out)?;
+    std::io::Write::flush(&mut out)?;
+    println!(
+        "MAPTOOL heights blocks={} tiles={} bytes={} area_km2={:.0} bytes_per_km2={:.1} cells={} absent={} absent_cells={} nodata_pixels={} peak_cells={} largest_fetch={} encode_s={:.1} wall_s={:.1}",
+        s.blocks,
+        s.tiles,
+        s.bytes,
+        s.area_km2,
+        s.bytes as f64 / s.area_km2.max(1.0),
+        s.cells,
+        s.absent.len(),
+        if s.absent.is_empty() {
+            "-".to_owned()
+        } else {
+            s.absent.join(",")
+        },
+        s.nodata,
+        s.peak_cells,
+        s.largest_fetch,
+        s.encode_seconds,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn cmd_heights_info(pack: &Path) -> Res<()> {
+    use leviculum_map::elevation::{split, Block, TileDecoder, TILE_CELLS};
+    let bytes = std::fs::read(pack)?;
+    let (directory, ranges) = split(&bytes).map_err(|e| format!("{e:?}"))?;
+    println!(
+        "MAPTOOL heights-info z{}..z{} blocks={} bytes={} directory_bytes={}",
+        directory.block_zoom(),
+        directory.tile_zoom(),
+        directory.len(),
+        bytes.len(),
+        ranges.first().map_or(0, |r| r.len())
+    );
+    let mut decoder = TileDecoder::new();
+    let mut out = vec![0i16; TILE_CELLS];
+    let mut scratch = vec![0i16; TILE_CELLS];
+    for zoom in (directory.block_zoom()..=directory.tile_zoom()).rev() {
+        let mut tiles = 0u32;
+        let (mut min, mut max) = (i16::MAX, i16::MIN);
+        let t0 = Instant::now();
+        for range in &ranges[1..] {
+            let block = Block::parse(&bytes[range.clone()]).map_err(|e| format!("{e:?}"))?;
+            let per = 1u32 << (zoom - block.block_zoom());
+            let (bx, by) = block.position();
+            for y in by * per..(by + 1) * per {
+                for x in bx * per..(bx + 1) * per {
+                    block
+                        .heights(&mut decoder, zoom, x, y, &mut out, &mut scratch)
+                        .map_err(|e| format!("z{zoom} {x}/{y}: {e:?}"))?;
+                    tiles += 1;
+                    for &h in &out {
+                        min = min.min(h);
+                        max = max.max(h);
+                    }
+                }
+            }
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        println!(
+            "MAPTOOL heights-info zoom={zoom} tiles={tiles} min_m={min} max_m={max} total_ms={:.1} per_tile_ms={:.3}",
+            secs * 1e3,
+            secs * 1e3 / f64::from(tiles.max(1))
+        );
+    }
+    Ok(())
+}
+
 fn print_zoom(label: &str, s: &ZoomStats) {
     println!(
         "MAPTOOL zoom={label} tiles={} entries={} empty={} shared={} bytes={} features_in={} features_out={} vertices_in={} vertices_out={} over_device={} clamped={} resimplified={} point_labels={} line_labels={} label_bytes={}",
@@ -121,17 +245,32 @@ fn print_zoom(label: &str, s: &ZoomStats) {
         s.vertices_in, s.vertices_out, s.over_device, s.clamped, s.resimplified,
         s.point_labels, s.line_labels, s.label_bytes
     );
+    if s.buildings_in > 0 {
+        println!(
+            "MAPTOOL buildings zoom={label} pieces_in={} footprints={} vertices={} sections={} bytes={} degenerate={} over_device={}",
+            s.buildings_in, s.buildings_out, s.building_vertices, s.building_sections,
+            s.building_bytes, s.buildings_degenerate, s.buildings_over_device
+        );
+    }
 }
 
-fn cmd_cut(
-    inputs: &[String],
-    output: &Path,
-    bbox: &str,
-    zooms: (u8, u8),
+/// What `cut` keeps of its source, beside the box and the zooms.
+struct Keep {
     profile: u8,
     threads: Option<usize>,
     locale: Option<String>,
-) -> Res<()> {
+    buildings: bool,
+    pois: bool,
+}
+
+fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: Keep) -> Res<()> {
+    let Keep {
+        profile,
+        threads,
+        locale,
+        buildings,
+        pois,
+    } = keep;
     let t = Instant::now();
     let bounds = parse_bbox(bbox)?;
     let remote = |i: &String| i.starts_with("http://") || i.starts_with("https://");
@@ -152,6 +291,9 @@ fn cmd_cut(
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
             .unwrap_or(1),
         locale,
+        buildings,
+        pois,
+        round: leviculum_mapcut::cut::ROUND,
     };
     let file = BufWriter::new(File::create(output)?);
     // A remote archive's tiles of the box are fetched first, in few
@@ -299,7 +441,14 @@ fn cmd_info(path: &Path) -> Res<()> {
     let mut per = std::collections::BTreeMap::<u8, (u64, u64)>::new();
     let mut seen = std::collections::HashSet::new();
     for n in 0..h.tiles {
-        let e = region.entry(n).map_err(|e| format!("{e:?}"))?;
+        // A version 4 slot saying nothing is there counts no tile.
+        let e = match region.slot(n).map_err(|e| format!("{e:?}"))? {
+            (_, leviculum_map::region::Slot::Here(e)) => e,
+            (_, leviculum_map::region::Slot::Empty) => continue,
+            (id, leviculum_map::region::Slot::Pending) => {
+                return Err(format!("tile {}/{}/{} has not arrived", id.z, id.x, id.y).into())
+            }
+        };
         let z = per.entry(e.id.z).or_default();
         z.0 += 1;
         if seen.insert(e.offset) {
@@ -315,14 +464,26 @@ fn cmd_info(path: &Path) -> Res<()> {
             z.1 += u64::from(e.len);
         }
         println!(
-            "MAPTOOL info version=2 strings={} string_bytes={} label_sections={}",
-            l.strings, l.table_len, l.sections
+            "MAPTOOL info version={} strings={} string_bytes={} label_sections={} building_sections={}",
+            h.version_of(),
+            l.strings,
+            l.table_len,
+            l.sections,
+            region.building_sections()
         );
+    }
+    let mut built = std::collections::BTreeMap::<u8, (u64, u64)>::new();
+    for n in 0..region.building_sections() {
+        let e = region.building_entry(n).map_err(|e| format!("{e:?}"))?;
+        let z = built.entry(e.id.z).or_default();
+        z.0 += 1;
+        z.1 += u64::from(e.len);
     }
     for (z, (n, bytes)) in per {
         let (sections, label_bytes) = labels.get(&z).copied().unwrap_or_default();
+        let (building_sections, building_bytes) = built.get(&z).copied().unwrap_or_default();
         println!(
-            "MAPTOOL info zoom={z} entries={n} blob_bytes={bytes} label_sections={sections} label_bytes={label_bytes}"
+            "MAPTOOL info zoom={z} entries={n} blob_bytes={bytes} label_sections={sections} label_bytes={label_bytes} building_sections={building_sections} building_bytes={building_bytes}"
         );
     }
     Ok(())
@@ -433,14 +594,20 @@ fn main() -> Res<()> {
             profile,
             threads,
             locale,
+            buildings,
+            pois,
         } => cmd_cut(
             &inputs,
             &output,
             &bbox,
             (min_zoom, max_zoom),
-            profile,
-            threads,
-            locale,
+            Keep {
+                profile,
+                threads,
+                locale,
+                buildings,
+                pois,
+            },
         ),
         Cmd::Extract {
             output,
@@ -449,6 +616,30 @@ fn main() -> Res<()> {
             min_zoom,
             max_zoom,
         } => cmd_extract(&input, &output, &bbox, min_zoom..=max_zoom),
+        Cmd::Heights {
+            output,
+            bbox,
+            source,
+            tile_zoom,
+            block_zoom,
+            level,
+            threads,
+            absent_is_sea,
+        } => cmd_heights(
+            &output,
+            &bbox,
+            &source,
+            HeightOptions {
+                bbox: [0.0; 4],
+                tile_zoom,
+                block_zoom,
+                level,
+                threads: threads
+                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
+                absent_is_sea,
+            },
+        ),
+        Cmd::HeightsInfo { pack } => cmd_heights_info(&pack),
         Cmd::Info { region } => cmd_info(&region),
         Cmd::Labels { region, zoom } => cmd_labels(&region, zoom),
         Cmd::Render {

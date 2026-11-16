@@ -1,0 +1,24 @@
+┌●┌ Einstellungen ───────────────────────────────────────────────────────────┐─┐
+│N│1  Profil                                                                 │ │
+│U│   Name, Adresse, QR-Code                                                 │ │
+│c│2  Postfach                                                               │ │
+│e│   Welches Postfach, Verbindung, Geräte                                   │ │
+│K│3  Darstellung                                                            │ │
+│ │   Hell oder dunkel, die Karte                                            │ │
+│ │4  Chats                                                                  │ │
+│ │   Fotogröße                                                              │ │
+│ │5  Benachrichtigungen                                                     │ │
+│ │   Neue Nachrichten, stumme Chats                                         │ │
+│ │6  Privatsphäre                                                           │ │
+│ │   Lesebestätigungen, blockierte Kontakte, geteilte Positionen            │ │
+│ │7  Karten                                                                 │ │
+│ │   Karten auf diesem Gerät, automatisch laden                             │ │
+│ │8  Sicherung                                                              │ │
+│ │   Das Postfach sichern                                                   │ │
+│ │9  Erweitert                                                              │ │
+│ │   Relais und mehr                                                        │ │
+│ │                                                                          │ │
+│ │1-9 open a section · q close                                              │ ┤
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

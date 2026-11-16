@@ -2002,6 +2002,11 @@ async fn test_mtu_e1_no_path_request_is_one_link_on_python() {
     assert!(!node.has_path(&dest_hash), "never announced");
 
     let signing_key = extract_signing_key(&dest_info.public_key);
+    let udp_before = daemon
+        .interface_rx_bytes("UDP")
+        .await
+        .expect("interfaces")
+        .expect("Python's UDP interface");
     let handle = node
         .connect(&dest_hash, &signing_key)
         .await
@@ -2012,6 +2017,21 @@ async fn test_mtu_e1_no_path_request_is_one_link_on_python() {
         "the link comes up over one of the two media"
     );
     tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // +ciris (leviculum#107): the request crossed UDP too, so one Link is
+    // the dedup's doing, not one medium delivering nothing. A link request
+    // is at least its 19-byte header and two 32-byte keys.
+    let udp_heard = daemon
+        .interface_rx_bytes("UDP")
+        .await
+        .expect("interfaces")
+        .expect("Python's UDP interface")
+        - udp_before;
+    println!("E1: Python's UDP interface heard {udp_heard} bytes");
+    assert!(
+        udp_heard >= 19 + 64,
+        "Python's UDP interface heard the request"
+    );
 
     let count = daemon
         .get_destination_link_count(&dest_info.hash)

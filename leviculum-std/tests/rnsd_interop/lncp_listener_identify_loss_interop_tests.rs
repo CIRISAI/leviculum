@@ -7,7 +7,7 @@
 //! armed `AcceptAll` only from the `LinkIdentified` event, so until an identify
 //! arrived the link kept `AcceptNone`, and `handle_resource_advertisement`
 //! discarded the advertisement with no event and no packet
-//! (`leviculum-core/src/node/link_management.rs:3355-3357`). The sender heard
+//! (`leviculum-core/src/node/link_management.rs:3465-3467`). The sender heard
 //! nothing at all and had to wait out its own advertisement retries.
 //!
 //! Python's `rncp` does not have that state. `client_link_established`
@@ -172,10 +172,10 @@ async fn lncp_listener_answers_the_advertisement_after_an_overtaken_rtt() {
 
 /// Reference measurement for the overtaken RTT: Python `rncp -l` behind the
 /// same proxy, with the same forced order. It answers no advertisement that
-/// arrives ahead of the RTT and rejects the first one behind it, which is what
-/// the two tests above hold our listener to. It runs with them rather than as
-/// an ignored measurement, because their tolerance for the advertisement ahead
-/// of the RTT is only right while the reference behaves this way.
+/// arrives ahead of the RTT and rejects the first one behind it. Ours answers
+/// the one ahead of the RTT as well since 1624 (a deliberate deviation: the
+/// advertisement proves the sender holds the link keys); this arm keeps the
+/// reference's side of that difference measured on every run.
 #[tokio::test]
 async fn python_rncp_listener_ignores_an_advertisement_ahead_of_the_rtt() {
     if !python_rns_available() {
@@ -318,7 +318,7 @@ async fn python_sender_against_our_listener(hold_rtt_behind_adv: bool) {
             log.count_to_upstream(CTX_RESOURCE_ADV),
             log.answerable_advs_to_upstream(),
             log.count_to_downstream(CTX_RESOURCE_RCL),
-            log.adv_to_rcl(),
+            log.first_adv_to_rcl(),
         )
     };
     let sender_exit = sender.exited();
@@ -329,10 +329,8 @@ async fn python_sender_against_our_listener(hold_rtt_behind_adv: bool) {
         drops, 1,
         "the modelled loss must have fired exactly once. {evidence}"
     );
-    // Ahead of the RTT the link is still in its handshake, and no listener
-    // can answer there, the reference included
-    // (`python_rncp_listener_ignores_an_advertisement_ahead_of_the_rtt`).
-    // The sender's thread race puts at most its first one there.
+    // The sender's thread race puts at most its first advertisement ahead of
+    // its RTT, and the proxy's forced order exactly that one.
     let ahead_of_rtt = adv_count - answerable;
     if hold_rtt_behind_adv {
         assert_eq!(
@@ -345,25 +343,29 @@ async fn python_sender_against_our_listener(hold_rtt_behind_adv: bool) {
             "only the sender's first advertisement can overtake its RTT. {evidence}"
         );
     }
+    // The reference answers none ahead of the RTT
+    // (`python_rncp_listener_ignores_an_advertisement_ahead_of_the_rtt`); ours
+    // answers that one too since 1624: it decrypts under the link keys, which
+    // establishes the responder link the RTT has not reached yet. So the
+    // answer is measured from the first advertisement, whichever side of the
+    // RTT it travelled.
     let gap = adv_to_rcl.expect("the loop above only exits once an RCL was seen");
     assert!(
         gap < RCL_WITHIN,
-        "the rejection must come back within one RTT of the first advertisement \
-         behind the RTT, not after the sender's retries; measured {gap:?}. {evidence}"
+        "the rejection must come back within one RTT of the first advertisement, \
+         not after the sender's retries; measured {gap:?}. {evidence}"
     );
     assert_eq!(
-        rcl_count, answerable,
-        "every advertisement behind the RTT gets an answer, not just the first. \
-         {evidence}"
+        rcl_count, adv_count,
+        "every advertisement gets an answer, not just the first. {evidence}"
     );
     assert!(
-        answerable <= 2,
+        adv_count <= 2,
         "the sender must not run its retry ladder out: it needed five \
-         advertisements before the fix. Two behind the RTT are possible without \
-         any fault of ours, because `__advertise_job` sends the advertisement \
-         before `register_outgoing_resource` (Resource.py:526-534), so a \
-         rejection that arrives inside that window finds no resource to reject. \
-         {evidence}"
+         advertisements before the fix. Two are possible without any fault of \
+         ours, because `__advertise_job` sends the advertisement before \
+         `register_outgoing_resource` (Resource.py:526-534), so a rejection that \
+         arrives inside that window finds no resource to reject. {evidence}"
     );
     assert!(
         sender_exit.is_none_or(|status| !status.success()),

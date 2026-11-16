@@ -22,21 +22,26 @@ use std::net::{SocketAddr, TcpListener};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 /// The land's failure, deterministic: anything on the host that binds the
-/// drawn number inside the handoff window takes it from the consumer.
+/// number a consumer was told to bind takes it from the consumer.
+///
+/// The stranger is not handed a drawn number: that would rebuild the window
+/// under test inside the test's own setup, and a real neighbour on the host
+/// took the number from the stranger instead (the land gate on f3650804,
+/// 1711). It binds port 0 and the consumer is given the number the kernel
+/// gave it, so the port is held from before the scene starts and the only
+/// one who can lose it is the consumer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_handoff_window_loses_the_port_to_a_stranger() {
-    // port-handoff: this draw re-creates the window under test on purpose;
-    // the stranger below is the deterministic neighbour.
-    let port = crate::ports::free_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-
-    // The stranger: a socket that never asked the allocator, arriving after
-    // the probe released the number and before the consumer binds it.
-    let _stranger = TcpListener::bind(addr).expect("stranger bind");
+    // The stranger: a socket that never asked the allocator, holding the
+    // number by the time the consumer binds it.
+    let stranger = crate::ports::bind_loopback_tcp();
+    let addr: SocketAddr = stranger.local_addr().expect("stranger addr");
 
     let storage = tempfile::tempdir().expect("tempdir");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
+        // port-handoff: the window under test, on purpose: the consumer is
+        // given a number the stranger above already holds.
         .add_tcp_server(addr)
         .storage_path(storage.path().to_path_buf())
         .build()
@@ -52,6 +57,7 @@ async fn the_handoff_window_loses_the_port_to_a_stranger() {
         text.contains("AddrInUse"),
         "the stranger's hold must be what refused the start: {text}"
     );
+    drop(stranger);
 }
 
 /// The fix: the port is held from the allocator's probe to the node's accept

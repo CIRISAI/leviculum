@@ -1075,21 +1075,10 @@ pub fn csma_slot_ms(bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
 
 /// Minimum spacing (ms) between consecutive serial writes.
 /// Prevents overrunning the serial buffer (508 bytes at 115200 baud ≈ 44ms).
-/// For CSMA-fair pacing, use `compute_spacing_ms()` instead, this constant
-/// is only the serial-level floor.
+/// This is only the serial-level floor: CSMA-fair pacing is the host
+/// interface's `tx_hold` (`leviculum-std`, `interfaces/rnode.rs`), which
+/// prices the firmware's contest from the slot the modem reports.
 pub const MIN_SPACING_MS: u64 = 50;
-
-/// Firmware CSMA DIFS time (ms). The firmware waits this long with the channel
-/// clear before starting the contention window. From RNode_Firmware Config.h.
-pub const CSMA_DIFS_MS: u64 = 48;
-
-/// Upper bound (ms) on the firmware's CSMA contention wait: 15 slots of 24 ms, one slot
-/// wider than it ever waits. Arduino `random` excludes its upper bound, so the boot window's
-/// `random(0, 15)` (`RNode_Firmware/Config.h:126-127`, `RNode_Firmware.ino:1626`) waits at most
-/// 14 slots = 336 ms, band 1 (`cw_max` = 14, `RNode_Firmware.ino:1617`) 13 = 312 ms. Kept at 360:
-/// its only reader, [`compute_spacing_ms`], has no production caller, and the census mvr
-/// `burst_continuation_contends_inside_its_own_answer` pins its numbers on this value.
-pub const CSMA_MAX_CW_MS: u64 = 360;
 
 /// Safety margin (ms) added to airtime-based pacing to absorb firmware
 /// processing jitter and serial I/O overhead.
@@ -1248,29 +1237,6 @@ pub fn host_frame_airtime_ms(
         preamble_symbols,
     );
     full_packets as u64 * full + last
-}
-
-/// Compute CSMA-fair inter-frame spacing in milliseconds.
-///
-/// Ensures the firmware's TX queue has at most one frame, so `flush_queue()`
-/// (which sends all queued frames back-to-back without CSMA) only sends one
-/// frame per CSMA contest.
-///
-/// spacing = airtime(frame) + DIFS + max_CW + margin
-///
-/// The airtime term charges the programmed preamble: pacing that assumes the
-/// modem-default 8 symbols undercounts every frame by (preamble-8)*t_sym.
-pub fn compute_spacing_ms(
-    payload_bytes: u32,
-    bandwidth_hz: u32,
-    sf: u8,
-    cr: u8,
-    preamble_symbols: u16,
-) -> u64 {
-    let air = airtime_ms_with_preamble(payload_bytes, bandwidth_hz, sf, cr, preamble_symbols);
-    let spacing = air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS;
-    // Never go below the serial-level floor
-    spacing.max(MIN_SPACING_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -3631,36 +3597,6 @@ mod tests {
         assert_eq!(cost, airtime_ms_with_preamble(184, 125_000, 12, 8, 18));
     }
 
-    #[test]
-    fn test_compute_spacing_includes_csma_overhead() {
-        let air = airtime_ms_with_preamble(491, 62_500, 7, 5, 24);
-        let spacing = compute_spacing_ms(491, 62_500, 7, 5, 24);
-        assert_eq!(
-            spacing,
-            air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS,
-            "spacing must be airtime + DIFS + max CW + margin"
-        );
-    }
-
-    /// TX pacing charges the programmed preamble: at SF12/BW125 the derived
-    /// 18-symbol preamble adds 328 ms per frame over the preamble-8 formula.
-    #[test]
-    fn test_compute_spacing_charges_the_programmed_preamble() {
-        let pre18 = compute_spacing_ms(184, 125_000, 12, 8, 18);
-        let pre8 = compute_spacing_ms(184, 125_000, 12, 8, 8);
-        assert!(pre18 - pre8 >= 327, "preamble delta {}ms", pre18 - pre8);
-    }
-
-    #[test]
-    fn test_compute_spacing_floor() {
-        // Tiny packet with huge bandwidth, airtime < MIN_SPACING_MS
-        let spacing = compute_spacing_ms(1, 500_000, 7, 5, 8);
-        assert!(
-            spacing >= MIN_SPACING_MS,
-            "spacing must never go below MIN_SPACING_MS"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Split protocol tests
     // -----------------------------------------------------------------------
@@ -4540,9 +4476,9 @@ mod tests {
 
         for &(at_ms, len) in POCKET_MINUTE_FRAMES.iter() {
             // `lora_task` calls `update` once per turn while a frame is
-            // pending, before it decides to key or hold (lora.rs:2166), and
+            // pending, before it decides to key or hold (lora.rs:2212), and
             // charges the frame only after `radio.transmit` returned Ok
-            // (lora.rs:1255) — i.e. at TX-done, one frame's airtime later.
+            // (lora.rs:1301) — i.e. at TX-done, one frame's airtime later.
             t.update(at_ms);
             t.add_airtime(at_ms + cost(len), cost(len));
         }

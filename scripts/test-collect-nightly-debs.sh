@@ -91,7 +91,7 @@ LNFLASH_VERSION="7.7.7"
 # stamp says, not what the host running this test happens to have installed.
 FIXTURE_RUSTC="rustc 9.9.9 (fixturec0de 2026-01-01)"
 
-BINS_AMD=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
+BINS_AMD=(lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt lnomad lblogd lnpnd loquax)
 
 setup() {  # <case> [stamp-mode: ok | missing | bogus | empty-target] [rustc-stamp: yes | no]
     local case_name="$1" stamp_mode="${2:-ok}" rustc_stamp="${3:-yes}"
@@ -257,7 +257,7 @@ rm -rf "$stage"; mkdir -p "$stage"
 tar -C "$stage" -xzf "$TREE/dist/leviculum-nightly-amd64.tar.gz" 2>/dev/null \
     || fail "leviculum-nightly-amd64.tar.gz is not a readable gzip tarball"
 lev="$stage/leviculum-nightly-amd64"
-for b in lnsd lnstest lncp lnstatus lnprobe lnpath; do
+for b in lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt; do
     [ -f "$lev/bin/$b" ] || fail "leviculum tarball is missing bin/$b"
 done
 got="$(head -n1 "$lev/bin/lnsd" 2>/dev/null)"
@@ -319,9 +319,9 @@ got="$(cat "$TREE/dist/leviculum-docs-nightly.tar.gz" 2>/dev/null)"
 # The source tarball is tracked files at HEAD, under one prefix, with no
 # build output in it.
 names="$(tar tzf "$TREE/dist/leviculum-nightly-source.tar.gz" 2>/dev/null)"
-echo "$names" | grep -q '^leviculum-nightly-source/README.md$' \
+grep -q '^leviculum-nightly-source/README.md$' <<<"$names" \
     || fail "source tarball does not hold leviculum-nightly-source/README.md"
-echo "$names" | grep -q 'target/' \
+grep -q 'target/' <<<"$names" \
     && fail "source tarball carries build output from target/"
 
 [ "$failures" -eq "$before" ] || dumpout

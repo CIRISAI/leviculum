@@ -12,6 +12,7 @@
 //! Every change is the whole of what the contacts file says about the peer
 //! ([`Contact`]), handed to the shell as [`UiEffect::Contact`] to write.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -22,6 +23,7 @@ use leviculum_ui::toast::ToastKind;
 
 use super::{Palette, UiEffect, UiModel, NONE_OPEN};
 use crate::names::{self, Contact, Trust};
+use crate::ui::strings::{Lang, StrId};
 
 /// What the open palette asks for instead of a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +35,50 @@ pub enum Ask {
     /// conversation: a digit picks a quick one, `Enter` sends what was
     /// typed ([`super::reactions`]).
     React { peer: [u8; 16], target: [u8; 32] },
+    /// A friend's code or address (1263, finding 6), read by
+    /// [`crate::code::read`]: its conversation opens, and with `name`
+    /// the palette asks the reader's name for it next (`add contact`).
+    Code { name: bool },
+    /// The terminal's group picker (1307): a friend's name ticks it, an
+    /// empty line goes on to [`Ask::GroupName`].
+    GroupPick,
+    /// The new group's name: `Enter` makes it.
+    GroupName,
+    /// A group's members, shown; `Enter` closes.
+    Members([u8; 16]),
+    /// Leave the group: `Enter` leaves.
+    LeaveGroup([u8; 16]),
+    /// "delete group" (1307 pass four): Enter deletes it for everyone.
+    DeleteGroup([u8; 16]),
+    /// A member's name: `Enter` removes it from the group.
+    RemoveMember([u8; 16]),
+    /// A friend's name (1371): `Enter` forwards the message `key` of
+    /// `from`'s conversation there.
+    Forward { from: [u8; 16], key: u64 },
+    /// The own position by hand (1371): `Enter` sets it, alone the map's
+    /// centre.
+    Position,
+    /// How long `peer`'s chat gets the position (1371): `Enter` alone
+    /// once, now.
+    Share([u8; 16]),
+    /// "delete all maps" (1371): `Enter` deletes them.
+    DeleteAllMaps,
+    /// A path the shell reads (1371): `Enter` hands it over.
+    Path(PathFor),
+    /// Another hub for the public rooms (1577): `Enter` takes the address
+    /// typed or pasted.
+    RoomsHub,
+}
+
+/// What a typed path is for (1371): the terminal's picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathFor {
+    /// A picture for `peer`'s chat, scaled at the photo size.
+    Picture([u8; 16]),
+    /// A file for `peer`'s chat, whole.
+    File([u8; 16]),
+    /// A picture of a friend's code: its conversation opens.
+    Code,
 }
 
 impl<B> UiModel<B> {
@@ -76,12 +122,28 @@ impl<B> UiModel<B> {
 
     /// The palette's rows while it asks: what for, and what `Enter` does.
     pub fn ask_rows(&self, ask: Ask) -> Vec<String> {
+        if let Some(rows) = self.verb_ask_rows(ask) {
+            return rows;
+        }
         match ask {
             Ask::Rename(peer) => vec![
-                format!("your name for {}", self.names.label(&peer)),
+                format!("your name for {}", self.names.label(&peer, self.lang)),
                 "Enter sets it, empty clears it".to_string(),
             ],
             Ask::React { peer, target } => self.react_rows(peer, target),
+            Ask::Code { .. } => vec![
+                super::strings::StrId::AskContactCode
+                    .text(self.lang)
+                    .to_string(),
+                "Enter opens the conversation".to_string(),
+            ],
+            Ask::RoomsHub => vec![
+                super::strings::Text::key(super::strings::StrId::RoomsHubPasteHint)
+                    .resolve(self.lang),
+                super::strings::Text::key(super::strings::StrId::RoomsNameVisible)
+                    .resolve(self.lang),
+            ],
+            group => self.group_ask_rows(group),
         }
     }
 
@@ -96,7 +158,7 @@ impl<B> UiModel<B> {
         let Some(peer) = self.open_peer() else {
             return Vec::new();
         };
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         if self.names.contacts.of(&peer).blocked == blocked {
             let state = match blocked {
                 true => "already blocked",
@@ -164,9 +226,11 @@ impl<B> UiModel<B> {
         contact.petname = petname.clone();
         let effects = self.set_contact(contact);
         if self.home_client {
-            self.petnames.push((peer, petname));
+            // Owed until the home node takes it (1635): kept in the store,
+            // handed again after a restart.
+            self.owed_petnames.set(peer, petname);
         }
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match cleared {
             true => format!("no name of yours for {label}"),
             false => format!("named {label}"),
@@ -177,15 +241,29 @@ impl<B> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
-    /// A petname one of the home's devices set, pulled (1139): taken as
-    /// the reader's word here and written to the contacts file, never
-    /// handed back. A name that sanitises to nothing clears it.
+    /// A petname one of the home's devices set, pulled (1139), and when
+    /// the home took it (`at`, the home's clock): taken as the reader's
+    /// word here and written to the contacts file, never handed back. A
+    /// name that sanitises to nothing clears it.
+    ///
+    /// Not over a newer word of this device's (1635). While this device
+    /// owes the home a petname for the peer, the home has not taken it,
+    /// and once it does it is the home's newest: what the pull brought is
+    /// older, a name the reader cleared among them. Once the home took it,
+    /// the archive holds nothing older for the peer, but a pull already
+    /// under way may: until that pull ends an entry counts only if the
+    /// home took it after this device's (`at` past the time its answer
+    /// came). An entry that says the same is the home's echo of it.
     pub(super) fn home_petname(
         &mut self,
         peer: [u8; 16],
         petname: Option<String>,
+        at: i64,
     ) -> Vec<UiEffect> {
         let petname = petname.as_deref().and_then(names::sanitise);
+        if !self.owed_petnames.pulled(&peer, &petname, at) {
+            return Vec::new();
+        }
         let mut contact = self.names.contacts.of(&peer);
         if contact.petname == petname {
             return Vec::new();
@@ -194,9 +272,29 @@ impl<B> UiModel<B> {
         self.set_contact(contact)
     }
 
-    /// The petnames this device set, for the shell to hand the home node.
+    /// The petnames this device owes the home node, the newest of each
+    /// peer, for the shell to hand it; it answers with
+    /// [`super::UiEvent::PetnamesHanded`]. Nothing while a hand is under way, so
+    /// the home takes a peer's names in the order they were set (1635):
+    /// two hands at once could reach it the other way round.
     pub fn take_petnames(&mut self) -> Vec<([u8; 16], Option<String>)> {
-        core::mem::take(&mut self.petnames)
+        self.owed_petnames.take()
+    }
+
+    /// A hand ended (1635): what the home took is owed no more, unless the
+    /// reader set another name for the peer meanwhile, and stands over
+    /// older entries until the next pull ends. What it did not take goes
+    /// with the next hand.
+    pub(super) fn petnames_handed(&mut self, taken: Vec<([u8; 16], Option<String>)>) {
+        let now = self.now.map_or(0, |at| at.unix_secs);
+        self.owed_petnames.handed(taken, now);
+    }
+
+    /// The petnames the store kept as owed (1635), at the start: handed
+    /// again with the first hand, and the reader's word over what the
+    /// first pull brings.
+    pub fn restore_owed_petnames(&mut self, owed: BTreeMap<[u8; 16], Option<String>>) {
+        self.owed_petnames.restore(owed);
     }
 }
 
@@ -221,9 +319,53 @@ impl<B: InputBuffer + Default> UiModel<B> {
 
     /// `Enter` in a palette that asks: what was asked is done with the text.
     pub(super) fn answer_ask(&mut self, ask: Ask, typed: String) -> Vec<UiEffect> {
+        if let Some(effects) = self.answer_verb_ask(ask, &typed) {
+            return effects;
+        }
         match ask {
             Ask::Rename(peer) => self.rename(peer, &typed),
             Ask::React { peer, target } => self.react(peer, target, &typed),
+            Ask::Code { name } => self.take_code(&typed, name),
+            Ask::RoomsHub => super::rooms::choose(self, super::rooms::HubChoice::Address(typed)),
+            group => self.answer_group_ask(group, typed),
         }
+    }
+
+    /// The palette's `new conversation` and `add contact`: ask for the
+    /// friend's code.
+    pub(super) fn ask_code(&mut self, name: bool) {
+        self.palette = Some(Palette {
+            ask: Some(Ask::Code { name }),
+            ..Palette::default()
+        });
+    }
+
+    /// A friend's code typed or pasted into the palette: the conversation
+    /// open with the cursor in compose, then the name asked for when
+    /// `name`. A code that is none is said in a toast, the same sentence
+    /// the phone shows.
+    pub(super) fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
+        let code = match crate::code::read(typed) {
+            Ok(code) => code,
+            Err(why) => {
+                self.toast(ToastKind::Error, why.say(Lang::En).to_string());
+                return Vec::new();
+            }
+        };
+        let Some(peer) = code.address() else {
+            self.toast(
+                ToastKind::Error,
+                StrId::CodeIsMailbox.text(Lang::En).to_string(),
+            );
+            return Vec::new();
+        };
+        self.show_blocked = false;
+        let index = self.conversation(peer);
+        self.select(index);
+        self.focus = super::Pane::Compose;
+        if name {
+            self.ask_rename();
+        }
+        Vec::new()
     }
 }

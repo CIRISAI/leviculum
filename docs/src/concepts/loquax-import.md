@@ -114,6 +114,56 @@ history stays under its address, and moving the file back switches back.
 On a client of a home node, adoption is refused: the client answers on the
 home node's address.
 
+### Ratchets
+
+Order 1185, after Lew's mailbox lost every short message Columba sent it
+with two ticks on the phone (2026-10-31). Every Python LXMF router turns
+ratchets on for its delivery destination
+(`reference/LXMF/LXMF/LXMRouter.py:357`), and so does Ratspeak. A peer that
+heard such an announce encrypts every single packet to that ratchet for 30
+days (`RNS/Identity.py:69`, `RATCHET_EXPIRY`), and only an announce that
+carries a newer ratchet replaces it. An identity that moves to Loquax
+without its ratchets therefore loses every short message from such a peer,
+which is most messages: a short text goes as one opportunistic packet, and
+only links (telemetry, long messages) use their own keys.
+
+So the old app's private ratchet keys come along. `loquax import --ratchets
+FILE` takes either format, told apart by content
+(`loquax/src/import/ratchets.rs` cites both layouts):
+
+- Python LXMF (NomadNet, Sideband): `<lxmf storage>/ratchets/<destination
+  hash>.ratchets`, `{"signature", "ratchets"}`, signed over the key list
+  (`RNS/Destination.py:210-220`).
+- Ratspeak: `identities/<identity hash>/ratchets/ring`, rsReticulum's
+  `RatchetRing` through `rmp_serde`, signed over the current ratchet's
+  public key.
+
+The signature has to hold for the identity Loquax answers on, so the
+ratchets go in after the identity is adopted (the same command does both,
+`loquax import --key --ratchets FILE` or a path with `--ratchets`). NomadNet's
+file and Ratspeak's ring are taken along by themselves when the identity is
+adopted from their place. They go in behind the ratchets Loquax holds, into
+the file its node loads at start (`storage/ratchetkeys/<address>`, mode
+0600), within the reference's 512. The import takes the delivery lock: with
+Loquax Mailbox or the messenger running it is refused, as a running node
+would write its own set over the file at its next rotation. On a Mailbox,
+stop it, import, start it again.
+
+Loquax itself announces with ratchets from 1185 on, so a peer that hears
+one of its announces replaces the old ratchet anyway; the import covers
+the time until then. The way out is the same: `loquax export` writes the
+ratchets to `storage/lxmf/ratchets/<address>.ratchets` in the tree, where
+NomadNet's router loads them, and an import of that tree takes them back.
+After an import that adopted an identity or brought
+ratchets, Loquax Mailbox announces every 30 minutes for a day instead of
+every 6 hours (`loquax-home-node.md`, "Inbound on the home node").
+
+A packet that no ratchet opens is logged as `LXMF_RX_UNDECRYPTABLE
+dst=<address> len=<bytes> ratchets=<held> count=<since start>` and is not
+proven, as the reference proves only what it could decrypt
+(`RNS/Transport.py:2159-2160`): until 1185 the core proved it anyway, and
+the sender showed it as delivered.
+
 ### Ratspeak history
 
 Order 1150. `loquax import <copy of ratspeak.db>` reads a database the

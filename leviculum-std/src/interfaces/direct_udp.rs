@@ -52,7 +52,7 @@ pub(crate) const FAST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const FAST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Largest datagram accepted: anything UDP can carry. The link is lowered to
-/// `DIRECT_LINK_MTU` when it moves here, but a part sized for the link's
+/// `DIRECT_LINK_MTU` or below when it moves here, but a part sized for its
 /// earlier, larger MTU may still be in flight, and a truncated datagram is
 /// a silently lost packet.
 const DATAGRAM_MAX: usize = 65_535;
@@ -145,9 +145,11 @@ pub(crate) fn spawn_direct_udp_interface(
             // does not) this one only exists between two nodes that ran the
             // DirectLink upgrade, so its far end is never a Python node.
             // Signalling none held a link BORN here (a derived one-hop
-            // address, never announced) at 500 on a path that carries 1400;
-            // a link that moves here is lowered to `DIRECT_LINK_MTU` as
-            // before, by both ends.
+            // address, never announced) at 500 on a path that carries 1400.
+            // A link that moves here is lowered by both ends to the smaller
+            // of their probes' finds, carried in their COMPLETEs
+            // (leviculum#107); with a peer that does not send one, to
+            // `DIRECT_LINK_MTU` as before.
             hw_mtu: hw_mtu.map(|m| m.min(DIRECT_LINK_MTU)),
             is_local_client: false,
             bitrate: None,
@@ -161,6 +163,7 @@ pub(crate) fn spawn_direct_udp_interface(
             kind: leviculum_core::traits::InterfaceKind::Udp,
             ingress_control: Some(false),
             transit: false,
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

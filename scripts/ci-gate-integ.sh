@@ -76,8 +76,14 @@
 #
 # Usage:
 #   bash scripts/ci-gate-integ.sh
-#   bash scripts/ci-gate-integ.sh --list   # print the selection, run nothing
+#   bash scripts/ci-gate-integ.sh --list      # print the selection, run nothing
+#   bash scripts/ci-gate-integ.sh --dry-run   # every check, the excluded tests'
+#                                             # listings included, then print the
+#                                             # cargo invocations instead of them
 set -uo pipefail
+
+DRY_RUN=0
+[ "${1:-}" != "--dry-run" ] || DRY_RUN=1
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR" || exit 1
@@ -138,37 +144,66 @@ done <<EOF
 $GATED
 EOF
 
+# `<dir>/<target><TAB><recipe>`, one per gated target whose recipe runs it
+# through scripts/with-prerequisites.sh naming it. A by-name line of
+# scripts/integ-prerequisites.txt for such a target is not stale although
+# this run excludes the target: the recipe applies the line (1203). Forge
+# land gate on e6dd4eaf: red on the four loquax/home_node lines 1167 added,
+# which the coder host never saw because its submodules exclude nothing.
+WRAPPED="$(python3 scripts/check-standard-integ.py --wrapped)" ||
+    die "could not read which gated targets run through scripts/with-prerequisites.sh
+(python3 scripts/check-standard-integ.py --wrapped)."
+
 # Both directions of drift. A stale exclusion is not cosmetic: the entry is
 # what carries the reason a suite is out of the push gate, so an entry naming
 # a target that no longer exists means the reason is describing nothing.
+#
+# An entry is `<dir>/<target>`. A bare `<target>` that a second package also
+# has is refused by name: it does not say which one it means, and
+# `cargo test --test <name>` would take every one of them. A shared name in a
+# QUALIFIED entry is fine: the run below gives the surviving target its own
+# package's invocation (1306; until then the forge refused the qualified
+# `loquax/scene_golden` once lnomad had a `scene_golden` too, land gate on
+# ee9541af).
 while read -r entry; do
     [ -n "$entry" ] || continue
+    if [ "${entry#*/}" = "$entry" ]; then
+        dupes="$(grep -c "/${entry}\$" <<<"$ALL")"
+        [ "$dupes" -le 1 ] ||
+            die "scripts/integ-prerequisites.txt names the bare target '$entry', which exists in $dupes packages:
+$(grep "/${entry}\$" <<<"$ALL" | sed 's/^/  /')
+'cargo test --test $entry' selects all of them, so excluding by that name
+would drop the others without a word. Qualify the line as <dir>/$entry."
+    fi
     has_line "$entry" "$ALL" ||
         die "scripts/integ-prerequisites.txt names '$entry', which is not a test target in this tree.
 Either the target was renamed or removed — drop the line — or the path is
-wrong, in which case a suite everyone believes is excluded is being run."
-    # Selection below is BY NAME (`cargo test --test <name>`), which is
-    # workspace-wide: excluding a name that a second package also uses would
-    # silently take that one out too.
-    name="${entry##*/}"
-    dupes="$(printf '%s\n' "$ALL" | grep -c "/${name}\$")"
-    [ "$dupes" -eq 1 ] ||
-        die "the excluded target name '$name' exists in $dupes packages.
-'cargo test --test $name' selects all of them, so excluding one would drop
-the others without a word. Give the surviving one a different name, or run
-it from a second invocation here."
+wrong, in which case a suite everyone believes is excluded is being run.
+A line names its target as <dir>/<target>."
 done <<EOF
 $EXCLUDED_LIST
 $GATED_LIST
+$(awk '{ print $1 }' <<<"$EXCLUDED_TESTS" | sort -u)
 EOF
 
 SELECTED="$(printf '%s\n' "$ALL" | grep -vxF -f <(printf '%s\n' "$EXCLUDED_LIST" "$GATED_LIST" | sed '/^$/d'))"
+# `-<TAB><name>` for the workspace run, `<dir><TAB><name>` for a selected
+# target whose name an excluded one shares (scripts/integ-targets.sh).
+RUN_GROUPS="$(integ_run_groups "$ALL" "$SELECTED")"
 # Names, deduplicated: two packages may legitimately both have a `cli` target,
 # and `--test cli` selects both, which is what we want.
-NAMES="$(printf '%s\n' "$SELECTED" | sed 's|.*/||' | sort -u)"
+NAMES="$(awk -F'\t' '$1 == "-" { print $2 }' <<<"$RUN_GROUPS")"
+# `<dir>/<name>`, each run from its own package after the workspace run.
+SPLIT="$(awk -F'\t' '$1 != "-" { print $1 "/" $2 }' <<<"$RUN_GROUPS")"
 
 say "$(printf '%s\n' "$ALL" | wc -l) integration-test targets in the tree"
-say "$(printf '%s\n' "$SELECTED" | wc -l) selected, via $(printf '%s\n' "$NAMES" | wc -l) target name(s)"
+say "$(printf '%s\n' "$SELECTED" | wc -l) selected, via $(printf '%s\n' "$NAMES" | sed '/^$/d' | wc -l) target name(s) and $(printf '%s\n' "$SPLIT" | sed '/^$/d' | wc -l) per-package target(s)"
+while read -r target; do
+    [ -n "$target" ] || continue
+    say "per package: $target (an excluded target of another package has its name)"
+done <<EOF
+$SPLIT
+EOF
 while read -r entry; do
     [ -n "$entry" ] || continue
     say "excluded: $entry ($(printf '%s\n' "$UNMET" | awk -F'\t' -v t="$entry" '$1 == t && $2 == "-" { print $3 }' | paste -sd' ') absent, scripts/integ-prerequisites.txt)"
@@ -192,8 +227,10 @@ EOF
 
 EXCLUDED_TESTS_LIST="$(printf '%s\n' "$EXCLUDED_TESTS" | sed '/^[[:space:]]*$/d')"
 
+# One selector a line: a bare name for the workspace run, `<dir>/<name>` for
+# a target run from its own package.
 if [ "${1:-}" = "--list" ]; then
-    printf '%s\n' "$NAMES"
+    printf '%s\n' "$NAMES" "$SPLIT" | sed '/^$/d'
     exit 0
 fi
 
@@ -211,11 +248,17 @@ fi
 LISTING_DIR="$(mktemp -d)"
 trap 'rm -rf "$LISTING_DIR"' EXIT
 
-# list_target NAME N: listing N of target NAME into $LISTING_DIR/NAME.N.{out,err}.
-# Same `--workspace` as the run below, so the listing compiles what the run
-# reuses rather than a second feature resolution.
+# list_target NAME N TARGET: listing N of target NAME into
+# $LISTING_DIR/NAME.N.{out,err}. The selector of the run below: `--workspace`
+# for a name of the workspace run, so the listing compiles what the run reuses
+# rather than a second feature resolution, and `-p` for a per-package target,
+# so a same-named target of another package cannot answer for it.
 list_target() {
-    cargo test --workspace --test "$1" -- --list \
+    local sel=(--workspace)
+    if has_line "$3" "$SPLIT"; then
+        sel=(-p "$(integ_package "${3%/*}")")
+    fi
+    cargo test "${sel[@]}" --test "$1" -- --list \
         >"$LISTING_DIR/$1.$2.out" 2>"$LISTING_DIR/$1.$2.err"
 }
 
@@ -263,27 +306,53 @@ describe_listing() {
     fi
 }
 
+# gate NAME CMD...: CMD through run-with-manifest.py as gate NAME, or under
+# `--dry-run` the command it would run, quoted, and nothing else.
+gate() {
+    local name="$1"
+    shift
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '[ci-gate-integ] would run (gate %s):' "$name" >&2
+        printf ' %q' "$@" >&2
+        echo >&2
+        return 0
+    fi
+    python3 scripts/run-with-manifest.py --gate "$name" -- "$@"
+}
+
 SKIP_ARGS=()
 declare -A LISTING=()
 while read -r target test; do
     [ -n "$target" ] || continue
-    has_line "$target" "$SELECTED" ||
+    if ! has_line "$target" "$SELECTED"; then
+        recipe="$(awk -F'\t' -v t="$target" '$1 == t { print $2 }' <<<"$WRAPPED")"
+        if [ -n "$recipe" ]; then
+            say "excluded test: $target $test (target runs in recipe $recipe, which applies scripts/integ-prerequisites.txt through scripts/with-prerequisites.sh)"
+            continue
+        fi
+        recipe="$(awk -F'\t' -v t="$target" '$1 == t { print $3 }' <<<"$GATED")"
+        [ -z "$recipe" ] ||
+            die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
+test target in this tree. It requires features and runs in recipe '$recipe',
+which does not run it through 'scripts/with-prerequisites.sh $target', so
+nothing applies the line there. Route that recipe through the wrapper."
         die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
 test target in this tree. Fix the target path, or drop the line if the
 target itself went onto EXCLUDED."
+    fi
     name="${target##*/}"
-    if [ -z "${LISTING[$name]+set}" ]; then
+    if [ -z "${LISTING[$target]+set}" ]; then
         say "listing target $name to check its excluded tests"
-        list_target "$name" 1 ||
+        list_target "$name" 1 "$target" ||
             die "could not list the tests of target '$name' (cargo exited $?).
 $(describe_listing "$name" 1 "$target")
 Kept: $(keep_listings "$name")"
-        LISTING[$name]="$(cat "$LISTING_DIR/$name.1.out")"
+        LISTING[$target]="$(cat "$LISTING_DIR/$name.1.out")"
     fi
     # Every branch of a miss ends in die, so a target is relisted at most once.
-    if ! has_line "$test: test" "${LISTING[$name]}"; then
+    if ! has_line "$test: test" "${LISTING[$target]}"; then
         say "target $name does not list '$test'; listing it once more before believing that"
-        list_target "$name" 2
+        list_target "$name" 2 "$target"
         relist_rc=$?
         if [ "$relist_rc" -eq 0 ] && has_line "$test: test" "$(cat "$LISTING_DIR/$name.2.out")"; then
             die "the test binary of target '$name' listed itself twice with different results:
@@ -331,14 +400,31 @@ EOF
 # `--exact` makes each `--skip` a whole test name rather than a substring, so
 # an excluded name cannot take a longer one in another binary with it.
 say "running cargo test --workspace --bins with ${#ARGS[@]} target flags, skipping $((${#SKIP_ARGS[@]} / 2)) test(s)"
-python3 scripts/run-with-manifest.py --gate ci-gate-integ -- \
+gate ci-gate-integ \
     cargo test --workspace --bins "${ARGS[@]}" --no-fail-fast -- --exact "${SKIP_ARGS[@]}"
 rc=$?
+
+# A target whose name an excluded target of another package shares, from its
+# own package: the workspace run above cannot name it without taking the
+# other along (1306). Same skips, one manifest per package. `-p` resolves
+# features for that package alone, which may compile a few crates again.
+while read -r target; do
+    [ -n "$target" ] || continue
+    pkg="$(integ_package "${target%/*}")"
+    [ -n "$pkg" ] || die "no package name in ${target%/*}/Cargo.toml, for $target."
+    say "running cargo test -p $pkg --test ${target##*/}"
+    gate "ci-gate-integ-$pkg" \
+        cargo test -p "$pkg" --test "${target##*/}" --no-fail-fast -- --exact "${SKIP_ARGS[@]}"
+    split_rc=$?
+    [ "$split_rc" -eq 0 ] || rc="$split_rc"
+done <<EOF
+$SPLIT
+EOF
 
 # Doctests are their own invocation because cargo DROPS them when any other
 # target selector is given — the same reason `complete` spells them out
 # separately. 33 tests, 1.1 s.
-python3 scripts/run-with-manifest.py --gate ci-gate-doc -- \
+gate ci-gate-doc \
     cargo test --workspace --doc --no-fail-fast
 doc_rc=$?
 

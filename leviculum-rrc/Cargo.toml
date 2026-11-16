@@ -1,0 +1,15 @@
+[package]
+name = "leviculum-rrc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Reticulum Relay Chat (RRC): the CBOR envelope codec and a client's link state, no_std"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dev-dependencies]
+serde_json = "1"

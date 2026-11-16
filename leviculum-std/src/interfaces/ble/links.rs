@@ -75,7 +75,7 @@ pub(crate) const LOCAL_CAPS: u8 = 0x00;
 pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 
 /// Outgoing (central-role) links a board opens, the firmware's
-/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:120`): one. A board
+/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:121`): one. A board
 /// dials at most one neighbour at a time — which the dial queue's
 /// one-setup-in-flight rule (#49 part 3) already arranged in time; this
 /// is the same bound held in the table, where it survives a setup that
@@ -507,7 +507,7 @@ impl LinkTable {
     }
 
     /// Whether an outgoing slot is free, the scan path's and the dial
-    /// pump's gate (`ble/mod.rs:1154`, `:867`).
+    /// pump's gate (`ble/mod.rs:1155`, `:867`).
     ///
     /// Half of what was one occupancy predicate before #432. It reads
     /// the CENTRAL links only, so a node with a lively GATT server
@@ -5649,7 +5649,7 @@ mod tests {
     }
 
     /// One dial in the room, gated exactly as the driver gates it: the
-    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1154` and
+    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1155` and
     /// the pump at `:856`) and the target must be on the air
     /// (`should_advertise` — a dark peer sends no connectable PDU, so a
     /// dial at it can only run out `bluez.rs`'s 20 s setup budget).
@@ -5765,7 +5765,7 @@ mod tests {
     /// The incoming cap, at the boundary: three dials land, the fourth
     /// is refused BY ROLE, and the node is on the air for exactly as
     /// long as it has room — the firmware's `PERIPH_LINKS` shape
-    /// (`leviculum-nrf/src/ble/mod.rs:113`) on a host.
+    /// (`leviculum-nrf/src/ble/mod.rs:114`) on a host.
     #[test]
     fn a_fourth_incoming_dial_is_refused_and_the_third_takes_the_node_dark() {
         const ADDR_4: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x04];

@@ -75,18 +75,33 @@ fn help_exits_zero_and_documents_the_send_subcommand() {
     );
 }
 
-/// Plain `loquax` is the messenger (Lew, 2026-10-26), and its help says so
-/// first, then lists the commands for scripts.
+/// Plain `loquax` is the messenger (Lew, 2026-10-26), in the window where
+/// there is a display (2026-11-02, 1342), and its help says so first, says
+/// how it picks and how to insist, then lists the commands for scripts.
 #[test]
 fn bare_help_names_the_messenger_first_then_the_subcommands() {
     let run = run(&["--help"], b"");
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
     assert_eq!(
         run.stdout.lines().next(),
-        Some("the Leviculum messenger; with no arguments it opens the conversation view"),
+        Some(
+            "the Leviculum messenger; with no arguments it opens the window, or the terminal \
+             view where there is no display"
+        ),
         "{}",
         run.stdout
     );
+    for words in [
+        "WAYLAND_DISPLAY or DISPLAY",
+        "`loquax gui` insists on the window",
+        "`loquax tui` insists on the terminal view",
+    ] {
+        assert!(
+            run.stdout.contains(words),
+            "{words} missing: {}",
+            run.stdout
+        );
+    }
     for command in ["send", "fetch", "address"] {
         assert!(
             run.stdout.contains(&format!("  {command} ")),
@@ -185,6 +200,7 @@ fn via_propagated_without_a_daemon_is_an_operational_failure() {
             "propagated",
             "--instance",
             &instance,
+            "--verbose",
         ],
         b"body\n",
     );
@@ -245,10 +261,14 @@ fn an_unknown_via_value_is_rejected_by_the_parser() {
 
 /// With no daemon there is nothing to queue into, and the message has to say
 /// what is missing and how to fix it — never fall back to a private stack.
+/// The instance and the daemons are the `--verbose` text since 1265.
 #[test]
 fn with_no_daemon_running_the_error_names_the_daemon() {
     let instance = format!("loquax-nothing-here-{}", std::process::id());
-    let run = run(&["send", NOWHERE, "--instance", &instance], b"body\n");
+    let run = run(
+        &["send", NOWHERE, "--instance", &instance, "--verbose"],
+        b"body\n",
+    );
     assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
     assert!(
         run.stdout.is_empty(),
@@ -570,7 +590,10 @@ fn config_is_taken_before_and_after_the_subcommand() {
         &["home", "join", code, "--config", dir],
     ];
     for args in runs {
-        let run = run(args, b"");
+        // The instance is the verbose text's (1265), and it is what proves
+        // the value of --config arrived.
+        let verbose: Vec<&str> = args.iter().copied().chain(["--verbose"]).collect();
+        let run = run(&verbose, b"");
         assert!(
             !run.stderr.contains("cannot be used with"),
             "{args:?}: {}",
@@ -604,6 +627,9 @@ fn a_first_send_or_fetch_makes_the_home_before_it_takes_the_lock() {
         let output = Command::new("sh")
             .args(["-c", "umask 0002 && exec \"$0\" \"$@\"", LNMSG])
             .args(&args)
+            // The instance is the verbose text's (1265), and it is what
+            // proves the run got as far as the daemon.
+            .arg("--verbose")
             .env("LNMSG_HOME", &home)
             .env_remove("LEVICULUM_EVENT_LOG")
             .stdin(Stdio::null())

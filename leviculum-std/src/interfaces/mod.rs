@@ -26,8 +26,11 @@ pub use firmware_request::{
     request_firmware_media_silence, request_firmware_reset, FirmwareRequest,
     FIRMWARE_ANNOUNCE_SIGNAL, FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL,
 };
+pub(crate) mod goodbye;
 pub mod hdlc;
+#[cfg(feature = "i2p")]
 pub(crate) mod i2p;
+pub(crate) use goodbye::{RadioGoodbyes, GOODBYE_BOUND};
 pub(crate) mod inventory;
 pub(crate) mod ipc;
 pub use ipc::{set_shared_instance_transport, shared_instance_transport, SharedInstanceTransport};
@@ -52,8 +55,11 @@ pub use rnode::{
 #[cfg(feature = "serial")]
 pub(crate) mod serial;
 #[cfg(feature = "serial")]
+pub mod serial_mux;
+#[cfg(feature = "serial")]
 pub use serial::{radio_bring_up, radio_pricing_phy, remembered_media_profile, RadioBringUp};
 pub(crate) mod tcp;
+pub(crate) mod tcp_admission;
 pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
 
@@ -243,6 +249,24 @@ pub(crate) struct InterfaceCounters {
     reconnect_kick: Notify,
 }
 
+/// The process's count of carrier changes, see [`carrier_changes`].
+static CARRIER_CHANGES: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn carrier_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    CARRIER_CHANGES.get_or_init(|| tokio::sync::watch::Sender::new(0))
+}
+
+/// Said whenever an interface of any node in this process sees its carrier
+/// come up or go down (1346): a TCP client that loses its connection marks
+/// itself offline and redials on its own, as the reference's does, and
+/// tells the core nothing, so no `InterfaceDown` reaches an application.
+/// A phone that sleeps between its timers hears the loss here and then
+/// looks at its own node's [`interface_stats`](crate::ReticulumNode::interface_stats);
+/// a change of another node's interface wakes it for nothing.
+pub fn carrier_changes() -> tokio::sync::watch::Receiver<u64> {
+    carrier_sender().subscribe()
+}
+
 impl InterfaceCounters {
     pub(crate) fn new() -> Self {
         Self {
@@ -297,8 +321,16 @@ impl InterfaceCounters {
 
     /// Record the carrier coming up or going down. Called by the owning
     /// interface task only; readers use [`is_online`](Self::is_online).
+    /// A change is said on [`carrier_changes`].
     pub(crate) fn set_online(&self, online: bool) {
-        self.online.store(online, Ordering::Release);
+        if self.swap_online(online) {
+            carrier_sender().send_modify(|changes| *changes = changes.wrapping_add(1));
+        }
+    }
+
+    /// Set the carrier, `true` when that changed it.
+    fn swap_online(&self, online: bool) -> bool {
+        self.online.swap(online, Ordering::AcqRel) != online
     }
 
     /// Whether the owning interface task currently considers its carrier up.
@@ -830,6 +862,15 @@ pub(crate) struct InterfaceInfo {
     /// (`LocalClientInterface.should_ingress_limit() -> False`,
     /// LocalInterface.py:137-138).
     pub ingress_control: Option<bool>,
+    /// The route rule this interface's medium declares for competing copies
+    /// of one announce emission (Codeberg #230, order 1380): `HopsAndLoss`
+    /// on the radio interfaces (RNode, RNode multi vports, BLE), where a
+    /// direct link can be marginal and its announce re-hear ratio says so,
+    /// `Hops` on every other. The driver hands it to
+    /// `Transport::set_interface_path_choice` at registration, a spawned
+    /// interface's included; the `[reticulum] path_choice` key, when set,
+    /// overrides it in the core (`TransportConfig::path_choice`).
+    pub path_choice: leviculum_core::transport::PathChoice,
     /// Declared transit policy (leviculum#51), inherited by spawned children
     /// the same way `mode` is: a `transit: false` listener's accepted
     /// connections are leaf-only — the node never forwards through them and
@@ -1133,6 +1174,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -1209,6 +1251,30 @@ mod tests {
     /// against either stack. It is the freeze predicate that has to know the
     /// difference, and it can only get it by watching the value across at
     /// least one full sampling period.
+    /// 1346: a carrier that changes is said; setting the state it already
+    /// has is no change. The signal is the process's, so other tests'
+    /// interfaces may say changes too: only the positive side is asserted
+    /// on it, the repeat on the swap that decides.
+    #[test]
+    fn a_carrier_change_is_said_and_a_repeat_is_not() {
+        let mut changes = carrier_changes();
+        let counters = InterfaceCounters::new();
+        assert!(!counters.swap_online(true), "online already");
+        changes.mark_unchanged();
+        counters.set_online(false);
+        assert!(
+            changes.has_changed().expect("the sender lives"),
+            "down is said"
+        );
+        assert!(!counters.swap_online(false), "down again is no change");
+        changes.mark_unchanged();
+        counters.set_online(true);
+        assert!(
+            changes.has_changed().expect("the sender lives"),
+            "up is said"
+        );
+    }
+
     #[test]
     fn a_zero_speed_reading_does_not_mean_the_bytes_have_been_accounted() {
         let counters = InterfaceCounters::new();
@@ -1518,3 +1584,9 @@ mod tests {
         assert!(matches!(err, InterfaceError::BufferFull));
     }
 }
+
+// +ciris (#109): WebSocket interfaces, server and client.
+#[cfg(feature = "websocket")]
+pub(crate) mod websocket;
+#[cfg(feature = "websocket")]
+pub use websocket::{WsFraming, SUBPROTOCOL_HDLC, SUBPROTOCOL_RAW};

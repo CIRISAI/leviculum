@@ -114,6 +114,7 @@ pub(super) fn build(
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             radio_config,
             test_drop_direct_ingress: config.test_drop_direct_ingress,
+            serial_mux: config.serial_mux,
         },
     );
     handle.info.bitrate = Some(bitrate);
@@ -193,6 +194,7 @@ mod tests {
                 transport_enabled: false,
                 default_announce_rate: Default::default(),
                 identity_hash: [0x5A; 16],
+                goodbyes: crate::interfaces::RadioGoodbyes::new(),
             }
         }
     }

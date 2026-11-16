@@ -1,0 +1,30 @@
+2026-11-10T19:32:19.124Z hci0 type 6 discovering on
+2026-11-10T19:32:19.125Z Discovery started
+2026-11-10T19:32:19.126Z hci0 dev_found: 44:1B:F6:69:77:25 type LE Public rssi -40 flags 0x0000 
+2026-11-10T19:32:19.127Z AD flags 0x06 
+2026-11-10T19:32:19.127Z name RNode 9A01
+2026-11-10T19:32:19.128Z hci0 dev_found: E8:1D:77:F0:9C:DC type LE Random rssi -50 flags 0x0000 
+2026-11-10T19:32:19.129Z AD flags 0x06 
+2026-11-10T19:32:19.129Z name Feld-T114
+2026-11-10T19:32:19.130Z hci0 dev_found: CE:FA:BD:03:80:F3 type LE Random rssi -60 flags 0x0000 
+2026-11-10T19:32:19.131Z AD flags 0x06 
+2026-11-10T19:32:19.132Z name LN-2fe8dd7c
+2026-11-10T19:32:19.132Z hci0 dev_found: E1:AC:9E:B3:F0:5D type LE Random rssi -50 flags 0x0000 
+2026-11-10T19:32:19.133Z AD flags 0x06 
+2026-11-10T19:32:19.134Z name HT-n5262-OTA
+2026-11-10T19:32:19.135Z hci0 dev_found: D9:16:E2:92:3E:D2 type LE Random rssi -58 flags 0x0000 
+2026-11-10T19:32:19.135Z AD flags 0x06 
+2026-11-10T19:32:19.136Z name LN-e19b2b38
+2026-11-10T19:32:19.137Z hci0 type 6 discovering off
+2026-11-10T19:32:30.644Z hci0 type 6 discovering on
+2026-11-10T19:32:30.645Z Discovery started
+2026-11-10T19:32:30.646Z hci0 dev_found: E1:AC:9E:B3:F0:5D type LE Random rssi -50 flags 0x0000 
+2026-11-10T19:32:30.647Z AD flags 0x06 
+2026-11-10T19:32:30.648Z name HT-n5262-OTA
+2026-11-10T19:32:30.649Z hci0 dev_found: D9:16:E2:92:3E:D2 type LE Random rssi -58 flags 0x0000 
+2026-11-10T19:32:30.649Z AD flags 0x06 
+2026-11-10T19:32:30.650Z eir_len 31
+2026-11-10T19:32:30.651Z hci0 dev_found: 44:1B:F6:69:77:25 type LE Public rssi -40 flags 0x0000 
+2026-11-10T19:32:30.652Z AD flags 0x06 
+2026-11-10T19:32:30.653Z name RNode 9A01
+2026-11-10T19:32:30.654Z hci0 dev_found: E1:AC:9E:B3:F0:5D type LE Random rssi -48 flags 0x0000 

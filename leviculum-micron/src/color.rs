@@ -9,6 +9,9 @@
 //! grayscale level, three hex nibbles are each doubled to form `#rrggbb`, and
 //! six hex characters are taken as a full `#rrggbb`.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 /// A parsed micron colour.
 ///
 /// `raw` is the exact micron colour form, either three characters (e.g.

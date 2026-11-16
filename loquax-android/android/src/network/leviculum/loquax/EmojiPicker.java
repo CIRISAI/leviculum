@@ -89,6 +89,30 @@ final class EmojiPicker {
         return Math.round(dp * activity.getResources().getDisplayMetrics().density);
     }
 
+    /** The recents row (1464), into `into` once the library answered. */
+    private void recents(LinearLayout into, List<String> recents) {
+        if (recents.isEmpty()) {
+            return;
+        }
+        HorizontalScrollView scroll = new HorizontalScrollView(activity);
+        scroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout row = new LinearLayout(activity);
+        for (final String emoji : recents) {
+            TextView cell = cell(emoji);
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    pick(emoji);
+                }
+            });
+            row.addView(cell, new LinearLayout.LayoutParams(dp(44), dp(48)));
+        }
+        scroll.addView(row);
+        TextView label = label(R.string.emoji_recent);
+        into.addView(label);
+        into.addView(scroll);
+    }
+
     private View content() {
         LinearLayout sheet = new LinearLayout(activity);
         sheet.setOrientation(LinearLayout.VERTICAL);
@@ -121,26 +145,24 @@ final class EmojiPicker {
         sheet.addView(search, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        List<String> recents = Core.recents();
-        if (!recents.isEmpty()) {
-            HorizontalScrollView scroll = new HorizontalScrollView(activity);
-            scroll.setHorizontalScrollBarEnabled(false);
-            LinearLayout row = new LinearLayout(activity);
-            for (final String emoji : recents) {
-                TextView cell = cell(emoji);
-                cell.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        pick(emoji);
-                    }
-                });
-                row.addView(cell, new LinearLayout.LayoutParams(dp(44), dp(48)));
+        // The recents, asked on the engine's thread (1464), go here when they come.
+        final LinearLayout recentsBox = new LinearLayout(activity);
+        recentsBox.setOrientation(LinearLayout.VERTICAL);
+        sheet.addView(recentsBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Engine.ask(new Engine.Ask<List<String>>() {
+            @Override
+            public List<String> ask() {
+                return Core.recents();
             }
-            scroll.addView(row);
-            TextView label = label(R.string.emoji_recent);
-            sheet.addView(label);
-            sheet.addView(scroll);
-        }
+        }, new Engine.Got<List<String>>() {
+            @Override
+            public void got(List<String> recents) {
+                if (!activity.isDestroyed()) {
+                    recents(recentsBox, recents);
+                }
+            }
+        });
 
         HorizontalScrollView tabScroll = new HorizontalScrollView(activity);
         tabScroll.setHorizontalScrollBarEnabled(false);

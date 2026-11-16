@@ -8,6 +8,7 @@
 //! feature, so `just lnsd-minimal` is what runs them.
 #![cfg(any(
     not(feature = "serial"),
+    not(feature = "i2p"),
     all(not(feature = "ble"), target_os = "linux")
 ))]
 
@@ -85,6 +86,21 @@ fn a_ble_section_fails_the_start_and_names_the_feature() {
     );
     assert!(
         stderr.contains("'Radio'") && stderr.contains("BLEInterface") && stderr.contains("`ble`"),
+        "the refusal names the section, the kind and the feature:\n{stderr}"
+    );
+}
+
+#[cfg(not(feature = "i2p"))]
+#[test]
+fn an_i2p_section_fails_the_start_and_names_the_feature() {
+    let (code, stderr) = lnsd_with_section("I2PInterface", "    connectable = yes\n");
+    assert_eq!(
+        code,
+        Some(1),
+        "lnsd must refuse to start, not run without I2P:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("'Radio'") && stderr.contains("I2PInterface") && stderr.contains("`i2p`"),
         "the refusal names the section, the kind and the feature:\n{stderr}"
     );
 }

@@ -35,7 +35,7 @@ interaction model across all three?
 | the core knows no frontend; a GUI is a frontend swap | [Loquax: architecture](loquax-architecture.md), "Requirement: the core must not know it has a terminal" |
 | one interaction model: same commands, same palette names, same delivery glyphs | [A messenger whose core runs anywhere](handheld-messenger.md), "One interaction model"; [Loquax: the user interface](loquax-ui.md), sections 1 and 2 |
 | keyboard first: the palette, no modes, `Enter` sends | [Loquax: the user interface](loquax-ui.md), section 1 |
-| the delivery glyphs `○ ◇ ⌂ ✓ ✗` and the braille spinner, with an ASCII fallback | [Loquax: the user interface](loquax-ui.md), section 2 |
+| the delivery glyphs (since 1232 the tick ladder `◷ ✓ ✓✓ ✔✔ !`) and the braille spinner, with an ASCII fallback | [Loquax: the user interface](loquax-ui.md), section 2 |
 | one palette: the GUI takes its colours from the token table of `leviculum-ui/src/tokens.rs`, the truecolor values of each theme, as both terminal programs do | [keys, mouse and layout](loquax-keys-and-layout.md), section 5, "Colour" |
 | licence compatible with `AGPL-3.0-or-later` | `Cargo.toml:89`, [Licensing and third-party notices](licensing-and-notices.md) |
 | German and Polish text, in the UI and in received messages | Lew, 2026-10-25 |
@@ -226,7 +226,7 @@ M9 through mousefood, sharing the terminal frontend's view code.
 
 - The M9 and the terminal are the same renderer and the same widget
   model. ratatui 0.30.2 is what `lnomad` already uses
-  (`lnomad/Cargo.toml:95`). Only the desktop GUI is a renderer of its
+  (`lnomad/Cargo.toml:149`). Only the desktop GUI is a renderer of its
   own.
 - One interaction model then lives where [Loquax: the user
   interface](loquax-ui.md) already put it: the one keymap table and the

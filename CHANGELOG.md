@@ -9,7 +9,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased]
+
+## [0.35.0+ciris.1] — CIRIS fork
+
+The fork carried onto current upstream master (+1,366 since the Oct 30 base).
+
+### Added
+
+- Core's lib tests run on `wasm32-wasip1` under wasmtime (leviculum#108),
+  and a CI lane, `wasi-test`, keeps them running there. All 2642 pass.
+  Three tests are ignored on wasm only, because a panic aborts the module
+  (the two `should_panic` tests) and WASI has no threads
+  (`capture_is_thread_local`). The runner is set in `.cargo/config.toml`:
+  `cargo test -p leviculum-core --lib --target wasm32-wasip1`.
+- WebSocket interfaces (leviculum#109): `WebSocketServerInterface` and
+  `WebSocketClientInterface` in `leviculum-std`, behind the default-on
+  `websocket` feature, so a browser node can reach the mesh. One Reticulum
+  packet per binary message; a text message closes with 1003. The server
+  runs under the TCP server's admission control and serves plain `ws://`
+  (TLS goes in a reverse proxy in front of it). The client dials `ws://` or
+  `wss://` (rustls on ring, webpki roots) and redials with the TCP client's
+  backoff. Builder methods `add_websocket_server`,
+  `add_websocket_server_listener`, `add_websocket_client`, and
+  `ReticulumNode::websocket_listen_addrs`; config keys `path` and `tls`.
+  See `docs/src/concepts/websocket-interface.md`.
+- Two WebSocket framings, chosen per connection by subprotocol: `rns.raw`
+  (one packet per binary message, the default, also for a client that
+  names none) and `rns.hdlc` (the TCP interface's HDLC as a byte stream,
+  message boundaries not significant). Client key `framing = raw | hdlc`;
+  client key `url` and `ReticulumNodeBuilder::add_websocket_interface(url)`
+  take a whole `ws://` or `wss://` URL.
+- `InterfaceKind::WebSocket` (`websocket`) in `leviculum-core`, reported by
+  both WebSocket interfaces; the by-medium resource window treats it as
+  TCP.
+
+### Changed
+
+- Known destinations: upstream's bounded flush and load (order 1585/1749:
+  memory keeps the newest `identity_cap`, the file is bounded by the cull)
+  replace the fork's #49 file pruning. One fork rule stays: a pinned entry
+  (`KnownDestUseState::Retained`) is kept in memory whatever its age, inside
+  the cap, so CIRISEdge can still recall a pinned contact after a restart.
+  Upstream keeps such an entry on disk only. A pin takes one of the cap's
+  slots, so a full node holds one unpinned entry fewer; pins alone past the
+  cap keep the newest of them in memory and the rest on disk, as the core's
+  identity table does.
+- Apple TCP sockets (leviculum#85) now take upstream's per-interface liveness
+  keys (`tcp_keepalive_idle_secs`, `tcp_keepalive_interval_secs`,
+  `tcp_keepalive_probes`, `tcp_user_timeout_secs`): the user timeout becomes
+  `TCP_RXT_CONNDROPTIME` there, as it becomes `TCP_USER_TIMEOUT` on Linux.
+  The defaults are unchanged.
+- The reconnect kick (leviculum#84) and upstream's TCP server admission
+  control (per-source and total caps, silent-client timeouts) share the
+  connection task.
+- Fork entry points that dispatch work (`propose_direct_link_with`,
+  `accept_direct_link`, `reject_direct_link`, `retire_direct_link`,
+  `try_send_unordered`) now commit through upstream's gated `ActionTx`
+  (order 1656), so none can land between a new interface's drain and its
+  interface-up.
+- `rusqlite` stays at 0.41.1 (RUSTSEC-2026-0459) under upstream's loquax
+  `hooks` feature.
+- 0.34.1+ciris.1's host-set direct-link keepalive (#99,
+  `ReticulumNodeBuilder::direct_link_keepalive`) is carried, so 0.35 keeps it.
+
+### Fixed
+
+- A link upgraded onto a punched path moves at the path's probed MTU, not
+  always 1400 (leviculum#107). On a path that carries less (WireGuard,
+  IPsec, cellular APNs, 464XLAT), its large frames were silently lost while
+  keepalives passed. **Wire addition:** the two-sided commit's COMPLETE
+  (`0xFE04`) carries an optional `"m"`, the path MTU this side's probe found
+  (msgpack uint, 500 when no step was acked). Both ends move at the smaller
+  of the two. A peer that sends no `"m"` (leviculum before this release)
+  skips the key, as its decoder skips every unknown key, and both ends keep
+  1400. rns-rs never runs the two-sided commit, so it never receives a
+  COMPLETE and its upgrades stay at 1400 as before.
+- The path-MTU probe sets Don't Fragment on Linux and Android
+  (`IP_PMTUDISC_PROBE`, and its IPv6 twin on a dual-stack socket), so a path
+  that fragments no longer measures 1400. The socket's own setting is
+  restored after the probe.
+- The probe has a third step, 1232 bytes, which is what an IPv6 path of
+  exactly 1280 carries once the IPv6 and UDP headers are paid. Such a path
+  fell back to 500. Peers that answer probes ack any size, so the new step
+  needs nothing new from them.
+
+### Consumer notes
+
+- Upstream changes are listed in its own sections below.
+- `deny.toml` allows `LGPL-2.1-only` for upstream's `codec2`, and ignores
+  RUSTSEC-2026-0370/0371/0372 (`zvariant`, `zbus_names`, unmaintained, no fix),
+  reached only through upstream's iced GUI.
 
 ## [0.34.1+ciris.1] — CIRIS fork
 
@@ -1475,6 +1564,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- I2P (#99, #284, 1576): lnsd's `I2PInterface` now makes the destination
+  the reference makes, Ed25519 instead of i2pd's DSA-SHA1 default, and keeps
+  its key under the reference's file name, so rnsd and lnsd on one config
+  directory publish one `.b32.i2p` address. A key an older lnsd stored as
+  `i2p_iface_<n>.i2p` is renamed once and keeps its address and type. The
+  interface is behind a Cargo feature `i2p`, on by default. `just i2p-live`
+  runs on a private I2P network on loopback (`scripts/i2p-privnet.sh`) and
+  needs no internet.
 - loquax reactions (#232, 1104): the LXMF `FIELD_REACTION` as Columba,
   Ratspeak and MeshChatX send it, drawn under the message it reacts to with
   a count and yours marked, never as a message of its own; a reaction that
@@ -1966,6 +2063,34 @@ Toolchain: Rust 1.97.1
   here. Refs #381.
 
 ### Changed
+
+- `lnflash` asks nothing (#476, 1573): starting it flashes every board it
+  recognises. The overwrite question is gone; the radio is estimated
+  (stored settings other than the shipped eu868 are kept, otherwise the
+  preset of the host's country, read from the time zone and then the
+  locale: eu868, us915 or au915, eu868 where none applies); telemetry and
+  remote management are not asked and stay off. A board that ran our own
+  image settles a shared Board-ID without the name question. `--ask` puts
+  every question back. Unknown serial devices (an M9, an ESP32 RNode) get
+  one line and are left alone, a port lnsd or another program holds is
+  named with its holder instead of read half-blind, and a missing bundle
+  says where to get one. The ESP32 transport no run reached is removed.
+
+- Loss-aware path choice is the default on radio interfaces (Codeberg
+  #230, 1380). With no `path_choice` in `[reticulum]`, an RNode interface
+  (a multi-RNode vport and a hot-plugged one included) and the BLE
+  interface price their direct link by its announce re-hear ratio, so a
+  marginal direct LoRa link no longer beats a clean two-hop route on hop
+  count alone; TCP, UDP, I2P, local IPC, serial, KISS, pipe and
+  AutoInterface keep hop count. `path_choice = hops` or `hops_and_loss`
+  still sets one rule for every interface. Measured on the emulated room
+  with 50 % loss on the direct pair: 8 of 8 probes on the evidence rule
+  against 5 of 8 on hop count (2026-10-06), where the hop-count arms
+  established 8, 2 and 3 of 8 links at 30, 50 and 70 % loss (2026-10-14).
+  Wire-invisible; a Python neighbour may hold a different next hop for
+  the same destination than we do, and both deliver. Boards stay on hop
+  count for now: the evidence table is a heap term their plan does not
+  fund yet.
 
 - The messenger's name is Loquax, with a capital L (#232, 1147): the
   terminal's list title and help, the window title, the messages it prints

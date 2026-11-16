@@ -1,0 +1,53 @@
+# Partition table for the ThinkNode M9's Loquax image (1414).
+#
+# The M9 keeps two records across resets: the node's identity, so the
+# destination a home and the mesh learned is the same one after a power
+# cycle, and the Loquax client record (`loquax::home::record`), which makes
+# the board a device of its home. Under espflash's default table the
+# application partition covers all of the 16 MiB flash up to 0xFB0000, so a
+# store needs an entry of its own here; the firmware finds both by label
+# (`src/flash.rs`) and runs without persistence on a board flashed with any
+# other table, saying `none/no-entry`.
+#
+# nvs and phy_init stay where the default table puts them (nothing here
+# reads either). The application gets 8 MiB: the image is 1.3 MB today and
+# carries its map regions in place, which is what grows. Each store is one
+# 4 KiB sector, the part's erase unit, so a save erases nothing else.
+#
+# The message store (1476, `loquax::home::board::store`) takes 4 MiB from
+# 0x812000: 1024 sectors, a ring the board's chats come back from after a
+# power cycle. 4058 short texts (Lew's archive of 2026-11-06, ~124 B each)
+# took 152 sectors on the host; 4 MiB holds about 27,000 of them. The rest,
+# 0xC12000 to the end at 0x1000000 (3.93 MiB), is left for the map region
+# the board will carry in flash (handheld-messenger.md, "Where the tiles
+# live: the flash").
+#
+# The client record is written copy-then-switch since 1493: the second
+# slot (loquax_client_b) sits in the last sector, so the map region
+# planned after the message store keeps its contiguous start at 0xC12000.
+# A board flashed before 1493 holds a bare record in loquax_client; it
+# reads as write 0 and the first save goes to the B slot.
+#
+# The map regions (1477) take that rest up to the client record's second
+# slot, 0xC12000 to 0xFFF000 (4,116,480 B): a `leviculum_map::area`, its
+# directory in the first sector, written by `lnflash --region` and read
+# into PSRAM at boot. A board flashed with an older table says
+# `regions=none/no-entry` and shows the image's regions alone.
+#
+# The WLAN the board joins (1479, `leviculum_core::wifi_credentials`)
+# takes the last sector of what was nvs, 0xE000: nothing on the board
+# reads nvs (esp-radio keeps no NVS), and every other offset stays where
+# boards already flashed hold their stores. `lnflash --wifi` writes it; a
+# board flashed with an older table says `wifi=none/no-entry` and keeps
+# its WiFi radio off.
+#
+# Name,         Type, SubType,   Offset,   Size,     Flags
+nvs,            data, nvs,       0x9000,   0x5000,
+wifi,           data, undefined, 0xe000,   0x1000,
+phy_init,       data, phy,       0xf000,   0x1000,
+factory,        app,  factory,   0x10000,  0x800000,
+identity,       data, undefined, 0x810000, 0x1000,
+loquax_client,  data, undefined, 0x811000, 0x1000,
+messages,       data, undefined, 0x812000, 0x400000,
+regions,        data, undefined, 0xc12000, 0x3ed000,
+loquax_client_b, data, undefined, 0xfff000, 0x1000,

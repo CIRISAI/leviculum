@@ -336,7 +336,7 @@ fn opt_int(v: Option<i64>) -> Value {
 ///     `r_battery_state != 0x00`).
 ///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
 ///     has reported a received packet via `apply_radio_stat`
-///     (interfaces/rnode.rs:2146-2154). These two are ours: Python does not
+///     (interfaces/rnode.rs:2157-2165). These two are ours: Python does not
 ///     place them in the dict (its RSSI feeds per-packet reporting), so they
 ///     are emitted as additive keys and omitted while `None` — rnstatus
 ///     renders by key lookup (rnstatus.py:475-533) and ignores them.
@@ -464,6 +464,28 @@ struct StatRow {
     /// What TAKING the carrier costs at worst, as the interface prices it;
     /// `None` for a medium that transmits as soon as it is asked.
     acquisition: Option<leviculum_core::transport::AcquisitionCeiling>,
+    /// A TCP server's admission counters (1190); `None` for every other row.
+    admission: Option<crate::interfaces::tcp_admission::AdmissionStats>,
+    /// The I2P keys of an I2P row; `None` for every other row.
+    i2p: Option<I2pRow>,
+    /// The daily pseudonym of an accepted TCP connection's source, the tag
+    /// its log lines carry (order 1678); `None` for every other row.
+    src_tag: Option<String>,
+}
+
+/// The I2P keys of one row (Reticulum.py:1346-1367). A parent row carries
+/// `i2p_connectable` and `i2p_b32`, a peer row `tunnelstate`; the reference
+/// gates each on an attribute only that class has, so neither carries the
+/// other's.
+enum I2pRow {
+    Parent {
+        connectable: bool,
+        /// With the `.b32.i2p` suffix, as Reticulum.py:1354 adds it.
+        b32: Option<String>,
+    },
+    Peer {
+        tunnelstate: &'static str,
+    },
 }
 
 /// Serialise one row into the Python `interface_stats` per-interface dict.
@@ -756,6 +778,48 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         }
     }
 
+    // 1190: a TCP server's admission counters. Additive like `origin`:
+    // rnstatus reads keys by name and passes these unread; lnstatus prints
+    // them as the `Admission` line. `connections` and `silent` are now,
+    // `capped` and `silent_closed` count since start.
+    if let Some(a) = row.admission {
+        fields.push((
+            pickle_str_key("connections"),
+            pickle_int(a.connections as i64),
+        ));
+        fields.push((pickle_str_key("silent"), pickle_int(a.silent as i64)));
+        fields.push((pickle_str_key("capped"), pickle_int(a.capped as i64)));
+        fields.push((
+            pickle_str_key("silent_closed"),
+            pickle_int(a.silent_closed as i64),
+        ));
+    }
+
+    // Order 1678: the source pseudonym of an accepted TCP connection, the
+    // tag its log lines carry in place of the address. Additive like
+    // `origin`; lnstatus prints it behind `--src-tags`, `lnstest diag` puts
+    // it in place of the address.
+    if let Some(tag) = &row.src_tag {
+        fields.push((pickle_str_key("src_tag"), pickle_str(tag)));
+    }
+
+    match &row.i2p {
+        Some(I2pRow::Parent { connectable, b32 }) => {
+            fields.push((pickle_str_key("i2p_connectable"), pickle_bool(*connectable)));
+            fields.push((
+                pickle_str_key("i2p_b32"),
+                match b32 {
+                    Some(b) => pickle_str(b),
+                    None => pickle_none(),
+                },
+            ));
+        }
+        Some(I2pRow::Peer { tunnelstate }) => {
+            fields.push((pickle_str_key("tunnelstate"), pickle_str(tunnelstate)));
+        }
+        None => {}
+    }
+
     pickle_dict(fields)
 }
 
@@ -765,6 +829,9 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
 fn default_bitrate(itype: &str) -> i64 {
     if itype.starts_with("Local") {
         crate::interfaces::local::LOCAL_BITRATE
+    } else if itype.starts_with("I2PInterface") {
+        // I2PInterface and I2PInterfacePeer (I2PInterface.py:423, 878).
+        crate::interfaces::inventory::I2P_BITRATE_GUESS
     } else {
         crate::interfaces::tcp::TCP_BITRATE_GUESS
     }
@@ -902,11 +969,16 @@ pub(crate) fn build_interface_stats(
 
         if let Some(parent) = identity_of.and_then(|i| i.parent) {
             let agg = aggregates.entry(parent).or_default();
-            agg.clients += 1;
-            agg.rxb += rxb;
-            agg.txb += txb;
-            agg.rxs += rxs;
-            agg.txs += txs;
+            // An I2P section's configured peers name their parent but are
+            // neither its clients nor in its byte counters
+            // (`parent_count = False`, I2PInterface.py:941).
+            if inv.counts_toward_parent(entry.id) {
+                agg.clients += 1;
+                agg.rxb += rxb;
+                agg.txb += txb;
+                agg.rxs += rxs;
+                agg.txs += txs;
+            }
             agg.ia_freq += entry.incoming_announce_frequency;
             agg.oa_freq += entry.outgoing_announce_frequency;
             agg.ip_freq += entry.incoming_pr_frequency;
@@ -992,6 +1064,11 @@ pub(crate) fn build_interface_stats(
             tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
             tx_hold_spread_max_ms: entry.link_profile.and_then(|p| p.tx_hold_spread_max_ms),
             acquisition: entry.link_profile.and_then(|p| p.acquisition),
+            admission: None,
+            i2p: inv.i2p_tunnel(entry.id).map(|t| I2pRow::Peer {
+                tunnelstate: t.description(),
+            }),
+            src_tag: inv.src_tag(entry.id).map(str::to_owned),
         });
     }
 
@@ -1002,6 +1079,7 @@ pub(crate) fn build_interface_stats(
     // (TCPInterface.py:634-644, LocalInterface.py:484-494).
     for (id, listener) in inv.listeners() {
         let agg = aggregates.remove(&id).unwrap_or_default();
+        let i2p = inv.i2p_endpoint(id);
         rows.push(StatRow {
             sort_key: inv.sort_key(id),
             name: listener.identity.name.clone(),
@@ -1019,7 +1097,10 @@ pub(crate) fn build_interface_stats(
             tx_stale_drops: 0,
             tx_unaccounted: 0,
             mtu: Some(listener.hw_mtu),
-            status: true,
+            // An I2P parent is up once its endpoint is (I2PInterface.py:308),
+            // and never when it is not connectable; every other listener is
+            // up for as long as it is listed.
+            status: i2p.is_none_or(|e| e.is_online()),
             mode: listener.mode.as_u8(),
             bitrate: listener.bitrate,
             clients: Some(agg.clients),
@@ -1044,6 +1125,15 @@ pub(crate) fn build_interface_stats(
             tx_jitter_max_ms: None,
             tx_hold_spread_max_ms: None,
             acquisition: None,
+            admission: listener
+                .admission
+                .as_ref()
+                .map(|t| t.lock_recover().stats()),
+            i2p: i2p.map(|e| I2pRow::Parent {
+                connectable: e.connectable,
+                b32: e.b32().map(|b| format!("{b}.b32.i2p")),
+            }),
+            src_tag: None,
         });
     }
 
@@ -2105,6 +2195,15 @@ fn interface_type(kind: InterfaceKind, name: &str) -> String {
         // The Columba ble-reticulum protocol; the reference package's own
         // RNS interface class carries the same name.
         InterfaceKind::Ble => "BLEInterface",
+        // +ciris (#109): no reference class; the config type names, split
+        // server/client the way the Tcp arm splits them.
+        InterfaceKind::WebSocket => {
+            if name.starts_with("ws_server") {
+                "WebSocketServerInterface"
+            } else {
+                "WebSocketClientInterface"
+            }
+        }
         InterfaceKind::Unknown => return interface_type_from_name(name),
     }
     .to_string()
@@ -2500,6 +2599,7 @@ mod tests {
             departed_rxb: 0,
             departed_txb: 0,
             bound_addr: None,
+            admission: None,
         };
 
         // The shared-instance server alone: 1 Gbps, and it counts.
@@ -2565,6 +2665,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: None,
+                admission: None,
             },
         );
 
@@ -3395,7 +3496,7 @@ mod tests {
         assert_eq!(
             auto_layer(&mut core),
             Some(Value::String(
-                "on reason=default lan=yes servers=no bluetooth=no serial=no".into()
+                "on reason=default lan=yes servers=yes bluetooth=yes serial=yes".into()
             ))
         );
     }
@@ -3455,6 +3556,7 @@ mod tests {
                     departed_rxb: 100,
                     departed_txb: 10,
                     bound_addr: Some("127.0.0.1:4242".parse().unwrap()),
+                    admission: None,
                 },
             );
             inv.add_spawned(
@@ -3553,6 +3655,180 @@ mod tests {
         );
     }
 
+    /// An I2P section reports as the reference reports it
+    /// (Reticulum.py:1346-1367, measured on the bed in
+    /// docs/src/concepts/i2p-interface.md): a parent row
+    /// `I2PInterface[<section>]` with `i2p_connectable`, `i2p_b32` and the
+    /// count of the connections it accepted; a configured peer
+    /// `I2PInterfacePeer[<section> to <b32>]` and an accepted one
+    /// `I2PInterfacePeer[Connected peer on <section>]`, each with its
+    /// `tunnelstate` and a parent link, the configured one adding nothing to
+    /// the parent's clients or bytes; every row at the 256 kbit/s guess.
+    #[test]
+    fn build_interface_stats_reports_an_i2p_section_as_the_reference_does() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::{
+            I2pEndpoint, I2pTunnelState, InterfaceIdentity, InterfaceInventory, ListenerRow,
+            TunnelState,
+        };
+        use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::traits::InterfaceMode;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-i2p-rows-")
+            .tempdir()
+            .unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let b32 = "p377jcvi6whf5keegjjbtv6mrpruhlyp56lebraya4hv7dvbbkqq";
+        // The configured peer (id 5) and the accepted connection (id 6) are
+        // routable; the parent (id 0) never enters transport.
+        core.set_interface_name(5, format!("i2p_0_to_{b32}.b32.i2p"));
+        core.set_interface_kind(5, InterfaceKind::I2p);
+        core.set_interface_name(6, format!("i2p_0/{b32}.b32.i2p"));
+        core.set_interface_kind(6, InterfaceKind::I2p);
+
+        let peer_counters = Arc::new(InterfaceCounters::new());
+        peer_counters.rx_bytes.store(1000, Ordering::Relaxed);
+        let accepted_counters = Arc::new(InterfaceCounters::new());
+        accepted_counters.rx_bytes.store(70, Ordering::Relaxed);
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([
+            (5usize, peer_counters),
+            (6usize, accepted_counters),
+        ])));
+
+        let endpoint = Arc::new(I2pEndpoint::new(true));
+        let peer_tunnel = Arc::new(I2pTunnelState::default());
+        let accepted_tunnel = Arc::new(I2pTunnelState::default());
+        let inventory = InterfaceInventory::shared();
+        {
+            let mut inv = inventory.lock_recover();
+            inv.add_i2p_parent(
+                0,
+                ListenerRow {
+                    identity: InterfaceIdentity {
+                        name: "I2PInterface[I2P]".into(),
+                        short_name: "I2P".into(),
+                        type_name: "I2PInterface",
+                        parent: None,
+                    },
+                    bitrate: 256_000,
+                    hw_mtu: 1064,
+                    mode: InterfaceMode::default(),
+                    announce_rate: (None, None, None),
+                    ifac_size_bits: None,
+                    departed_rxb: 0,
+                    departed_txb: 0,
+                    bound_addr: None,
+                    admission: None,
+                },
+                Arc::clone(&endpoint),
+            );
+            inv.add_i2p_peer(
+                5,
+                InterfaceIdentity {
+                    name: format!("I2PInterfacePeer[I2P to {b32}.b32.i2p]"),
+                    short_name: format!("I2P to {b32}.b32.i2p"),
+                    type_name: "I2PInterfacePeer",
+                    parent: Some(0),
+                },
+                Arc::clone(&peer_tunnel),
+                false,
+            );
+            inv.add_i2p_peer(
+                6,
+                InterfaceIdentity {
+                    name: "I2PInterfacePeer[Connected peer on I2P]".into(),
+                    short_name: "Connected peer on I2P".into(),
+                    type_name: "I2PInterfacePeer",
+                    parent: Some(0),
+                },
+                Arc::clone(&accepted_tunnel),
+                true,
+            );
+        }
+
+        let rows = |core: &mut StdNodeCore| -> Vec<BTreeMap<HashableValue, Value>> {
+            let value =
+                build_interface_stats(core, std::time::Instant::now(), &stats, &inventory, 0);
+            let Value::Dict(top) = value else {
+                panic!("interface_stats must be a dict")
+            };
+            let Some(Value::List(list)) = top
+                .get(&HashableValue::String("interfaces".into()))
+                .cloned()
+            else {
+                panic!("interfaces must be a list")
+            };
+            list.into_iter()
+                .map(|v| match v {
+                    Value::Dict(d) => d,
+                    other => panic!("interface entry must be a dict, got {other:?}"),
+                })
+                .collect()
+        };
+        let field = |d: &BTreeMap<HashableValue, Value>, k: &str| -> Option<Value> {
+            d.get(&HashableValue::String(k.into())).cloned()
+        };
+        let s = |v: &str| Some(Value::String(v.into()));
+
+        // Before the endpoint knows its key: no b32, down, tunnels initial.
+        let before = rows(&mut core);
+        assert_eq!(before.len(), 3);
+        let parent = &before[0];
+        assert_eq!(field(parent, "name"), s("I2PInterface[I2P]"));
+        assert_eq!(field(parent, "type"), s("I2PInterface"));
+        assert_eq!(field(parent, "i2p_connectable"), Some(Value::Bool(true)));
+        assert_eq!(field(parent, "i2p_b32"), Some(Value::None));
+        assert_eq!(field(parent, "status"), Some(Value::Bool(false)));
+        assert_eq!(field(parent, "tunnelstate"), None, "a parent has no tunnel");
+        assert_eq!(field(&before[1], "tunnelstate"), s("Creating Tunnel"));
+
+        endpoint.set_b32(b32);
+        endpoint.set_online(true);
+        peer_tunnel.set(TunnelState::Active);
+        accepted_tunnel.set(TunnelState::Stale);
+        let after = rows(&mut core);
+        let (parent, peer, accepted) = (&after[0], &after[1], &after[2]);
+
+        assert_eq!(field(parent, "i2p_b32"), s(&format!("{b32}.b32.i2p")));
+        assert_eq!(field(parent, "status"), Some(Value::Bool(true)));
+        assert_eq!(field(parent, "bitrate"), Some(Value::I64(256_000)));
+        assert_eq!(field(parent, "mtu"), Some(Value::I64(1064)));
+        // Only the accepted connection is a client and adds its bytes.
+        assert_eq!(field(parent, "clients"), Some(Value::I64(1)));
+        assert_eq!(field(parent, "rxb"), Some(Value::I64(70)));
+
+        assert_eq!(
+            field(peer, "name"),
+            s(&format!("I2PInterfacePeer[I2P to {b32}.b32.i2p]"))
+        );
+        assert_eq!(field(peer, "type"), s("I2PInterfacePeer"));
+        assert_eq!(field(peer, "tunnelstate"), s("Tunnel Active"));
+        assert_eq!(field(peer, "parent_interface_name"), s("I2PInterface[I2P]"));
+        assert_eq!(field(peer, "bitrate"), Some(Value::I64(256_000)));
+        assert_eq!(field(peer, "i2p_connectable"), None);
+        assert_eq!(field(peer, "i2p_b32"), None);
+
+        assert_eq!(
+            field(accepted, "name"),
+            s("I2PInterfacePeer[Connected peer on I2P]")
+        );
+        assert_eq!(field(accepted, "tunnelstate"), s("Tunnel Unresponsive"));
+        assert_eq!(
+            field(accepted, "parent_interface_name"),
+            s("I2PInterface[I2P]")
+        );
+        assert_eq!(field(accepted, "bitrate"), Some(Value::I64(256_000)));
+    }
+
     /// One TCP listener plus the connection it spawned, served through the
     /// real reply builder. Shared by the two key-set tests below — they must
     /// read the same two row kinds for their verdicts to be about the same
@@ -3606,6 +3882,7 @@ mod tests {
                     departed_rxb: 0,
                     departed_txb: 0,
                     bound_addr: Some("127.0.0.1:4242".parse().unwrap()),
+                    admission: None,
                 },
             );
             inv.add_spawned(
@@ -3913,7 +4190,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:765-771), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:829-838), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;
@@ -4862,26 +5139,27 @@ mod tests {
                     "{codec:?}: {key} must survive as a list"
                 );
             }
-            // A None capacity has to survive the transcode as a None, not as
-            // a zero: zero would read as "ceiling reached".
+            // Every collection has a ceiling since order 1586 bounded the
+            // persisted known destinations and the remember stamps, so
+            // every capacity must survive the transcode as the number it
+            // is: a None would read as "unbounded", a zero as "ceiling
+            // reached".
             let Some(Value::List(rows)) = d.get(&HashableValue::String("collections".into()))
             else {
                 panic!("{codec:?}: collections must be a list")
             };
-            let unbounded = rows
-                .iter()
-                .filter_map(|r| match r {
-                    Value::Dict(row) => row
-                        .get(&HashableValue::String("capacity".into()))
-                        .map(|c| matches!(c, Value::None)),
-                    _ => None,
-                })
-                .filter(|is_none| *is_none)
-                .count();
-            assert!(
-                unbounded > 0,
-                "{codec:?}: a collection with no ceiling must decode as None"
-            );
+            assert!(!rows.is_empty(), "{codec:?}: no collections");
+            for row in rows {
+                let Value::Dict(row) = row else {
+                    panic!("{codec:?}: a collection row must be a dict")
+                };
+                let capacity = row.get(&HashableValue::String("capacity".into()));
+                assert!(
+                    matches!(capacity, Some(Value::I64(n)) if *n > 0),
+                    "{codec:?}: {:?} has capacity {capacity:?}",
+                    row.get(&HashableValue::String("name".into()))
+                );
+            }
         }
     }
 

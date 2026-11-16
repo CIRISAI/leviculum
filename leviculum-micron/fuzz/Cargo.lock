@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-micron"
-version = "0.10.0-dev"
+version = "0.10.0-dev.10"
 
 [[package]]
 name = "leviculum-micron-fuzz"

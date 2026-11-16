@@ -60,62 +60,33 @@ impl Paint {
 /// own tints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tones {
-    /// Dim grey: queued.
-    pub queued: Option<Ink>,
-    /// Dim yellow: computing the proof of work.
-    pub stamping: Option<Ink>,
-    /// Yellow: in flight.
-    pub in_flight: Option<Ink>,
-    /// Amber: sent, unproven.
-    pub sent: Option<Ink>,
-    /// Blue: in a mailbox.
-    pub in_mailbox: Option<Ink>,
-    /// Green: delivered.
-    pub delivered: Option<Ink>,
-    /// Red: refused.
-    pub rejected: Option<Ink>,
-    /// Dim red: given up.
+    /// Grey: on its way, in the mailbox, delivered.
+    pub pending: Option<Ink>,
+    /// Green: read.
+    pub read: Option<Ink>,
+    /// Red: not sent.
     pub failed: Option<Ink>,
 }
 
 impl Tones {
     const NONE: Tones = Tones {
-        queued: None,
-        stamping: None,
-        in_flight: None,
-        sent: None,
-        in_mailbox: None,
-        delivered: None,
-        rejected: None,
+        pending: None,
+        read: None,
         failed: None,
     };
 
-    /// The colour of a glyph row's tone (`dim` as the row has it).
-    pub fn of(&self, tone: Tone, dim: bool) -> Option<Ink> {
-        match (tone, dim) {
-            (Tone::Gray, _) => self.queued,
-            (Tone::Yellow, true) => self.stamping,
-            (Tone::Yellow, false) => self.in_flight,
-            (Tone::Amber, _) => self.sent,
-            (Tone::Blue, _) => self.in_mailbox,
-            (Tone::Green, _) => self.delivered,
-            (Tone::Red, false) => self.rejected,
-            (Tone::Red, true) => self.failed,
+    /// The colour of a glyph row's tone.
+    pub fn of(&self, tone: Tone) -> Option<Ink> {
+        match tone {
+            Tone::Gray => self.pending,
+            Tone::Green => self.read,
+            Tone::Red => self.failed,
         }
     }
 
     /// Every tone, for the contrast test.
-    pub fn all(&self) -> [Option<Ink>; 8] {
-        [
-            self.queued,
-            self.stamping,
-            self.in_flight,
-            self.sent,
-            self.in_mailbox,
-            self.delivered,
-            self.rejected,
-            self.failed,
-        ]
+    pub fn all(&self) -> [Option<Ink>; 3] {
+        [self.pending, self.read, self.failed]
     }
 }
 
@@ -215,14 +186,9 @@ pub const TRUECOLOR_DARK: Tokens = Tokens {
     chrome: pair(hex(0xcdd2dc), hex(0x262831)),
     chrome_muted: fg(hex(0x8c96a5)),
     tones: Tones {
-        queued: hex(0xb4bcc8),
-        stamping: hex(0xc8ad4a),
-        in_flight: hex(0xf2d45c),
-        sent: hex(0xffb347),
-        in_mailbox: hex(0xa8ccff),
-        delivered: hex(0x6fe39a),
-        rejected: hex(0xff8a80),
-        failed: hex(0xe8a29c),
+        pending: hex(0xb4bcc8),
+        read: hex(0x6fe39a),
+        failed: hex(0xff8a80),
     },
 };
 
@@ -243,14 +209,9 @@ pub const TRUECOLOR_LIGHT: Tokens = Tokens {
     chrome: pair(hex(0x282c34), hex(0xe1e4eb)),
     chrome_muted: fg(hex(0x5f6470)),
     tones: Tones {
-        queued: hex(0x4f5866),
-        stamping: hex(0x7d6a33),
-        in_flight: hex(0x6b5200),
-        sent: hex(0x8a4500),
-        in_mailbox: hex(0x1a46a0),
-        delivered: hex(0x176a35),
-        rejected: hex(0xa3211a),
-        failed: hex(0x8a4a45),
+        pending: hex(0x4f5866),
+        read: hex(0x176a35),
+        failed: hex(0xa3211a),
     },
 };
 
@@ -271,14 +232,9 @@ pub const ANSI256_DARK: Tokens = Tokens {
     chrome: pair(idx(188), idx(235)),
     chrome_muted: fg(idx(103)),
     tones: Tones {
-        queued: idx(250),
-        stamping: idx(179),
-        in_flight: idx(221),
-        sent: idx(214),
-        in_mailbox: idx(153),
-        delivered: idx(121),
-        rejected: idx(217),
-        failed: idx(181),
+        pending: idx(250),
+        read: idx(121),
+        failed: idx(217),
     },
 };
 
@@ -299,14 +255,9 @@ pub const ANSI256_LIGHT: Tokens = Tokens {
     chrome: pair(idx(236), idx(254)),
     chrome_muted: fg(idx(241)),
     tones: Tones {
-        queued: idx(240),
-        stamping: idx(94),
-        in_flight: idx(58),
-        sent: idx(130),
-        in_mailbox: idx(19),
-        delivered: idx(22),
-        rejected: idx(124),
-        failed: idx(95),
+        pending: idx(240),
+        read: idx(22),
+        failed: idx(124),
     },
 };
 
@@ -566,12 +517,13 @@ mod tests {
 
     #[test]
     fn a_tone_reads_its_glyph_row() {
-        use crate::delivery::DELIVERY_GLYPHS;
+        use crate::delivery::{glyph, DeliveryState};
         let t = &TRUECOLOR_DARK.tones;
-        let got: Vec<Option<Ink>> = DELIVERY_GLYPHS
-            .iter()
-            .map(|row| t.of(row.tone, row.dim))
-            .collect();
-        assert_eq!(got, t.all());
+        let tone = |state| t.of(glyph(state).tone);
+        assert_eq!(tone(DeliveryState::Queued), t.pending);
+        assert_eq!(tone(DeliveryState::Delivered), t.pending);
+        assert_eq!(tone(DeliveryState::Read { at: 0 }), t.read);
+        assert_eq!(tone(DeliveryState::Failed), t.failed);
+        assert_ne!(t.read, t.pending);
     }
 }

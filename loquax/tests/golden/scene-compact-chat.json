@@ -1,0 +1,3352 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Jürgen 🚲"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Jürgen 🚲"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "OpenMapAt { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]) }",
+          "label_key": "map"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "a2526a",
+            "fg": "ffffff",
+            "initials": "J🚲",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Jürgen 🚲"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775809",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Treffen wir uns um 18:00 am Bahnhof?"
+              },
+              "resource": "bubble_9223372036854775809",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [123, 134, 57, 133, 103, 68, 229, 70, 121, 242, 113, 10, 102, 49, 254, 120, 81, 4, 253, 204, 78, 173, 131, 14, 61, 233, 235, 5, 178, 47, 213, 80], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([123, 134, 57, 133, 103, 68, 229, 70, 121, 242, 113, 10, 102, 49, 254, 120, 81, 4, 253, 204, 78, 173, 131, 14, 61, 233, 235, 5, 178, 47, 213, 80]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775809] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780000014,
+            "body": "Treffen wir uns um 18:00 am Bahnhof?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775809",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "7b8639856744e54679f2710a6631fe785104fdcc4ead830e3de9eb05b22fd550",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1780000014,
+          "words": {
+            "args": [
+              {
+                "args": [],
+                "key": "scene_thursday"
+              },
+              28,
+              {
+                "args": [],
+                "key": "scene_may"
+              }
+            ],
+            "key": "scene_date"
+          }
+        },
+        "id": "group_9223372036854775809",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775810",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              "resource": "bubble_9223372036854775810",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [47, 140, 28, 242, 55, 18, 125, 102, 254, 208, 33, 167, 158, 252, 54, 73, 64, 193, 176, 177, 197, 131, 82, 100, 10, 2, 196, 192, 65, 104, 214, 201], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([47, 140, 28, 242, 55, 18, 125, 102, 254, 208, 33, 167, 158, 252, 54, 73, 64, 193, 176, 177, 197, 131, 82, 100, 10, 2, 196, 192, 65, 104, 214, 201]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775810] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780000614,
+            "body": "naïve façade, smörgåsbord, Ærøskøbing",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775810",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "2f8c1cf237127d66fed021a79efc364940c1b0b1c58352640a02c4c04168d6c9",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775810",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775811",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "日本語のテキストも"
+              },
+              "resource": "bubble_9223372036854775811",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [75, 41, 241, 132, 188, 138, 11, 43, 48, 175, 204, 246, 133, 46, 103, 20, 53, 178, 96, 208, 120, 203, 196, 187, 204, 142, 192, 158, 79, 159, 164, 183], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([75, 41, 241, 132, 188, 138, 11, 43, 48, 175, 204, 246, 133, 46, 103, 20, 53, 178, 96, 208, 120, 203, 196, 187, 204, 142, 192, 158, 79, 159, 164, 183]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775811] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780001214,
+            "body": "日本語のテキストも",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775811",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "4b29f184bc8a0b2b30afccf6852e671435b260d078cbc4bbcc8ec09e4f9fa4b7",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775811",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775812",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 "
+              },
+              "resource": "bubble_9223372036854775812",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [34, 56, 79, 205, 226, 165, 218, 83, 156, 174, 212, 166, 104, 136, 72, 30, 131, 161, 195, 241, 8, 247, 39, 133, 110, 28, 127, 98, 52, 197, 245, 144], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([34, 56, 79, 205, 226, 165, 218, 83, 156, 174, 212, 166, 104, 136, 72, 30, 131, 161, 195, 241, 8, 247, 39, 133, 110, 28, 127, 98, 52, 197, 245, 144]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775812] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780001814,
+            "body": "Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 ",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775812",
+            "live": null,
+            "liveness": null,
+            "mark": "failed",
+            "mark_node": {
+              "activate": {
+                "enabled": true,
+                "intent": "SendAgain { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], key: 9223372036854775812 }",
+                "label_key": "scene_send_again"
+              },
+              "mark": "failed",
+              "resource": "state_failed",
+              "words": {
+                "args": [],
+                "key": "state_failed"
+              }
+            },
+            "msg_id": "22384fcde2a5da539caed4a66888481e83a1c3f108f727856e1c7f6234c5f590",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 ",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775812",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775813",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "zwei\nZeilen"
+              },
+              "resource": "bubble_9223372036854775813",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [170, 31, 109, 35, 213, 47, 161, 19, 59, 129, 16, 172, 110, 70, 13, 57, 126, 5, 253, 108, 29, 81, 148, 53, 115, 156, 155, 182, 205, 151, 99, 202], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([170, 31, 109, 35, 213, 47, 161, 19, 59, 129, 16, 172, 110, 70, 13, 57, 126, 5, 253, 108, 29, 81, 148, 53, 115, 156, 155, 182, 205, 151, 99, 202]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775813] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780002414,
+            "body": "zwei\nZeilen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775813",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "aa1f6d23d52fa1133b8110ac6e460d397e05fd6c1d519435739c9bb6cd9763ca",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775813",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775814",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ja"
+              },
+              "resource": "bubble_9223372036854775814",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [24, 229, 12, 78, 93, 76, 234, 14, 110, 197, 243, 175, 255, 86, 68, 38, 224, 248, 210, 76, 242, 168, 12, 21, 30, 232, 214, 207, 48, 9, 198, 173], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([24, 229, 12, 78, 93, 76, 234, 14, 110, 197, 243, 175, 255, 86, 68, 38, 224, 248, 210, 76, 242, 168, 12, 21, 30, 232, 214, 207, 48, 9, 198, 173]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775814] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780003014,
+            "body": "ja",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775814",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "18e50c4e5d4cea0e6ec5f3afff564426e0f8d24cf2a80c151ee8d6cf3009c6ad",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ja",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775814",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775815",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Grüße aus Köln, die Straße ist nass"
+              },
+              "resource": "bubble_9223372036854775815",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [16, 174, 119, 187, 178, 25, 46, 102, 240, 246, 223, 51, 154, 147, 200, 144, 156, 39, 193, 54, 222, 32, 213, 119, 154, 110, 180, 123, 191, 176, 43, 101], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([16, 174, 119, 187, 178, 25, 46, 102, 240, 246, 223, 51, 154, 147, 200, 144, 156, 39, 193, 54, 222, 32, 213, 119, 154, 110, 180, 123, 191, 176, 43, 101]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775815] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780003614,
+            "body": "Grüße aus Köln, die Straße ist nass",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775815",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "10ae77bbb2192e66f0f6df339a93c8909c27c136de20d5779a6eb47bbfb02b65",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775815",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775816",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Antwort 7: genau, äh, so 🙂"
+              },
+              "resource": "bubble_9223372036854775816",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [67, 184, 31, 108, 91, 133, 24, 0, 147, 0, 122, 162, 149, 26, 68, 47, 83, 50, 81, 194, 13, 188, 188, 209, 236, 247, 70, 116, 61, 106, 18, 130], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([67, 184, 31, 108, 91, 133, 24, 0, 147, 0, 122, 162, 149, 26, 68, 47, 83, 50, 81, 194, 13, 188, 188, 209, 236, 247, 70, 116, 61, 106, 18, 130]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775816] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780004214,
+            "body": "Antwort 7: genau, äh, so 🙂",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775816",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "43b81f6c5b85180093007aa2951a442f533251c20dbcbcd1ecf746743d6a1282",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": {
+              "ours": false,
+              "text": "Grüße aus Köln, die Straße ist nass",
+              "to": "10ae77bbb2192e66f0f6df339a93c8909c27c136de20d5779a6eb47bbfb02b65"
+            },
+            "since": null,
+            "text": "Antwort 7: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775816",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775817",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Treffen wir uns um 18:00 am Bahnhof?"
+              },
+              "resource": "bubble_9223372036854775817",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [124, 117, 168, 72, 210, 109, 255, 107, 8, 216, 218, 233, 80, 254, 96, 158, 107, 196, 22, 38, 3, 95, 249, 53, 228, 155, 240, 178, 84, 229, 237, 165], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([124, 117, 168, 72, 210, 109, 255, 107, 8, 216, 218, 233, 80, 254, 96, 158, 107, 196, 22, 38, 3, 95, 249, 53, 228, 155, 240, 178, 84, 229, 237, 165]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775817] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780004814,
+            "body": "Treffen wir uns um 18:00 am Bahnhof?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775817",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "7c75a848d26dff6b08d8dae950fe609e6bc41626035ff935e49bf0b254e5eda5",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775817",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775818",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              "resource": "bubble_9223372036854775818",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [177, 234, 132, 249, 137, 171, 11, 246, 165, 37, 214, 212, 247, 10, 147, 99, 123, 90, 122, 17, 74, 113, 148, 246, 28, 180, 253, 247, 223, 202, 197, 96], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([177, 234, 132, 249, 137, 171, 11, 246, 165, 37, 214, 212, 247, 10, 147, 99, 123, 90, 122, 17, 74, 113, 148, 246, 28, 180, 253, 247, 223, 202, 197, 96]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775818] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780005414,
+            "body": "naïve façade, smörgåsbord, Ærøskøbing",
+            "chips": [
+              {
+                "content": "👍",
+                "count": 1,
+                "ours": true
+              }
+            ],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775818",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "b1ea84f989ab0bf6a525d6d4f70a93637b5a7a114a7194f61cb4fdf7dfcac560",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775818",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775819",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "日本語のテキストも"
+              },
+              "resource": "bubble_9223372036854775819",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [127, 85, 35, 9, 131, 153, 243, 220, 113, 149, 190, 181, 246, 188, 26, 205, 99, 154, 94, 149, 0, 90, 54, 247, 35, 87, 105, 162, 103, 151, 163, 183], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([127, 85, 35, 9, 131, 153, 243, 220, 113, 149, 190, 181, 246, 188, 26, 205, 99, 154, 94, 149, 0, 90, 54, 247, 35, 87, 105, 162, 103, 151, 163, 183]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775819] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780006014,
+            "body": "日本語のテキストも",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775819",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "7f5523098399f3dc7195beb5f6bc1acd639a5e95005a36f7235769a26797a3b7",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775819",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775821",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "zwei\nZeilen"
+              },
+              "resource": "bubble_9223372036854775821",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [28, 1, 70, 123, 19, 138, 101, 206, 56, 75, 36, 42, 96, 130, 153, 45, 159, 150, 156, 246, 118, 224, 75, 139, 35, 33, 241, 171, 140, 116, 99, 184], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([28, 1, 70, 123, 19, 138, 101, 206, 56, 75, 36, 42, 96, 130, 153, 45, 159, 150, 156, 246, 118, 224, 75, 139, 35, 33, 241, 171, 140, 116, 99, 184]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775821] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780007214,
+            "body": "zwei\nZeilen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775821",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "1c01467b138a65ce384b242a6082992d9f969cf676e04b8b2321f1ab8c7463b8",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775821",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775822",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ja"
+              },
+              "resource": "bubble_9223372036854775822",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [227, 187, 21, 98, 228, 26, 10, 147, 34, 222, 90, 39, 68, 171, 171, 24, 171, 45, 33, 43, 113, 47, 223, 249, 14, 155, 173, 138, 122, 131, 80, 188], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([227, 187, 21, 98, 228, 26, 10, 147, 34, 222, 90, 39, 68, 171, 171, 24, 171, 45, 33, 43, 113, 47, 223, 249, 14, 155, 173, 138, 122, 131, 80, 188]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775822] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780007814,
+            "body": "ja",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775822",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "e3bb1562e41a0a9322de5a2744abab18ab2d212b712fdff90e9bad8a7a8350bc",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ja",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775822",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775823",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "hier bin ich"
+              },
+              "resource": "bubble_9223372036854775823",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [165, 0, 168, 229, 141, 125, 69, 59, 249, 244, 238, 178, 80, 238, 101, 72, 145, 48, 35, 168, 14, 71, 69, 170, 4, 30, 220, 145, 184, 193, 104, 205], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([165, 0, 168, 229, 141, 125, 69, 59, 249, 244, 238, 178, 80, 238, 101, 72, 145, 48, 35, 168, 14, 71, 69, 170, 4, 30, 220, 145, 184, 193, 104, 205]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775823] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780008414,
+            "body": "hier bin ich",
+            "chips": [],
+            "files": [],
+            "fix": [
+              48139000,
+              11256000
+            ],
+            "id": "bubble_9223372036854775823",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "a500a8e58d7d453bf9f4eeb250ee6548913023a80e4745aa041edc91b8c168cd",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "hier bin ich",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775823",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775824",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ok 👍"
+              },
+              "resource": "bubble_9223372036854775824",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [144, 197, 39, 165, 212, 32, 224, 232, 240, 62, 161, 211, 135, 162, 179, 165, 118, 58, 190, 15, 63, 217, 242, 243, 164, 51, 87, 222, 104, 4, 0, 134], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([144, 197, 39, 165, 212, 32, 224, 232, 240, 62, 161, 211, 135, 162, 179, 165, 118, 58, 190, 15, 63, 217, 242, 243, 164, 51, 87, 222, 104, 4, 0, 134]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775824] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780009014,
+            "body": "ok 👍",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775824",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "90c527a5d420e0e8f03ea1d387a2b3a5763abe0f3fd9f2f3a43357de68040086",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775824",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775825",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Treffen wir uns um 18:00 am Bahnhof?"
+              },
+              "resource": "bubble_9223372036854775825",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [226, 77, 255, 175, 172, 145, 48, 81, 151, 231, 153, 176, 244, 176, 126, 169, 40, 5, 192, 65, 48, 39, 153, 29, 151, 147, 127, 73, 135, 179, 75, 25], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([226, 77, 255, 175, 172, 145, 48, 81, 151, 231, 153, 176, 244, 176, 126, 169, 40, 5, 192, 65, 48, 39, 153, 29, 151, 147, 127, 73, 135, 179, 75, 25]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775825] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780009614,
+            "body": "Treffen wir uns um 18:00 am Bahnhof?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775825",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "e24dffafac91305197e799b0f4b07ea92805c0413027991d97937f4987b34b19",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775825",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775826",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              "resource": "bubble_9223372036854775826",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [18, 182, 66, 150, 51, 133, 249, 147, 96, 31, 192, 8, 5, 95, 39, 167, 204, 135, 38, 33, 68, 66, 137, 82, 203, 182, 120, 161, 126, 118, 80, 36], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([18, 182, 66, 150, 51, 133, 249, 147, 96, 31, 192, 8, 5, 95, 39, 167, 204, 135, 38, 33, 68, 66, 137, 82, 203, 182, 120, 161, 126, 118, 80, 36]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775826] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780010214,
+            "body": "naïve façade, smörgåsbord, Ærøskøbing",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775826",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "12b642963385f993601fc008055f27a7cc87262144428952cbb678a17e765024",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775826",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775827",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "args": [
+                  {
+                    "args": [
+                      {
+                        "args": [
+                          27
+                        ],
+                        "key": "hours_ago"
+                      }
+                    ],
+                    "key": "live_ago"
+                  }
+                ],
+                "key": "last_position"
+              },
+              "resource": "bubble_9223372036854775827",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [117, 246, 14, 201, 240, 44, 181, 166, 115, 31, 121, 216, 166, 46, 104, 248, 104, 10, 151, 11, 28, 0, 26, 222, 186, 189, 5, 25, 222, 98, 234, 222], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([117, 246, 14, 201, 240, 44, 181, 166, 115, 31, 121, 216, 166, 46, 104, 248, 104, 10, 151, 11, 28, 0, 26, 222, 186, 189, 5, 25, 222, 98, 234, 222]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775827] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780010814,
+            "body": "",
+            "chips": [],
+            "files": [],
+            "fix": [
+              48102000,
+              11256000
+            ],
+            "id": "bubble_9223372036854775827",
+            "live": {
+              "args": [
+                {
+                  "args": [
+                    {
+                      "args": [
+                        27
+                      ],
+                      "key": "hours_ago"
+                    }
+                  ],
+                  "key": "live_ago"
+                }
+              ],
+              "key": "last_position"
+            },
+            "liveness": {
+              "cadence_s": null,
+              "last_fix_at": 1780010814,
+              "state": "stale"
+            },
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "75f60ec9f02cb5a6731f79d8a62e68f8680a970b1c001adebabd0519de62eade",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": null,
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775827",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775828",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "😀🐀🚲 drei Emoji am Stück"
+              },
+              "resource": "bubble_9223372036854775828",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [99, 93, 32, 55, 182, 13, 140, 50, 2, 64, 174, 174, 199, 172, 120, 94, 26, 115, 42, 158, 240, 3, 238, 67, 4, 33, 149, 30, 128, 217, 122, 183], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([99, 93, 32, 55, 182, 13, 140, 50, 2, 64, 174, 174, 199, 172, 120, 94, 26, 115, 42, 158, 240, 3, 238, 67, 4, 33, 149, 30, 128, 217, 122, 183]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775828] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780011414,
+            "body": "😀🐀🚲 drei Emoji am Stück",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775828",
+            "live": null,
+            "liveness": null,
+            "mark": "failed",
+            "mark_node": {
+              "activate": {
+                "enabled": true,
+                "intent": "SendAgain { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], key: 9223372036854775828 }",
+                "label_key": "scene_send_again"
+              },
+              "mark": "failed",
+              "resource": "state_failed",
+              "words": {
+                "args": [],
+                "key": "state_failed"
+              }
+            },
+            "msg_id": "635d2037b60d8c320240aeaec7ac785e1a732a9ef003ee430421951e80d97ab7",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775828",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775829",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "zwei\nZeilen"
+              },
+              "resource": "bubble_9223372036854775829",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [144, 227, 186, 121, 158, 132, 4, 230, 159, 17, 14, 87, 129, 244, 184, 73, 146, 31, 251, 69, 13, 48, 188, 4, 65, 170, 38, 97, 222, 74, 89, 104], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([144, 227, 186, 121, 158, 132, 4, 230, 159, 17, 14, 87, 129, 244, 184, 73, 146, 31, 251, 69, 13, 48, 188, 4, 65, 170, 38, 97, 222, 74, 89, 104]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775829] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780012014,
+            "body": "zwei\nZeilen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775829",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "90e3ba799e8404e69f110e5781f4b849921ffb450d30bc0441aa2661de4a5968",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775829",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775830",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Antwort 21: genau, äh, so 🙂"
+              },
+              "resource": "bubble_9223372036854775830",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [114, 241, 107, 115, 247, 57, 55, 5, 82, 57, 3, 243, 146, 105, 233, 235, 246, 69, 162, 30, 132, 14, 247, 52, 136, 13, 180, 16, 184, 204, 187, 154], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([114, 241, 107, 115, 247, 57, 55, 5, 82, 57, 3, 243, 146, 105, 233, 235, 246, 69, 162, 30, 132, 14, 247, 52, 136, 13, 180, 16, 184, 204, 187, 154]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775830] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780012614,
+            "body": "Antwort 21: genau, äh, so 🙂",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775830",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "72f16b73f7393705523903f39269e9ebf645a21e840ef734880db410b8ccbb9a",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": {
+              "ours": false,
+              "text": "zwei",
+              "to": "90e3ba799e8404e69f110e5781f4b849921ffb450d30bc0441aa2661de4a5968"
+            },
+            "since": null,
+            "text": "Antwort 21: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775830",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775831",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Grüße aus Köln, die Straße ist nass"
+              },
+              "resource": "bubble_9223372036854775831",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [206, 66, 30, 222, 188, 95, 77, 32, 175, 20, 148, 155, 87, 110, 193, 138, 155, 64, 207, 178, 0, 141, 99, 41, 179, 146, 77, 178, 227, 206, 96, 94], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([206, 66, 30, 222, 188, 95, 77, 32, 175, 20, 148, 155, 87, 110, 193, 138, 155, 64, 207, 178, 0, 141, 99, 41, 179, 146, 77, 178, 227, 206, 96, 94]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775831] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780013214,
+            "body": "Grüße aus Köln, die Straße ist nass",
+            "chips": [
+              {
+                "content": "👍",
+                "count": 1,
+                "ours": false
+              }
+            ],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775831",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "ce421edebc5f4d20af14949b576ec18a9b40cfb2008d6329b3924db2e3ce605e",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1780013214,
+          "words": {
+            "args": [],
+            "key": "yesterday"
+          }
+        },
+        "id": "group_9223372036854775831",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775832",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ok 👍"
+              },
+              "resource": "bubble_9223372036854775832",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [99, 162, 123, 41, 247, 84, 167, 100, 32, 32, 153, 234, 3, 189, 185, 219, 98, 83, 149, 112, 199, 199, 66, 217, 197, 39, 224, 27, 148, 250, 157, 191], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([99, 162, 123, 41, 247, 84, 167, 100, 32, 32, 153, 234, 3, 189, 185, 219, 98, 83, 149, 112, 199, 199, 66, 217, 197, 39, 224, 27, 148, 250, 157, 191]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775832] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780013814,
+            "body": "ok 👍",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775832",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "63a27b29f754a764202099ea03bdb9db62539570c7c742d9c527e01b94fa9dbf",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775832",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775834",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              "resource": "bubble_9223372036854775834",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [10, 51, 173, 194, 146, 140, 102, 65, 110, 127, 53, 139, 186, 92, 130, 8, 61, 27, 168, 166, 195, 244, 243, 73, 15, 99, 76, 87, 239, 137, 201, 200], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([10, 51, 173, 194, 146, 140, 102, 65, 110, 127, 53, 139, 186, 92, 130, 8, 61, 27, 168, 166, 195, 244, 243, 73, 15, 99, 76, 87, 239, 137, 201, 200]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775834] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780015014,
+            "body": "naïve façade, smörgåsbord, Ærøskøbing",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775834",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "0a33adc2928c66416e7f358bba5c82083d1ba8a6c3f4f3490f634c57ef89c9c8",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775834",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775835",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "日本語のテキストも"
+              },
+              "resource": "bubble_9223372036854775835",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [84, 57, 100, 128, 152, 141, 173, 153, 29, 58, 95, 255, 101, 182, 163, 116, 71, 0, 3, 33, 175, 94, 50, 32, 87, 32, 134, 213, 149, 195, 127, 247], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([84, 57, 100, 128, 152, 141, 173, 153, 29, 58, 95, 255, 101, 182, 163, 116, 71, 0, 3, 33, 175, 94, 50, 32, 87, 32, 134, 213, 149, 195, 127, 247]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775835] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780015614,
+            "body": "日本語のテキストも",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775835",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "54396480988dad991d3a5fff65b6a37447000321af5e3220572086d595c37ff7",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775835",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775836",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "😀🐀🚲 drei Emoji am Stück"
+              },
+              "resource": "bubble_9223372036854775836",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [67, 96, 135, 80, 103, 179, 9, 138, 145, 44, 53, 119, 181, 73, 248, 165, 60, 171, 178, 73, 85, 98, 218, 53, 244, 214, 190, 225, 177, 58, 239, 180], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([67, 96, 135, 80, 103, 179, 9, 138, 145, 44, 53, 119, 181, 73, 248, 165, 60, 171, 178, 73, 85, 98, 218, 53, 244, 214, 190, 225, 177, 58, 239, 180]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775836] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780016214,
+            "body": "😀🐀🚲 drei Emoji am Stück",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775836",
+            "live": null,
+            "liveness": null,
+            "mark": "failed",
+            "mark_node": {
+              "activate": {
+                "enabled": true,
+                "intent": "SendAgain { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], key: 9223372036854775836 }",
+                "label_key": "scene_send_again"
+              },
+              "mark": "failed",
+              "resource": "state_failed",
+              "words": {
+                "args": [],
+                "key": "state_failed"
+              }
+            },
+            "msg_id": "4360875067b3098a912c3577b549f8a53cabb2495562da35f4d6bee1b13aefb4",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775836",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775837",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "zwei\nZeilen"
+              },
+              "resource": "bubble_9223372036854775837",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [91, 134, 236, 224, 140, 189, 99, 16, 68, 112, 220, 228, 88, 76, 147, 160, 225, 84, 240, 156, 72, 74, 97, 230, 201, 71, 253, 202, 245, 87, 74, 8], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([91, 134, 236, 224, 140, 189, 99, 16, 68, 112, 220, 228, 88, 76, 147, 160, 225, 84, 240, 156, 72, 74, 97, 230, 201, 71, 253, 202, 245, 87, 74, 8]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775837] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780016814,
+            "body": "zwei\nZeilen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775837",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "5b86ece08cbd63104470dce4584c93a0e154f09c484a61e6c947fdcaf5574a08",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775837",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775838",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": ""
+              },
+              "resource": "bubble_9223372036854775838",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [26, 38, 181, 129, 183, 7, 143, 218, 129, 187, 38, 232, 151, 189, 62, 103, 222, 40, 173, 13, 134, 205, 198, 188, 45, 100, 180, 238, 24, 62, 78, 34], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([26, 38, 181, 129, 183, 7, 143, 218, 129, 187, 38, 232, 151, 189, 62, 103, 222, 40, 173, 13, 134, 205, 198, 188, 45, 100, 180, 238, 24, 62, 78, 34]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775838] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780017414,
+            "body": "",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775838",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "1a26b581b7078fda81bb26e897bd3e67de28ad0d86cdc6bc2d64b4ee183e4e22",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": null,
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775838",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775839",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Grüße aus Köln, die Straße ist nass"
+              },
+              "resource": "bubble_9223372036854775839",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [210, 206, 201, 21, 218, 250, 132, 114, 72, 177, 181, 47, 38, 209, 30, 10, 76, 151, 152, 156, 105, 149, 236, 55, 40, 228, 188, 220, 239, 131, 25, 224], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([210, 206, 201, 21, 218, 250, 132, 114, 72, 177, 181, 47, 38, 209, 30, 10, 76, 151, 152, 156, 105, 149, 236, 55, 40, 228, 188, 220, 239, 131, 25, 224]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775839] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780018014,
+            "body": "Grüße aus Köln, die Straße ist nass",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775839",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "d2cec915dafa847248b1b52f26d11e0a4c97989c6995ec3728e4bcdcef8319e0",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775839",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775840",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ok 👍"
+              },
+              "resource": "bubble_9223372036854775840",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [18, 199, 73, 130, 157, 188, 179, 166, 72, 228, 152, 29, 90, 191, 173, 165, 145, 93, 123, 8, 1, 216, 98, 255, 58, 114, 159, 143, 145, 4, 153, 164], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([18, 199, 73, 130, 157, 188, 179, 166, 72, 228, 152, 29, 90, 191, 173, 165, 145, 93, 123, 8, 1, 216, 98, 255, 58, 114, 159, 143, 145, 4, 153, 164]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775840] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780018614,
+            "body": "ok 👍",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775840",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "12c749829dbcb3a648e4981d5abfada5915d7b0801d862ff3a729f8f910499a4",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775840",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775841",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Treffen wir uns um 18:00 am Bahnhof?"
+              },
+              "resource": "bubble_9223372036854775841",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [253, 69, 46, 212, 170, 225, 83, 56, 67, 184, 187, 156, 215, 243, 26, 121, 165, 159, 147, 105, 227, 125, 150, 195, 226, 35, 68, 219, 63, 230, 172, 122], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([253, 69, 46, 212, 170, 225, 83, 56, 67, 184, 187, 156, 215, 243, 26, 121, 165, 159, 147, 105, 227, 125, 150, 195, 226, 35, 68, 219, 63, 230, 172, 122]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775841] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780019214,
+            "body": "Treffen wir uns um 18:00 am Bahnhof?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775841",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "fd452ed4aae1533843b8bb9cd7f31a79a59f9369e37d96c3e22344db3fe6ac7a",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775841",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775842",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              "resource": "bubble_9223372036854775842",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [237, 229, 60, 211, 105, 224, 90, 69, 151, 112, 53, 189, 252, 179, 56, 86, 240, 112, 122, 130, 102, 216, 143, 1, 229, 250, 82, 38, 84, 226, 136, 2], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([237, 229, 60, 211, 105, 224, 90, 69, 151, 112, 53, 189, 252, 179, 56, 86, 240, 112, 122, 130, 102, 216, 143, 1, 229, 250, 82, 38, 84, 226, 136, 2]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775842] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780019814,
+            "body": "naïve façade, smörgåsbord, Ærøskøbing",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775842",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "ede53cd369e05a45977035bdfcb33856f0707a8266d88f01e5fa522654e28802",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775842",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775843",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Antwort 34: genau, äh, so 🙂"
+              },
+              "resource": "bubble_9223372036854775843",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [238, 30, 83, 237, 108, 190, 69, 52, 109, 124, 158, 171, 52, 242, 139, 189, 254, 19, 159, 34, 106, 82, 195, 24, 201, 57, 86, 57, 106, 248, 103, 60], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([238, 30, 83, 237, 108, 190, 69, 52, 109, 124, 158, 171, 52, 242, 139, 189, 254, 19, 159, 34, 106, 82, 195, 24, 201, 57, 86, 57, 106, 248, 103, 60]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775843] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780020414,
+            "body": "Antwort 34: genau, äh, so 🙂",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775843",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "ee1e53ed6cbe45346d7c9eab34f28bbdfe139f226a52c318c93956396af8673c",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": {
+              "ours": true,
+              "text": "naïve façade, smörgåsbord, Ærøskøbing",
+              "to": "ede53cd369e05a45977035bdfcb33856f0707a8266d88f01e5fa522654e28802"
+            },
+            "since": null,
+            "text": "Antwort 34: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775843",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775844",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "😀🐀🚲 drei Emoji am Stück"
+              },
+              "resource": "bubble_9223372036854775844",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [53, 22, 235, 87, 251, 30, 244, 198, 232, 165, 94, 168, 211, 82, 213, 27, 10, 213, 202, 240, 227, 52, 175, 254, 2, 53, 207, 53, 238, 71, 212, 176], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([53, 22, 235, 87, 251, 30, 244, 198, 232, 165, 94, 168, 211, 82, 213, 27, 10, 213, 202, 240, 227, 52, 175, 254, 2, 53, 207, 53, 238, 71, 212, 176]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775844] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780021014,
+            "body": "😀🐀🚲 drei Emoji am Stück",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775844",
+            "live": null,
+            "liveness": null,
+            "mark": "failed",
+            "mark_node": {
+              "activate": {
+                "enabled": true,
+                "intent": "SendAgain { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], key: 9223372036854775844 }",
+                "label_key": "scene_send_again"
+              },
+              "mark": "failed",
+              "resource": "state_failed",
+              "words": {
+                "args": [],
+                "key": "state_failed"
+              }
+            },
+            "msg_id": "3516eb57fb1ef4c6e8a55ea8d352d51b0ad5caf0e334affe0235cf35ee47d4b0",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775844",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775845",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "zwei\nZeilen"
+              },
+              "resource": "bubble_9223372036854775845",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [37, 155, 194, 200, 159, 150, 160, 81, 21, 95, 57, 128, 98, 38, 239, 215, 142, 214, 226, 147, 222, 46, 230, 247, 22, 67, 43, 80, 74, 121, 48, 49], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([37, 155, 194, 200, 159, 150, 160, 81, 21, 95, 57, 128, 98, 38, 239, 215, 142, 214, 226, 147, 222, 46, 230, 247, 22, 67, 43, 80, 74, 121, 48, 49]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775845] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780021614,
+            "body": "zwei\nZeilen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775845",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "259bc2c89f96a051155f39806226efd78ed6e293de2ee6f716432b504a793031",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775845",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775846",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ja"
+              },
+              "resource": "bubble_9223372036854775846",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [39, 36, 154, 31, 228, 68, 140, 226, 212, 13, 89, 73, 39, 105, 134, 119, 229, 106, 185, 226, 128, 238, 201, 180, 207, 152, 184, 239, 168, 215, 170, 36], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([39, 36, 154, 31, 228, 68, 140, 226, 212, 13, 89, 73, 39, 105, 134, 119, 229, 106, 185, 226, 128, 238, 201, 180, 207, 152, 184, 239, 168, 215, 170, 36]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775846] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780022214,
+            "body": "ja",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775846",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "27249a1fe4448ce2d40d594927698677e56ab9e280eec9b4cf98b8efa8d7aa24",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ja",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775846",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲"
+          },
+          "resource": "group_9223372036854775847",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Grüße aus Köln, die Straße ist nass"
+              },
+              "resource": "bubble_9223372036854775847",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [16, 206, 110, 214, 188, 72, 2, 98, 32, 164, 44, 106, 144, 132, 122, 3, 47, 220, 242, 235, 192, 239, 220, 107, 172, 41, 172, 155, 90, 163, 136, 125], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([16, 206, 110, 214, 188, 72, 2, 98, 32, 164, 44, 106, 144, 132, 122, 3, 47, 220, 242, 235, 192, 239, 220, 107, 172, 41, 172, 155, 90, 163, 136, 125]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775847] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780022814,
+            "body": "Grüße aus Köln, die Straße ist nass",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775847",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "10ce6ed6bc48026220a42c6a90847a032fdcf2ebc0efdc6bac29ac9b5aa3887d",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775847",
+        "ours": false,
+        "sender": {
+          "raw": "Jürgen 🚲"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_9223372036854775848",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "ok 👍"
+              },
+              "resource": "bubble_9223372036854775848",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: [160, 179, 8, 129, 180, 185, 21, 134, 86, 253, 141, 109, 197, 190, 252, 128, 254, 23, 186, 132, 160, 208, 107, 150, 77, 205, 223, 233, 222, 37, 120, 127], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), target: Some([160, 179, 8, 129, 180, 185, 21, 134, 86, 253, 141, 109, 197, 190, 252, 128, 254, 23, 186, 132, 160, 208, 107, 150, 77, 205, 223, 233, 222, 37, 120, 127]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], keys: [9223372036854775848] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780023414,
+            "body": "ok 👍",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_9223372036854775848",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "a0b30881b4b9158656fd8d6dc5befc80fe17ba84a0d06b964dcddfe9de25787f",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_9223372036854775848",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "1d0abf792296d6027f9c456dda8a1f95",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "1d0abf792296d6027f9c456dda8a1f95"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Jürgen 🚲"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "OpenMapAt { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]) }",
+        "label_key": "map"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "J🚲",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Jürgen 🚲"
+    }
+  },
+  "whereabouts": null
+}

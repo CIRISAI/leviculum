@@ -199,7 +199,15 @@ impl<'a, P: Panel> Display<'a, P> {
                 };
                 if let Some(req) = request {
                     let panel = &mut self.panel;
-                    match apply_power(req, &mut display_on, |on| panel.set_power(on)) {
+                    let watch = &crate::thread_watch::THREAD;
+                    match apply_power(req, &mut display_on, |on| {
+                        // A synchronous bus write on some panels: named, so
+                        // a stall inside it is reported by where it is.
+                        watch.enter(crate::thread_watch::Site::PanelPower, now_ms as u32);
+                        let done = panel.set_power(on);
+                        watch.leave();
+                        done
+                    }) {
                         None => {}
                         Some(Err(e)) => crate::log::log_fmt(
                             "[DISP] ",
@@ -248,7 +256,11 @@ impl<'a, P: Panel> Display<'a, P> {
                 // The painter clears, draws the six lines and sets the
                 // heartbeat dot three pixels in from the panel's width.
                 let _ = model.paint(self.panel.frame(), P::WIDTH);
-                if let Err(e) = self.panel.flush().await {
+                let watch = &crate::thread_watch::THREAD;
+                watch.enter(crate::thread_watch::Site::PanelFlush, clock.now_ms() as u32);
+                let flushed = self.panel.flush().await;
+                watch.leave();
+                if let Err(e) = flushed {
                     crate::log::log_fmt("[DISP] ", format_args!("flush failed: {:?}", e));
                 }
                 last_key = Some(key);

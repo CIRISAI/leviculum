@@ -28,11 +28,11 @@ use leviculum_core::envelope::{
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
     IdentityReportWire, MediaProfileWire, MgmtAllowState, NodeNameState, TelemetryTargetWire,
     REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_NOT_RUNNING, REFUSE_NO_CLOCK, REFUSE_PERSIST,
-    REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT,
-    TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY,
-    TYPE_MEDIA_REPORT, TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY, TYPE_MGMT_ALLOW_REPORT,
-    TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
-    TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
+    REFUSE_PERSIST_PENDING, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
+    TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE,
+    TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY,
+    TYPE_MGMT_ALLOW_REPORT, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT,
+    TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::node_name::NodeName;
@@ -164,6 +164,11 @@ pub fn reason_str(reason: u8) -> &'static str {
         REFUSE_PERSIST => {
             "the board applied the value but could not write it to flash, \
                            so a reset would lose it"
+        }
+        REFUSE_PERSIST_PENDING => {
+            "the board applied the value and is still writing it to flash; \
+                           its debug port logs `persist landed` when it is on the page, \
+                           and a reset before that would lose it"
         }
         REFUSE_NO_CLOCK => {
             "the board has no calendar clock yet, so it withheld the announce \
@@ -452,6 +457,40 @@ pub fn send_pn_config(
         &payload,
         CONTROL_TIMING,
         command_answer(leviculum_core::envelope::TYPE_PN_CONFIG),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
+/// Set whom the board shares its position with (order 1301,
+/// `TYPE_POSITION_SHARE`). Persisted before the ack (#358) and applied at
+/// once, so a positive answer means the next position announce follows it.
+pub fn send_position_share(fd: &Fd, setting: u8) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_position_share(setting);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_POSITION_SHARE),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
+/// Make the board a device of a Loquax home (order 1415,
+/// `TYPE_HOME_CODE`): the admission code as text. The board writes its
+/// pending client record before the ack, so a positive answer means it
+/// joins the home, at once and after any reset.
+pub fn send_home_code(fd: &Fd, code: &str) -> io::Result<ControlOutcome> {
+    let Some(payload) = leviculum_core::envelope::encode_home_code(code) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the code is empty or longer than a home code frame carries",
+        ));
+    };
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_HOME_CODE),
     )?;
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }

@@ -1,0 +1,20 @@
+# A walk in the board's KBRAW format (loquax_m9::kbraw::parse_raw), made only of
+# codes the bench capture of 2026-11-04 measured (capture-20261104.txt): one press is
+# one answer with the code in all eight bytes, idle reads between. Open the pinned
+# chat (Enter 0d), write (i 69), type "hi&0" (68 69 26 30), Enter sends.
+[FW_BUILD] synthetic
+KBRAW 10 0000000000000000
+KBRAW 20 0d0d0d0d0d0d0d0d
+KBRAW 30 0000000000000000
+KBRAW 120 6969696969696969
+KBRAW 130 0000000000000000
+KBRAW 220 6868686868686868
+KBRAW 230 0000000000000000
+KBRAW 320 6969696969696969
+KBRAW 330 0000000000000000
+KBRAW 420 2626262626262626
+KBRAW 430 0000000000000000
+KBRAW 520 3030303030303030
+KBRAW 530 0000000000000000
+KBRAW 620 0d0d0d0d0d0d0d0d
+KBRAW 630 0000000000000000

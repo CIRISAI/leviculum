@@ -168,10 +168,21 @@ pub fn swap_words(serial: &str) -> Option<String> {
 /// directory in tests. Carries the `/dev` root beside it because the two
 /// answer one question — "where is this board's port" — and a test that can
 /// point the first at a fixture must be able to point the second at one too.
+///
+/// And the `/proc` root, for the third part of that question: whether some
+/// other program holds the port ([`Sysfs::holders`]).
 #[derive(Debug, Clone)]
 pub struct Sysfs {
     root: PathBuf,
     dev: PathBuf,
+    proc: PathBuf,
+}
+
+/// A program that has a port open: its pid and its name (`/proc/<pid>/comm`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    pub pid: u32,
+    pub name: String,
 }
 
 impl Default for Sysfs {
@@ -185,6 +196,7 @@ impl Sysfs {
         Self {
             root: root.into(),
             dev: PathBuf::from("/dev"),
+            proc: PathBuf::from("/proc"),
         }
     }
 
@@ -195,7 +207,62 @@ impl Sysfs {
         Self {
             root: root.into(),
             dev: dev.into(),
+            proc: PathBuf::from("/proc"),
         }
+    }
+
+    /// The same tree with its processes read from `proc` instead of
+    /// `/proc`. For tests: a directory of `<pid>/fd/<n>` links and
+    /// `<pid>/comm` files plays a daemon holding a port.
+    pub fn with_proc(mut self, proc: impl Into<PathBuf>) -> Self {
+        self.proc = proc.into();
+        self
+    }
+
+    /// Every other program with a file open on the device node `rdev`.
+    ///
+    /// A port held under `TIOCEXCL` still opens for root, which lnflash is,
+    /// so the open succeeding proves nothing: the holder and lnflash then
+    /// read the same port, and each answer goes to whichever reads first.
+    /// That is how a session reports silence from a board that answered.
+    /// The kernel's own table of who has what open is the only place the
+    /// sharing shows, so it is read here. Processes this user may not look
+    /// into are not seen; lnflash runs as root, which sees every one.
+    pub fn holders(&self, rdev: u64) -> Vec<Holder> {
+        let me = std::process::id();
+        let mut found: Vec<Holder> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.proc) else {
+            return found;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == me {
+                continue;
+            }
+            let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+                continue;
+            };
+            let holds = fds.filter_map(Result::ok).any(|fd| {
+                std::fs::metadata(fd.path()).is_ok_and(|meta| {
+                    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+                    meta.file_type().is_char_device() && meta.rdev() == rdev
+                })
+            });
+            if holds {
+                let name = std::fs::read_to_string(entry.path().join("comm"))
+                    .map(|text| text.trim().to_string())
+                    .unwrap_or_else(|_| "an unnamed program".to_string());
+                found.push(Holder { pid, name });
+            }
+        }
+        found.sort_by_key(|holder| holder.pid);
+        found
     }
 
     pub fn root(&self) -> &Path {
@@ -290,7 +357,7 @@ impl Sysfs {
                 Some(Interface {
                     number: hex8(&attr(&dir, "bInterfaceNumber")?)?,
                     class: hex8(&attr(&dir, "bInterfaceClass")?)?,
-                    tty: first_entry(&dir.join("tty")),
+                    tty: interface_tty(&dir),
                     block: find_block(&dir, 5),
                 })
             })
@@ -298,6 +365,25 @@ impl Sysfs {
         found.sort_by_key(|i| i.number);
         found
     }
+}
+
+/// The tty an interface carries. A CDC-ACM function (every LNode) has it
+/// at `<iface>/tty/ttyACMn`; a USB-serial bridge (the CH340 of a ThinkNode
+/// M9 or an ESP32 RNode, the CP210x of others) one level down, at
+/// `<iface>/ttyUSBn/tty/ttyUSBn`. Both forms are read, so a bridge on the bus
+/// is seen as the serial device it is.
+fn interface_tty(dir: &Path) -> Option<String> {
+    first_entry(&dir.join("tty")).or_else(|| {
+        let mut ports: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("tty")))
+            .map(|e| e.path().join("tty"))
+            .collect();
+        ports.sort();
+        ports.iter().find_map(|port| first_entry(port))
+    })
 }
 
 /// Read a sysfs attribute. Trailing newline stripped; empty reads as absent,
@@ -573,5 +659,58 @@ mod tests {
         // "No devices" and "I could not look" must not be the same answer:
         // the second would let the flow report a clean bus on a broken host.
         assert!(Sysfs::new("/nonexistent/sysfs/root").devices().is_err());
+    }
+
+    #[test]
+    fn a_usb_serial_bridge_shows_its_tty_like_a_cdc_function_does() {
+        // A CH340 (the ThinkNode M9) binds usb-serial, whose tty sits one
+        // level below the interface; a CDC function's sits directly under it.
+        let root = tempfile::TempDir::new().unwrap();
+        let write = |dir: &Path, name: &str, value: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), format!("{value}\n")).unwrap();
+        };
+        let dev = root.path().join("1-2");
+        write(&dev, "idVendor", "1a86");
+        write(&dev, "idProduct", "7522");
+        let iface = root.path().join("1-2:1.0");
+        write(&iface, "bInterfaceNumber", "00");
+        write(&iface, "bInterfaceClass", "ff");
+        std::fs::create_dir_all(iface.join("ttyUSB3/tty/ttyUSB3")).unwrap();
+        let found = Sysfs::new(root.path()).devices().unwrap();
+        assert_eq!(found[0].first_tty(), Some((0, "ttyUSB3")));
+
+        // And a CDC function still reads the direct form.
+        std::fs::create_dir_all(iface.join("tty/ttyACM0")).unwrap();
+        let found = Sysfs::new(root.path()).devices().unwrap();
+        assert_eq!(found[0].first_tty(), Some((0, "ttyACM0")));
+    }
+
+    #[test]
+    fn a_holder_is_found_by_the_device_number_and_this_process_is_not_one() {
+        // A file holds no device number of its own, so the fd links point at
+        // /dev/null, the one character device every host has.
+        let null = std::fs::metadata("/dev/null").unwrap();
+        let rdev = std::os::unix::fs::MetadataExt::rdev(&null);
+        let proc = tempfile::TempDir::new().unwrap();
+        for (pid, name, target) in [
+            (4242u32, "lnsd", "/dev/null"),
+            (std::process::id(), "lnflash", "/dev/null"),
+            (77, "bash", "/etc/hostname"),
+        ] {
+            let fd = proc.path().join(pid.to_string()).join("fd");
+            std::fs::create_dir_all(&fd).unwrap();
+            std::os::unix::fs::symlink(target, fd.join("3")).unwrap();
+            std::fs::write(proc.path().join(pid.to_string()).join("comm"), name).unwrap();
+        }
+        std::fs::create_dir_all(proc.path().join("self")).unwrap();
+        let sysfs = Sysfs::new("/nonexistent").with_proc(proc.path());
+        assert_eq!(
+            sysfs.holders(rdev),
+            [Holder {
+                pid: 4242,
+                name: "lnsd".into()
+            }]
+        );
     }
 }

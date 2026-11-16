@@ -21,6 +21,9 @@
     <!-- The failed mark: its circle 4.8:1 on our bubble, the sign 7.2:1 on it. -->
     <color name="failed_ground">#ffdad6</color>
     <color name="failed_mark">#93000a</color>
+    <!-- Read's two ticks on our bubble: 5.1:1; in the list the accent,
+         8.8:1 on the background. -->
+    <color name="read_mark">#b2ff59</color>
     <!-- The send button: 4.6:1 on the background, its arrow 3.9:1 on it. -->
     <color name="send">#4f8f5b</color>
     <color name="on_send">#ffffff</color>
@@ -39,4 +42,21 @@
     <color name="reaction_ours">#4f8f5b</color>
     <!-- A selected message's row: the accent at a quarter. -->
     <color name="selected_row">#4081c784</color>
+    <!-- The status dot on the bar's avatar (1199), in a ring of the
+         background: up and down, 8.8:1 and 4.5:1 on the background. The tab bar sits on the
+         background: the selected tab in the accent, the others in
+         text_secondary, and the map's chips are text on the bar. -->
+    <color name="status_up">#81c784</color>
+    <color name="status_down">#7d8087</color>
+    <!-- The recording bar (1276): red 4.6:1 on the bar, the held
+         microphone's white glyph 3.2:1 on it; amber 8.6:1 on the bar. -->
+    <color name="rec_red">#ee6464</color>
+    <color name="rec_amber">#ffb74d</color>
+    <!-- A field's placeholder (1448, walk finding 4): lighter than any
+         written text, so an empty field never reads as filled; 4.4:1 on the background,
+         below text_secondary as a hint is meant to be. -->
+    <color name="hint">#7c7f86</color>
+    <!-- The own position on a map (1448): blue, as the maps people know
+         draw it; 8.3:1 on the background. -->
+    <color name="own_dot">#8ab4f8</color>
 </resources>

@@ -1,0 +1,586 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "ReticulumNet NL"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [
+            "ReticulumNet NL"
+          ],
+          "key": "relayed_group"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "OpenMapAt { peer: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]) }",
+          "label_key": "map"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "b0503a",
+            "fg": "ffffff",
+            "initials": "RN",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "args": [
+          "ReticulumNet NL"
+        ],
+        "key": "relayed_group"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Anna"
+          },
+          "resource": "group_1",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Hallo zusammen"
+              },
+              "resource": "bubble_1",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: [193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: Some([193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], keys: [1] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780109340,
+            "body": "Hallo zusammen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_1",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Hallo zusammen",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+              "name": "Anna"
+            }
+          }
+        ],
+        "day": {
+          "at": 1780109340,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_1",
+        "named": true,
+        "ours": false,
+        "sender": {
+          "raw": "Anna"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Ben"
+          },
+          "resource": "group_2",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Moin Anna"
+              },
+              "resource": "bubble_2",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: [194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: Some([194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], keys: [2] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780109640,
+            "body": "Moin Anna",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_2",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": true,
+              "joins_before": false,
+              "meta": false
+            },
+            "quote": null,
+            "since": null,
+            "text": "Moin Anna",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c",
+              "name": "Ben"
+            }
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "reacted 👍 to a message that is not here"
+              },
+              "resource": "bubble_3",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: [195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: Some([195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], keys: [3] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780109700,
+            "body": "reacted 👍 to a message that is not here",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_3",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "reacted 👍 to a message that is not here",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c",
+              "name": "Ben"
+            }
+          }
+        ],
+        "day": null,
+        "id": "group_2",
+        "named": true,
+        "ours": false,
+        "sender": {
+          "raw": "Ben"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_4",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Ich bin auch da"
+              },
+              "resource": "bubble_4",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: [196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: Some([196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], keys: [4] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780109940,
+            "body": "Ich bin auch da",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_4",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Ich bin auch da",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_4",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Anna"
+          },
+          "resource": "group_5",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Schön, dass du da bist"
+              },
+              "resource": "bubble_5",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: [197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), target: Some([197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106], keys: [5] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110240,
+            "body": "Schön, dass du da bist",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_5",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": {
+              "ours": null,
+              "text": "Ben: Moin Anna",
+              "to": "7878787878787878787878787878787878787878787878787878787878787878"
+            },
+            "since": null,
+            "text": "Schön, dass du da bist",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+              "name": "Anna"
+            }
+          }
+        ],
+        "day": null,
+        "id": "group_5",
+        "named": true,
+        "ours": false,
+        "sender": {
+          "raw": "Anna"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [
+          "ReticulumNet NL"
+        ],
+        "key": "relayed_group"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "OpenMapAt { peer: Peer([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]) }",
+        "label_key": "map"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "RN",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "args": [
+        "ReticulumNet NL"
+      ],
+      "key": "relayed_group"
+    }
+  },
+  "whereabouts": null
+}

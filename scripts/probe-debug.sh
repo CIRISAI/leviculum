@@ -17,6 +17,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$REPO/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$REPO/scripts/nrf-rustflags.sh"
 ELFDIR="$(cargo_target_dir "$REPO/leviculum-nrf")/$NRF_TARGET/release"
 
 die() { echo "probe-debug: ERROR: $*" >&2; exit 1; }
@@ -46,7 +51,7 @@ require_probe() {
 
 build() {
   local b="$1"
-  ( cd "$REPO/leviculum-nrf" && cargo build --release --bin "$b" --features "$(board_features "$b")" )
+  ( cd "$REPO/leviculum-nrf" && nrf_cargo build --release --bin "$b" --features "$(board_features "$b")" )
 }
 
 p() { "$PROBE_RS" "$@" --chip "$CHIP" --probe "$PROBE" --protocol swd; }
@@ -98,7 +103,9 @@ case "$cmd" in
     # gdb sessions SHORT and bounded; if it wedges, run `probe-debug.sh recover`
     # (and physically replug the probe if that is not enough).
     echo "probe-debug: GDB server on :1337. Connect (keep it SHORT):"
-    echo "  gdb-multiarch $ELFDIR/$b -ex 'target extended-remote :1337'"
+    # The ELF's DWARF names sources by their remapped paths (/src, /registry,
+    # scripts/nrf-rustflags.sh); substitute-path points /src back at this tree.
+    echo "  gdb-multiarch $ELFDIR/$b -ex 'set substitute-path /src $REPO' -ex 'target extended-remote :1337'"
     exec "$PROBE_RS" gdb --chip "$CHIP" --probe "$PROBE" --protocol swd ;;
   recover)
     # Re-enumerate the Debug Probe's USB to clear a wedged probe-rs / D-state hang

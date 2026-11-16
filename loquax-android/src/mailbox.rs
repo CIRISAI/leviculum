@@ -30,12 +30,15 @@ pub const DIR: &str = "mailbox";
 /// ended the process (the sticky service) finds it.
 pub const HERE_FILE: &str = "mailbox-here";
 /// The file under [`DIR`] that names the entry servers, `host:port` one per
-/// line; the shipped list when it is absent or holds none.
+/// line, tried one at a time in this order with failover; the shipped
+/// rendezvous list when it is absent or holds none.
 pub const SERVERS_FILE: &str = "servers";
 /// The file under [`DIR`] with the name recipients see.
 pub const NAME_FILE: &str = "name";
-/// The shipped entry server: the first of the zero-config server list
-/// (`docs/src/concepts/zero-config.md`, "The server list").
+/// The shipped entry servers, as the mailbox dials them: the rendezvous
+/// list (`loquax::home::rendezvous::DEFAULT`) on its ordinary port, as a
+/// peer (1196). The phones' default is the same node's access point port,
+/// `leviculum.network:4343`, with `:4242` as its last fallback.
 pub const DEFAULT_SERVERS: &[&str] = &["leviculum.network:4242"];
 /// The name the screens' device is admitted under.
 const SCREENS: &str = "this phone";
@@ -95,22 +98,399 @@ pub fn set_name(app: &Path, name: &str) -> Result<(), String> {
     std::fs::write(&path, name.trim()).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// The mailbox's store, beside the running home node's (SQLite takes both).
+fn store(app: &Path) -> Result<loquax::store::Store, String> {
+    let address = loquax::engine::delivery_address(&identity(app)?)?;
+    loquax::store::Store::open_in(&app.join(DIR), address).map_err(|e| e.to_string())
+}
+
 /// An admission for the screens: a token issued in the mailbox's store, as
-/// `loquax home admit` issues one, and the code that carries it.
+/// `loquax mailbox admit` issues one ([`loquax::home::admit::open`]), and
+/// the code that carries it.
 pub fn admission(app: &Path) -> Result<HomeCode, String> {
-    let identity = identity(app)?;
-    let address = loquax::engine::delivery_address(&identity)?;
-    let mut store =
-        loquax::store::Store::open_in(&app.join(DIR), address).map_err(|e| e.to_string())?;
-    let mut token = [0u8; 16];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
-    store
-        .issue_token(&token, SCREENS, leviculum_std::local_time::unix_now_secs())
-        .map_err(|e| e.to_string())?;
-    Ok(HomeCode {
-        public_key: identity.public_key_bytes(),
-        token,
+    let public_key = identity(app)?.public_key_bytes();
+    let now = leviculum_std::local_time::unix_now_secs();
+    loquax::home::admit::open(&mut store(app)?, public_key, SCREENS, Vec::new(), now)
+        .map(|admission| admission.code)
+        .map_err(|e| e.to_string())
+}
+
+/// The rendezvous list a code of this phone's mailbox carries (1264): what
+/// the mailbox dials itself ([`servers`]), as another device dials it. The
+/// shipped entry servers are the shipped rendezvous list, the access point
+/// port first (`loquax::home::rendezvous::DEFAULT`); a list of the
+/// servers file goes as it stands, since one server for both is what a
+/// file names (a test's, a power user's).
+pub fn code_list(app: &Path) -> Vec<String> {
+    let dialled = servers(app);
+    let shipped: Vec<String> = DEFAULT_SERVERS.iter().map(|s| (*s).to_string()).collect();
+    match dialled == shipped {
+        true => loquax::home::rendezvous::default_list(),
+        false => dialled,
+    }
+}
+
+/// How long this mailbox's codes are good for, in seconds: its config's
+/// `home_token_hours`, a day by default, as on a computer.
+pub fn token_ttl_secs(app: &Path) -> Result<i64, String> {
+    let config = loquax::config::load(&app.join(DIR)).map_err(|error| error.to_string())?;
+    Ok(loquax::home::token_ttl_secs(&config))
+}
+
+/// A device being linked (1264): its code's token, the devices the mailbox
+/// had admitted when the code was made, and when it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linking {
+    pub token: [u8; 16],
+    pub known: Vec<([u8; 16], i64)>,
+    pub expires_at: i64,
+}
+
+/// Where a link stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Linked {
+    /// The code is open; no device redeemed it yet.
+    Waiting,
+    /// A device redeemed it, under this name.
+    Linked(String),
+    /// The code ran out or was withdrawn, and no device came with it.
+    Over,
+}
+
+/// "Link a device" (1264, finding 7): a code for another device of the
+/// same `lqxh1` form `loquax mailbox admit` prints, issued self-named so
+/// the device is listed under the name its join brings, the rendezvous
+/// list of [`code_list`] behind it; and what [`linked`] needs to see the
+/// device come.
+pub fn link_code(app: &Path) -> Result<(loquax::home::admit::Admission, Linking), String> {
+    let public_key = identity(app)?.public_key_bytes();
+    let ttl = token_ttl_secs(app)?;
+    let now = leviculum_std::local_time::unix_now_secs();
+    let mut store = store(app)?;
+    let known = store
+        .devices()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|device| (device.device, device.admitted_at))
+        .collect();
+    let admission = loquax::home::admit::open(
+        &mut store,
+        public_key,
+        loquax::home::admit::SELF_NAMED,
+        code_list(app),
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    let linking = Linking {
+        token: admission.code.token,
+        known,
+        expires_at: admission.expires_at(ttl),
+    };
+    Ok((admission, linking))
+}
+
+/// The names of the devices the mailbox on this phone admitted, the
+/// earliest first (1443, the profile's devices).
+pub fn devices(app: &Path) -> Result<Vec<String>, String> {
+    let store = store(app)?;
+    let devices = store.devices().map_err(|e| e.to_string())?;
+    Ok(devices.into_iter().map(|device| device.name).collect())
+}
+
+/// Whether the device of `linking` came: its token still open, a device
+/// admitted since that was not (a device admitted again counts, under its
+/// new name), or neither.
+pub fn linked(app: &Path, linking: &Linking) -> Result<Linked, String> {
+    let ttl = token_ttl_secs(app)?;
+    let now = leviculum_std::local_time::unix_now_secs();
+    let mut store = store(app)?;
+    let devices = store.devices().map_err(|e| e.to_string())?;
+    if let Some(device) = devices
+        .iter()
+        .find(|device| !linking.known.contains(&(device.device, device.admitted_at)))
+    {
+        return Ok(Linked::Linked(device.name.clone()));
+    }
+    let open = store.open_tokens(now, ttl).map_err(|e| e.to_string())?;
+    Ok(match open.iter().any(|open| open.token == linking.token) {
+        true => Linked::Waiting,
+        false => Linked::Over,
     })
+}
+
+/// The scratch directory under the app's a move in works in (1281): the
+/// node that reaches the old phone keeps its storage there, and it goes
+/// when the move ends either way.
+pub const MOVING_DIR: &str = "moving";
+/// How long a restore looks for its address live elsewhere (1281).
+pub const PROBE_BUDGET: Duration = Duration::from_secs(15);
+
+/// Where a move to a new phone stands, on the old one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moving {
+    /// The code is open; the new phone did not take everything yet.
+    Waiting,
+    /// The new phone took everything, `name` the name it joined under;
+    /// this phone's mailbox has stopped.
+    Moved(String),
+    /// The code ran out, or a newer one replaced it, and nobody moved.
+    Over,
+}
+
+/// "Move to a new phone" (1281, walk finding 24): a join code of the same
+/// form as [`link_code`]'s, and a move opened for its token, so the device
+/// that joins with it may take the identity, the archive and the rest
+/// (`loquax::home::handover`).
+pub fn move_code(app: &Path) -> Result<(loquax::home::admit::Admission, Linking), String> {
+    let (admission, linking) = link_code(app)?;
+    loquax::home::handover::open(&app.join(DIR), &linking.token, linking.expires_at)?;
+    Ok((admission, linking))
+}
+
+/// Whether the new phone of `linking` took the mailbox.
+pub fn moving(app: &Path, linking: &Linking) -> Result<Moving, String> {
+    let dir = app.join(DIR);
+    if loquax::home::handover::gone_at(&dir).is_some() {
+        let name = match linked(app, linking)? {
+            Linked::Linked(name) => name,
+            Linked::Waiting | Linked::Over => String::new(),
+        };
+        return Ok(Moving::Moved(name));
+    }
+    let now = leviculum_std::local_time::unix_now_secs();
+    Ok(match loquax::home::handover::token(&dir, now) {
+        Some(token) if token == linking.token => Moving::Waiting,
+        _ => Moving::Over,
+    })
+}
+
+/// Whether the mailbox on this phone moved to another one and was not
+/// taken back: it does not start, and this phone sends nothing.
+pub fn has_moved(app: &Path) -> bool {
+    loquax::home::handover::gone_at(&app.join(DIR)).is_some()
+}
+
+/// "Use this phone again": the owner takes the moved mailbox back here.
+pub fn take_back(app: &Path) -> Result<(), String> {
+    loquax::home::handover::take_back(&app.join(DIR))
+}
+
+/// Why a move in did not work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveFailed {
+    /// The text is no join code.
+    Code(String),
+    /// This phone holds an address or reads a mailbox already.
+    HasAddress,
+    /// The old phone was not reached, or refused, or the move broke off;
+    /// the old phone still has everything.
+    Move(loquax::home::client::HomeError),
+    /// Something on this phone failed.
+    Here(String),
+}
+
+/// Move in from the old phone (1281): join its mailbox with the move code,
+/// take the identity, its ratchets, the contacts' keys, the name and the
+/// whole archive, keep them as this phone's mailbox, and tell the old
+/// phone, which stops. This phone becomes the mailbox only once the old one
+/// said it took the word; before that, a failure leaves nothing here.
+pub fn move_in(app: &Path, text: &str, name: &str, runtime: &Handle) -> Result<(), MoveFailed> {
+    let client = loquax::home::client::load_client(app).map_err(MoveFailed::Here)?;
+    if is_here(app) || app.join(DIR).join("identity").exists() || client.is_some() {
+        return Err(MoveFailed::HasAddress);
+    }
+    let (code, list) = HomeCode::parse_with_rendezvous(text.trim())
+        .map_err(|error| MoveFailed::Code(error.to_string()))?;
+    if list.is_empty() {
+        return Err(MoveFailed::Code("the code names no server".to_string()));
+    }
+    let device =
+        loquax::identity::load_or_create(&app.join(loquax::home::client::DEVICE_IDENTITY_FILE))
+            .map_err(|error| MoveFailed::Here(error.to_string()))?;
+    let scratch = app.join(MOVING_DIR);
+    let moved = runtime.block_on(take_in(app, &scratch, &code, list, &device, name));
+    let _ = std::fs::remove_dir_all(&scratch);
+    if moved.is_err() {
+        let _ = std::fs::remove_dir_all(app.join(DIR));
+    }
+    moved
+}
+
+/// A leaf node of this phone's own to `list`, for the mailbox of
+/// `public_key`, its storage under `scratch`.
+async fn leaf(
+    app: &Path,
+    scratch: &Path,
+    public_key: &[u8; 64],
+    list: Vec<String>,
+    device: &Identity,
+) -> Result<loquax::engine::Attached, String> {
+    let storage = scratch.join("storage");
+    std::fs::create_dir_all(&storage).map_err(|error| format!("{}: {error}", storage.display()))?;
+    let config = loquax::config::load(app).map_err(|error| error.to_string())?;
+    let address = loquax::home::lxmf_address(public_key)?;
+    loquax::engine::attach_leaf(
+        loquax::engine::LeafConfig {
+            servers: list,
+            home_destination: Some(loquax::home::destination_hash(public_key)?),
+            timing: loquax::home::rendezvous::Timing::default(),
+            storage_dir: storage,
+            identity: device.clone(),
+            display_name: Vec::new(),
+            notices: loquax::effects::Terminal::new(scratch.to_path_buf()),
+            tcp: config.tcp,
+            network: Default::default(),
+        },
+        loquax::engine::Role::Client { address },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn take_in(
+    app: &Path,
+    scratch: &Path,
+    code: &HomeCode,
+    list: Vec<String>,
+    device: &Identity,
+    name: &str,
+) -> Result<(), MoveFailed> {
+    let attached = leaf(app, scratch, &code.public_key, list, device)
+        .await
+        .map_err(MoveFailed::Here)?;
+    let node = attached.node();
+    let moved = take_over(app, &node, code, device, name).await;
+    drop(node);
+    attached.stop().await;
+    moved
+}
+
+/// How often a `/moved` the old phone answers with "more came" is tried
+/// again after taking the rest.
+const BEHIND_TRIES: usize = 5;
+
+async fn take_over(
+    app: &Path,
+    node: &leviculum_std::ReticulumNode,
+    code: &HomeCode,
+    device: &Identity,
+    name: &str,
+) -> Result<(), MoveFailed> {
+    use loquax::home::client::{self, HomeError};
+    use loquax::home::wire::Status;
+    let budget = crate::session::BUDGET;
+    client::join(node, &code.public_key, device, &code.token, name, budget)
+        .await
+        .map_err(MoveFailed::Move)?;
+    let taken = client::take_move(node, &code.public_key, device, &code.token, 0, budget)
+        .await
+        .map_err(MoveFailed::Move)?;
+    let identity = Identity::from_private_key_bytes(&taken.private_key)
+        .map_err(|_| MoveFailed::Move(HomeError::Malformed))?;
+    if identity.public_key_bytes() != code.public_key {
+        return Err(MoveFailed::Move(HomeError::Malformed));
+    }
+    let dir = app.join(DIR);
+    std::fs::create_dir_all(&dir).map_err(|error| MoveFailed::Here(error.to_string()))?;
+    loquax::identity::store(&dir.join("identity"), &identity)
+        .map_err(|error| MoveFailed::Here(error.to_string()))?;
+    let mut store = store(app).map_err(MoveFailed::Here)?;
+    let cap = loquax::config::load(&dir)
+        .map_err(|error| MoveFailed::Here(error.to_string()))?
+        .archive_cap_mb
+        .unwrap_or(loquax::home::DEFAULT_ARCHIVE_CAP_MB)
+        .saturating_mul(1 << 20);
+    let mut cursor = 0;
+    // The old home, by its `loquax.home` destination.
+    let peer_home = loquax::home::destination_hash(&code.public_key).unwrap_or([0; 16]);
+    let ratchets = match taken.ratchets.is_empty() {
+        true => "differ",
+        false => "same",
+    };
+    let mut keep = |entries: &[loquax::home::wire::Moving], cursor: &mut u64| {
+        *cursor = entries.last().map_or(*cursor, |entry| entry.seq);
+        // The old home's ring is written below as this one's (1305).
+        loquax::events::home_sync(&peer_home, entries.len(), 0, ratchets);
+        store
+            .archive_moved_in(entries, cap)
+            .map(|_| ())
+            .map_err(|error| MoveFailed::Here(error.to_string()))
+    };
+    keep(&taken.entries, &mut cursor)?;
+    let storage = dir.join("storage");
+    std::fs::create_dir_all(&storage).map_err(|error| MoveFailed::Here(error.to_string()))?;
+    if !taken.ratchets.is_empty() {
+        let address = loquax::engine::delivery_address(&identity).map_err(MoveFailed::Here)?;
+        let path = leviculum_std::dest_ratchet_keys_path(&storage, &address);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| MoveFailed::Here(error.to_string()))?;
+        }
+        leviculum_std::atomic_write_secret(&path, &taken.ratchets)
+            .map_err(|error| MoveFailed::Here(error.to_string()))?;
+    }
+    if !taken.known.is_empty() {
+        std::fs::write(storage.join("known_destinations"), &taken.known)
+            .map_err(|error| MoveFailed::Here(error.to_string()))?;
+    }
+    if !taken.name.is_empty() {
+        set_name(app, &taken.name).map_err(MoveFailed::Here)?;
+    }
+    // Announce often for a day: the peers that heard the old phone learn
+    // the new path sooner (`loquax::home::daemon::announce_period`).
+    loquax::identity::mark_moved(&dir).map_err(MoveFailed::Here)?;
+    let mut tries = 0;
+    loop {
+        match client::confirm_move(node, &code.public_key, device, &code.token, cursor, budget)
+            .await
+        {
+            Ok(()) => break,
+            Err(HomeError::Refused(Status::Behind)) if tries < BEHIND_TRIES => {
+                tries += 1;
+                let more =
+                    client::take_move(node, &code.public_key, device, &code.token, cursor, budget)
+                        .await
+                        .map_err(MoveFailed::Move)?;
+                keep(&more.entries, &mut cursor)?;
+            }
+            Err(error) => return Err(MoveFailed::Move(error)),
+        }
+    }
+    std::fs::write(app.join(HERE_FILE), b"")
+        .map_err(|error| MoveFailed::Here(format!("{}: {error}", app.join(HERE_FILE).display())))
+}
+
+/// Whether the mailbox of `public_key` answers right now (1281), looked
+/// for over this phone's code list ([`code_list`]) within `budget`: the
+/// restore's guard against a second live copy.
+pub fn answers_elsewhere(
+    app: &Path,
+    public_key: &[u8; 64],
+    budget: Duration,
+    runtime: &Handle,
+) -> Result<bool, String> {
+    let device =
+        loquax::identity::load_or_create(&app.join(loquax::home::client::DEVICE_IDENTITY_FILE))
+            .map_err(|error| error.to_string())?;
+    let scratch = app.join(MOVING_DIR);
+    let answered = runtime.block_on(async {
+        let attached = leaf(app, &scratch, public_key, code_list(app), &device).await?;
+        let node = attached.node();
+        let answered = loquax::home::client::answers(&node, public_key, &device, budget).await;
+        drop(node);
+        attached.stop().await;
+        Ok::<bool, String>(answered)
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    answered
+}
+
+/// The public key a backup line holds, read with `passphrase`.
+pub fn backup_key(line: &str, passphrase: &str) -> Result<[u8; 64], String> {
+    let private =
+        loquax::home::backup::open(line, passphrase).map_err(|error| error.to_string())?;
+    Identity::from_private_key_bytes(&private)
+        .map(|identity| identity.public_key_bytes())
+        .map_err(|_| "the backup holds no key".to_string())
 }
 
 /// The address's backup line, sealed with `passphrase`
@@ -150,14 +530,25 @@ pub fn restore(app: &Path, line: &str, passphrase: &str) -> Result<(), String> {
 pub struct Here {
     app: PathBuf,
     port: u16,
+    /// The platform's word on the network (1298), kept for a restart.
+    network: loquax::home::rendezvous::Network,
+    /// Where its node is lent at every start: the Browse tab's fetch (1337
+    /// pass two) and the Rooms' hub link (1384), which reach the network
+    /// through it.
+    lends: loquax::home::daemon::Lends,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl Here {
     /// Start the home node on `runtime`, its screens' server on a free
-    /// loopback port.
-    pub fn start(app: &Path, runtime: &Handle) -> Result<Self, String> {
+    /// loopback port, its node lent on `lends` once it runs.
+    pub fn start(
+        app: &Path,
+        runtime: &Handle,
+        network: loquax::home::rendezvous::Network,
+        lends: loquax::home::daemon::Lends,
+    ) -> Result<Self, String> {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
             .map_err(|error| format!("no port for the screens: {error}"))?;
         let port = listener
@@ -167,6 +558,8 @@ impl Here {
         let mut here = Self {
             app: app.to_path_buf(),
             port,
+            network,
+            lends,
             stop: None,
             task: None,
         };
@@ -206,6 +599,10 @@ impl Here {
             upstream: DaemonUpstream::Mesh {
                 servers: servers(&self.app),
                 screens: listener,
+                // The phone's own mailbox dials from the phone's battery:
+                // the long idle, as the screens' leaf has (1346).
+                tcp: config.tcp.for_device(),
+                timing: loquax::home::rendezvous::Timing::default(),
             },
             storage_dir,
             identity: identity(&self.app)?,
@@ -224,6 +621,8 @@ impl Here {
             fetch_budget: Duration::from_secs(120),
             wake: true,
             stop: Some(stopped),
+            network: self.network.clone(),
+            lends: self.lends.clone(),
         };
         self.stop = Some(stop);
         self.task = Some(runtime.spawn(loquax::home::daemon::run(options)));
@@ -255,6 +654,15 @@ impl Here {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shipped_servers_are_the_rendezvous_list_on_its_peer_port() {
+        let shipped: Vec<String> = DEFAULT_SERVERS.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(
+            shipped,
+            loquax::home::rendezvous::peer_list(&loquax::home::rendezvous::default_list())
+        );
+    }
 
     #[test]
     fn the_servers_file_replaces_the_shipped_list_and_an_empty_one_does_not() {
@@ -307,5 +715,48 @@ mod tests {
         assert_eq!(choose_here(app.path()).expect("again"), first);
         let code = admission(app.path()).expect("admission");
         assert_eq!(code.public_key, first);
+    }
+
+    /// A phone's link code (1264): the shipped entry servers go into it as
+    /// the shipped rendezvous list, a servers file's list as it stands; the
+    /// device redeeming it is seen under the name it brought, and a code
+    /// withdrawn with no device is over.
+    #[test]
+    fn a_link_code_carries_the_list_and_sees_its_device_come() {
+        let app = tempfile::tempdir().expect("app dir");
+        let key = choose_here(app.path()).expect("chosen");
+        assert_eq!(
+            code_list(app.path()),
+            loquax::home::rendezvous::default_list()
+        );
+        std::fs::write(
+            app.path().join(DIR).join(SERVERS_FILE),
+            "# a test's\n10.0.0.2:4242\n",
+        )
+        .expect("servers");
+        assert_eq!(code_list(app.path()), ["10.0.0.2:4242"]);
+        admission(app.path()).expect("the screens' own");
+        let (code, linking) = link_code(app.path()).expect("a link code");
+        let (parsed, list) = HomeCode::parse_with_rendezvous(&code.text()).expect("it reads back");
+        assert_eq!(parsed.public_key, key);
+        assert_eq!(list, ["10.0.0.2:4242"]);
+        assert_eq!(
+            linking.expires_at,
+            code.issued_at + 3600 * loquax::home::DEFAULT_TOKEN_HOURS as i64
+        );
+        assert_eq!(linked(app.path(), &linking), Ok(Linked::Waiting));
+        let mut store = store(app.path()).expect("store");
+        let now = leviculum_std::local_time::unix_now_secs();
+        store
+            .redeem_token_as(&code.code.token, &[7; 16], "Pixel 8", now, 3600)
+            .expect("redeemed");
+        assert_eq!(
+            linked(app.path(), &linking),
+            Ok(Linked::Linked("Pixel 8".to_string()))
+        );
+        let (other, linking) = link_code(app.path()).expect("another");
+        let prefix = loquax::address::to_hex(&other.code.token);
+        store.revoke_token(&prefix[..8]).expect("withdrawn");
+        assert_eq!(linked(app.path(), &linking), Ok(Linked::Over));
     }
 }

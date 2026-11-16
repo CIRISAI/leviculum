@@ -13,14 +13,22 @@ use std::{
 
 const LXMF_VERSION: &str = "1.1.0";
 const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
-// Updated 2026-10-29 for VEC-MSG-REPLY and VEC-MSG-COMMENT (replies, 1137):
+// Updated 2026-11-02 for VEC-MSG-LEV-GROUP-STATUS and -ENDED (the group
+// status key 0x03 and the ended standing of 0x05, 1307 pass four): 47
+// added lines, none removed. Before that 2026-11-02 for VEC-MSG-LEV-GROUP-DIGEST (the digest key 0x06 of
+// the lev namespace, 1307 G2): 29 added lines, none removed. Before that
+// 2026-11-02 for VEC-MSG-LEV-GROUP-COPY, -INVITE, -MEMBERS and
+// -LEAVE (the group keys of the lev namespace, 1307): 97 added lines, none
+// removed. Before that 2026-11-01 for VEC-MSG-LEV-MARK and VEC-MSG-LEV-RECEIPT (the lev
+// namespace, 1230): 38 added lines, none removed. Before that 2026-10-29 for
+// VEC-MSG-REPLY and VEC-MSG-COMMENT (replies, 1137):
 // 32 added lines, none removed. Before that 2026-10-29 for VEC-MSG-REACTION and VEC-MSG-REACTION-TEXT
 // (FIELD_REACTION, 1104): the regeneration added two vectors and left every
 // existing record byte-identical (the diff is 34 added lines, none removed).
 // Before that 2026-09-12 for VEC-PN-CONTROL (leviculum#384 part 4), the same
 // way.
 const VECTOR_FIXTURE_SHA256: &str =
-    "0c09fa89bf06095405fada95960c89aa750271a4aa9da240940b6a0ac32c9ca9";
+    "954e026448da2260b171dc91230a1a20a1a357904ff6c5b377aae29174a98eb2";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (

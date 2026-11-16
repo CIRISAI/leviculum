@@ -20,20 +20,23 @@
 //! Commit `362c1c2d` records a T114 image landing on a RAK4631 when that
 //! rule was absent.
 
+pub mod bootloader_update;
 pub mod dfu;
 pub mod entry;
 pub mod envelope;
-pub mod esp;
 pub mod flow;
+pub mod home;
 pub mod ihex;
 pub mod infouf2;
 pub mod manifest;
+pub mod maps;
 pub mod media;
 pub mod mgmt;
 pub mod name;
 pub mod pn_list;
 pub mod position;
 pub mod radio;
+pub mod region;
 pub mod softdevice;
 pub mod summarize;
 pub mod sys;
@@ -44,6 +47,7 @@ pub mod ui;
 pub mod usb;
 pub mod verify;
 pub mod watch;
+pub mod wifi;
 
 // The committed sysfs fixture tree encodes ':' as '+' (NTFS cannot check a
 // colon out); this helper materializes the decoded tree for unit tests.

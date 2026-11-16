@@ -58,6 +58,11 @@ check_limit
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$ROOT/scripts/nrf-rustflags.sh"
 OUT="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 
 # GNU objdump prints the immediate in decimal, llvm-objdump in hex; the
@@ -123,7 +128,7 @@ for s in sorted(sizes, reverse=True):
 
 build() {
     # shellcheck disable=SC2086 # feature list is intentionally word-split
-    (cd "$NRF" && cargo build --release --bin "$1" --features "$2")
+    (cd "$NRF" && nrf_cargo build --release --bin "$1" --features "$2")
 }
 
 check() {

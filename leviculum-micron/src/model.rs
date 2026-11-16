@@ -7,7 +7,9 @@
 //! RGB), alignment and text attributes as plain flags.
 
 use crate::color::Color;
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A fully parsed micron page.
 ///

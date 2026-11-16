@@ -178,6 +178,32 @@ pub fn led_notification(pin: Peri<'static, LedNotificationPin>) -> Output<'stati
     Output::new(pin, Level::Low, OutputDrive::Standard)
 }
 
+/// Raise the RAK19026 baseboard's 3V3-S rail ([`Periph3V3En`], P1.02):
+/// **HIGH** powers the OLED, the ZOE-M8Q, the LIS3DH and the NCP5623, per
+/// Meshtastic's RAK4631 init (`variants/.../variant.cpp:initVariant`, and
+/// `src/platform/nrf52/main-nrf52.cpp:453`, which drives it LOW only at
+/// shutdown). The display task sleeps 500 ms after creating its TWIM, so
+/// the OLED's own power-on reset has finished by the first probe. The
+/// binary holds the returned output for the life of the board.
+pub fn periph_3v3(pin: Peri<'static, Periph3V3En>) -> Output<'static> {
+    Output::new(pin, Level::High, OutputDrive::Standard)
+}
+
+/// Raise the SX1262 front-end power ([`LoRaPowerEn`], P1.05). It must be
+/// HIGH before any SPI traffic to the radio, so the binary raises it before
+/// `lora::init`. The chip sits on the module, not the baseboard, so this is
+/// independent of [`periph_3v3`]. Held for the life of the board.
+pub fn lora_power(pin: Peri<'static, LoRaPowerEn>) -> Output<'static> {
+    Output::new(pin, Level::High, OutputDrive::Standard)
+}
+
+// Module names, for the spawn lines (D7 of order 1085: every board says
+// `<task> task spawned (<module>)` with the module from its board file).
+/// The status panel on TWISPI0, driven as an SSD1306.
+pub const DISPLAY_MODULE: &str = "SSD1306";
+/// The GNSS receiver on UARTE0.
+pub const GNSS_MODULE: &str = "ZOE-M8Q";
+
 /// Runtime board metadata for shared init code (USB / flash / LoRa).
 pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_vid: 0x1209,
@@ -206,3 +232,44 @@ pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
 pub const PANIC_LED_PORT: u8 = 1;
 pub const PANIC_LED_PIN: u8 = 3;
 pub const PANIC_LED_ACTIVE_LOW: bool = false;
+
+/// HardFault-LED descriptor for `set_hardfault_led`: LED2 (blue) on P1.04,
+/// **active high**, so a HardFault reads apart from the green panic LED.
+pub const HARDFAULT_LED_PORT: u8 = 1;
+pub const HARDFAULT_LED_PIN: u8 = 4;
+pub const HARDFAULT_LED_ACTIVE_LOW: bool = false;
+
+/// The button, LED and off pins of the 8 s off and the boot-time factory
+/// reset (order 1511, `crate::power`). Off: the 3V3-S rail
+/// ([`Periph3V3En`], P1.02) that feeds the OLED, the GNSS and the sensors
+/// goes low, as Meshtastic drives it at shutdown
+/// (`src/platform/nrf52/main-nrf52.cpp:453`); the SX1262 front-end power
+/// ([`LoRaPowerEn`], P1.05) goes low; both LEDs (P1.03, P1.04, active high)
+/// go low. The OLED has no backlight of its own: its rail is 3V3-S.
+#[cfg(feature = "softdevice")]
+pub const POWER: crate::power::PowerFacts = crate::power::PowerFacts {
+    button_active_high: false,
+    led: (PANIC_LED_PORT, PANIC_LED_PIN, PANIC_LED_ACTIVE_LOW),
+    off_pins: &[
+        crate::power::OffPin {
+            port: 1,
+            pin: 2,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 5,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 3,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 4,
+            high: false,
+        },
+    ],
+};

@@ -62,10 +62,25 @@ fn hex_bytes(message: &serde_json::Value, key: &str) -> Vec<u8> {
     .unwrap_or_else(|_| panic!("{key} is not hex in {message}"))
 }
 
+/// The positive control's knob for the renamed-sender check (leviculum
+/// 1465): with `LOQUAX_TEST_HOLD_RENAME_S=<seconds>` the Python peer stores
+/// an announce that renames a sender it knows that much later, which is the
+/// order the land gate on b07e759b saw. Unset in every gate.
+fn held_rename_s() -> Option<f64> {
+    std::env::var("LOQUAX_TEST_HOLD_RENAME_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
 /// Positive: a message sent by the shipped binary arrives in a real Python
 /// LXMF inbox with its body and title intact, non-ASCII included.
 #[tokio::test(flavor = "multi_thread")]
 async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
+    // The in-process daemon's structured events (ANN_RX, PATH_ADD, ANN_PACED,
+    // ANN_TX, IFACE_DOWN), dumped to stderr if the test panics. The renamed
+    // announce went missing once under a loaded host (order 1584) and the
+    // run carried no line from the instance to say where.
+    let _instance_events = leviculum_std::test_support::event_log::init_event_log();
     let peer = PythonPeer::start();
     let python_address = peer.lxmf_init();
     let mut mesh = Mesh::start(peer.rns_port).await;
@@ -145,6 +160,12 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
     // And `--from` is what an operator uses when the bare account name is
     // ambiguous — three hosts, one user. Same identity, so this run's announce
     // replaces the name Python holds for us.
+    if let Some(seconds) = held_rename_s() {
+        peer.rpc(
+            "lxmf_hold_renames",
+            serde_json::json!({ "seconds": seconds }),
+        );
+    }
     let overridden = mesh
         .send(
             vec![
@@ -165,10 +186,56 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
     let overridden_id = overridden.enqueued_id();
     let message = wait_for_python(&peer, &overridden_id, Duration::from_secs(40)).await;
     assert_eq!(
-        message.get("source_display_name").and_then(|v| v.as_str()),
-        Some("lew@schneckenschreck"),
-        "--from must reach the receiver verbatim: {message}"
+        String::from_utf8(hex_bytes(&message, "content")).expect("the body round-trips as UTF-8"),
+        "second line",
+        "the renamed sender's message must arrive itself: {message}"
     );
+    // The new name is asserted where Python holds it, not on the message.
+    // Names come from announces, and a recipient shows the old one until the
+    // new announce lands, which is the reference's model and its clients'.
+    // Nothing orders that announce ahead of the message: the instance holds
+    // a client's announce for the fresh-interface pacer (up to 600 ms after
+    // the previous own announce on that TCP link, `ANN_PACED`, and a timer
+    // releases it), while the message's link packets are forwarded as they
+    // arrive. On an idle host the announce still won by about 230 ms in 20 of
+    // 20 runs; the land gate on b07e759b starved the timer and the message
+    // came first. A relay would add its rebroadcast wait to the announce and
+    // none to the link, so a multi-hop path orders even less.
+    let source = message
+        .get("source_hash")
+        .and_then(|v| v.as_str())
+        .expect("the message carries its source")
+        .to_string();
+    let shown = message.get("source_display_name").and_then(|v| v.as_str());
+    assert!(
+        shown == Some(expected_name.as_str()) || shown == Some("lew@schneckenschreck"),
+        "the message shows the old name or the new one, nothing else: {message}"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let known = peer.rpc(
+            "lxmf_known_name",
+            serde_json::json!({ "destination_hash": source }),
+        );
+        if known.as_str() == Some("lew@schneckenschreck") {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // Each place the renamed announce can stop says what it holds:
+            // the second client's own events (did it announce?), the
+            // instance's on the panic dump above, and Python's interface
+            // (a held announce, an ingress burst) and path table.
+            panic!(
+                "--from must reach the receiver verbatim; Python holds {known} and heard {}\n\
+                 Python has a path to {source}: {}\nPython's interfaces: {}\n\
+                 the renamed send: {overridden}",
+                peer.rpc("lxmf_names_heard", serde_json::json!({})),
+                peer.rpc("has_path", serde_json::json!({ "hash": source })),
+                peer.rpc("get_interfaces", serde_json::json!({})),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
@@ -476,6 +543,192 @@ async fn a_fetch_from_a_nonexistent_node_fails_cleanly() {
         .await;
     assert_eq!(fetched.code, Some(1), "{fetched}");
     assert_eq!(fetched.stdout, "", "no messages may be invented: {fetched}");
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// The image field Python's router handed its delivery callback, read by
+/// our codec: the format word and the picture's bytes.
+#[cfg(feature = "photos")]
+fn python_photo(message: &serde_json::Value) -> (String, Vec<u8>) {
+    use leviculum_lxmf::msgpack;
+    let packed = hex_bytes(message, "fields");
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).expect("a fields map");
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).expect("an int key");
+        let start = at;
+        msgpack::skip(&packed, &mut at).expect("a value");
+        if key == leviculum_lxmf::constants::FIELD_IMAGE {
+            let fields = [(key, packed[start..at].to_vec())];
+            let (format, data) = loquax::ui::photos::photo_parts(&fields).expect("[format, bytes]");
+            return (format, data.to_vec());
+        }
+    }
+    panic!("no image field in {message}");
+}
+
+/// Positive and negative (1220): `loquax send --photo` delivers the
+/// picture to a real Python LXMF inbox as the image field Columba and
+/// Sideband write, `[format, bytes]` under `FIELD_IMAGE`
+/// (`reference/LXMF/LXMF/LXMF.py:13`), scaled to the size asked for,
+/// upright and without its EXIF; over a link, since it is past one
+/// packet. A file that is no picture is a usage error and sends nothing.
+#[cfg(feature = "photos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_reaches_a_python_lxmf_receiver_as_the_image_field() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/photo-portrait.jpg"
+    );
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    for (size, edge) in [("small", 800u32), ("phone", 1600)] {
+        let sent = mesh
+            .send(
+                vec![
+                    python_address.clone(),
+                    "--photo".to_string(),
+                    fixture.to_string(),
+                    "--photo-size".to_string(),
+                    size.to_string(),
+                    "--via".to_string(),
+                    "direct".to_string(),
+                    "--timeout".to_string(),
+                    "40".to_string(),
+                ],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(sent.code, Some(0), "{size}: {sent}");
+        let id = sent.enqueued_id();
+        let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
+        assert!(hex_bytes(&message, "content").is_empty(), "{size}: no text");
+        let (format, data) = python_photo(&message);
+        assert_eq!(format, "jpg");
+        let (w, h) = loquax::photo::dimensions(&data).expect("a picture");
+        assert_eq!((w.max(h), h > w), (edge, true), "{size}: {w}x{h}, upright");
+        for secret in [&b"Exif"[..], b"Pixel 8", b"GPS"] {
+            assert!(!data.windows(secret.len()).any(|w| w == secret), "{size}");
+        }
+    }
+
+    let refused = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--photo".to_string(),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(refused.code, Some(2), "a usage error: {refused}");
+    assert!(refused.stderr.contains("not a picture"), "{refused}");
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// The file attachments field Python's router handed its delivery
+/// callback, raw: the entries as the reference packed them.
+fn python_files(message: &serde_json::Value) -> Vec<u8> {
+    use leviculum_lxmf::msgpack;
+    let packed = hex_bytes(message, "fields");
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).expect("a fields map");
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).expect("an int key");
+        let start = at;
+        msgpack::skip(&packed, &mut at).expect("a value");
+        if key == leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS {
+            return packed[start..at].to_vec();
+        }
+    }
+    panic!("no file attachments field in {message}");
+}
+
+/// Positive and negative (1221): `loquax send --file` delivers a file to a
+/// real Python LXMF inbox as the field Columba and Sideband write,
+/// `[[name, bytes]]` under `FIELD_FILE_ATTACHMENTS`
+/// (`reference/LXMF/LXMF/LXMF.py:12`), the name a str as Columba sends it
+/// and the bytes unchanged; over a link, since it is past one packet. A
+/// file past the 990 KB a receiver takes is a usage error and sends
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_reaches_a_python_lxmf_receiver_as_the_attachments_field() {
+    use leviculum_lxmf::msgpack;
+    // Its own directory, not a fixed name: two copies of this binary run side
+    // by side under the quota survey and raced on one (1590).
+    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).expect("the target tmpdir");
+    let scratch = tempfile::Builder::new()
+        .prefix("1221-file-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("a scratch dir");
+    let dir = scratch.path();
+    let name = "Protokoll Grüße.pdf";
+    let path = dir.join(name);
+    let data: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(&path, &data).expect("the file");
+    let large = dir.join("large.bin");
+    std::fs::write(&large, vec![0u8; loquax::ui::files::LARGEST + 1]).expect("the large file");
+
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    let sent = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--file".to_string(),
+                path.display().to_string(),
+                "--via".to_string(),
+                "direct".to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}");
+    let id = sent.enqueued_id();
+    let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
+    assert!(hex_bytes(&message, "content").is_empty(), "no text");
+    let value = python_files(&message);
+    let mut at = 0;
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(1), "one file");
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(2), "[name, bytes]");
+    assert_eq!(
+        msgpack::read_str(&value, &mut at),
+        Ok(name),
+        "the name, a str"
+    );
+    assert!(
+        msgpack::read_bin(&value, &mut at) == Ok(&data[..]),
+        "the bytes unchanged"
+    );
+
+    let refused = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--file".to_string(),
+                large.display().to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(refused.code, Some(2), "a usage error: {refused}");
+    assert!(
+        refused.stderr.contains("A message carries at most 990 KB"),
+        "{refused}"
+    );
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }

@@ -276,6 +276,15 @@ pub fn session_census() -> ([usize; MAX_LINKS], usize) {
     (slots, OUTGOING_HELD.get() + INCOMING_HELD.get())
 }
 
+/// Whether every packet the core handed to BLE has left: picked up by the
+/// fan-out AND finished (sent or abandoned) by every link's pump, read off
+/// the same two census cells the `[HEAP_CENSUS]` line prints. The `/dfu`
+/// exit waits on this before the reset (#235), so a reply that went out on
+/// a phone's link is not cut off mid-fragment.
+pub fn outgoing_drained() -> bool {
+    OUTGOING_HELD.get() == 0 && SESSION_HELD.total() == 0
+}
+
 /// The backend queued one packet of `bytes` on a link's outbound queue.
 pub fn session_held_add(slot_index: usize, bytes: usize) {
     SESSION_HELD.add(slot_index, bytes);

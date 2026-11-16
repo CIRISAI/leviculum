@@ -201,3 +201,63 @@ fn old_ratchet_packet_after_rotation_still_delivers() {
         "retained-key delivery must not count as a decrypt fail"
     );
 }
+
+/// The proofs among a call's outgoing packets.
+fn proofs_sent(out: &crate::TickOutput) -> usize {
+    out.actions
+        .iter()
+        .filter(|a| match a {
+            crate::transport::Action::SendPacket { data, .. } => {
+                Packet::unpack(data).is_ok_and(|p| p.flags.packet_type == PacketType::Proof)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// Case 4 (leviculum 1185): a PROVE_ALL destination proves only what it
+/// could decrypt, as the reference does (`Destination.receive` returns
+/// False and `RNS/Transport.py:2159-2160` sends no proof). Until 1185 the
+/// core proved every arrival, decrypted or not, and a sender holding a
+/// stale ratchet was told "delivered" for every message it lost: Lew's
+/// mailbox, 2026-10-31. The drop is named to the application as
+/// `PacketUndecryptable`; the control is a decryptable packet to the same
+/// destination, which is proven and raises no such event.
+#[test]
+fn an_undecryptable_packet_is_not_proven_and_is_named() {
+    let (mut node, iface) = make_node();
+    let (hash, pub_view, ratchet_pub) = register_ratchet_dest(&mut node);
+    node.destination_mut(&hash)
+        .expect("registered")
+        .set_proof_strategy(crate::destination::ProofStrategy::All);
+
+    let raw = data_packet(&hash, std::vec![0x42u8; 128]);
+    let out = node.handle_packet(InterfaceId(iface), &raw);
+    assert_eq!(proofs_sent(&out), 0, "an undecryptable packet was proven");
+    let named: Vec<_> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::PacketUndecryptable {
+                destination, len, ..
+            } => Some((*destination, *len)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named, std::vec![(hash, 128)]);
+
+    // Control: the same destination proves what it can read.
+    let payload = pub_view
+        .encrypt_for_destination(b"readable", Some(&ratchet_pub), &mut OsRng)
+        .expect("encrypt");
+    let out = node.handle_packet(InterfaceId(iface), &data_packet(&hash, payload));
+    assert_eq!(
+        delivered_payloads(&out.events),
+        std::vec![b"readable".to_vec()]
+    );
+    assert_eq!(proofs_sent(&out), 1, "a readable packet must be proven");
+    assert!(!out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::PacketUndecryptable { .. })));
+}

@@ -102,7 +102,7 @@ use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle, TcpTarget,
+    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle, TcpLiveness, TcpTarget,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::{InterfaceHandle, InterfaceRegistry, InterfaceStatsMap};
@@ -1187,6 +1187,7 @@ fn reattach_bootstrap_interfaces(
         identity_hash,
         auto_peer_count,
         host_resolver,
+        goodbyes,
     } = bootstrap;
     let ctx = interface_build::InterfaceBuildCtx {
         next_id,
@@ -1202,6 +1203,7 @@ fn reattach_bootstrap_interfaces(
         transport_enabled,
         default_announce_rate: default_announce_rate.clone(),
         identity_hash: *identity_hash,
+        goodbyes: goodbyes.clone(),
     };
     for b in ifaces.iter_mut() {
         if !b.ids.is_empty() {
@@ -1275,6 +1277,11 @@ struct EventLoopChannels {
     /// share one ordered channel.
     peer_event_rx: mpsc::Receiver<(InterfaceId, crate::interfaces::PeerEvent)>,
     shutdown: watch::Receiver<lifecycle::StopSignal>,
+    /// The gate every [`dispatch_committed`] holds across its commit and
+    /// enqueue (order 1656). Branch 5 holds it from its drain of
+    /// `action_dispatch_rx` through the new interface's interface-up, so no
+    /// commit lands between the two. See [`ActionTx`].
+    commit_gate: Arc<Mutex<()>>,
 }
 
 /// Runtime auto-connect wiring handed to the event loop (Codeberg #32).
@@ -1322,6 +1329,8 @@ struct BootstrapWiring {
     /// The node's TCP target resolver, so a re-attached client resolves the
     /// way it did at start.
     host_resolver: Option<crate::resolver::HostResolver>,
+    /// The node's goodbye count, for a re-attached radio (1567).
+    goodbyes: crate::interfaces::RadioGoodbyes,
 }
 
 /// One `bootstrap_only` section under management.
@@ -1339,14 +1348,142 @@ struct BootstrapIface {
 /// [`build_announce_app_data`](leviculum_core::discovery::build_announce_app_data))
 /// so the announcer arm never runs a proof-of-work stamp on the event loop.
 struct DiscoveryAnnounceJob {
-    /// Ready-to-announce `flags + msgpack(info) + stamp` payload.
-    app_data: Vec<u8>,
+    /// The `flags + msgpack(info) + stamp` payload, or the slot it arrives in.
+    payload: JobPayload,
     /// Minimum spacing between this interface's announces.
     interval: Duration,
     /// When this interface last self-advertised; `None` until the first emit.
     last_announce: Option<tokio::time::Instant>,
     /// Interface name, for the announce log line.
     label: String,
+}
+
+/// A self-advertise job's payload.
+///
+/// A connectable I2P interface publishes its b32 as `reachable_on`
+/// (Discovery.py:143), and a node without a stored key learns that address
+/// only from its first `SESSION CREATE`, seconds to minutes after start, or
+/// never while no router answers. Its job therefore waits: it is not due
+/// until a task that watches the endpoint has stamped the payload with the
+/// address, off the event loop. It does not announce without the address,
+/// because an I2P announce without `reachable_on` is one the reference's
+/// receivers refuse (`unpacked[REACHABLE_ON]`, Discovery.py:297, raises), and
+/// the next chance would be one announce interval (6 h by default) later.
+enum JobPayload {
+    /// Stamped and ready to announce.
+    Ready(Vec<u8>),
+    /// Filled once the interface knows the value it publishes.
+    Awaiting(Arc<std::sync::OnceLock<Vec<u8>>>),
+}
+
+impl DiscoveryAnnounceJob {
+    /// The payload, once there is one.
+    fn ready_app_data(&mut self) -> Option<&[u8]> {
+        if let JobPayload::Awaiting(slot) = &self.payload {
+            if let Some(data) = slot.get() {
+                self.payload = JobPayload::Ready(data.clone());
+            }
+        }
+        match &self.payload {
+            JobPayload::Ready(data) => Some(data),
+            JobPayload::Awaiting(_) => None,
+        }
+    }
+}
+
+/// Stamp one discovery announce payload, encrypted for the network identity
+/// when the interface asks for it. `None` when the descriptor lacks a field
+/// its type needs, or encryption was asked for without a network identity.
+fn stamp_discovery_app_data(
+    desc: &leviculum_core::discovery::InterfaceDescriptor,
+    transport_id: &[u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    encrypt: bool,
+    network_identity: Option<&leviculum_core::Identity>,
+) -> Option<Vec<u8>> {
+    let mut rng = rand_core::OsRng;
+    if encrypt {
+        match network_identity {
+            Some(id) => leviculum_core::discovery::build_announce_app_data_encrypted(
+                desc,
+                transport_id,
+                transport_enabled,
+                id,
+                &mut rng,
+            ),
+            None => {
+                tracing::error!(
+                    "discovery: interface {:?} requests discovery_encrypt but no \
+                     network_identity is configured, skipping",
+                    desc.name
+                );
+                None
+            }
+        }
+    } else {
+        leviculum_core::discovery::build_announce_app_data(
+            desc,
+            transport_id,
+            transport_enabled,
+            &mut rng,
+        )
+    }
+}
+
+/// Stamp a connectable I2P interface's discovery payload once its endpoint
+/// knows its b32, off the event loop, into the slot the job reads (see
+/// `JobPayload`). The b32 goes out bare, without `.b32.i2p`, as the reference
+/// sends `interface.b32` (Discovery.py:143-144).
+fn spawn_i2p_discovery_stamp(
+    endpoint: Arc<crate::interfaces::inventory::I2pEndpoint>,
+    mut desc: leviculum_core::discovery::InterfaceDescriptor,
+    transport_id: [u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    encrypt: bool,
+    network_identity: Option<Arc<leviculum_core::Identity>>,
+    label: String,
+) -> Arc<std::sync::OnceLock<Vec<u8>>> {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let fill = Arc::clone(&slot);
+    let mut b32_rx = endpoint.watch_b32();
+    tokio::spawn(async move {
+        let b32 = match b32_rx.wait_for(Option::is_some).await {
+            Ok(b32) => b32.clone(),
+            Err(_) => return,
+        };
+        let Some(b32) = b32 else { return };
+        tracing::info!(
+            "discovery: I2P interface \"{}\" reachable on {}.b32.i2p, its discovery announce carries it",
+            label,
+            b32
+        );
+        desc.reachable_on = Some(b32);
+        let stamped = tokio::task::spawn_blocking(move || {
+            stamp_discovery_app_data(
+                &desc,
+                &transport_id,
+                transport_enabled,
+                encrypt,
+                network_identity.as_deref(),
+            )
+        })
+        .await;
+        match stamped {
+            Ok(Some(app_data)) => {
+                let _ = fill.set(app_data);
+            }
+            Ok(None) => tracing::warn!(
+                "discovery: could not build announce data for I2P interface \"{}\", skipping",
+                label
+            ),
+            Err(e) => tracing::warn!(
+                "discovery: stamping the announce for I2P interface \"{}\" failed: {}",
+                label,
+                e
+            ),
+        }
+    });
+    slot
 }
 
 /// Producer-side discovery wiring (Codeberg #107): the registered discovery
@@ -1683,6 +1820,9 @@ pub struct ReticulumNode {
     /// so listeners live here and nowhere else; `interface_stats` reports the
     /// union of the two, which is the collection a Python `rnsd` reports.
     inventory: crate::interfaces::inventory::SharedInventory,
+    /// The radio interfaces that still owe their board a goodbye; `stop()`
+    /// waits for them, bounded (1567).
+    goodbyes: crate::interfaces::RadioGoodbyes,
     /// Live shared-instance client count, shared with the local accept loop.
     /// The reference labels an accepted IPC client with this count at accept
     /// time (LocalInterface.py:441/355).
@@ -1751,7 +1891,7 @@ impl Drop for ReticulumNode {
         // not stall its event loop / interface tasks.
         let run = std::mem::replace(
             &mut *self.run.lock_recover(),
-            lifecycle::RunState::new(mpsc::channel(1).0),
+            lifecycle::RunState::new(ActionTx::detached(mpsc::channel(1).0)),
         );
         if let Some(counter) = run.traffic_counter {
             counter.end();
@@ -1817,6 +1957,7 @@ impl ReticulumNode {
         };
         // Create dummy channel; real one is created in start()
         let (action_dispatch_tx, _) = mpsc::channel(1);
+        let action_dispatch_tx = ActionTx::detached(action_dispatch_tx);
 
         Self {
             inner: Arc::new(Mutex::new(core)),
@@ -1848,6 +1989,7 @@ impl ReticulumNode {
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             radio_cache: crate::rpc::radio_cache::shared(),
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            goodbyes: crate::interfaces::RadioGoodbyes::new(),
             local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             storage_path: None,
@@ -1971,50 +2113,53 @@ impl ReticulumNode {
             (dest_hash, transport_id, transport_enabled)
         };
 
-        let mut rng = rand_core::OsRng;
         let mut jobs = Vec::new();
         for (cfg, desc) in discoverable {
             let interval =
                 Duration::from_secs(crate::discovery::resolve_announce_interval_secs(cfg));
-            let app_data = if cfg.discovery_encrypt {
-                match &network_identity {
-                    Some(id) => leviculum_core::discovery::build_announce_app_data_encrypted(
-                        &desc,
-                        &transport_id,
-                        transport_enabled,
-                        id,
-                        &mut rng,
-                    ),
-                    None => {
-                        tracing::error!(
-                            "discovery: interface {:?} requests discovery_encrypt but no \
-                             network_identity is configured, skipping",
-                            desc.name
-                        );
-                        None
-                    }
-                }
-            } else {
-                leviculum_core::discovery::build_announce_app_data(
-                    &desc,
-                    &transport_id,
-                    transport_enabled,
-                    &mut rng,
-                )
-            };
-            let Some(app_data) = app_data else {
-                tracing::warn!(
-                    "discovery: could not build announce data for {} interface, skipping",
-                    desc.interface_type
-                );
-                continue;
-            };
             let label = desc
                 .name
                 .clone()
                 .unwrap_or_else(|| desc.interface_type.clone());
+            let payload = if crate::discovery::publishes_runtime_address(cfg) {
+                let Some(endpoint) = self
+                    .inventory
+                    .lock_recover()
+                    .i2p_endpoint_of_section(&cfg.name)
+                else {
+                    tracing::warn!(
+                        "discovery: I2P interface {} has no endpoint to read its address from, skipping",
+                        cfg.name
+                    );
+                    continue;
+                };
+                JobPayload::Awaiting(spawn_i2p_discovery_stamp(
+                    endpoint,
+                    desc,
+                    transport_id,
+                    transport_enabled,
+                    cfg.discovery_encrypt,
+                    network_identity.clone(),
+                    label.clone(),
+                ))
+            } else {
+                let Some(app_data) = stamp_discovery_app_data(
+                    &desc,
+                    &transport_id,
+                    transport_enabled,
+                    cfg.discovery_encrypt,
+                    network_identity.as_deref(),
+                ) else {
+                    tracing::warn!(
+                        "discovery: could not build announce data for {} interface, skipping",
+                        desc.interface_type
+                    );
+                    continue;
+                };
+                JobPayload::Ready(app_data)
+            };
             jobs.push(DiscoveryAnnounceJob {
-                app_data,
+                payload,
                 interval,
                 last_announce: None,
                 label,
@@ -2208,6 +2353,10 @@ impl ReticulumNode {
                     // keeps that default; a config interface's own
                     // `register_interface_config` runs after this loop and
                     // still wins.
+                    // Route rule (Codeberg #230, order 1380): the medium
+                    // declares it, the core applies `[reticulum]
+                    // path_choice` over it when the operator set one.
+                    core.set_interface_path_choice(handle.info.id.0, handle.info.path_choice);
                     if let Some(ingress_on) = handle.info.ingress_control {
                         core.set_interface_ingress_control(handle.info.id.0, ingress_on);
                         if !ingress_on {
@@ -2257,7 +2406,8 @@ impl ReticulumNode {
         // every iteration, so the queue only backs up if the event loop is
         // blocked (which also stalls all other I/O).
         let (action_dispatch_tx, action_dispatch_rx) = mpsc::channel(ACTION_DISPATCH_CAPACITY);
-        run.action_dispatch_tx = action_dispatch_tx;
+        let commit_gate = Arc::new(Mutex::new(()));
+        run.action_dispatch_tx = ActionTx::new(action_dispatch_tx, Arc::clone(&commit_gate));
 
         // Clone handles for the runner. The event loop owns a single
         // `EventSink` built from clones of both plane senders; it is the only
@@ -2379,6 +2529,7 @@ impl ReticulumNode {
             identity_hash: self.identity_hash(),
             auto_peer_count: self.auto_peer_count.clone(),
             host_resolver: self.host_resolver.clone(),
+            goodbyes: self.goodbyes.clone(),
         });
 
         // A previous stop() closed the completion registry when its event loop
@@ -2407,6 +2558,7 @@ impl ReticulumNode {
                     remove_iface_rx,
                     peer_event_rx,
                     shutdown: shutdown_rx,
+                    commit_gate,
                 },
                 iface_stats_map,
                 radio_cache,
@@ -2503,6 +2655,7 @@ impl ReticulumNode {
                 transport_enabled: self.is_transport_enabled(),
                 default_announce_rate: self.default_announce_rate(),
                 identity_hash: self.identity_hash(),
+                goodbyes: self.goodbyes.clone(),
             };
             {
                 // Every section once, enabled or not, before anything is
@@ -2589,6 +2742,7 @@ impl ReticulumNode {
                         jitter_arm,
                         subslot_arm,
                         identity_hash: self.identity_hash(),
+                        goodbye: Some(self.goodbyes.token()),
                     },
                     // Construction-time interface: lives for the node's
                     // lifetime, no caller-driven shutdown handle.
@@ -2716,7 +2870,7 @@ impl ReticulumNode {
         // it: the waits below are awaits (leviculum#90).
         let run = {
             let mut guard = self.run.lock_recover();
-            let dispatch = mpsc::channel(1).0;
+            let dispatch = ActionTx::detached(mpsc::channel(1).0);
             std::mem::replace(&mut *guard, lifecycle::RunState::new(dispatch))
         };
 
@@ -2730,6 +2884,30 @@ impl ReticulumNode {
             handle
                 .await
                 .map_err(|e| Error::Config(format!("runner panicked: {}", e)))?;
+        }
+
+        // The event loop is gone, so every radio interface is writing its
+        // board the goodbye (radio off, leave) on its own task. Let those
+        // writes land before the runtime below is torn down: on the rig
+        // (1567) a stop without this wait reached two RNodes of four, and the
+        // other two kept their radios on.
+        // The wait runs on the node's own runtime: the host's may have no
+        // timer (an embedder's IO-only runtime), and a node without radios
+        // asks no timer at all.
+        if let Some(runtime) = run.runtime.as_ref() {
+            if self.goodbyes.outstanding() > 0 {
+                let goodbyes = self.goodbyes.clone();
+                let waited = runtime
+                    .spawn(async move { goodbyes.wait(crate::interfaces::GOODBYE_BOUND).await })
+                    .await;
+                if let Ok(Err(left)) = waited {
+                    tracing::warn!(
+                        "{} radio interface(s) did not say goodbye within {} ms; stopping anyway",
+                        left,
+                        crate::interfaces::GOODBYE_BOUND.as_millis()
+                    );
+                }
+            }
         }
 
         // Persist state to disk
@@ -3062,6 +3240,7 @@ impl ReticulumNode {
                     jitter_arm,
                     subslot_arm,
                     identity_hash: self.identity_hash(),
+                    goodbye: Some(self.goodbyes.token()),
                 },
                 Some(shutdown_rx),
             )
@@ -3145,6 +3324,8 @@ impl ReticulumNode {
                 socks_target,
                 shutdown: Some(shutdown_rx),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
+                liveness: TcpLiveness::default(),
+                failover: None,
             })
         };
 
@@ -3249,6 +3430,7 @@ impl ReticulumNode {
             transport_enabled: self.is_transport_enabled(),
             default_announce_rate: self.default_announce_rate(),
             identity_hash: self.identity_hash(),
+            goodbyes: self.goodbyes.clone(),
         };
 
         let built = {
@@ -3587,6 +3769,49 @@ impl ReticulumNode {
             .lock_recover()
             .link(link_id)
             .map(|l| *l.destination_hash())
+    }
+
+    /// Give one link its own keepalive interval in seconds, in place of the
+    /// RTT-derived one or the node-wide override (1346); the stale timeout
+    /// follows it at twice the interval. `false` when the link does not
+    /// exist. Local timing only, as the node-wide override: nothing on the
+    /// wire changes, but the peer has to tolerate the silence, since a
+    /// responder goes stale at twice *its own* interval (Link.py:797). So
+    /// both ends of a link set it, as Loquax does on a device's link to its
+    /// mailbox; a link to a reference peer keeps the default. Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn set_link_keepalive(&self, link_id: &LinkId, secs: u64) -> bool {
+        match self.inner.lock_recover().link_mut(link_id) {
+            Some(link) => {
+                link.set_keepalive_override(Some(secs));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The keepalive interval of a link in milliseconds and the keepalive
+    /// round trips it has made (on an initiator the answers it heard, on a
+    /// responder the keepalives it answered), or `None` when the link does
+    /// not exist (1346: the wake counters of a device link). Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn link_keepalive(&self, link_id: &LinkId) -> Option<(u64, u64)> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .map(|l| (l.keepalive_ms(), l.keepalives_acked()))
+    }
+
+    /// How far the resource a link sends has gone, 0.0 to 1.0: the share
+    /// of its parts the peer asked for; `None` when the link does not
+    /// exist or sends none. A request too large for a packet goes as one,
+    /// so a requester shows its upload by it (Loquax's bubble, 1662).
+    /// Takes the core lock: never from a `CoreProcessor` hook.
+    pub fn link_outgoing_resource_progress(&self, link_id: &LinkId) -> Option<f32> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .and_then(|l| l.outgoing_resource_progress())
     }
 
     /// Get the encrypted link MDU (maximum data unit) for a link
@@ -3952,6 +4177,18 @@ impl ReticulumNode {
         self.inner.lock_recover().transport_stats()
     }
 
+    /// The route rule interface `id` runs under (Codeberg #230): the
+    /// `path_choice` override when one is set, otherwise what the
+    /// interface's medium declared. Crate-only, for the registration tests.
+    /// Takes the core lock: never from a `CoreProcessor` hook.
+    #[cfg(all(test, feature = "serial"))]
+    pub(crate) fn interface_path_choice(
+        &self,
+        id: InterfaceId,
+    ) -> leviculum_core::transport::PathChoice {
+        self.inner.lock_recover().interface_path_choice(id.0)
+    }
+
     /// A read-only snapshot of every interface: its name and online status
     /// from the core, joined with the byte counters tracked by the I/O tasks.
     /// Additive; built for diagnostics (an `rnstatus`-style interface view).
@@ -4050,6 +4287,7 @@ impl ReticulumNode {
         let inv = self.inventory.lock_recover();
         inv.listeners()
             .filter(|(_, row)| row.identity.type_name != "LocalServerInterface")
+            .filter(|(_, row)| row.identity.type_name != "WebSocketServerInterface")
             .filter_map(|(_, row)| row.bound_addr)
             .collect()
     }
@@ -4116,6 +4354,22 @@ impl ReticulumNode {
         .await
     }
 
+    /// Send one plain data packet on an established link, without Channel
+    /// framing: Python's `RNS.Packet(link, data).send()`, what a protocol
+    /// that frames its own messages per packet reads on the far side (an
+    /// RRC hub's `packet_callback`, #232). `data` must fit the link's MDU.
+    ///
+    /// See [`NodeCore::send_packet_on_link()`]. Returns the packet hash.
+    /// Takes the core lock while it builds the packet: a task beside the
+    /// node calls it, never a `CoreProcessor` hook.
+    pub async fn send_link_packet(&self, link_id: &LinkId, data: &[u8]) -> Result<[u8; 32], Error> {
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            let mut inner = self.inner.lock_recover();
+            Ok(inner.send_packet_on_link(link_id, data)?)
+        })
+        .await
+    }
+
     /// Identify our identity to the link peer.
     ///
     /// See [`NodeCore::identify_link()`] for protocol details.
@@ -4164,18 +4418,14 @@ impl ReticulumNode {
                 leviculum_core::node::DirectLinkError::NoFacilitator,
             ))?;
         let facilitator = crate::direct_link::resolve_facilitator(&addr).await?;
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut core = self.inner.lock_recover();
             let mut config = core.direct_link_config();
             config.facilitator = Some(facilitator);
             core.set_direct_link_config(config);
-            core.propose_direct_link_with(link_id, host_payload)?
-        };
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), core.propose_direct_link_with(link_id, host_payload)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#70): the direct interface a link travels over, if
@@ -4189,22 +4439,20 @@ impl ReticulumNode {
     /// `NodeEvent::DirectLinkRequested`). The establishment flow starts; its
     /// outcome arrives as `DirectLinkEstablished` or `DirectLinkFailed`.
     pub async fn accept_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().accept_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().accept_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#82): refuse the peer's held upgrade request on
     /// `link_id`. The peer's proposal ends `Rejected`; this node probed and
     /// sent nothing about its address.
     pub async fn reject_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().reject_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().reject_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// +ciris (leviculum#83): move `link_id` off its direct interface and back
@@ -4214,11 +4462,10 @@ impl ReticulumNode {
     /// re-proposal cooldown applies. A link that is not direct is an error and
     /// nothing changes.
     pub async fn retire_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = self.inner.lock_recover().retire_direct_link(link_id)?;
-        self.action_dispatch_tx()
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)
+        dispatch_committed(&self.action_dispatch_tx(), || {
+            Ok(((), self.inner.lock_recover().retire_direct_link(link_id)?))
+        })
+        .await
     }
 
     /// Turn the background retry of this node's failed direct-link
@@ -4340,11 +4587,26 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
+        self.send_response_resource_with(link_id, request_id, response_data, true)
+            .await
+    }
+
+    /// [`send_response_resource`](Self::send_response_resource), saying
+    /// whether the resource may be compressed: `false` for a responder whose
+    /// requesters include boards, which link no decompressor and refuse a
+    /// compressed resource (`NodeCore::send_response_resource_with`, 1459).
+    pub async fn send_response_resource_with(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+        compress: bool,
+    ) -> Result<(), Error> {
         dispatch_committed(&self.action_dispatch_tx(), || {
             let (_resource_hash, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner
-                    .send_response_resource(link_id, request_id, response_data)
+                    .send_response_resource_with(link_id, request_id, response_data, compress)
                     .map_err(Error::Resource)?
             };
             self.completions.note_send_began(*link_id);
@@ -4711,6 +4973,12 @@ impl ReticulumNode {
     /// `Err(RequestTimedOut)` on the in-protocol timeout and
     /// `Err(LinkClosed)` if the link dies first — never a hang. Cancel-safe;
     /// the caller owns any additional wall-clock bound.
+    ///
+    /// A request past the link MDU travels as a request Resource, as the
+    /// reference's `Link.request()` sends it
+    /// (`reference/Reticulum/RNS/Link.py:514-517`): a photo handed to a
+    /// home node's `/send`, say. Its id is then the hash of the packed
+    /// request, and the response resolves the future the same way.
     pub async fn send_request_awaited(
         &self,
         link_id: &LinkId,
@@ -4721,9 +4989,16 @@ impl ReticulumNode {
         dispatch_committed(&self.action_dispatch_tx(), || {
             let (request_id, output) = {
                 let mut inner = self.inner.lock_recover();
-                inner
-                    .send_request(link_id, path, data, timeout_ms)
-                    .map_err(Error::Request)?
+                match inner.send_request(link_id, path, data, timeout_ms) {
+                    Ok(sent) => sent,
+                    Err(leviculum_core::RequestError::PayloadTooLarge) => {
+                        let (request_id, _resource_hash, output) = inner
+                            .send_request_resource(link_id, path, data, timeout_ms)
+                            .map_err(Error::Resource)?;
+                        (request_id, output)
+                    }
+                    Err(error) => return Err(Error::Request(error)),
+                }
             };
             let response = self
                 .completions
@@ -5187,6 +5462,7 @@ async fn run_event_loop(
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut remove_iface_rx = channels.remove_iface_rx;
     let mut peer_event_rx = channels.peer_event_rx;
+    let commit_gate = channels.commit_gate;
     // A removal can arrive before the event loop has registered its interface
     // (a detach racing a just-accepted add); held here, applied on arrival.
     let mut pending_removals: std::collections::HashSet<InterfaceId> =
@@ -6173,6 +6449,44 @@ async fn run_event_loop(
                 if pending_removals.remove(&handle.info.id) {
                     continue;
                 }
+                // What the core committed before this interface existed goes
+                // out first, to the interfaces that existed then (order 1320).
+                // `select!` picks among ready branches at random, so a
+                // committed announce could wait in Branch 2 while this one
+                // registered the interface: the interface-up re-announce
+                // below sent the destination on it, and the queued broadcast
+                // reached it a second time, the burst a Python peer holds
+                // the third announce of. Draining here keeps the dispatch in
+                // commit order, whichever branch the loop takes first.
+                //
+                // The commit gate is held from the drain through the
+                // interface-up below (order 1656): a commit landing after
+                // the drain and before the registration put its destination
+                // in the cache the interface-up reads AND a broadcast in the
+                // channel that reached the new interface after it, two
+                // copies on one fresh connection. With the gate a commit is
+                // either drained here or made after the interface-up, when
+                // the core paces it onto the new interface itself.
+                let _commit_gate = commit_gate.lock_recover();
+                while let Ok(output) = action_dispatch_rx.try_recv() {
+                    let processor_delay = dispatch_output(
+                        output,
+                        &mut registry,
+                        event_sink.as_mut(),
+                        &inner,
+                        &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                        remote_mgmt.as_ref(),
+                        discovery_storage.as_deref(),
+                        discovery_network_identity.as_deref(),
+                        &mut discovery_heard_ifac,
+                        &completions,
+                        &mut assembler,
+                        &plane_counters,
+                        &mut breakers,
+                        core_processor.as_mut(),
+                    );
+                    tighten_next_poll(&mut next_poll, processor_delay);
+                }
                 tracing::info!("New connection: {} ({})", handle.info.name, handle.info.id);
                 let is_local = handle.info.is_local_client;
                 let iface_idx = handle.info.id.0;
@@ -6191,6 +6505,7 @@ async fn run_event_loop(
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
                 let inherited_ingress = handle.info.ingress_control;
+                let declared_path_choice = handle.info.path_choice;
                 let announce_cap_bps = handle.info.announce_cap_bitrate;
                 {
                     let mut core = inner.lock_recover();
@@ -6207,6 +6522,10 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
+                    // Codeberg #230: a runtime-attached radio (a multi-RNode
+                    // vport, a hot-plugged RNode, a BLE peer) prices its
+                    // direct link like a configured one.
+                    core.set_interface_path_choice(iface_idx, declared_path_choice);
                     // Codeberg #404: a runtime-attached radio is capped like a
                     // configured one. `None` for every medium that declares no
                     // announce-cap bitrate, which is every dynamically spawned
@@ -6597,12 +6916,15 @@ async fn run_event_loop(
             } => {
                 if let Some(wiring) = discovery_announce.as_mut() {
                     let now = tokio::time::Instant::now();
-                    // Due = never announced, or spacing elapsed. Pick the most
-                    // overdue (largest time since last announce), like Python's
-                    // `sort(key=now-last, reverse=True)[0]`.
+                    // Due = has a payload, and never announced or spacing
+                    // elapsed. Pick the most overdue (largest time since last
+                    // announce), like Python's `sort(key=now-last,
+                    // reverse=True)[0]`. A job still waiting for its payload
+                    // is not due (see `JobPayload`).
                     let selected = wiring
                         .jobs
                         .iter_mut()
+                        .filter_map(|j| j.ready_app_data().is_some().then_some(j))
                         .filter(|j| match j.last_announce {
                             None => true,
                             Some(last) => now.duration_since(last) >= j.interval,
@@ -6614,7 +6936,7 @@ async fn run_event_loop(
 
                     if let Some(job) = selected {
                         job.last_announce = Some(now);
-                        let app_data = job.app_data.clone();
+                        let app_data = job.ready_app_data().map(<[u8]>::to_vec).unwrap_or_default();
                         let label = job.label.clone();
                         let output = {
                             let mut core = inner.lock_recover();
@@ -6766,6 +7088,8 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
+            liveness: TcpLiveness::default(),
+            failover: None,
         });
         // A discovered peer we dialled ourselves comes up as a gateway while
         // this node routes for others, and stays `Full` otherwise: Python
@@ -7921,6 +8245,7 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "AutoInterface" => InterfaceKind::Auto,
         "BLEInterface" => InterfaceKind::Ble,
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
+        "WebSocketClientInterface" | "WebSocketServerInterface" => InterfaceKind::WebSocket,
         _ => InterfaceKind::Unknown,
     }
 }
@@ -7947,17 +8272,68 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
 ///
 /// Fails with [`Error::NotRunning`] before `commit` runs when the event loop
 /// is gone or has closed the channel for shutdown.
+///
+/// The commit and the enqueue happen under [`ActionTx`]'s gate, so the event
+/// loop's interface registration sees every commit either with its output
+/// already queued or not at all (order 1656).
 pub(crate) async fn dispatch_committed<T>(
-    action_dispatch_tx: &mpsc::Sender<TickOutput>,
+    action_dispatch_tx: &ActionTx,
     commit: impl FnOnce() -> Result<(T, TickOutput), Error>,
 ) -> Result<T, Error> {
     let permit = action_dispatch_tx
+        .tx
         .reserve()
         .await
         .map_err(|_| Error::NotRunning)?;
+    let _gate = action_dispatch_tx.gate.lock_recover();
     let (value, output) = commit()?;
     permit.send(output);
     Ok(value)
+}
+
+/// The sending half of the event loop's action channel, with the gate that
+/// makes a commit and its enqueue one step for the loop's Branch 5 (order
+/// 1656, Refs #232).
+///
+/// Branch 5 registers a new interface and calls `handle_interface_up`, which
+/// re-announces every destination with a cached announce on it. Before it
+/// does, it drains the action channel (order 1320) so a broadcast committed
+/// earlier goes out to the interfaces that existed then. Without the gate an
+/// announce could commit after that drain and before the registration: its
+/// cache entry made the interface-up re-announce it, and its queued
+/// broadcast, dispatched after the registration, reached the new interface
+/// too. Two announces of one destination inside a millisecond, and with the
+/// next destination's the three a Python peer holds the third of: the phone
+/// mailbox's delivery destination went unheard for the six minutes to its
+/// next announce (`leviculum-std/tests/mvr/a_new_interface_hears_an_announce_made_before_it.rs`).
+///
+/// The gate is a std mutex held only across synchronous code, never across
+/// an await. Lock order: the gate first, then the core lock, in
+/// [`dispatch_committed`] and in Branch 5 alike.
+#[derive(Clone)]
+pub(crate) struct ActionTx {
+    tx: mpsc::Sender<TickOutput>,
+    gate: Arc<Mutex<()>>,
+}
+
+impl ActionTx {
+    /// The sender the event loop drains, sharing `gate` with it.
+    pub(crate) fn new(tx: mpsc::Sender<TickOutput>, gate: Arc<Mutex<()>>) -> Self {
+        Self { tx, gate }
+    }
+
+    /// A sender with a gate of its own: the placeholder before `start()`,
+    /// and tests that drive the channel without an event loop.
+    /// Hold the gate for a commit and its enqueue, as
+    /// [`dispatch_committed`] does, for a caller that reserved a slot itself
+    /// (`LinkHandle::try_send_unordered`, which must not wait).
+    pub(crate) fn lock_gate(&self) -> crate::sync_ext::TrackedGuard<'_, ()> {
+        self.gate.lock_recover()
+    }
+
+    pub(crate) fn detached(tx: mpsc::Sender<TickOutput>) -> Self {
+        Self::new(tx, Arc::new(Mutex::new(())))
+    }
 }
 
 /// The first hop's timeout toward `dest_hash` as the shared instance
@@ -8023,6 +8399,26 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
     }
 }
 
+/// A pending link's figures for a caller beside the node (order 1669), kept
+/// apart from the main block so the lines the docs cite there stay where
+/// they are.
+impl ReticulumNode {
+    /// The establishment timeout of a pending link, in milliseconds, as the
+    /// core times its request out and retries it with fresh keys: the hop
+    /// term, the first hop's term and the link's jitter included.
+    ///
+    /// A caller waiting for the link sizes its patience by it (lnomad's
+    /// fetch, order 1669): a wait shorter than this gives up before the
+    /// core's own retry is due. `None` once the link is gone. Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn link_establishment_timeout_ms(&self, link_id: &LinkId) -> Option<u64> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .map(|l| l.establishment_timeout_ms())
+    }
+}
+
 mod lifecycle;
 mod relay_route; // +ciris leviculum#91, own file so no cited line moves
 mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves // leviculum#90: what a run owns, restartable through &self
@@ -8033,6 +8429,106 @@ const RUNTIME_SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The descriptor of a connectable I2P section, at the lowest stamp cost
+    /// so the test stamps in milliseconds.
+    fn i2p_discovery_desc() -> leviculum_core::discovery::InterfaceDescriptor {
+        leviculum_core::discovery::InterfaceDescriptor {
+            interface_type: "I2PInterface".into(),
+            name: Some("I2P".into()),
+            stamp_value: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// Wait (bounded) for a job to hold a payload, and decode it.
+    async fn i2p_job_reachable_on(job: &mut DiscoveryAnnounceJob) -> Option<String> {
+        let start = tokio::time::Instant::now();
+        while job.ready_app_data().is_none() && start.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let app_data = job.ready_app_data()?.to_vec();
+        let di = leviculum_core::discovery::parse_announce_app_data(&app_data, &[7u8; 16], 1)
+            .expect("the payload decodes");
+        assert_eq!(di.interface_type, "I2PInterface");
+        di.reachable_on
+    }
+
+    fn i2p_job(endpoint: &Arc<crate::interfaces::inventory::I2pEndpoint>) -> DiscoveryAnnounceJob {
+        DiscoveryAnnounceJob {
+            payload: JobPayload::Awaiting(spawn_i2p_discovery_stamp(
+                Arc::clone(endpoint),
+                i2p_discovery_desc(),
+                [7u8; 16],
+                true,
+                false,
+                None,
+                "I2P".into(),
+            )),
+            interval: Duration::from_secs(3600),
+            last_announce: None,
+            label: "I2P".into(),
+        }
+    }
+
+    /// Order one: the endpoint knows its b32 before the announcer looks (a
+    /// stored key). The first payload carries it as `reachable_on`, bare, as
+    /// the reference sends `interface.b32` (Discovery.py:143-144).
+    #[tokio::test]
+    async fn an_i2p_announce_carries_a_b32_known_at_start() {
+        let endpoint = Arc::new(crate::interfaces::inventory::I2pEndpoint::new(true));
+        endpoint.set_b32("p377jcvi6whf5keegjjbtv6mrpruhlyp56lebraya4hv7dvbbkqq");
+        let mut job = i2p_job(&endpoint);
+        assert_eq!(
+            i2p_job_reachable_on(&mut job).await.as_deref(),
+            Some("p377jcvi6whf5keegjjbtv6mrpruhlyp56lebraya4hv7dvbbkqq")
+        );
+    }
+
+    /// Order two: the announcer looks before the endpoint knows its b32 (a
+    /// fresh key, which comes with the first SESSION CREATE). The job has no
+    /// payload and is not due, so no announce without the address goes out;
+    /// once the b32 arrives the payload carries it.
+    #[tokio::test]
+    async fn an_i2p_announce_waits_for_a_b32_learned_later() {
+        let endpoint = Arc::new(crate::interfaces::inventory::I2pEndpoint::new(true));
+        let mut job = i2p_job(&endpoint);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            job.ready_app_data().is_none(),
+            "no payload, so no announce, while the address is unknown"
+        );
+        endpoint.set_b32("iryr3x4k4sgz6tnhraseru5edf5a4byikgajg44sow4w5xlaj34q");
+        assert_eq!(
+            i2p_job_reachable_on(&mut job).await.as_deref(),
+            Some("iryr3x4k4sgz6tnhraseru5edf5a4byikgajg44sow4w5xlaj34q")
+        );
+    }
+
+    /// Only a connectable I2P section waits for a runtime address; one that
+    /// is not connectable publishes none, as in the reference, and every
+    /// other type is stamped at start.
+    #[test]
+    fn only_a_connectable_i2p_section_publishes_a_runtime_address() {
+        let mut cfg = crate::config::InterfaceConfig {
+            name: "I2P".into(),
+            interface_type: "I2PInterface".into(),
+            discoverable: true,
+            connectable: Some(true),
+            ..Default::default()
+        };
+        assert!(crate::discovery::publishes_runtime_address(&cfg));
+        let desc = crate::discovery::descriptor_from_config(&cfg).expect("I2P is discoverable");
+        assert_eq!(
+            desc.reachable_on, None,
+            "filled at runtime, not from config"
+        );
+        cfg.connectable = Some(false);
+        assert!(!crate::discovery::publishes_runtime_address(&cfg));
+        assert!(crate::discovery::descriptor_from_config(&cfg).is_some());
+        cfg.interface_type = "TCPServerInterface".into();
+        assert!(!crate::discovery::publishes_runtime_address(&cfg));
+    }
 
     /// A configured TCP client now carries the reference display name, but
     /// its tunnel hash still derives from the internal `tcp_client_<idx>`:
@@ -8099,6 +8595,7 @@ mod tests {
         registry.register(InterfaceHandle {
             next_tag: None,
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(7),
                 name: "closing".into(),
                 hw_mtu: None,
@@ -8111,9 +8608,9 @@ mod tests {
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
-                transit: true,
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -8437,6 +8934,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -9260,6 +9758,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10109,6 +10608,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10167,6 +10667,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -10242,6 +10743,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -10272,6 +10774,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -10331,6 +10834,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -10411,6 +10915,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -10440,6 +10945,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -10523,6 +11029,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10586,6 +11093,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10649,6 +11157,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10802,6 +11311,18 @@ mod tests {
             Some(dest_hash),
             "active link must expose the dialed destination"
         );
+
+        // 4. 1346: one link takes its own keepalive, the RTT measured at
+        //    establishment notwithstanding; an unknown id takes nothing.
+        assert!(!node.set_link_keepalive(&unknown, 230));
+        assert!(node.link_keepalive(&unknown).is_none());
+        let (rtt_derived, _) = node.link_keepalive(&link_id).expect("live link");
+        assert!(
+            rtt_derived < 230_000,
+            "a local pair's RTT gives {rtt_derived} ms"
+        );
+        assert!(node.set_link_keepalive(&link_id, 230));
+        assert_eq!(node.link_keepalive(&link_id), Some((230_000, 0)));
     }
 
     // ---- Codeberg #196: the in-driver core processor seam --------------
@@ -10928,6 +11449,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -11663,6 +12185,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: in_rx,
             outgoing: out_tx,
@@ -11694,6 +12217,7 @@ mod tests {
                 remove_iface_rx: remove_rx,
                 peer_event_rx,
                 shutdown: shutdown_rx,
+                commit_gate: Arc::new(Mutex::new(())),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
             crate::rpc::radio_cache::shared(),
@@ -12370,6 +12894,7 @@ mod tests {
             next_tag: None,
             info: InterfaceInfo {
                 transit: false,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
                 id: InterfaceId(9),
                 name: "punched".into(),
                 hw_mtu: Some(1400),
@@ -12994,6 +13519,7 @@ mod tests {
                         departed_rxb: 0,
                         departed_txb: 0,
                         bound_addr: None,
+                        admission: None,
                     },
                 );
             }
@@ -13104,6 +13630,113 @@ mod tests {
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
+    }
+
+    /// mvr (orders 1317, 1320): an announce committed before a new
+    /// connection registers reaches that connection once.
+    ///
+    /// The field record is the phone's mailbox in the facade test
+    /// `a_file_travels_both_ways_with_python_lxmf`: its home announce waited
+    /// in the action channel while the loop took the new-interface branch,
+    /// whose interface-up re-announce sent the destination on the new
+    /// connection, and the queued broadcast reached it a second time. With
+    /// the delivery announce that made three inside a millisecond, and the
+    /// Python peer held the third (`leviculum-std/tests/mvr/a_third_announce_on_a_fresh_interface_waits_at_python.rs`).
+    ///
+    /// Both channels hold their message before the loop runs, and `select!`
+    /// picks between the two ready branches at random, so each round is
+    /// either order. Without the drain in Branch 5, a round that took the
+    /// interface first counted two; sixteen rounds miss that order with
+    /// probability 2^-16. With it every round counts one, whatever the order.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_announce_committed_before_a_new_interface_reaches_it_once() {
+        use crate::interfaces::{InterfaceCounters, InterfaceInfo};
+        use leviculum_core::packet::{Packet, PacketType};
+        use leviculum_core::{Destination, DestinationType, Direction, Identity};
+
+        for round in 0..16 {
+            let (core, _td) = shared_test_core();
+            let dest = Destination::new(
+                Some(Identity::generate(&mut rand_core::OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "mvr1320",
+                &["home"],
+            )
+            .expect("destination");
+            let hash = *dest.hash();
+            let committed = {
+                let mut core = core.lock_recover();
+                core.register_destination(dest);
+                core.announce_destination(&hash, None).expect("announce")
+            };
+            let harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+            let (_in_tx, in_rx) = mpsc::channel(4);
+            let (out_tx, mut out_rx) = mpsc::channel(8);
+            let new_iface = InterfaceHandle {
+                next_tag: None,
+                info: InterfaceInfo {
+                    transit: true,
+                    id: InterfaceId(1),
+                    name: "tcp_client_1".into(),
+                    hw_mtu: None,
+                    is_local_client: false,
+                    bitrate: None,
+                    announce_cap_bitrate: None,
+                    tx_jitter_max_ms: None,
+                    tx_hold_spread_max_ms: None,
+                    acquisition: None,
+                    frame_turnaround_ms: None,
+                    ifac: None,
+                    mode: leviculum_core::traits::InterfaceMode::default(),
+                    kind: leviculum_core::traits::InterfaceKind::Tcp,
+                    ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
+                },
+                incoming: in_rx,
+                outgoing: out_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+                credit: None,
+                ready: crate::interfaces::ReadySignal::ready_immediate(),
+                teardown: None,
+            };
+
+            // Committed first, the connection after: the core's order.
+            harness
+                .action_tx
+                .send(committed)
+                .await
+                .expect("loop is live");
+            harness
+                ._new_iface_tx
+                .send(new_iface)
+                .await
+                .expect("loop is live");
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+
+            let mut count = 0;
+            while let Ok(frame) = out_rx.try_recv() {
+                if let Ok(packet) = Packet::unpack(&frame.data) {
+                    if packet.flags.packet_type == PacketType::Announce
+                        && &packet.destination_hash == hash.as_bytes()
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            harness
+                .shutdown_tx
+                .send(lifecycle::StopSignal::Stop)
+                .expect("loop is live");
+            harness.loop_handle.await.expect("loop exits cleanly");
+            assert_eq!(
+                count, 1,
+                "round {round}: the new interface carried the destination's announce {count} times"
+            );
+        }
     }
 }
 
@@ -13424,6 +14057,8 @@ mod first_hop_timeout_tests {
     /// client's link carries Python's initiator timeout for that answer on a
     /// 2-hop path: 2276 + 6000 * 3 = 20 276 ms before jitter. Before #480
     /// the client never asked and priced the hop at 300 bit/s, 31 333 ms.
+    // Unix paths and sockets (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
     #[tokio::test]
     async fn shared_instance_client_takes_the_daemons_first_hop_timeout() {
         let (timeout, jitter) = client_timeout("answer", true).await;

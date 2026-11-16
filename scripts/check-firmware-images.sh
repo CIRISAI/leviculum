@@ -162,7 +162,7 @@ check_tree() {  # <bundle.sh> <README.md> <publish.sh> <collect.sh>
         return 1
     fi
     for board in $built; do
-        printf '%s\n' "$body" | grep -qiF -- "$board" || {
+        grep -qiF -- "$board" <<<"$body" || {
             echo "  FAIL: the release body never mentions the '$board' image the"
             echo "        bundle carries — the releases page is where a stranger"
             echo "        looks first, and it would tell them their board has none"
@@ -176,7 +176,7 @@ check_tree() {  # <bundle.sh> <README.md> <publish.sh> <collect.sh>
     while read -r url; do
         [ -n "$url" ] || continue
         name="${url##*/}"
-        printf '%s\n' "$staged" | grep -qxF -- "$name" || {
+        grep -qxF -- "$name" <<<"$staged" || {
             echo "  FAIL: the README links releases/download/nightly/$name and"
             echo "        the collect script stages no such asset — a 404 under a"
             echo "        URL we published"
@@ -222,7 +222,7 @@ selftest() {
     sed -i 's#^BOARDS=($#BOARDS=(\n    "xiao|xiao|bsp-xiao|"#' "$B"
     run
     [ "$rc" -ne 0 ] || { echo "  FAIL: passed with an unadvertised board"; failures=$((failures + 1)); }
-    printf '%s\n' "$out" | grep -q xiao || {
+    grep -q xiao <<<"$out" || {
         echo "  FAIL: the failure does not name the board"
         failures=$((failures + 1))
     }
@@ -233,7 +233,7 @@ selftest() {
     sed -i 's#^| `t114`#| `nosuchboard`#' "$R"
     run
     [ "$rc" -ne 0 ] || { echo "  FAIL: passed with an unbuilt board advertised"; failures=$((failures + 1)); }
-    printf '%s\n' "$out" | grep -q nosuchboard || {
+    grep -q nosuchboard <<<"$out" || {
         echo "  FAIL: the failure does not name the board"
         failures=$((failures + 1))
     }
@@ -255,7 +255,7 @@ selftest() {
     sed -i 's#releases/download/nightly/leviculum-nightly-amd64.deb#releases/download/nightly/leviculum-nightly-ppc64.deb#' "$R"
     run
     [ "$rc" -ne 0 ] || { echo "  FAIL: passed with a link to an unpublished asset"; failures=$((failures + 1)); }
-    printf '%s\n' "$out" | grep -q ppc64 || {
+    grep -q ppc64 <<<"$out" || {
         echo "  FAIL: the failure does not name the missing asset"
         failures=$((failures + 1))
     }

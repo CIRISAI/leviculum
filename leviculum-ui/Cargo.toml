@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Terminal-free UI model shared by the Leviculum programs: styled text, palette, input events, chrome and delivery glyphs"
+description = "Terminal-free UI model shared by the Leviculum programs: styled text, palette, input events, chrome, delivery glyphs and the scene vocabulary"
 # A library for the workspace's own programs, not published on its own.
 publish = false
 
@@ -31,3 +31,5 @@ unicode-width = "0.2.2"
 # both terminal crates in. The key-to-edit table those carry is restated in
 # `input`.
 tui-input = { version = "0.15", default-features = false, optional = true }
+# The scene's golden files: `alloc` only, so the no_std build takes it.
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

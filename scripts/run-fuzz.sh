@@ -68,7 +68,7 @@
 #   LEVICULUM_FUZZ_ARTIFACTS crash-input root, <root>/<crate>/<target>/
 #                            (default $LEVICULUM_FUZZ_STATE/findings)
 #   LEVICULUM_FUZZ_CRATES    space-separated fuzz crate dirs, repo-relative or
-#                            absolute (default the three in this repo)
+#                            absolute (default the four in this repo)
 #   LEVICULUM_FUZZ_MAX_LEN   libFuzzer -max_len                (default 8192)
 #   LEVICULUM_FUZZ_RSS_MB    libFuzzer -rss_limit_mb           (default 2048)
 #   LEVICULUM_FUZZ_TIMEOUT   libFuzzer -timeout, seconds per input (default 25)
@@ -80,7 +80,7 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 STATE="${LEVICULUM_FUZZ_STATE:-$HOME/.local/state/leviculum-fuzz}"
-CRATES="${LEVICULUM_FUZZ_CRATES:-leviculum-core/fuzz leviculum-std/fuzz leviculum-micron/fuzz}"
+CRATES="${LEVICULUM_FUZZ_CRATES:-leviculum-core/fuzz leviculum-std/fuzz leviculum-micron/fuzz leviculum-rrc/fuzz}"
 MAX_LEN="${LEVICULUM_FUZZ_MAX_LEN:-8192}"
 RSS_MB="${LEVICULUM_FUZZ_RSS_MB:-2048}"
 # Per-INPUT limit, not per-run: without it libFuzzer waits 1200 s for one
@@ -265,7 +265,7 @@ for crate_rel in $CRATES; do
     for f in "$FUZZ_DIR"/fuzz_targets/*.rs; do
         [ -e "$f" ] || continue
         name="$(basename "$f" .rs)"
-        if ! printf '%s\n' "$listed" | grep -qx -- "$name"; then
+        if ! grep -qx -- "$name" <<<"$listed"; then
             die "$crate_rel/fuzz_targets/$name.rs is not a [[bin]] in $crate_rel/Cargo.toml,
        so no run reaches it"
         fi

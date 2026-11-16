@@ -22,6 +22,8 @@
 #   scripts/build-lnflash-deb.sh         the lnflash .deb, from that bundle
 #   scripts/build-docs-tarball.sh        the book
 #   scripts/collect-nightly-debs.sh      everything staged into dist/
+#   scripts/build-nightly-apk.sh         the Android APKs, into dist/ (1267;
+#                                        no forge step: the forge has no SDK)
 #   scripts/publish-site.sh              leviculum.network/releases/nightly/
 #   scripts/publish-nightly.sh           the forge's rolling `nightly` release,
 #                                        ONLY with LEVICULUM_PUBLISH_FORGE=1
@@ -138,6 +140,9 @@ if [ "$(has rustup)" = 1 ]; then
     fi
     need "an objcopy: rustup component llvm-tools, or binutils-arm-none-eabi" "$objcopy"
 fi
+# The Android SDK, NDK and rustup targets, as the APK script itself checks
+# them; it prints one line per missing piece.
+bash scripts/build-nightly-apk.sh --check-tools | sed 's/^\[nightly-apk\]/[nightly-publish]/' || missing=1
 [ "$missing" = 0 ] || die "refusing: tools missing (above); nothing was built"
 
 # --- Credentials -------------------------------------------------------------
@@ -194,6 +199,8 @@ else
     bash scripts/build-lnflash-deb.sh
     bash scripts/build-docs-tarball.sh
     bash scripts/collect-nightly-debs.sh
+    # After the collector, which empties dist/ before it stages.
+    bash scripts/build-nightly-apk.sh
     mkdir -p "$(dirname "$BUILT_STAMP")"
     printf '%s %s\n' "$BUILD_ID" "$HEAD_SHA" >"$BUILT_STAMP"
     say "built ${BUILD_ID} in $(($(date +%s) - start)) s"

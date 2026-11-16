@@ -56,7 +56,6 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::{mpsc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
-use leviculum_micron::MicronDocument;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::{from_ratatui, to_ratatui};
@@ -64,22 +63,29 @@ use leviculum_ui_ratatui::images::{self as pictures, Pictures, SlicedProtocol};
 use leviculum_ui_ratatui::spinner::spinner_span;
 use leviculum_ui_ratatui::style::{
     chrome_muted_style, chrome_style, chrome_text_style, downgrade_buffer, paint, rgb,
+    rstyle_to_ratatui,
 };
 use leviculum_ui_ratatui::terminal::install_panic_hook;
 use leviculum_ui_ratatui::{chip, footer, help, toast};
 pub use leviculum_ui_ratatui::{to_ratatui_text, CrosstermTerminal, TerminalGuard, TerminalOps};
 
 use crate::bookmarks::Bookmarks;
-use crate::browser::{self, BrowserOptions};
+use crate::browser::BrowserOptions;
 use crate::color::ColorDepth;
 use crate::discovery::DiscoveredNode;
 use crate::fetch::Session;
 use crate::image::{Backend, Probe, SlotState};
 use crate::image_cache::ImageCache;
 use crate::theme::{resolve_theme, ThemeFlag};
+use crate::transfer::{
+    close_session, open_saved, save_picture, say_saved, spawn_discovery, spawn_download,
+    spawn_fetch, spawn_image_queue, FetchOutcome, ImageOutcome, ImageResult, LoadResult,
+};
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
+use crate::app::scene::{AddressField, Chip, Page, Row as SceneRow, SceneToast, Sheet};
+use crate::app::strings::{with, StrId, Text as StrText};
 use crate::app::*;
 
 /// [`crate::app::geometry::regions`] over ratatui rectangles, for the drawing
@@ -88,41 +94,41 @@ fn regions(area: Rect) -> [Rect; 3] {
     crate::app::geometry::regions(from_ratatui(area)).map(to_ratatui)
 }
 
-/// The places panel's placeholder under "Discovered nodes" while the registry
-/// is empty.
-const NO_NODES_YET: &str = "  (listening for announces…)";
-
 /// Draw the whole UI: the top-bar, the scrollable content, and the status bar,
 /// plus the help overlay when active.
 pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
+    let scene = model.scene();
     let [topbar, content, status] = regions(frame.area());
-    render_topbar(model, frame, topbar);
-    render_content(model, frame, content);
+    render_topbar(model, &scene.address, frame, topbar);
+    render_content(&scene.page, frame, content);
     // Pictures go over the reserved rows, before every other overlay: a toast,
     // the help or the places panel must be able to cover one.
     render_images(model, images, frame, content);
     // The bottom-left status chip floats over the content, above the footer row,
     // so the footer's clickable buttons below it are never covered.
-    render_status_chip(model, frame, frame.area());
+    render_status_chip(model, scene.status.as_ref(), frame, frame.area());
     render_status(model, frame, status);
     // Overlays drawn on top of the laid-out page: the form-field input boxes, the
     // search-match highlights, the focus highlight, the mouse-hover highlight, and
     // the hint badges while hint mode is active.
-    render_fields(model, frame);
-    render_search_matches(model, frame);
-    render_focus(model, frame);
+    render_fields(model, scene.page.focus, frame);
+    render_search_matches(model, &scene.page, frame, content);
+    render_focus(model, scene.page.focus, frame);
     render_hover(model, frame);
     if model.mode == Mode::Hint {
         render_hints(model, frame);
     }
-    if model.show_places {
-        render_places(model, frame, frame.area());
+    if let Some(sheet) = &scene.places {
+        render_places(model, sheet, frame, frame.area());
+    }
+    if let Some(sheet) = &scene.names {
+        render_names(model, sheet, frame, frame.area());
     }
     if model.show_help {
         render_help(model, frame, frame.area());
     }
     // The toast floats on top of everything so it is always visible.
-    render_toast(model, frame, frame.area());
+    render_toast(model, scene.toast.as_ref(), frame, frame.area());
     // Colour-depth post-pass: on a terminal without true colour, downgrade every
     // 24-bit RGB colour in the finished buffer to its nearest xterm-256 index in
     // one sweep. A single chokepoint over the rendered buffer keeps every colour
@@ -132,9 +138,11 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
 
 /// Draw the form-field input boxes over the laid-out page: every field's cells
 /// get an input style (a distinct chrome-slate box, or an underline box under
-/// `no_color`); the focused field is reversed on top so it stands out. A focused
-/// TEXT field also places the hardware cursor at its edit position.
-fn render_fields(model: &Model, frame: &mut Frame) {
+/// `no_color`); the scene's focused field is reversed on top so it stands out.
+/// A focused TEXT field also places the hardware cursor at its edit position.
+/// The boxes are the hit-test geometry ([`visible_fields`]), so a click and the
+/// box agree.
+fn render_fields(model: &Model, focus: Option<Focus>, frame: &mut Frame) {
     let visible = visible_fields(model);
     if visible.is_empty() {
         return;
@@ -154,7 +162,7 @@ fn render_fields(model: &Model, frame: &mut Frame) {
     {
         let buf = frame.buffer_mut();
         for vf in &visible {
-            let is_focused = model.field_focus == Some(vf.index);
+            let is_focused = focus == Some(Focus::Field(vf.index));
             let style = if is_focused { focused } else { base };
             for x in vf.col_start..vf.col_end {
                 if x >= area.width || vf.row >= area.height {
@@ -184,10 +192,12 @@ fn render_fields(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Highlight the focused link's cells (reverse video) so Tab navigation is
-/// visible. A no-op when nothing is focused or the focus is off-screen.
-fn render_focus(model: &Model, frame: &mut Frame) {
-    let Some(idx) = model.focus else {
+/// Highlight the scene's focused link (reverse video) so Tab navigation is
+/// visible, over the link's hit-test span ([`visible_links`]): the cells a
+/// click on it lands on. A no-op when no link is focused or the focus is
+/// off-screen.
+fn render_focus(model: &Model, focus: Option<Focus>, frame: &mut Frame) {
+    let Some(Focus::Link(idx)) = focus else {
         return;
     };
     let area = frame.area();
@@ -238,39 +248,38 @@ fn render_hover(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Highlight the on-screen search matches: every match wears a theme-aware
-/// background tint, and the current match a stronger reversed highlight on top.
-/// Off-viewport matches are skipped. A no-op when there are no matches.
-fn render_search_matches(model: &Model, frame: &mut Frame) {
-    if model.matches.is_empty() {
-        return;
-    }
+/// Highlight the on-screen search matches from the scene's runs: a matched run
+/// wears a theme-aware background tint, the current match a stronger reversed
+/// highlight. The page window is what the screen shows, so nothing off it is
+/// painted.
+fn render_search_matches(model: &Model, page: &Page, frame: &mut Frame, content: Rect) {
     let area = frame.area();
-    let viewport = model.viewport();
-    let scroll = model.scroll;
     let match_style = Style::default()
         .fg(rgb(model.theme.search_match_fg()))
         .bg(rgb(model.theme.search_match_bg()));
     let current_style = Style::default().add_modifier(Modifier::REVERSED);
     let buf = frame.buffer_mut();
-    for (i, m) in model.matches.iter().enumerate() {
-        if m.line_idx < scroll || m.line_idx >= scroll + viewport {
-            continue;
-        }
-        let row = TOPBAR_ROWS + (m.line_idx - scroll) as u16;
-        let style = if model.current_match == Some(i) {
-            current_style
-        } else {
-            match_style
-        };
-        for col in m.col_start..m.col_end {
-            let x = col as u16;
-            if x >= area.width || row >= area.height {
-                continue;
+    for (row, line) in page.lines.iter().enumerate() {
+        let y = content.y.saturating_add(row as u16);
+        let mut x = content.x;
+        for run in &line.runs {
+            let width = UnicodeWidthStr::width(run.text.as_str()) as u16;
+            let style = match run.matched {
+                Some(true) => Some(current_style),
+                Some(false) => Some(match_style),
+                None => None,
+            };
+            if let Some(style) = style {
+                for cx in x..x.saturating_add(width) {
+                    if cx >= area.width || y >= area.height {
+                        continue;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_style(style);
+                    }
+                }
             }
-            if let Some(cell) = buf.cell_mut((x, row)) {
-                cell.set_style(style);
-            }
+            x = x.saturating_add(width);
         }
     }
 }
@@ -303,8 +312,9 @@ fn render_hints(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Draw the visible slice of the page and the scrollbar into the content region.
-fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
+/// Draw the scene's window of the page, run by run, and the scrollbar into
+/// the content region.
+fn render_content(page: &Page, frame: &mut Frame, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -315,10 +325,20 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
         width: area.width.saturating_sub(SCROLLBAR_COLS),
         height: area.height,
     };
-    let end = model.scroll.saturating_add(viewport).min(model.page.len());
-    let start = model.scroll.min(end);
-    let text = to_ratatui_text(&model.page[start..end]);
-    frame.render_widget(Paragraph::new(text), body);
+    let lines: Vec<RtLine<'static>> = page
+        .lines
+        .iter()
+        .take(viewport)
+        .map(|line| {
+            RtLine::from(
+                line.runs
+                    .iter()
+                    .map(|run| RtSpan::styled(run.text.clone(), rstyle_to_ratatui(run.style)))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
 
     // Map the scrollbar over the SCROLL POSITIONS, not the line count: content
     // length is `max_scroll` so `position` spans the full `[0, max_scroll]` range
@@ -327,7 +347,8 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
     // `content_length` to `page.len()` with `viewport_content_length` instead left
     // the thumb short of the bottom for pages only a little taller than the
     // viewport (the position denominator over-counted by the viewport height).
-    let mut state = ScrollbarState::new(model.max_scroll(viewport).max(1)).position(model.scroll);
+    let max_scroll = page.total.saturating_sub(viewport);
+    let mut state = ScrollbarState::new(max_scroll.max(1)).position(page.first);
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None);
@@ -374,7 +395,7 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
                     continue;
                 }
                 let row = body.y + y as u16;
-                let text = crate::image::status_line(&slot.name, state);
+                let text = crate::image::status_text(&slot.name, state).resolve(model.lang);
                 let style = match model.no_color {
                     true => Style::default().add_modifier(Modifier::DIM),
                     false => paint(model.tokens().muted),
@@ -393,8 +414,10 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
 
 /// Draw the one-row top bar: the page title, a `·`, and the address on the left,
 /// then the right-aligned status cluster (bookmark star, cache bolt, hop count).
-/// In address mode the address slot becomes the live editor.
-fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
+/// The words are the scene's top bar, address field and state chips, laid out
+/// by [`topbar_layout`]. While the field is edited the address slot becomes the
+/// live editor.
+fn render_topbar(model: &Model, field: &AddressField, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
@@ -435,8 +458,8 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
 
     // The address slot: the live editor in address mode, else the address text
     // with an input-field look (underlined) so it reads as editable.
-    if model.mode == Mode::Address {
-        render_address_editor(model, frame, to_ratatui(tb.address_rect));
+    if field.editing {
+        render_address_editor(model, field, frame, to_ratatui(tb.address_rect));
     } else if !tb.address.is_empty() {
         let style =
             chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::UNDERLINED);
@@ -494,8 +517,9 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Draw the live address editor over the address slot: a `:` prompt, then the
-/// tui-input value with its cursor.
-fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
+/// field's value with its caret. The window over a long value is the editor's
+/// own scroll, so the caret stays where the keys put it.
+fn render_address_editor(model: &Model, field: &AddressField, frame: &mut Frame, area: Rect) {
     if area.width == 0 {
         return;
     }
@@ -516,11 +540,11 @@ fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
     let w = inner.width as usize;
     let scroll = model.input.visual_scroll(w.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(RtSpan::styled(model.input.value().to_string(), style))
-            .scroll((0, scroll as u16)),
+        Paragraph::new(RtSpan::styled(field.value.clone(), style)).scroll((0, scroll as u16)),
         inner,
     );
-    let cx = inner.x + (model.input.visual_cursor().saturating_sub(scroll)) as u16;
+    let caret = field.cursor.unwrap_or_default();
+    let cx = inner.x + (caret.saturating_sub(scroll)) as u16;
     frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
@@ -551,12 +575,12 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Draw the bottom-left floating status chip: a one-line field on the content's
 /// last row showing the CURRENT pointer/page state, floating over the page just
-/// above the footer so the footer's clickable buttons are never covered. In
-/// priority order it shows, while a fetch is in flight, the spinner and the
-/// loading path; else, when a link is focused (Tab) or hovered (mouse), that
-/// link's target (`→ <address>`); else nothing at all. Transient events use
-/// [`render_toast`] (bottom-right) instead.
-fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
+/// above the footer so the footer's clickable buttons are never covered. It
+/// draws the scene's status chip: while a fetch is in flight, the spinner and
+/// the loading path; else, when a link is focused (Tab) or hovered (mouse),
+/// that link's target (`→ <address>`); else nothing at all. Transient events
+/// use [`render_toast`] (bottom-right) instead.
+fn render_status_chip(model: &Model, shown: Option<&Chip>, frame: &mut Frame, area: Rect) {
     let [_topbar, content, _status] = regions(area);
     if content.width == 0 || content.height == 0 {
         return;
@@ -565,35 +589,28 @@ fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
     if inner_budget == 0 {
         return;
     }
+    // Idle has no chip and leaves the content row untouched.
+    let Some(status) = shown else {
+        return;
+    };
     let text_style = chrome_muted_style(model.no_color, model.theme);
-    // Priority: a fetch in flight wins over a focused/hovered link; idle draws
-    // nothing at all and leaves the content row untouched.
-    let (spans, inner_w): (Vec<RtSpan<'static>>, u16) = if let Some(pending) = &model.pending {
-        let label = truncate_to_cols(
-            &format!(" loading {}", pending.target.path),
-            inner_budget.saturating_sub(1),
-        );
+    let words = status.text.resolve(model.lang);
+    // A load or a download spins; a link's target only names it.
+    let spins = matches!(
+        status.text,
+        StrText::Key(StrId::Loading | StrId::Downloading, _)
+    );
+    let (spans, inner_w): (Vec<RtSpan<'static>>, u16) = if spins {
+        let label = truncate_to_cols(&format!(" {words}"), inner_budget.saturating_sub(1));
         let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
         (
             vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
             w,
         )
-    } else if let Some(name) = &model.download {
-        let label = truncate_to_cols(
-            &format!(" downloading {name}"),
-            inner_budget.saturating_sub(1),
-        );
-        let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
-        (
-            vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
-            w,
-        )
-    } else if let Some(target) = focused_link_target(model) {
-        let body = truncate_to_cols(&format!("→ {target}"), inner_budget);
+    } else {
+        let body = truncate_to_cols(&words, inner_budget);
         let w = UnicodeWidthStr::width(body.as_str()) as u16;
         (vec![RtSpan::styled(body, text_style)], w)
-    } else {
-        return;
     };
     chip::render(frame, content, spans, inner_w, model.no_color, model.theme);
 }
@@ -645,13 +662,12 @@ fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
-/// Draw the centered places panel: a chrome-styled overlay with a "Bookmarks"
-/// section and a "Discovered nodes" section, the selected row reverse-video
-/// highlighted. Both the fill and the border use the theme's chrome colours, so
-/// the panel tracks the light/dark theme.
-fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
-    let entries = places(model);
-    let bm_count = model.bookmarks.len();
+/// Draw the centered places panel from the scene's sheet: a chrome-styled
+/// overlay with a "Bookmarks" section and a "Pages heard" section, the
+/// selected row reverse-video highlighted. Both the fill and the border use
+/// the theme's chrome colours, so the panel tracks the light/dark theme.
+fn render_places(model: &Model, sheet: &Sheet, frame: &mut Frame, area: Rect) {
+    let lang = model.lang;
     let text_style = chrome_text_style(model.no_color, model.theme);
     let muted = chrome_muted_style(model.no_color, model.theme);
     let header = text_style.add_modifier(Modifier::BOLD);
@@ -665,52 +681,46 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     let overlay = to_ratatui(places_overlay_rect(model, from_ratatui(area)));
     let inner = overlay.width.saturating_sub(2) as usize;
 
+    // A heading after the first stands under a blank spacer: exactly the
+    // order `places_layout` models, so the entry -> line mapping there (and
+    // the overlay height derived from it) stays exact.
     let mut lines: Vec<RtLine<'static>> = Vec::new();
-    lines.push(RtLine::from(RtSpan::styled("Bookmarks", header)));
-    if bm_count == 0 {
-        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
-    } else {
-        for (i, place) in entries.iter().enumerate().take(bm_count) {
-            lines.push(place_line(
-                place,
-                i,
-                model.places_sel,
-                model.places_hover,
+    for row in &sheet.rows {
+        match row {
+            SceneRow::Heading(title) => {
+                if !lines.is_empty() {
+                    lines.push(RtLine::from(""));
+                }
+                lines.push(RtLine::from(RtSpan::styled(title.resolve(lang), header)));
+            }
+            SceneRow::Placeholder(text) => {
+                lines.push(RtLine::from(RtSpan::styled(
+                    format!("  {}", text.resolve(lang)),
+                    muted,
+                )));
+            }
+            SceneRow::Item {
+                item,
+                title,
+                hovered,
+            } => lines.push(place_line(
+                &format!("  {}", title.resolve(lang)),
+                item.selected,
+                *hovered,
+                !item.menu.is_empty(),
                 text_style,
                 selected,
                 inner,
-            ));
-        }
-    }
-    lines.push(RtLine::from(""));
-    lines.push(RtLine::from(RtSpan::styled("Discovered nodes", header)));
-    if entries.len() == bm_count {
-        // Not "(none)": discovery is always running, so an empty list means
-        // nothing has announced YET. Saying so keeps a first run — where this
-        // panel opens by itself and both sections are empty — from reading as a
-        // broken feature rather than a quiet mesh.
-        lines.push(RtLine::from(RtSpan::styled(NO_NODES_YET, muted)));
-    } else {
-        for (i, place) in entries.iter().enumerate().skip(bm_count) {
-            lines.push(place_line(
-                place,
-                i,
-                model.places_sel,
-                model.places_hover,
-                text_style,
-                selected,
-                inner,
-            ));
+            )),
+            SceneRow::Note { text, .. } => {
+                lines.push(RtLine::from(RtSpan::styled(text.resolve(lang), muted)));
+            }
         }
     }
 
-    // The lines built above interleave the two section titles, an "(none)"
-    // placeholder or the entry rows, and one blank spacer — exactly the order
-    // `places_layout` models, so the entry -> line mapping there (and the overlay
-    // height derived from it) stays exact.
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" places ")
+        .title(format!(" {} ", sheet.title.resolve(lang)))
         .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
 
@@ -733,14 +743,74 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Draw the name-search result list from the scene's sheet: one row per hit
+/// (`name ·hash4`, hops, last seen, pin mark), the selected row highlighted,
+/// and a last line that is either the key hint or, while asking, the "same
+/// name, other key" question.
+fn render_names(model: &Model, sheet: &Sheet, frame: &mut Frame, area: Rect) {
+    let lang = model.lang;
+    let text_style = chrome_text_style(model.no_color, model.theme);
+    let muted = chrome_muted_style(model.no_color, model.theme);
+    let selected = paint(model.tokens().selection);
+
+    let items: Vec<(&StrText, bool)> = sheet
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            SceneRow::Item { item, title, .. } => Some((title, item.selected)),
+            _ => None,
+        })
+        .collect();
+    let sel = items.iter().position(|(_, on)| *on).unwrap_or(0);
+    let width = 76u16.min(area.width);
+    let rows = names_viewport(model).min(items.len());
+    let height = (rows as u16 + 3).min(area.height);
+    let overlay = ratatui::layout::Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let inner = overlay.width.saturating_sub(2) as usize;
+    let offset = sel.saturating_sub(rows.saturating_sub(1));
+
+    let mut lines: Vec<RtLine<'static>> = items
+        .iter()
+        .skip(offset)
+        .take(rows)
+        .map(|(title, on)| {
+            let style = if *on { selected } else { text_style };
+            let row = format!("  {}", title.resolve(lang));
+            RtLine::from(RtSpan::styled(truncate_to_cols(&row, inner), style))
+        })
+        .collect();
+    for row in &sheet.rows {
+        if let SceneRow::Note { text, ask } = row {
+            let style = if *ask { text_style } else { muted };
+            lines.push(RtLine::from(RtSpan::styled(
+                truncate_to_cols(&text.resolve(lang), inner),
+                style,
+            )));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", sheet.title.resolve(lang)))
+        .style(chrome_style(model.no_color, model.theme));
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
+}
+
 /// One places-panel row: its label, reverse-video highlighted when it is the
-/// selected row. A selected or hovered BOOKMARK row additionally carries a
-/// right-aligned `×` delete marker on the last inner cell ([`marks_x`]).
+/// selected row. A selected or hovered row with a menu (a BOOKMARK row, whose
+/// menu forgets it) additionally carries a right-aligned `×` delete marker on
+/// the last inner cell ([`marks_x`]).
 fn place_line(
-    place: &Place,
-    idx: usize,
-    sel: usize,
-    hover: Option<usize>,
+    label: &str,
+    is_selected: bool,
+    hovered: bool,
+    removable: bool,
     normal: Style,
     selected: Style,
     inner: usize,
@@ -748,21 +818,21 @@ fn place_line(
     // Selection wins over hover, and the two styles differ (reverse video vs the
     // bold + underline the links and footer buttons use on hover), so a hovered
     // row stays distinguishable from the selected row even when they coincide.
-    let style = if idx == sel {
+    let style = if is_selected {
         selected
-    } else if hover == Some(idx) {
+    } else if hovered {
         normal.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         normal
     };
-    let x_col = place_x_col(inner).filter(|_| marks_x(place, idx, sel, hover));
+    let x_col = place_x_col(inner).filter(|_| removable && (is_selected || hovered));
     let Some(x_col) = x_col else {
-        let label = truncate_to_cols(&place_label(place), inner);
+        let label = truncate_to_cols(label, inner);
         return RtLine::from(RtSpan::styled(label, style));
     };
     // The marker's cell plus a one-column gap are reserved: the label truncates
     // before them, so it can never overlap the `×` or spill past the border.
-    let label = truncate_to_cols(&place_label(place), x_col.saturating_sub(1));
+    let label = truncate_to_cols(label, x_col.saturating_sub(1));
     // The pad is measured with ratatui's ADDRESSING width (see `fit_width`'s
     // position-vs-paint note), so the `×` lands exactly on the cell
     // `place_x_screen_col` hit-tests.
@@ -774,43 +844,19 @@ fn place_line(
     ])
 }
 
-/// The one-line label for a place: a bookmark's title and URL, or a node's name,
-/// short hash and hop count.
-fn place_label(place: &Place) -> String {
-    match place {
-        Place::Bookmark { url, title } => {
-            if title.is_empty() {
-                format!("  {url}")
-            } else {
-                format!("  {title}  ·  {url}")
-            }
-        }
-        Place::Node {
-            dest_hash,
-            name,
-            hops,
-            ..
-        } => {
-            let label = name
-                .clone()
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| short_hex(dest_hash));
-            let hop = hops
-                .map(|h| format!("{h} hops"))
-                .unwrap_or_else(|| "? hops".to_string());
-            format!("  {label}  ·  {}  ·  {hop}", short_hex(dest_hash))
-        }
-    }
-}
-
-/// Draw lnomad's transient toast over the content ([`toast::render`]). A no-op
-/// when no toast is up.
-fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
-    let Some(t) = &model.toast else {
+/// Draw the scene's toast over the content ([`toast::render`]). A no-op when
+/// no toast is up.
+fn render_toast(model: &Model, shown: Option<&SceneToast>, frame: &mut Frame, area: Rect) {
+    let (Some(t), Some(up)) = (shown, &model.toast) else {
         return;
     };
     let [_topbar, content, _status] = regions(area);
-    toast::render(frame, content, t, model.tokens());
+    let toast = Toast {
+        kind: t.kind,
+        text: t.text.resolve(model.lang),
+        shown_at: up.shown_at,
+    };
+    toast::render(frame, content, &toast, model.tokens());
 }
 
 /// Draw lnomad's help overlay ([`help::render`] over its keybinding groups).
@@ -818,160 +864,12 @@ fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
     help::render(
         frame,
         area,
-        &help_groups(),
-        " help — Esc, ? or click to close ",
+        &help_groups_in(model.lang),
+        StrId::HelpTitle.text(model.lang),
         model.help_scroll,
         model.no_color,
         model.theme,
     );
-}
-
-/// The result of a background fetch, tagged with the generation that issued it
-/// so a superseded or cancelled fetch's late result can be ignored.
-struct FetchOutcome {
-    generation: u64,
-    result: LoadResult,
-}
-
-/// A fetch's outcome: a parsed page and its title, or an error message. A
-/// success also carries the session's authoritative identify answer for the
-/// fetched destination (read under the same lock as the fetch), so the loop can
-/// refresh the model's display flag after every fresh load.
-enum LoadResult {
-    Ok {
-        doc: MicronDocument,
-        title: String,
-        dest: [u8; 16],
-        identifying: bool,
-    },
-    Err(String),
-    /// A file download completed and was saved to disk.
-    Downloaded {
-        name: String,
-        bytes: usize,
-        dir: String,
-    },
-    /// A file download (or the save to disk) failed.
-    DownloadErr(String),
-}
-
-/// Start (or restart) a background fetch for `target`. Aborts any in-flight
-/// task, bumps the generation, and spawns a task that locks the session, fetches
-/// and parses the page, resolves the title, and reports the tagged outcome.
-fn spawn_fetch(
-    inflight: &mut Option<tokio::task::JoinHandle<()>>,
-    generation: &mut u64,
-    session: &Arc<Mutex<Session>>,
-    tx: &mpsc::UnboundedSender<FetchOutcome>,
-    timeout: Duration,
-    target: Target,
-) {
-    if let Some(handle) = inflight.take() {
-        handle.abort();
-    }
-    *generation = generation.wrapping_add(1);
-    let generation_now = *generation;
-    let session = session.clone();
-    let tx = tx.clone();
-    let handle = tokio::spawn(async move {
-        let mut guard = session.lock().await;
-        let result = match browser::fetch_document(&mut guard, &target, timeout).await {
-            Ok(doc) => {
-                let name = guard.node_name(&target.dest_hash);
-                let title = browser::page_title(name.as_deref(), &target.dest_hash, &target.path);
-                LoadResult::Ok {
-                    doc,
-                    title,
-                    dest: target.dest_hash,
-                    identifying: guard.is_identifying(&target.dest_hash),
-                }
-            }
-            Err(err) => LoadResult::Err(err.to_string()),
-        };
-        let _ = tx.send(FetchOutcome {
-            generation: generation_now,
-            result,
-        });
-    });
-    *inflight = Some(handle);
-}
-
-/// Start a background file download for `target`, sharing the in-flight slot
-/// and generation counter with fetches: starting either supersedes the other.
-/// The spawned task fetches the raw bytes over the session, saves them into
-/// the download directory (`$XDG_DOWNLOAD_DIR`, else `$HOME/Downloads`,
-/// created if missing, existing names de-duplicated), and reports the outcome.
-fn spawn_download(
-    inflight: &mut Option<tokio::task::JoinHandle<()>>,
-    generation: &mut u64,
-    session: &Arc<Mutex<Session>>,
-    tx: &mpsc::UnboundedSender<FetchOutcome>,
-    timeout: Duration,
-    target: Target,
-) {
-    if let Some(handle) = inflight.take() {
-        handle.abort();
-    }
-    *generation = generation.wrapping_add(1);
-    let generation_now = *generation;
-    let session = session.clone();
-    let tx = tx.clone();
-    let handle = tokio::spawn(async move {
-        let mut guard = session.lock().await;
-        let fetched = guard.download_file(&target, timeout).await;
-        drop(guard);
-        let result = match fetched {
-            Ok((bytes, server_name)) => {
-                let name = crate::download::choose_name(server_name.as_deref(), &target.path);
-                match crate::download::download_dir() {
-                    Some(dir) => match crate::download::save_to_dir(&dir, &name, &bytes) {
-                        Ok(path) => LoadResult::Downloaded {
-                            name: path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or(name),
-                            bytes: bytes.len(),
-                            dir: dir.to_string_lossy().into_owned(),
-                        },
-                        Err(err) => {
-                            LoadResult::DownloadErr(format!("could not save {name}: {err}"))
-                        }
-                    },
-                    None => LoadResult::DownloadErr(
-                        "no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)".to_string(),
-                    ),
-                }
-            }
-            Err(err) => LoadResult::DownloadErr(err.to_string()),
-        };
-        let _ = tx.send(FetchOutcome {
-            generation: generation_now,
-            result,
-        });
-    });
-    *inflight = Some(handle);
-}
-
-/// One inline image's outcome, reported by the image-queue task.
-struct ImageOutcome {
-    /// The queue generation this belongs to; a stale one is dropped.
-    generation: u64,
-    /// The link index it belongs to.
-    link: usize,
-    /// Where it was fetched from, which is the cache key.
-    target: Target,
-    /// What happened.
-    result: ImageResult,
-}
-
-/// What the image-queue task has to say about one picture.
-enum ImageResult {
-    /// Its transfer has started.
-    Started,
-    /// Its bytes arrived.
-    Bytes(Vec<u8>),
-    /// Its transfer failed.
-    Failed(String),
 }
 
 /// One picture the shell is holding: the payload, and the encoded form the
@@ -1195,109 +1093,12 @@ impl ImageStore {
     /// Write a held picture into the download directory, once. A second save
     /// returns the path it already has, so `s` then `o` does not produce two
     /// files.
-    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), String> {
+    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), StrText> {
         let Some(entry) = self.entries.get_mut(&link) else {
-            return Err("that image has not arrived yet".to_string());
+            return Err(StrText::key(StrId::ImageNotArrived));
         };
-        if let Some(path) = &entry.saved {
-            return Ok((path.clone(), entry.bytes.len()));
-        }
-        let dir = crate::download::download_dir()
-            .ok_or("no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)")?;
-        let path = crate::download::save_to_dir(&dir, &entry.name, &entry.bytes)
-            .map_err(|e| format!("could not save {}: {e}", entry.name))?;
-        entry.saved = Some(path.clone());
-        Ok((path, entry.bytes.len()))
+        save_picture(&entry.name, &entry.bytes, &mut entry.saved)
     }
-}
-
-/// Fetch a page's inline images one after another, reporting each outcome.
-///
-/// Sequential on purpose: a link carries one transfer at a time, so issuing
-/// them in parallel would only queue them inside the stack while holding the
-/// session lock longer. Between images the lock is released, so a navigation
-/// the reader starts is served promptly — and it aborts this task anyway.
-fn spawn_image_queue(
-    store: &mut ImageStore,
-    session: &Arc<Mutex<Session>>,
-    tx: &mpsc::UnboundedSender<ImageOutcome>,
-    timeout: Duration,
-    requests: Vec<ImageRequest>,
-) {
-    let generation = store.generation;
-    let session = session.clone();
-    let tx = tx.clone();
-    store.task = Some(tokio::spawn(async move {
-        for request in requests {
-            let _ = tx.send(ImageOutcome {
-                generation,
-                link: request.link,
-                target: request.target.clone(),
-                result: ImageResult::Started,
-            });
-            let fetched = {
-                let mut guard = session.lock().await;
-                guard.download_file(&request.target, timeout).await
-            };
-            let result = match fetched {
-                Ok((bytes, _)) => ImageResult::Bytes(bytes),
-                Err(err) => ImageResult::Failed(err.to_string()),
-            };
-            if tx
-                .send(ImageOutcome {
-                    generation,
-                    link: request.link,
-                    target: request.target,
-                    result,
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-    }));
-}
-
-/// How long the background discovery drain parks on the shared session before
-/// yielding the lock. A fetch that wants the session waits at most this slice,
-/// while an idle mesh still has its announces drained continuously. Kept small
-/// relative to a page fetch so the hand-off is imperceptible.
-const DISCOVERY_LOCK_SLICE: Duration = Duration::from_millis(250);
-
-/// Spawn the continuous NomadNet node-discovery drain.
-///
-/// The single shared-instance event stream carries announces alongside fetch
-/// responses and has one consumer (whoever holds the session), so discovery
-/// cannot own a second stream. Instead this task drives the same session in
-/// short slices: it locks the session, parks for the next node announce, then
-/// releases so a queued navigation runs next (the session mutex is fair). Any
-/// node announce it drains — or that a concurrent fetch drains — is forwarded to
-/// the announce sink wired to the loop's `node_rx`, surfacing as an
-/// [`AppEvent::NodeDiscovered`]. So the registry keeps filling whether or not a
-/// fetch is in flight, and there is never a second reader racing the stream.
-///
-/// The returned handle is aborted at teardown (mirroring the in-flight fetch),
-/// dropping this task's session clone so the session can be unwrapped and closed.
-fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle<()> {
-    let session = session.clone();
-    tokio::spawn(async move {
-        loop {
-            let mut guard = session.lock().await;
-            // `recv_node_announce` forwards each node announce to the sink itself;
-            // it is cancel-safe, so capping the park at one slice drops the wait
-            // without losing a buffered event. `Ok(None)` means the stream closed
-            // (the session is stopping) — stop draining. Otherwise (an announce
-            // arrived, or the slice elapsed) release the lock and re-park.
-            let closed = matches!(
-                tokio::time::timeout(DISCOVERY_LOCK_SLICE, guard.recv_node_announce()).await,
-                Ok(None)
-            );
-            drop(guard);
-            if closed {
-                break;
-            }
-        }
-    })
 }
 
 /// The IO handles [`run_effects`] works with, bundled.
@@ -1351,31 +1152,17 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                     update(model, event);
                 }
                 if !pending.is_empty() {
-                    spawn_image_queue(images, session, image_tx, timeout, pending);
+                    images.task = Some(spawn_image_queue(
+                        session,
+                        image_tx,
+                        timeout,
+                        pending,
+                        images.generation,
+                    ));
                 }
             }
-            Effect::SaveImage { link } => match images.save(link) {
-                Ok((path, bytes)) => model.set_toast(
-                    ToastKind::Info,
-                    format!("saved {} ({bytes} bytes)", path.display()),
-                ),
-                Err(err) => model.set_toast(ToastKind::Error, err),
-            },
-            Effect::OpenImage { link } => match images.save(link) {
-                // Saved first, because the platform handler needs a file: the
-                // picture only ever existed in this process's memory.
-                Ok((path, _)) => match open::that(&path) {
-                    Ok(_) => model.set_toast(
-                        ToastKind::Info,
-                        format!("opened {} externally", path.display()),
-                    ),
-                    Err(_) => model.set_toast(
-                        ToastKind::Error,
-                        format!("failed to open {}", path.display()),
-                    ),
-                },
-                Err(err) => model.set_toast(ToastKind::Error, err),
-            },
+            Effect::SaveImage { link } => say_saved(model, images.save(link)),
+            Effect::OpenImage { link } => open_saved(model, images.save(link)),
             Effect::Download(target) => {
                 spawn_download(inflight, generation, session, tx, timeout, target);
             }
@@ -1390,9 +1177,9 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 }
                 *generation = generation.wrapping_add(1);
                 if let Err(err) = session.lock().await.set_identify(&dest, on).await {
-                    model.set_toast(
+                    model.say(
                         ToastKind::Error,
-                        format!("could not save identify decision: {err}"),
+                        with(StrId::IdentifyNotSaved, err.to_string()),
                     );
                 }
             }
@@ -1401,8 +1188,8 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 // Linux). `open::that` launches the handler and returns; a
                 // failure only raises a toast, never takes the UI down.
                 match open::that(&url) {
-                    Ok(_) => model.set_toast(ToastKind::Info, format!("opened externally: {url}")),
-                    Err(_) => model.set_toast(ToastKind::Error, format!("failed to open: {url}")),
+                    Ok(_) => model.say(ToastKind::Info, with(StrId::OpenedExternally, url)),
+                    Err(_) => model.say(ToastKind::Error, with(StrId::FailedToOpen, url)),
                 }
             }
             Effect::Cancel => {
@@ -1427,7 +1214,16 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                     let _ = model.bookmarks.save(path);
                 }
             }
+            Effect::SavePins => {
+                // Same rule as the bookmarks: a failed write never takes the
+                // browser down, the pins then last for the session.
+                if let Some(path) = &model.pins_path {
+                    let _ = model.pins.save(path);
+                }
+            }
             Effect::Quit => model.quit = true,
+            // Never raised here: the terminal is not hosted by a messenger.
+            Effect::Write(_) => {}
         }
     }
 }
@@ -1467,6 +1263,13 @@ pub async fn run_tui(
         .map(Bookmarks::load)
         .unwrap_or_default();
 
+    // The pins (`names.rs`), loaded the same best-effort way.
+    let pins_path = crate::names::default_path();
+    let pins = pins_path
+        .as_deref()
+        .map(crate::names::PinStore::load)
+        .unwrap_or_default();
+
     let mut model = Model {
         no_color: opts.no_color,
         no_images: opts.no_images,
@@ -1474,8 +1277,13 @@ pub async fn run_tui(
         theme,
         bookmarks,
         bookmarks_path,
+        pins,
+        pins_path,
         // The session's own fingerprint is stable for its whole life: set once.
         fingerprint: session.fingerprint_hex(),
+        // Every word of the shell is in the catalogue now, so it speaks the
+        // locale's language.
+        lang: crate::app::strings::locale_lang(|name| std::env::var(name).ok()),
         ..Model::default()
     };
     let size = terminal.size()?;
@@ -1609,8 +1417,8 @@ pub async fn run_tui(
                             // identify.toml by an earlier run.
                             model.note_identify(dest, identifying);
                         }
-                        LoadResult::Err(msg) => {
-                            update(&mut model, AppEvent::LoadFailed(msg));
+                        LoadResult::Err(text) => {
+                            update(&mut model, AppEvent::LoadFailedText(text));
                         }
                         LoadResult::Downloaded { name, bytes, dir } => {
                             update(&mut model, AppEvent::DownloadDone { name, bytes, dir });
@@ -1672,30 +1480,6 @@ pub async fn run_tui(
     result
 }
 
-/// Close the session at teardown, after every task that held a clone of it
-/// has been awaited.
-///
-/// If a clone survives anyway, the unwrap fails; the node is then stopped
-/// through the lock with [`Session::shutdown`], which needs no ownership, and
-/// the returned line says so. It is printed once the terminal is restored,
-/// because a line written into the alternate screen is lost with it.
-async fn close_session(session: Arc<Mutex<Session>>) -> Option<String> {
-    match Arc::try_unwrap(session) {
-        Ok(mutex) => {
-            let _ = mutex.into_inner().close().await;
-            None
-        }
-        Err(shared) => {
-            let holders = Arc::strong_count(&shared) - 1;
-            let _ = shared.lock().await.shutdown().await;
-            Some(format!(
-                "lnomad: error: {holders} task(s) still held the session at exit; \
-                 the node was stopped through the shared lock"
-            ))
-        }
-    }
-}
-
 /// Translate a crossterm event into an [`AppEvent`], dropping the ones the UI
 /// does not act on (focus, paste).
 fn map_event(event: Event) -> Option<AppEvent> {
@@ -1712,6 +1496,7 @@ mod tests {
     use super::*;
     use crate::app::geometry::{regions, Rect};
     use crate::bookmarks::Bookmark;
+    use crate::browser;
     use crate::color::rgb_to_ansi256;
     use crate::discovery::NomadNodeRegistry;
     use crate::image::MAX_INLINE_IMAGES;
@@ -1906,7 +1691,9 @@ mod tests {
     fn bad_url_sets_error_and_no_navigate() {
         let mut m = model_from_sample(content_width(80), (80, 24));
         press(&mut m, KeyCode::Char(':'), KeyModifiers::NONE);
-        type_str(&mut m, "not-a-hash");
+        // A scheme form is an address, never a name search, so a bad one
+        // stays a bad URL.
+        type_str(&mut m, "nomadnet://not-a-hash");
         let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
         assert!(effects.is_empty());
         let toast = m.toast.as_ref().expect("an error toast is raised");
@@ -2693,7 +2480,7 @@ mod tests {
         // The loading state now floats in the bottom-left chip on the content's
         // last row (row 22), not the footer row.
         let chip = row_text(&buffer, 22, 80);
-        assert!(chip.contains("loading"), "loading missing: {chip:?}");
+        assert!(chip.contains("Loading"), "loading missing: {chip:?}");
     }
 
     #[test]
@@ -3207,12 +2994,16 @@ mod tests {
         }
     }
 
+    /// A terminal tall enough for the whole help: since the help lists
+    /// every chord of the key table (slice 1b), it no longer fits 40 rows.
+    const HELP_ROWS: u16 = 50;
+
     #[test]
     fn help_overlay_renders_keybindings() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         assert!(m.show_help);
-        let buffer = render(&m, 120, 40);
+        let buffer = render(&m, 120, HELP_ROWS);
         let text = flat(&buffer);
         assert!(text.contains("help"), "help title missing:\n{text}");
         assert!(text.contains("quit"), "help body missing:\n{text}");
@@ -3274,9 +3065,9 @@ mod tests {
     fn help_descriptions_all_align() {
         // Every description starts at the same display column: the keys column is
         // computed, never hand-padded, so alignment is structural.
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         let rows: Vec<&str> = text.lines().collect();
         let mut cols = Vec::new();
         for group in help_groups() {
@@ -3302,9 +3093,9 @@ mod tests {
     fn help_lines_never_exceed_the_overlay_width() {
         // The overlay sizes itself to its widest line, so no content line wraps:
         // every built line renders intact on a single row.
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         for line in help_lines().iter().filter(|l| !l.is_empty()) {
             assert!(
                 text.lines().any(|row| row.contains(line.as_str())),
@@ -3587,6 +3378,31 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_browser_hands_an_lxmf_link_to_its_messenger() {
+        // In Loquax's Browse tab a page's "message the operator" link opens
+        // the chat: the browser asks the host to write, copies nothing and
+        // fetches nothing. Without `hosted` the same link is copied (the
+        // test below), which is the control.
+        let hash = "0ec84236630cea839d80a71c39fb41ce";
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Lew Palm".to_string(),
+                target: format!("lxmf@{hash}"),
+                ..RenderedLink::default()
+            }],
+            hosted: true,
+            ..Model::default()
+        };
+        assert_eq!(
+            follow_link(&mut m, 1),
+            vec![Effect::Write(hash.to_string())]
+        );
+        assert!(m.pending.is_none(), "an address must not start a fetch");
+        assert!(m.toast.is_none(), "the chat opening says it all");
+    }
+
+    #[test]
     fn following_lxmf_link_copies_the_address_instead_of_failing() {
         // Before this was handled, the target reached parse_url and produced
         // "bad link: ... (malformed URL)", which reads as a broken page
@@ -3746,7 +3562,7 @@ mod tests {
         m.download = Some("manual.pdf".to_string());
         let effects = update(
             &mut m,
-            AppEvent::DownloadFailed("request timed out".to_string()),
+            AppEvent::DownloadFailed(StrText::Raw("request timed out".to_string())),
         );
         assert!(effects.is_empty());
         assert!(m.download.is_none(), "the flight must be cleared");
@@ -4039,7 +3855,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let chip = row_text(&buffer, 22, 80);
         assert!(
-            chip.contains("loading") && chip.contains("/page/7.mu"),
+            chip.contains("Loading") && chip.contains("/page/7.mu"),
             "loading chip missing spinner label / path: {chip:?}"
         );
         let spins: Vec<&str> = SPIN_FRAMES.to_vec();
@@ -4063,7 +3879,7 @@ mod tests {
         let chip = row_text(&buffer, 22, 80);
         assert!(!chip.contains('→'), "idle chip drew an arrow: {chip:?}");
         assert!(
-            !chip.contains("loading"),
+            !chip.contains("Loading"),
             "idle chip drew a loading label: {chip:?}"
         );
     }
@@ -4080,7 +3896,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let chip = row_text(&buffer, 22, 80);
         assert!(
-            chip.contains("loading") && chip.contains("/page/7.mu"),
+            chip.contains("Loading") && chip.contains("/page/7.mu"),
             "loading did not win over the hovered link: {chip:?}"
         );
         assert!(
@@ -4688,12 +4504,12 @@ mod tests {
 
     #[test]
     fn help_overlay_lists_all_bindings_and_affordances() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         // The bindings the old hand-written list silently dropped.
         for s in [
-            "Ctrl-n", "Ctrl-p", "Ctrl-v", "PageDown", "PageUp", "wheel", "Ctrl-R", "F5", "Alt-←",
+            "Ctrl-n", "Ctrl-p", "Ctrl-v", "PageDown", "PageUp", "wheel", "Ctrl-r", "F5", "Alt-←",
             "Alt-→",
         ] {
             assert!(text.contains(s), "help missing binding {s:?}:\n{text}");
@@ -4852,7 +4668,7 @@ mod tests {
 
     #[test]
     fn help_that_fits_shows_no_scrollbar_and_ignores_scroll_keys() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         let (_, max) = help_scroll_geometry(&m);
         assert_eq!(max, 0, "the help fits, so there is nothing to scroll");
@@ -4862,7 +4678,7 @@ mod tests {
             "scroll keys are pinned when the help fits"
         );
         assert!(
-            !overlay_scrollbar_shown(&render(&m, 120, 40)),
+            !overlay_scrollbar_shown(&render(&m, 120, HELP_ROWS)),
             "no scrollbar when the help fits the terminal"
         );
     }
@@ -5061,10 +4877,28 @@ mod tests {
             labels.contains(&"next field"),
             "Tab next field missing: {labels:?}"
         );
+        // A text field takes Space as a letter, so the footer offers no toggle
+        // there: its keys are the key table's, live in this field (slice 1b).
         assert!(
-            labels.contains(&"toggle"),
-            "Space toggle missing: {labels:?}"
+            !labels.contains(&"toggle"),
+            "Space toggle offered on a text field: {labels:?}"
         );
+        // The help is F1 here: `?` is a letter while typing.
+        let keys: Vec<&str> = footer_layout(&m, Rect::new(0, 23, 100, 1))
+            .into_iter()
+            .map(|s| s.item.key)
+            .collect();
+        assert!(keys.contains(&"F1"), "help key missing: {keys:?}");
+        assert!(!keys.contains(&"?"), "? is typed, not help: {keys:?}");
+        // On a checkbox Space toggles, and the footer says so.
+        let mut m = field_model("Agree: `<?|agree`Agree>", (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Field);
+        let toggle = footer_layout(&m, Rect::new(0, 23, 100, 1))
+            .into_iter()
+            .find(|s| s.item.label == "toggle")
+            .expect("Space toggle on a checkbox");
+        assert_eq!(toggle.item.key, "Space");
     }
 
     #[test]
@@ -5532,7 +5366,7 @@ mod tests {
         press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
         let len = places(&m).len();
         // Walk the whole list; the selected row is visible at every step, even
-        // as it crosses the blank spacer and the "Discovered nodes" title.
+        // as it crosses the blank spacer and the "Pages heard" title.
         for _ in 0..len + 2 {
             press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
             assert!(
@@ -6207,7 +6041,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let text = flat(&buffer);
         assert!(text.contains("Bookmarks"), "missing header:\n{text}");
-        assert!(text.contains("Discovered nodes"), "missing header:\n{text}");
+        assert!(text.contains("Pages heard"), "missing header:\n{text}");
         assert!(text.contains("Home"), "missing bookmark:\n{text}");
         assert!(text.contains("Node-C"), "missing node:\n{text}");
     }
@@ -7305,5 +7139,240 @@ Text unter dem Bild.
             painted, cols as usize,
             "the picture's first row must be painted across its full width"
         );
+    }
+
+    // --- names: search and pins ----------------------------------------
+
+    const MARCEL: [u8; 16] = [
+        0xfa, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd,
+    ];
+    const IMPOSTOR: [u8; 16] = [0x9c; 16];
+
+    /// A model with two sites heard: Marcel (pinned) and one wearing his name
+    /// under another key, plus an unrelated one.
+    fn names_model() -> Model {
+        let mut m = loaded_model((90, 24));
+        m.clock = Some(10_000);
+        m.node_registry
+            .upsert(MARCEL, Some("Marcel".to_string()), Some(3), 10_000 - 7200);
+        m.node_registry
+            .upsert(IMPOSTOR, Some("Marcel".to_string()), Some(1), 10_000 - 30);
+        m.node_registry.upsert(
+            [0x17; 16],
+            Some("Solar Nord".to_string()),
+            Some(2),
+            10_000 - 600,
+        );
+        m.pins.note_visit(Some("Marcel"), &MARCEL, 100);
+        m
+    }
+
+    fn enter_query(m: &mut Model, query: &str) -> Vec<Effect> {
+        press(m, KeyCode::Char(':'), KeyModifiers::NONE);
+        type_str(m, query);
+        press(m, KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn an_exact_unambiguous_name_opens_directly() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "solar nord");
+        assert_eq!(
+            effects,
+            vec![Effect::Navigate(crate::app::node_target([0x17; 16]))]
+        );
+        assert!(m.names.is_none());
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn a_shared_name_lists_the_pinned_site_first() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "Marcel");
+        assert!(effects.is_empty(), "{effects:?}");
+        let results = m.names.as_ref().expect("result list open");
+        let dests: Vec<[u8; 16]> = results.hits.iter().map(|h| h.dest).collect();
+        assert_eq!(dests, vec![MARCEL, IMPOSTOR]);
+        // Enter on the pinned one opens it with no question.
+        let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![Effect::Navigate(crate::app::node_target(MARCEL))]
+        );
+        assert!(m.names.is_none());
+    }
+
+    #[test]
+    fn the_other_key_asks_once_and_a_yes_pins_it_beside_the_first() {
+        let mut m = names_model();
+        enter_query(&mut m, "fa01");
+        // The short hash finds exactly Marcel's pinned site. It is listed, not
+        // opened: only an exact name opens directly.
+        let dests: Vec<[u8; 16]> = m
+            .names
+            .as_ref()
+            .unwrap()
+            .hits
+            .iter()
+            .map(|h| h.dest)
+            .collect();
+        assert_eq!(dests, vec![MARCEL]);
+
+        let mut m = names_model();
+        enter_query(&mut m, "marcel");
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        // Enter on the conflicting row asks instead of opening.
+        assert!(press(&mut m, KeyCode::Enter, KeyModifiers::NONE).is_empty());
+        assert!(m.names.as_ref().is_some_and(|r| r.confirm));
+        // Any key but y returns to the list, nothing pinned.
+        assert!(press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE).is_empty());
+        assert!(m.names.as_ref().is_some_and(|r| !r.confirm));
+        assert_eq!(m.pins.dests_for("Marcel"), vec![MARCEL]);
+        // Asked again, a yes pins the second key and opens it.
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let effects = press(&mut m, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SavePins,
+                Effect::Navigate(crate::app::node_target(IMPOSTOR))
+            ]
+        );
+        assert_eq!(m.pins.dests_for("marcel"), vec![MARCEL, IMPOSTOR]);
+        assert_eq!(m.pins.list().len(), 2);
+    }
+
+    #[test]
+    fn a_name_nobody_announced_says_so_and_keeps_the_editor() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "zebra");
+        assert!(effects.is_empty());
+        let toast = m.toast.as_ref().expect("a note is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert!(toast.text.contains("zebra"), "{}", toast.text);
+        assert_eq!(m.mode, Mode::Address);
+    }
+
+    #[test]
+    fn a_fresh_load_pins_the_visited_site_once() {
+        let mut m = names_model();
+        enter_query(&mut m, "solar nord");
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("hi"),
+                title: "Solar".to_string(),
+            },
+        );
+        assert_eq!(effects.first(), Some(&Effect::SavePins));
+        assert_eq!(m.pins.dests_for("Solar Nord"), vec![[0x17; 16]]);
+        let pin = m.pins.list().last().unwrap().clone();
+        assert_eq!((pin.first_seen, pin.last_seen), (10_000, 10_000));
+    }
+
+    #[test]
+    fn a_nururl_opens_and_names_the_ignored_hint() {
+        let mut m = names_model();
+        let hash = "0123456789abcdef0123456789abcdef";
+        let effects = enter_query(
+            &mut m,
+            &format!("nururl:{hash}/page/x.mu?nn.a=1&hint=marcel"),
+        );
+        let Some(Effect::Navigate(target)) = effects.first() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(target.path, "/page/x.mu");
+        assert_eq!(target.fields, vec![("var_a".to_string(), "1".to_string())]);
+        let toast = m.toast.as_ref().expect("the ignored hint is named");
+        assert!(toast.text.contains("hint=marcel"), "{}", toast.text);
+    }
+
+    #[test]
+    fn the_result_list_renders_its_rows_and_the_question() {
+        let mut m = names_model();
+        enter_query(&mut m, "marcel");
+        let buffer = render(&m, 90, 24);
+        let screen: Vec<String> = (0..24).map(|y| row_text(&buffer, y, 90)).collect();
+        let joined = screen.join("\n");
+        assert!(joined.contains("sites matching \"marcel\""), "{joined}");
+        let pinned = screen
+            .iter()
+            .position(|r| r.contains("Marcel ·fa01  ·  3 hops  ·  2 h ago  pinned"))
+            .expect("pinned row");
+        let other = screen
+            .iter()
+            .position(|r| r.contains("Marcel ·9c9c  ·  1 hop  ·  just now  ! name pinned to ·fa01"))
+            .expect("conflict row");
+        assert_eq!(other, pinned + 1, "{joined}");
+        assert!(joined.contains("Enter open"), "{joined}");
+
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let buffer = render(&m, 90, 24);
+        let joined: String = (0..24)
+            .map(|y| row_text(&buffer, y, 90))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("\"Marcel\" is pinned to ·fa01; this is ·9c9c"),
+            "{joined}"
+        );
+    }
+
+    /// Italic text reaches the frame as the italic modifier, and plain text
+    /// beside it does not: no other frame test held the italic flag of a run
+    /// (pass one's positive control found the gap).
+    #[test]
+    fn an_italic_run_is_drawn_italic() {
+        let m = Model::from_document(
+            &parse("`*slanted`* upright"),
+            content_width(40),
+            "t",
+            (40, 6),
+        );
+        let buffer = render(&m, 40, 6);
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("slanted upright")
+            })
+            .expect("the line is drawn");
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect();
+        let at = line.find("slanted").expect("slanted") as u16;
+        let up = line.find("upright").expect("upright") as u16;
+        for x in at..at + 7 {
+            assert!(buffer[(x, row)].modifier.contains(Modifier::ITALIC), "{x}");
+        }
+        for x in up..up + 7 {
+            assert!(!buffer[(x, row)].modifier.contains(Modifier::ITALIC), "{x}");
+        }
+    }
+
+    /// In German the help, the footer and the start page are German: the
+    /// shell may follow the locale because nothing it draws is left English.
+    #[test]
+    fn the_terminal_speaks_german() {
+        let mut m = Model {
+            lang: crate::app::strings::Lang::De,
+            ..Model::default()
+        };
+        m.size = (100, 40);
+        m.relayout(content_width(100));
+        show_start_screen(&mut m);
+        m.show_places = false;
+        let start = flat(&render(&m, 100, 40));
+        assert!(start.contains("Keine Seite offen"), "{start}");
+        assert!(start.contains("beenden"), "{start}");
+        assert!(!start.contains("No page is open"), "{start}");
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let help = flat(&render(&m, 100, 40));
+        assert!(help.contains("Bewegen"), "{help}");
+        assert!(help.contains("Hilfe"), "{help}");
+        assert!(!help.contains("close this help"), "{help}");
     }
 }

@@ -89,6 +89,39 @@ pub const fn admits_incoming_resource(within_sync_limit: bool, in_flight: usize)
     within_sync_limit && in_flight < INCOMING_RESOURCES_FUNDED
 }
 
+/// Reticulum link-table slots the propagation role's peering leaves free
+/// for a client's link request (order 1666, LV-1006, #24).
+///
+/// A propagation node exists to accept clients, so its own dials never take
+/// the last slot of the enforced cap (`max_endpoint_links`, handed to
+/// `NodeCoreBuilder::max_links`). The engine dials through
+/// `NodeCore::connect_keeping_free(.., CLIENT_RESERVED_LINKS)`, which goes
+/// ahead only while `links + 1 + CLIENT_RESERVED_LINKS <= max`. With
+/// today's cap of 4 ([`peering_dial_ceiling`]`(4)` = 2): a sync dial waits
+/// once 3 entries are live, whoever holds them, so the 4th stays free for
+/// an inbound request. The engine holds one outbound round at a time, so
+/// its own share is one slot of the 3; the reserve is what keeps that one
+/// slot from being the last.
+///
+/// The rule needs a cap of at least `2 + CLIENT_RESERVED_LINKS` for the
+/// role to peer while one client is connected; at a cap of
+/// `1 + CLIENT_RESERVED_LINKS` it peers only with the table empty. The
+/// assertion below pins the reserve below the BLE slot count the derived
+/// cap equals today; `the_client_reserve_leaves_these_dial_ceilings` pins
+/// the ceilings.
+pub const CLIENT_RESERVED_LINKS: usize = 1;
+
+const _: () = assert!(CLIENT_RESERVED_LINKS < MAX_LINKS);
+
+/// The most live link-table entries at which the propagation role may
+/// still dial a peer, for a cap of `max_links`: one dial on top leaves
+/// [`CLIENT_RESERVED_LINKS`] free. The same rule
+/// `NodeCore::connect_keeping_free` enforces, stated here so the budget's
+/// tests and the boot line can print it.
+pub const fn peering_dial_ceiling(max_links: usize) -> usize {
+    max_links.saturating_sub(1 + CLIENT_RESERVED_LINKS)
+}
+
 /// Slots in the per-connection HVN drain table (`HVN_DRAIN`, `leviculum-nrf/src/ble/mod.rs`).
 ///
 /// The #255 design headroom of 4 that this table was pre-sized to is
@@ -197,6 +230,18 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - RESOURCE_SDU_OVERHEAD;
 /// stood on funds 7 252 B after the margin, which is all 24 of the
 /// field's messages in one fetch. Raising this reserve would buy a
 /// bigger floor, not a bigger serve, and it would cost a link.
+///
+/// **Decided, not open (Lead, 2026-11-11, order 1676): zero.** Funding
+/// the whole [`SERVE_PEAK_BYTES`] would take 17 248 B the plan does not
+/// have (16 B of slack), which is three of the four links with their
+/// BLE sessions ([`budget_per_link`] + [`SESSION_BUDGET_BYTES`] =
+/// 6 644 B each), and a propagation node with one link is no
+/// propagation node. The serve is gated live instead: every `/get`
+/// re-reads the heap ([`live_serve_cap`]) and a heap that funds no
+/// message answers with a refusal the client retries
+/// (`PN_REJECT reason=heap_low via=get`, `leviculum_pn_store::board_answer_get`).
+/// The boot line states it: `HEAP_BUDGET_SERVE mode=live_gated reserve=0
+/// need=17264 free_at_boot=…`.
 pub const SERVE_RESERVE_BYTES: usize = 0;
 
 /// Peak heap this board holds live AT ONCE while it serves one `/get`
@@ -230,8 +275,8 @@ pub const SERVE_RESERVE_BYTES: usize = 0;
 /// one part's scratch.
 ///
 /// **[`ROLE_BUDGET_BYTES`] below funds [`SERVE_RESERVE_BYTES`] of this,
-/// which is zero, and that is the open decision, not an oversight** —
-/// see the arithmetic there. What the plan does fund is the bound the
+/// which is zero by decision (order 1676), not an oversight** — see the
+/// arithmetic there. What the plan does fund is the bound the
 /// serve is held to ([`budget_serve_cap`]), so the
 /// board answers with what it can afford instead of attempting this
 /// number.
@@ -246,7 +291,7 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///   streamed answer to one outbound offer;
 /// * `pn_work` — queued upload payloads, one per phone at the announced
 ///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
-/// * 5 KiB — everything structural: the peer table (§5's `104·16` plus
+/// * 6 KiB — everything structural: the peer table (§5's `104·16` plus
 ///   the 64 B of public keys each peer now keeps (#388 pass 3, ~1 KiB
 ///   at `BOARD_MAX_PEERS` — grown from the previous 4 KiB term
 ///   because the keys did not fit its slack), the offer plan
@@ -291,10 +336,11 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///
 /// Funding a bigger FLOOR still means taking bytes from a term above,
 /// from the link count, or from the reserve, and it would not change
-/// what the board serves in the field. That decision is the Lead's;
-/// [`SERVE_RESERVE_BYTES`] is where it is made, and the boot line
-/// reports the gap (`HEAP_BUDGET … serve= slack= serve_cap=`, and the
-/// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
+/// what the board serves in the field. The Lead decided it on
+/// 2026-11-11 (order 1676): [`SERVE_RESERVE_BYTES`] stays 0 and the
+/// serve is gated live, and the boot line says so
+/// (`HEAP_BUDGET … serve= slack= serve_cap=`, then
+/// `HEAP_BUDGET_SERVE mode=live_gated reserve=0 need=… free_at_boot=…`).
 pub const ROLE_BUDGET_BYTES: usize = SYNC_SLICE_BYTES
     + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000
     + ROLE_STRUCTURAL_BYTES
@@ -305,7 +351,7 @@ pub const ROLE_BUDGET_BYTES: usize = SYNC_SLICE_BYTES
 /// store writes). Named so the per-operation peaks ([`peak`]) can say what
 /// the budget leaves for a transient once this and the queued uploads are
 /// spent.
-pub const ROLE_STRUCTURAL_BYTES: usize = 5 * 1024;
+pub const ROLE_STRUCTURAL_BYTES: usize = 6 * 1024; // order 1641, see the end of this file
 
 /// The board peer-table cap (`PeeringConfig::max_peers`,
 /// `leviculum-nrf/src/pn.rs`), §5's derivation
@@ -319,7 +365,7 @@ pub const ROLE_STRUCTURAL_BYTES: usize = 5 * 1024;
 /// The 104 B is §5's persisted record. What the table costs in RAM by the
 /// census's own model is [`peak::peer_table_bytes`], which is larger; the
 /// test `the_peer_table_at_the_cap_against_its_slice` prints both.
-pub const BOARD_MAX_PEERS: usize = 16;
+pub const BOARD_MAX_PEERS: usize = 7; // order 1641: what the structural term funds
 
 /// §5's per-peer record, aligned (`propagation-node-on-a-board.md`).
 pub const PEER_RECORD_BYTES: usize = 104;
@@ -346,7 +392,7 @@ const _: () = assert!(
 /// allocation (an MTU packet plus its copies) times a churn factor,
 /// not at the idle loss. Re-derive from `largest=` under two-phone
 /// load when the field census arrives.
-const FRAG_RESERVE_BYTES: usize = 6 * 1024;
+const FRAG_RESERVE_BYTES: usize = 5 * 1024; // order 1641 moved 1 KiB to the role
 
 /// One 11-slot B-tree node of the boxed link table, amortised per link
 /// in the budget's `per_link=` term (the value is a `Box` pointer since
@@ -384,9 +430,9 @@ pub const fn budget_reserve() -> usize {
 /// link currently rides them, because a claimable GATT connection can
 /// fill its queues). What remains of [`HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
-/// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
-/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
-/// division yields 4 with 8 B over — the heap affords exactly the
+/// With today's numbers (node box [`NODE_BOX_BYTES`], role 22 144 B,
+/// reserve 17 824 B, sessions 4 × 3 948 B, per-link 2 696 B) the
+/// division yields 4 with 16 B over — the heap affords exactly the
 /// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
 /// that line is a budget violation at compile time, not a dead session
@@ -737,11 +783,11 @@ pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
 /// ```text
 ///   free at the 2026-09-23 T114 panic (two phones + role)  30 380 B
 /// − SERVE_MARGIN_BYTES        claimed while a /get is in   14 696 B
-/// − FRAG_RESERVE_BYTES        the allocator's elbow room    6 144 B
-/// =                           what a hold may take          9 540 B
+/// − FRAG_RESERVE_BYTES        the allocator's elbow room    5 120 B
+/// =                           what a hold may take         10 564 B
 /// ```
 ///
-/// 8 KiB is under that with 1.3 KiB to spare. What it buys is
+/// 8 KiB is under that with 2.3 KiB to spare. What it buys is
 /// [`BOARD_MAX_HELD_ANNOUNCES`] = 6 per interface at the MTU bound
 /// (7 256 B for both holding interfaces full, LoRa and BLE; the USB serial
 /// interface holds none, [`BOARD_INGRESS_CONTROL`]); at the rig's 183 B
@@ -806,7 +852,7 @@ const _: () =
 /// prints it, at 68429da6. The board prints the same figure at runtime as
 /// `size_of_val(&*node)`: the `node_box=` of every `[HEAP_CENSUS]` line,
 /// and the argument the binaries hand `log_budget_and_assert`, whose
-/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 752 B,
+/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 744 B,
 /// `EmbeddedStorage`'s inline tables are 29 968 B
 /// (`docs/src/firmware/heap-budget.md` has the table).
 ///
@@ -832,4 +878,70 @@ const _: () =
 /// slack is 8 B, the boot serve cap is still 0 B, and 9 more bytes in
 /// `NodeCore` cost a link and fail the binaries'
 /// `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert.
-pub const NODE_BOX_BYTES: usize = 31_752;
+///
+/// That assert fired once more on 27165081 (Codeberg #232, the ratchet
+/// work): `NodeCore::undecrypted_packet`, the hash of the last packet that
+/// failed to decrypt, held inline as `Option<[u8; 32]>`, grew the node box
+/// by 32 B to 31 784 B. 81f50698 boxed it the way `split_internal` is, and
+/// its 4 B pointer fits the struct's alignment padding: measured on the
+/// bsp-t114 build, the node box is 31 752 B with the boxed field and
+/// 31 752 B with no field at all, so this number and the 8 B slack hold.
+/// The 32 B live on the heap only between a failed decrypt and the proof
+/// request behind it. No ratchet state entered the box: the ratchet keys
+/// live in `Destination`, which a board without ratchets never fills.
+///
+/// 1380 (Codeberg #230) moved the path-choice evidence map, 12 B inline,
+/// into a box allocated only while some interface prices loss, beside the
+/// per-interface declaration that order added: measured on the bsp-t114
+/// build the node box is 31 744 B, 8 B smaller, and the slack is 16 B, so
+/// it now takes 17 more bytes in `NodeCore` to cost a link. The box is
+/// never allocated on a board, which declares no interface.
+pub const NODE_BOX_BYTES: usize = 31_744;
+
+// The role's structural term against what the bench measured (order 1641,
+// Refs LV-1006). Declared last, like the node box above, so the book's line
+// citations into this file stay where they are.
+//
+// On 2026-11-10 a T114 with sixteen peers (a LAN of stock lxmd nodes filled
+// the table) printed, two minutes before each of its out-of-memory panics,
+// `pn_peers=7152 n_peers=16 pn_out=128 pn_links=640..1320 pn_role=14..734
+// pn_flush=1168..1376`: about 10.7 KB of structure against a 5 KiB term.
+// The term had been sized from §5's 104 B persisted record, while the table
+// holds each 200 B `Peer` inline in a B-tree whose nodes are allocated
+// eleven slots wide: one node funds up to eleven peers, and the twelfth
+// splits the root into two leaves under an internal node, about three times
+// the bytes. The census's model (`peak::peer_table_bytes`, fill of seven)
+// agrees with the allocation exactly at seven peers or fewer, 2 384 B.
+//
+// So the cap is seven, the most one model-and-allocation node holds, and the
+// term is what the table at that cap plus the rest of the structure the
+// bench measured actually cost:
+//
+//   peer_table_bytes(7)                 2 384 B
+// + the measured rest (largest seen)    3 558 B  pn_out + pn_links + pn_role + pn_flush
+// =                                     5 942 B  ≤ 6 144 B
+//
+// The extra KiB comes out of the fragmentation reserve, so the total, the
+// link count and the slack do not move. The reserve was sized against the
+// field's 340 B refusal at 4 760 B free; the bench's three censuses lost
+// 35, 44 and 43 B to fragmentation at 35 and 22 KB free, and the table this
+// change shrinks gives back about 4.8 KB of steady state, four times what
+// the reserve lends. A peer declined at the cap is the reference's own
+// full-table answer (`DeclineReason::TableFull`, `LXMRouter.py:2032`), and
+// rotation keeps a slot free for newcomers.
+
+/// The non-table part of the role's structural term, the largest the
+/// 2026-11-10 T114 bench measured (`pn_out` 128 + `pn_links` 1 320 +
+/// `pn_role` 734 + `pn_flush` 1 376 B, each the largest of three censuses).
+pub const ROLE_STRUCTURAL_REST_MEASURED_BYTES: usize = 128 + 1_320 + 734 + 1_376;
+
+const _: () = assert!(
+    peak::peer_table_bytes(BOARD_MAX_PEERS) + ROLE_STRUCTURAL_REST_MEASURED_BYTES
+        <= ROLE_STRUCTURAL_BYTES
+);
+// One more peer is one more B-tree node in the census's model: the cap is
+// the largest the term funds, not a number below it.
+const _: () = assert!(
+    peak::peer_table_bytes(BOARD_MAX_PEERS + 1) + ROLE_STRUCTURAL_REST_MEASURED_BYTES
+        > ROLE_STRUCTURAL_BYTES
+);

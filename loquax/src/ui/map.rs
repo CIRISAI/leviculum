@@ -18,12 +18,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use leviculum_map::blend::{world_floor_milli, Shape};
 use leviculum_map::choice::fit_ceiling;
 use leviculum_map::labels::{self as names, Candidate, LabelKind, ViewLabel};
 use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::pins::{self, Mark, Metrics, Pin, Side};
 use leviculum_map::region::{Bounds, Header};
-use leviculum_map::viewport::Viewport;
+use leviculum_map::viewport::{Viewport, MILLI};
 use leviculum_ui::Rect;
 
 use crate::telemetry;
@@ -72,11 +73,13 @@ impl Default for MapSetup {
 }
 
 /// Why a region is loaded (1089): the reader went to a place, or asked for
-/// the visible area.
+/// the visible area; or the scheduler asked for the screen itself at its
+/// zoom, which loads before anything else (1527, [`super::viewload`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadReason {
     Place,
     View,
+    Screen,
 }
 
 impl LoadReason {
@@ -85,6 +88,7 @@ impl LoadReason {
         match self {
             Self::Place => "place",
             Self::View => "view",
+            Self::Screen => "screen",
         }
     }
 }
@@ -203,9 +207,34 @@ pub struct MapPin {
     /// How old the fix is, when the shell has said the time.
     pub age: Option<String>,
     pub stale: bool,
+    /// A node the mesh announced that is no contact (1302): a neutral pin,
+    /// grey, with its announced name and no avatar.
+    pub nearby: bool,
+    /// Our own position (1386): what the radar centres on.
+    pub own: bool,
+    /// The fix time, unix seconds: the newest peer is what the radar
+    /// centres on without an own position.
+    pub fix_at: Option<i64>,
+    /// The battery's charge in percent, when the fix's Telemeter carried a
+    /// battery sensor (1386): below [`LOW_BATTERY`] the pin gets a glyph.
+    pub battery: Option<u8>,
 }
 
+/// A pin whose battery is below this many percent gets the battery glyph
+/// (1386).
+pub const LOW_BATTERY: u8 = 20;
+
+/// The low battery's glyph after a pin's name in the terminal, a battery
+/// on its side's outline; `!` in ASCII. A pixel screen draws a battery
+/// ([`crate::screenmap::draw_pins`]).
+pub const BATTERY_GLYPH: char = '▯';
+
 impl MapPin {
+    /// Whether its battery is low ([`LOW_BATTERY`]).
+    pub fn low_battery(&self) -> bool {
+        self.battery.is_some_and(|b| b < LOW_BATTERY)
+    }
+
     /// What is set beside the marker: the name, and the fix's age when
     /// the shell has said the time.
     pub fn words(&self) -> String {
@@ -231,7 +260,13 @@ pub struct PinCell {
     /// neither side of it had room.
     pub apart: Option<LabelCell>,
     pub stale: bool,
+    /// [`MapPin::nearby`].
+    pub nearby: bool,
     pub selected: bool,
+    /// [`MapPin::own`]: the reader's own position, the blue dot alone as
+    /// the maps people know draw it, never a name or an avatar (1449 item 2,
+    /// walk 1 finding 8).
+    pub own: bool,
 }
 
 /// A pin's name set on a row of its own.
@@ -408,6 +443,27 @@ pub struct MapView {
     pub cell_px: (u16, u16),
     /// The pins in view, the selected one last so it is drawn on top.
     pub pins: Vec<PinCell>,
+    /// The tracks' cells under the pins (1385).
+    pub tracks: Vec<crate::ui::tracks::cells::TrackCell>,
+    /// The radar where no region touches the view (1386): the picture is
+    /// left blank and these drawn instead.
+    pub radar: Option<RadarCells>,
+    /// The tracks' time window's word when it is not the default (1419):
+    /// on the credit's row, so the reader knows why older lines show.
+    pub window_word: Option<String>,
+    /// A pointer drags the view (1422): the frame budget's gesture, from
+    /// the button going down past a drag to it coming up.
+    pub moving: bool,
+}
+
+/// The radar in the terminal's cells (1386).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RadarCells {
+    /// [`crate::ui::radar::Radar::note`], on the credit's row.
+    pub note: String,
+    /// The rings, their distances and the centre
+    /// ([`crate::ui::radar::cells`]).
+    pub cells: Vec<crate::ui::tracks::cells::TrackCell>,
 }
 
 /// Pixels the fit leaves free at each side, so a pin is not on the edge.
@@ -421,12 +477,16 @@ pub const MARKER: char = '●';
 /// screen show it, and a text frame does too.
 pub const SELECTED: char = '◉';
 
-/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`.
+/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`,
+/// each fix's age in the catalogue's words in `lang` ("vor 28 Std.", 1447):
+/// the one age a position has, the card's.
 pub fn pins_of(
     positions: &alloc::collections::BTreeMap<[u8; 16], telemetry::Fix>,
     label: impl Fn(&[u8; 16]) -> String,
+    nearby: impl Fn(&[u8; 16]) -> bool,
     own: Option<[u8; 16]>,
     now: Option<i64>,
+    lang: super::strings::Lang,
 ) -> Vec<MapPin> {
     let all: Vec<MapPin> = positions
         .iter()
@@ -437,16 +497,20 @@ pub fn pins_of(
             ));
             let age = now
                 .filter(|_| !fix.ahead())
-                .map(|now| telemetry::span(now - fix.fix_time()));
+                .map(|now| super::scene::ago(now - fix.fix_time()).resolve(lang));
             MapPin {
                 peer: *peer,
                 at,
                 label: match Some(*peer) == own {
-                    true => "you".to_string(),
+                    true => super::strings::StrId::MapYou.text(lang).to_string(),
                     false => label(peer),
                 },
                 age,
                 stale: now.is_some_and(|now| fix.stale(now)),
+                nearby: Some(*peer) != own && nearby(peer),
+                own: Some(*peer) == own,
+                fix_at: Some(fix.fix_time()),
+                battery: fix.battery(),
             }
         })
         .collect();
@@ -474,12 +538,27 @@ pub fn picture_area(pane: Rect) -> Rect {
     )
 }
 
+/// The world projection the product ships (1710): Equal Earth, Lew's
+/// first decision; the orthographic globe behind the `globe-world` build
+/// switch until he has seen both on pictures.
+pub fn world_shape() -> Shape {
+    match cfg!(feature = "globe-world") {
+        true => Shape::Globe,
+        false => Shape::EqualEarth,
+    }
+}
+
 /// The view of `state` over `area` at `setup`'s cell size, as every
 /// frontend shows it: one world at most ([`Viewport::one_world`]), however
-/// far the state was zoomed out or panned north or south.
+/// far the state was zoomed out or panned north or south, and the world
+/// never smaller than the picture: the whole zoom at or past the
+/// [`world_floor_milli`] of the product's [`world_shape`] (1796), the
+/// window's and the phone's floor rounded up to the terminal's steps.
 pub fn viewport(state: &MapState, area: Rect, setup: &MapSetup) -> Viewport {
     let (w, h) = pixels(area, setup);
-    Viewport::new(state.centre, state.zoom, w, h).one_world()
+    let floor = world_floor_milli(world_shape(), w, h).div_ceil(MILLI);
+    let floor = u8::try_from(floor).unwrap_or(u8::MAX);
+    Viewport::new(state.centre, state.zoom.max(floor), w, h).one_world()
 }
 
 /// `state` moved to the view it shows ([`viewport`]): a zoom out past the
@@ -508,8 +587,10 @@ fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
 
 /// The view that shows every pin, at the deepest zoom of `setup` that
 /// does, but no deeper than the region under its centre has data for
-/// ([`fit_ceiling`]): one pin fits at that region's max zoom, or at the
-/// outline's, and `+` goes on into the overzoom. With no pin, the first of
+/// ([`fit_ceiling`]): one pin fits at that region's max zoom, and `+` goes
+/// on into the overzoom. Where no region holds the centre the radar draws
+/// (1386): the fit goes to [`crate::ui::radar::FIT_ZOOM`] where `setup`
+/// reaches it, the outline's deepest where it does not. With no pin, the first of
 /// `setup`'s regions, which the shells list newest first; with none of
 /// those either, the world at the [`zoom_floor`].
 pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
@@ -530,6 +611,21 @@ pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
     fit_points(&points, area, setup)
 }
 
+/// The pins "fit all" brings into view (1386): those of `inside`, the
+/// peers with a position inside the tracks' time window
+/// ([`crate::ui::tracks::inside`]); every pin when none is.
+pub fn in_window(pins: &[MapPin], inside: &[[u8; 16]]) -> Vec<MapPin> {
+    let kept: Vec<MapPin> = pins
+        .iter()
+        .filter(|p| inside.contains(&p.peer))
+        .cloned()
+        .collect();
+    match kept.is_empty() {
+        true => pins.to_vec(),
+        false => kept,
+    }
+}
+
 /// The view centred on one point, at the zoom [`fit`] gives a single pin
 /// there: the deepest the region under it has data for, or the outline's
 /// without one. Where a report's fix opens the map (1076).
@@ -543,7 +639,16 @@ fn fit_points(points: &[World], area: Rect, setup: &MapSetup) -> (World, u8) {
     let floor = zoom_floor(area, setup);
     let (centre, zoom) = match Viewport::fit(points, w, h, margin, floor..=setup.zooms.1) {
         Some(view) => {
-            let ceiling = fit_ceiling(&setup.regions, view.centre).max(floor);
+            // Where no region holds the centre the radar draws (1386): the
+            // fit goes as deep as its rings read, not the outline's.
+            let at = unproject(view.centre);
+            let held = setup.regions.iter().any(|h| h.bounds.contains(at));
+            let ceiling = fit_ceiling(&setup.regions, view.centre);
+            let ceiling = match held {
+                true => ceiling,
+                false => ceiling.max(crate::ui::radar::FIT_ZOOM.min(setup.zooms.1)),
+            }
+            .max(floor);
             (view.centre, view.zoom().min(ceiling))
         }
         None => (
@@ -582,7 +687,14 @@ pub fn place(
             let pin = pins.get(placed.index)?;
             let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
             let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            let words = pin.words();
+            // A battery below a fifth after the name (1386). Our own
+            // position is the dot alone, no name (1449 item 2).
+            let words = match (pin.low_battery(), ascii) {
+                _ if pin.own => String::new(),
+                (false, _) => pin.words(),
+                (true, false) => format!("{} {BATTERY_GLYPH}", pin.words()),
+                (true, true) => format!("{} !", pin.words()),
+            };
             let len = u16::try_from(words.chars().count()).unwrap_or(u16::MAX);
             Some((pin, (col, row), len, words))
         })
@@ -623,6 +735,7 @@ pub fn place(
                 })
             };
             let (col, text, apart) = match side {
+                _ if pin.own => (col, marker.to_string(), None),
                 Some(Side::Right) => (col, format!("{marker} {words}"), None),
                 Some(Side::Left) => (
                     col.saturating_sub(len + 1),
@@ -640,7 +753,9 @@ pub fn place(
                 text,
                 apart,
                 stale: pin.stale,
+                nearby: pin.nearby,
                 selected,
+                own: pin.own,
             }
         })
         .collect();
@@ -727,6 +842,8 @@ pub fn zoom_at(state: &mut MapState, area: Rect, setup: &MapSetup, col: u16, row
     let view = view.one_world();
     state.centre = view.centre;
     state.zoom = view.zoom();
+    // Past the world's floor (1796) the zoom stops there, about the centre.
+    settle(state, area, setup);
 }
 
 /// The pin drawn at a cell, its marker or its name, the topmost where
@@ -759,6 +876,7 @@ mod tests {
         ViewLabel {
             kind,
             rank,
+            min_zoom: 0,
             text: text.to_string(),
             local: text.to_string(),
             at: (col as u32, row as u32),
@@ -852,6 +970,7 @@ mod tests {
         ViewLabel {
             kind,
             rank: 0,
+            min_zoom: 0,
             text: text.to_string(),
             local: text.to_string(),
             at: (at, 0),
@@ -953,6 +1072,10 @@ mod tests {
             label: label.to_string(),
             age: None,
             stale: false,
+            nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         };
         let pins = [pin(1, "you"), pin(2, "them")];
         let area = Rect::new(1, 1, 40, 10);
@@ -1001,17 +1124,39 @@ mod tests {
             label: "bob".to_string(),
             age: None,
             stale: false,
+            nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &setup);
         assert_eq!(zoom, header.max_zoom);
-        // Frankfurt, outside the fixture: the outline's deepest.
+        // Frankfurt, outside the fixture: the radar draws there (1386),
+        // and the fit goes to its zoom where the setup reaches it, the
+        // outline's deepest where it does not.
         let (_, zoom) = fit(&[pin(50.1106, 8.6821)], area, &setup);
-        assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
+        assert_eq!(
+            zoom,
+            crate::ui::radar::FIT_ZOOM
+                .min(setup.zooms.1)
+                .max(leviculum_map::outline::MAX_ZOOM)
+        );
         let none = MapSetup {
             regions: Vec::new(),
             ..setup.clone()
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &none);
+        assert_eq!(
+            zoom,
+            crate::ui::radar::FIT_ZOOM
+                .min(setup.zooms.1)
+                .max(leviculum_map::outline::MAX_ZOOM)
+        );
+        let outline_only = MapSetup {
+            zooms: (0, leviculum_map::outline::MAX_ZOOM),
+            ..none
+        };
+        let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &outline_only);
         assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
     }
 
@@ -1076,6 +1221,49 @@ mod tests {
         assert_eq!(zoom_floor(phone, &bare), 3);
     }
 
+    /// The terminal's world at its smallest is as wide as its picture
+    /// (1796): settled from z0 the product's world (Equal Earth, the globe
+    /// in the globe build) spans at least the picture's width, the globe
+    /// its shorter side; a step further out settles to the same zoom.
+    #[test]
+    fn settle_keeps_the_smallest_world_as_wide_as_the_picture() {
+        use leviculum_map::blend::Blend;
+        let shape = world_shape();
+        let setup = MapSetup {
+            cell_px: (2, 4),
+            zooms: (0, 20),
+            ..MapSetup::default()
+        };
+        for (cols, rows) in [(495u16, 550u16), (200, 60), (80, 24), (612, 549)] {
+            let area = Rect::new(0, 0, cols, rows);
+            let (w, h) = (u32::from(cols) * 2, u32::from(rows) * 4);
+            let mut state = MapState {
+                centre: project(LatLon::from_degrees(43.77, 11.26)),
+                zoom: 0,
+                selected: None,
+            };
+            settle(&mut state, area, &setup);
+            let view = viewport(&state, area, &setup);
+            let blend = Blend::new(shape, view.centre, f64::from(view.zoom()), w, h);
+            let pi = core::f64::consts::PI;
+            let (across, side) = match shape {
+                Shape::Globe => (2.0 * blend.radius(), w.min(h)),
+                Shape::EqualEarth => (
+                    blend.to_screen_angles(pi, 0.0).0 - blend.to_screen_angles(-pi, 0.0).0,
+                    w,
+                ),
+            };
+            assert!(
+                across >= f64::from(side) - 0.5,
+                "{w}x{h}: the world {across:.1} across, the picture {side}"
+            );
+            let zoom = state.zoom;
+            state.zoom = zoom.saturating_sub(1);
+            settle(&mut state, area, &setup);
+            assert_eq!(state.zoom, zoom, "{w}x{h}: a step further out");
+        }
+    }
+
     /// A zoom out past the floor stops there, and a pan past the north
     /// edge stops at it: the state is what the reader sees.
     #[test]
@@ -1092,8 +1280,22 @@ mod tests {
             selected: None,
         };
         settle(&mut state, phone, &setup);
-        assert_eq!(state.zoom, 3);
-        assert_eq!(state.centre.y, 1 << 31, "shorter than the view: centred");
+        // Mercator's and Equal Earth's floor is z3 on 1080 pixels; the
+        // globe's disk needs z3.73 to be 1080 across (1796), z4 in whole
+        // steps.
+        let floor = match world_shape() {
+            Shape::Globe => 4,
+            Shape::EqualEarth => 3,
+        };
+        assert_eq!(state.zoom, floor);
+        match 256u32 << floor <= 2400 {
+            true => assert_eq!(state.centre.y, 1 << 31, "shorter than the view: centred"),
+            false => assert_eq!(
+                viewport(&state, phone, &setup).top_left_sub().1,
+                0,
+                "taller than the view: stopped at the north edge"
+            ),
+        }
         state.zoom = 6;
         state.centre = project(LatLon::from_degrees(84.0, 0.0));
         settle(&mut state, phone, &setup);

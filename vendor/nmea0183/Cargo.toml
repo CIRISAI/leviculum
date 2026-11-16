@@ -9,6 +9,13 @@
 # carries more than ten significant digits, so an integer parse and one
 # division reproduce `parse` bit for bit (Codeberg #386).
 #
+# A second patch (order 1326) routes the crate's fourteen `&s[a..b]` str
+# slices through `common::field`, a `str::get`. Each is length-checked on
+# ASCII input, so the slice is the same; the indexing form dragged
+# `str::slice_error_fail`, `<char as Debug>` and the unicode grapheme tables
+# into the image, 5392 B of the Pocket's flash, for a panic that cannot
+# happen.
+#
 # It is a workspace member rather than an excluded tree like vendor/crossterm
 # because the patch is ours and has to be gated: `cargo test --workspace`
 # runs its unit tests, which assert the bit equality against `str::parse`
@@ -37,7 +44,7 @@ strict = []
 # Upstream 0.6.0 predates these lints and trips 39 of them; the workspace
 # gate runs `clippy -D warnings`, so a member has to answer for them. They
 # are allowed here rather than fixed so the fork's diff against upstream
-# stays the nine call sites and `src/fixed.rs` — a rewrite of code we do
+# stays the nine call sites, `src/fixed.rs` and the `field` slices — a rewrite of code we do
 # not own turns every future upstream release into a merge. `src/fixed.rs`
 # opts back into `clippy::all` at the top of the file: the allowances are
 # for the code we inherited, not the code we wrote.

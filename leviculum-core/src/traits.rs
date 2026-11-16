@@ -190,6 +190,7 @@ pub enum InterfaceKind {
     Channel,
     Auto,
     Ble,
+    WebSocket,
     #[default]
     Unknown,
 }
@@ -209,6 +210,7 @@ impl InterfaceKind {
             InterfaceKind::Channel => "channel",
             InterfaceKind::Auto => "auto",
             InterfaceKind::Ble => "ble",
+            InterfaceKind::WebSocket => "websocket",
             InterfaceKind::Unknown => "unknown",
         }
     }

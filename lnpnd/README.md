@@ -80,15 +80,17 @@ The config file is lxmd's format and keys (`lxmd --exampleconfig` and
 example on first daemon start if missing. All keys of the reference's
 `[propagation]`, `[lxmf]` and `[logging]` sections are accepted, and most are
 honoured identically. The keys accepted but not acted on
-(`prioritise_destinations`, `sequential_pn_stamp_validation`, and
-`static_peers_bypass_sequential`) are warned about at startup; lnpnd(1)
-explains each.
+(`sequential_pn_stamp_validation` and `static_peers_bypass_sequential`) are
+warned about at startup; lnpnd(1) explains each.
 
-Two defaults differ deliberately from the reference and are wire-legal:
-`propagation_stamp_cost_target` defaults to 0 (accept uploads without
-proof-of-work) and `peering_cost` defaults to 0. A stock lxmd peer can never
-sync *toward* a node announcing peering cost 0, so nodes that want stock
-peers to push messages to them should announce at least 1.
+Three defaults differ deliberately from the reference and are wire-legal:
+`propagation_stamp_cost_target` defaults to 13 (lxmd's floor; its default
+is 16), `propagation_stamp_cost_flexibility` to 0, so the node takes exactly
+what a stock peer will take from it, and `peering_cost` to 1. A stock lxmd
+peer can never sync *toward* a node announcing peering cost 0. A client
+upload larger than the per-message transfer limit is stored local only:
+its recipient collects it here, and no peer is offered it; lnpnd(1) has
+the details.
 
 The config directory keeps lxmd's layout: `config`, `identity` (the node's
 mesh address, the same file format Python's RNS uses), the optional `allowed`

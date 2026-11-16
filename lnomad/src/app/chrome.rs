@@ -1,13 +1,22 @@
 //! The browser chrome laid out in character cells: the top bar, the footer,
 //! the help text. Shared by the frontend that draws it and by the click and
-//! hover hit-tests in [`update`], which is why it lives in the core.
+//! hover hit-tests in [`update`](super::event::update), which is why it lives in the core.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::event::*;
 use super::geometry::Rect;
-use super::input::KeyCode;
+use super::intent::Intent;
 use super::model::*;
+use super::scene::{
+    address as scene_address, state as scene_state, top_bar as scene_top_bar, Chip, ChipId, NodeId,
+    TopBar as SceneTopBar,
+};
+use super::strings::{Arg, Lang, StrId, Text};
 
 /// The ` · ` separator drawn between the title and the address on the top bar.
 pub(crate) const TOPBAR_SEP: &str = " · ";
@@ -41,51 +50,68 @@ pub struct TopBar {
     pub hops: Option<(String, u16)>,
 }
 
-/// The bookmark-star glyph for the current page: filled when bookmarked, hollow
-/// when not, or `None` when no page is loaded (nothing to bookmark).
-pub(crate) fn star_glyph(model: &Model) -> Option<&'static str> {
-    let url = current_url(model)?;
-    Some(if model.bookmarks.contains(&url) {
-        STAR_ON
-    } else {
-        STAR_OFF
+/// The bookmark-star glyph of the scene's top bar: filled when the page is
+/// bookmarked (its star's action takes the bookmark off), hollow when not, or
+/// `None` when the bar has no star (no page loaded, nothing to bookmark).
+fn star_of(bar: &SceneTopBar) -> Option<&'static str> {
+    bar.actions.iter().find_map(|action| match action.intent {
+        Intent::Bookmark { on: true } => Some(STAR_OFF),
+        Intent::Bookmark { on: false } => Some(STAR_ON),
+        _ => None,
     })
 }
 
-/// The identity-marker cluster text: the key glyph plus the first 8 hex chars
-/// of the session's own fingerprint, or `None` when not identifying to the
-/// current node (or the fingerprint is unset, as in a bare test model).
-pub(crate) fn identity_text(model: &Model) -> Option<String> {
-    if !model.identifying || model.fingerprint.is_empty() {
-        return None;
-    }
-    let fp8: String = model.fingerprint.chars().take(8).collect();
-    Some(format!("{IDENTIFY_GLYPH} {fp8}"))
+/// The scene chip `id`, if the top bar's state has it.
+fn chip_of(chips: &[Chip], id: ChipId) -> Option<&Chip> {
+    chips.iter().find(|chip| chip.id == NodeId::Chip(id))
 }
 
-/// The hop-count cluster text for the current destination: `N hops` when the
-/// destination is a known announced node with a hop count, `unknown` when it is
-/// not in the registry, or `None` when no page is loaded.
-pub(crate) fn hops_text(model: &Model) -> Option<String> {
-    let dest = model.current_dest?;
-    Some(
-        match model.node_registry.get_by_hash(&dest).and_then(|n| n.hops) {
-            Some(h) => format!("{h} hops"),
-            None => "unknown".to_string(),
+/// The identity chip as the one-row bar draws it: the key glyph in place of
+/// the chip's words, then the fingerprint prefix the chip names.
+fn identity_of(chips: &[Chip]) -> Option<String> {
+    match &chip_of(chips, ChipId::Identity)?.text {
+        Text::Key(_, args) => match args.first() {
+            Some(Arg::Str(fp8)) => Some(format!("{IDENTIFY_GLYPH} {fp8}")),
+            _ => None,
         },
-    )
+        _ => None,
+    }
 }
 
+/// The bookmark-star glyph for the current page, from the scene's top bar.
+#[cfg(test)]
+pub(crate) fn star_glyph(model: &Model) -> Option<&'static str> {
+    star_of(&scene_top_bar(model))
+}
+
+/// The hop-count cluster text for the current destination, the scene's hops
+/// chip in the model's language: `N hops` when the destination is a known
+/// announced node with a hop count, `unknown` when it is not in the registry,
+/// or `None` when no page is loaded.
+#[cfg(test)]
+pub(crate) fn hops_text(model: &Model) -> Option<String> {
+    let chips = scene_state(model);
+    Some(chip_of(&chips, ChipId::Hops)?.text.resolve(model.lang))
+}
+
+/// The top bar laid out in cells over the scene's words: its title, its
+/// address field and its state chips are what the cluster and the left side
+/// show, so the terminal draws the scene and the hit tests read the same
+/// geometry.
 pub(crate) fn topbar_layout(model: &Model, area: Rect) -> TopBar {
     let y = area.y;
     let right = area.right();
 
+    let bar = scene_top_bar(model);
+    let field = scene_address(model);
+    let chips = scene_state(model);
+
     // Right-aligned status cluster: star, identity marker, cache bolt, hop
     // count, each present only when it applies, separated by a single column.
-    let star = star_glyph(model);
-    let identity = identity_text(model);
-    let mut cached = model.cached_view;
-    let mut hops = hops_text(model);
+    let star = star_of(&bar);
+    let identity = identity_of(&chips);
+    let mut cached = chip_of(&chips, ChipId::Cached).is_some();
+    let mut hops = chip_of(&chips, ChipId::Hops).map(|chip| chip.text.resolve(model.lang));
     let seg_w = |g: &str| UnicodeWidthStr::width(g) as u16;
     let cluster_width = |cached: bool, hops: &Option<String>| -> u16 {
         let mut w = 0u16;
@@ -159,8 +185,18 @@ pub(crate) fn topbar_layout(model: &Model, area: Rect) -> TopBar {
         right
     };
     let left_w = left_end.saturating_sub(area.x);
-    let title_full = model.title.trim().to_string();
-    let addr_full = breadcrumb(model);
+    let title_full = bar.title.resolve(model.lang);
+    // An empty field shows its hint, as a platform's text field does.
+    let addr_full = match field.value.is_empty() {
+        true => field.hint.resolve(model.lang),
+        false => field.value,
+    };
+    // A host's name for the page is the title and the address alike
+    // (1621): said once, in the address slot.
+    let title_full = match !field.editing && title_full == addr_full {
+        true => String::new(),
+        false => title_full,
+    };
     let sep_w = UnicodeWidthStr::width(TOPBAR_SEP) as u16;
     let tw = UnicodeWidthStr::width(title_full.as_str()) as u16;
 
@@ -231,7 +267,7 @@ pub(crate) fn top_bar_controls(model: &Model, area: Rect) -> Vec<ControlRect> {
 pub(crate) fn breadcrumb(model: &Model) -> String {
     match model.history.current() {
         Some(target) => format!("{}:{}", short_hex(&target.dest_hash), target.path),
-        None => "press : to enter a URL".to_string(),
+        None => StrId::AddressHint.text(model.lang).to_string(),
     }
 }
 
@@ -246,28 +282,11 @@ pub(crate) fn short_hex(dest: &[u8; 16]) -> String {
     s
 }
 
-/// What a footer button activates when pressed or clicked. Mode-specific keys
-/// (`Esc`, `Tab`, `Space`, `Enter`, `n`, `N`) route back through the key handler
-/// so the click behaves exactly like the key press it mirrors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FooterAction {
-    Back,
-    Forward,
-    Reload,
-    /// Toggle identifying to the current page's node (same as the `i` key).
-    Identify,
-    Hint,
-    Search,
-    Places,
-    Mark,
-    Copy,
-    Help,
-    Quit,
-    /// Synthesize a plain key press (the mode-action buttons).
-    Key(KeyCode),
-    /// A non-interactive sentence (hint mode's instruction).
-    None,
-}
+/// What a footer button runs when pressed or clicked: the key table's
+/// action for the chord it shows ([`super::keys`]), so a click and the key
+/// cannot do two different things. [`Action::Sentence`](super::keys::Action::Sentence)
+/// is a sentence, not a button.
+pub type FooterAction = super::keys::Action;
 
 /// One footer button of lnomad's strip: [`leviculum_ui::footer::FooterItem`]
 /// over lnomad's [`FooterAction`].
@@ -286,87 +305,10 @@ impl leviculum_ui::footer::FooterRole for FooterAction {
     }
 }
 
-/// The footer's navigation trio, always first: back, forward, reload. They are
-/// ordinary `key + label` items like the rest of the strip, spelling their keys
-/// (`Alt-←`, `Alt-→`, `R`) rather than using glyphs. Their availability tracks
-/// the history so an impossible motion reads muted.
-pub(crate) fn footer_nav(model: &Model) -> [FooterItem; 3] {
-    [
-        FooterItem {
-            available: model.history.can_back(),
-            ..FooterItem::action("Alt-←", "back", FooterAction::Back)
-        },
-        FooterItem {
-            available: model.history.can_forward(),
-            ..FooterItem::action("Alt-→", "forward", FooterAction::Forward)
-        },
-        FooterItem {
-            available: model.history.current().is_some(),
-            ..FooterItem::action("R", "reload", FooterAction::Reload)
-        },
-    ]
-}
-
-/// The footer button list for the current mode: the nav trio, then the
-/// mode-dependent action set. The first non-nav item carries the stronger
-/// divider before it.
+/// The footer button list for the current mode, derived from the key table
+/// ([`super::keys::footer_items`]): the nav trio, then the mode's buttons.
 pub(crate) fn footer_items(model: &Model) -> Vec<FooterItem> {
-    let mut items: Vec<FooterItem> = footer_nav(model).to_vec();
-    match model.mode {
-        Mode::Browse => {
-            // The identify toggle, only when there is a page to identify to. A
-            // state action, so under truncation it outlives the hint/search/
-            // places/mark/copy conveniences (highest drop rank, right below the
-            // never-dropped reload).
-            if model.current_dest.is_some() {
-                let label = if model.identifying {
-                    "anonymous"
-                } else {
-                    "identify"
-                };
-                items.push(FooterItem::droppable("i", label, FooterAction::Identify, 6));
-            }
-            items.extend_from_slice(&[
-                FooterItem::droppable("f", "hint", FooterAction::Hint, 5),
-                FooterItem::droppable("/", "search", FooterAction::Search, 4),
-                FooterItem::droppable("d", "places", FooterAction::Places, 3),
-                FooterItem::droppable("m", "mark", FooterAction::Mark, 2),
-                FooterItem::droppable("y", "copy", FooterAction::Copy, 1),
-                FooterItem::action("?", "help", FooterAction::Help),
-                FooterItem::action("q", "quit", FooterAction::Quit),
-            ]);
-        }
-        Mode::Field => items.extend_from_slice(&[
-            FooterItem::action("Esc", "done", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("Tab", "next field", FooterAction::Key(KeyCode::Tab), 1),
-            FooterItem::droppable("Space", "toggle", FooterAction::Key(KeyCode::Char(' ')), 2),
-            FooterItem::action("?", "help", FooterAction::Help),
-        ]),
-        Mode::Search => items.extend_from_slice(&[
-            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
-            FooterItem::droppable("n", "next", FooterAction::Key(KeyCode::Char('n')), 2),
-            FooterItem::droppable("N", "prev", FooterAction::Key(KeyCode::Char('N')), 3),
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", "help", FooterAction::Help, 1),
-        ]),
-        Mode::Address => items.extend_from_slice(&[
-            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", "help", FooterAction::Help, 1),
-        ]),
-        Mode::Hint => items.extend_from_slice(&[
-            FooterItem {
-                key: "",
-                label: HINT_SENTENCE,
-                key_first: true,
-                action: FooterAction::None,
-                drop_rank: None,
-                available: true,
-            },
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
-        ]),
-    }
-    items
+    super::keys::footer_items(model)
 }
 
 /// Lay lnomad's footer buttons out across `area`
@@ -398,138 +340,34 @@ pub fn focused_link_target(model: &Model) -> Option<String> {
     }
 }
 
-pub(crate) use leviculum_ui::help::{HelpEntry, HelpGroup};
+pub(crate) use leviculum_ui::help::HelpGroup;
 
-/// The keybinding groups shown in the help overlay. The Move group's scroll rows
-/// are pulled straight from [`SCROLL_ROWS`], so the overlay can never list a
-/// scroll binding that the key handler does not honour, nor omit one it does.
+/// The catalogue's words for a shared scroll row's description: the rows live
+/// in `leviculum-ui` with English words, the browser says them in its own
+/// language. A row this does not know keeps its English words
+/// (`every_scroll_row_has_its_words` holds that none is left so).
+pub(crate) fn scroll_desc(desc: &'static str, lang: Lang) -> &'static str {
+    let id = match desc {
+        "scroll a line" => StrId::HelpScrollLine,
+        "page down / up" => StrId::HelpScrollPage,
+        "half a page" => StrId::HelpScrollHalf,
+        "top / bottom" => StrId::HelpScrollEnds,
+        _ => return desc,
+    };
+    id.text(lang)
+}
+
+/// The keybinding groups shown in the help overlay, in `lang`, derived from
+/// the key table ([`super::keys::help_groups_in`]): the overlay can never
+/// list a binding the key handler does not honour, nor omit one it does.
+pub(crate) fn help_groups_in(lang: Lang) -> Vec<HelpGroup> {
+    super::keys::help_groups_in(lang)
+}
+
+/// The help groups in English, as the tests of `tui.rs` read them.
+#[cfg(test)]
 pub(crate) fn help_groups() -> Vec<HelpGroup> {
-    // The scroll rows come straight from the keymap table; the mouse wheel is the
-    // one Move affordance that is not a key chord, so it is appended here.
-    let mut move_entries: Vec<HelpEntry> = SCROLL_ROWS
-        .iter()
-        .map(|s| HelpEntry {
-            keys: s.keys(),
-            desc: s.desc,
-        })
-        .collect();
-    move_entries.push(HelpEntry {
-        keys: "wheel",
-        desc: "scroll",
-    });
-    vec![
-        HelpGroup {
-            title: "Move",
-            entries: move_entries,
-        },
-        HelpGroup {
-            title: "Follow",
-            entries: vec![
-                HelpEntry {
-                    keys: "Tab / Shift-Tab",
-                    desc: "focus a link or field",
-                },
-                HelpEntry {
-                    keys: "Enter / click",
-                    desc: "follow a link or footer button",
-                },
-                HelpEntry {
-                    keys: "f",
-                    desc: "hint — type a label or the link text",
-                },
-                HelpEntry {
-                    keys: "Alt-← / Alt-→   mouse side buttons",
-                    desc: "back / forward",
-                },
-                HelpEntry {
-                    keys: "hover a link",
-                    desc: "show its URL",
-                },
-            ],
-        },
-        HelpGroup {
-            title: "Page",
-            entries: vec![
-                HelpEntry {
-                    keys: ": / click the URL",
-                    desc: "enter a URL",
-                },
-                HelpEntry {
-                    keys: "R / Ctrl-R / F5",
-                    desc: "reload (always refetches)",
-                },
-                HelpEntry {
-                    keys: "Esc / Ctrl-g",
-                    desc: "cancel a load",
-                },
-                HelpEntry {
-                    keys: "m / click star",
-                    desc: "bookmark this page",
-                },
-                HelpEntry {
-                    keys: "y",
-                    desc: "copy the link's / page's URL",
-                },
-                HelpEntry {
-                    keys: "d / click a place",
-                    desc: "places panel — click an entry to open it",
-                },
-                HelpEntry {
-                    keys: "i",
-                    desc: "identify / go anonymous to this node",
-                },
-                HelpEntry {
-                    keys: "",
-                    desc: "default anonymous; identifying lets this node attribute your posts",
-                },
-                HelpEntry {
-                    keys: "/ n N",
-                    desc: "search / next / prev",
-                },
-            ],
-        },
-        HelpGroup {
-            title: "Images",
-            entries: vec![
-                HelpEntry {
-                    keys: "Enter",
-                    desc: "save the focused picture (no second transfer)",
-                },
-                HelpEntry {
-                    keys: "o",
-                    desc: "open it in the system viewer",
-                },
-                HelpEntry {
-                    keys: "",
-                    desc: "start with --images off to leave them as plain links",
-                },
-            ],
-        },
-        HelpGroup {
-            title: "Fields",
-            entries: vec![HelpEntry {
-                keys: "type / Space / Esc",
-                desc: "edit / toggle / leave",
-            }],
-        },
-        HelpGroup {
-            title: "App",
-            entries: vec![
-                HelpEntry {
-                    keys: "t",
-                    desc: "light / dark theme",
-                },
-                HelpEntry {
-                    keys: "? / Esc / click",
-                    desc: "close this help",
-                },
-                HelpEntry {
-                    keys: "q / Ctrl-c",
-                    desc: "quit",
-                },
-            ],
-        },
-    ]
+    help_groups_in(Lang::En)
 }
 
 /// The plain-text lines of lnomad's help overlay ([`leviculum_ui::help::lines`]
@@ -548,5 +386,8 @@ pub(crate) fn help_lines() -> Vec<String> {
 /// [`leviculum_ui::help::scroll_bounds`] over the whole terminal.
 pub(crate) fn help_scroll_geometry(model: &Model) -> (usize, usize) {
     let (cols, rows) = model.size;
-    leviculum_ui::help::scroll_bounds(&help_groups(), leviculum_ui::Rect::new(0, 0, cols, rows))
+    leviculum_ui::help::scroll_bounds(
+        &help_groups_in(model.lang),
+        leviculum_ui::Rect::new(0, 0, cols, rows),
+    )
 }

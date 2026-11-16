@@ -16,7 +16,7 @@
 use leviculum_lxmf::msgpack::{self, Number};
 use leviculum_lxmf::telemetry::{
     decode_stream_field_value, encode_stream_field_value, Battery, Location, PhysicalLink,
-    PowerProducer, StreamEntry, Telemetry,
+    PowerProducer, ShareMark, StreamEntry, Telemetry,
 };
 
 /// SplitMix64: a tiny deterministic PRNG so the sweep needs no new
@@ -153,6 +153,118 @@ fn every_encodable_telemetry_round_trips_through_the_field_wrapper() {
         let decoded = Telemetry::decode_field_value(&field_value)
             .unwrap_or_else(|e| panic!("case {case}: decode failed: {e:?} for {telemetry:?}"));
         assert_eq!(decoded, telemetry, "case {case}");
+    }
+}
+
+/// A live share's mark (Loquax 1273) rides as the location's eighth
+/// element: it round trips, the plain decoder reads the same reading
+/// without it (what a receiver that does not know it sees), and an empty
+/// mark is the plain encoding byte for byte.
+#[test]
+fn a_share_mark_round_trips_and_the_plain_reading_ignores_it() {
+    let mut rng = SplitMix64(0x2337_1273);
+    let marks = [
+        ShareMark::default(),
+        ShareMark {
+            every: Some(900),
+            ended: false,
+        },
+        ShareMark {
+            every: None,
+            ended: true,
+        },
+        ShareMark {
+            every: Some(u32::MAX),
+            ended: true,
+        },
+    ];
+    let mut located = 0;
+    for case in 0..256 {
+        let telemetry = arbitrary_telemetry(&mut rng);
+        for mark in marks {
+            let packed = telemetry.encode_marked(mark);
+            let decoded = Telemetry::decode(&packed)
+                .unwrap_or_else(|e| panic!("case {case}: decode failed: {e:?}"));
+            assert_eq!(decoded, telemetry, "case {case}: the reading stands");
+            let expected = match telemetry.location {
+                Some(_) => mark,
+                None => ShareMark::default(),
+            };
+            assert_eq!(ShareMark::of_blob(&packed), expected, "case {case}");
+            if mark.is_empty() {
+                assert_eq!(packed, telemetry.encode(), "case {case}: no mark, no bytes");
+            }
+        }
+        located += telemetry.location.is_some() as usize;
+    }
+    assert!(located > 0, "the sweep carried locations");
+}
+
+/// A mark this codec cannot read is no mark, and the fix stands: a nil
+/// eighth element, a string, unknown keys, a wrong type under a known key.
+#[test]
+fn a_strange_eighth_element_is_no_mark() {
+    let location = Location {
+        latitude_e6: 52_520_008,
+        longitude_e6: 13_404_954,
+        altitude_e2: 3_400,
+        speed_e2: 0,
+        bearing_e2: 0,
+        accuracy_e2: 500,
+        last_update: 1_793_500_000,
+    };
+    let plain = Telemetry {
+        time: Some(1_793_500_000),
+        location: Some(location),
+        ..Default::default()
+    }
+    .encode_marked(ShareMark {
+        every: Some(1),
+        ended: true,
+    });
+    // The mark map is the blob's tail: `{"every": 1, "ended": true}`.
+    let mut tail = Vec::new();
+    msgpack::map(&mut tail, 2);
+    msgpack::string(&mut tail, "every");
+    msgpack::uint(&mut tail, 1);
+    msgpack::string(&mut tail, "ended");
+    msgpack::bool(&mut tail, true);
+    assert!(plain.ends_with(&tail));
+    let head = &plain[..plain.len() - tail.len()];
+    let strange: [Vec<u8>; 4] = [
+        vec![0xc0],
+        {
+            let mut o = Vec::new();
+            msgpack::string(&mut o, "ended");
+            o
+        },
+        {
+            let mut o = Vec::new();
+            msgpack::map(&mut o, 1);
+            msgpack::string(&mut o, "colour");
+            msgpack::string(&mut o, "red");
+            o
+        },
+        {
+            let mut o = Vec::new();
+            msgpack::map(&mut o, 2);
+            msgpack::string(&mut o, "every");
+            msgpack::string(&mut o, "soon");
+            msgpack::string(&mut o, "ended");
+            msgpack::int(&mut o, 1);
+            o
+        },
+    ];
+    for element in strange {
+        let mut blob = head.to_vec();
+        blob.extend_from_slice(&element);
+        let decoded = Telemetry::decode(&blob).expect("a map");
+        assert_eq!(decoded.location, Some(location), "{element:02x?}");
+        assert_eq!(
+            ShareMark::of_blob(&blob),
+            ShareMark::default(),
+            "{element:02x?}"
+        );
     }
 }
 

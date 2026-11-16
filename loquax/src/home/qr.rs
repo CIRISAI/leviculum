@@ -57,6 +57,15 @@ pub fn modules(text: &str) -> Result<(u32, Vec<bool>), String> {
     Ok(grid(&encode(text)?))
 }
 
+/// `text` as modules exactly as it is, in byte mode: a contact code
+/// ([`crate::lxma`]), which Columba compares case for case, so it must not
+/// be raised into the alphanumeric mode as [`encode`] raises a join code.
+pub fn verbatim_modules(text: &str) -> Result<(u32, Vec<bool>), String> {
+    let qr = QrCode::encode_segments(&[QrSegment::make_bytes(text.as_bytes())], QrCodeEcc::Medium)
+        .map_err(|error| alloc::format!("the text does not fit a QR code: {error}"))?;
+    Ok(grid(&qr))
+}
+
 /// The side in modules and the modules row by row, true for dark.
 fn grid(qr: &QrCode) -> (u32, Vec<bool>) {
     let size = qr.size();

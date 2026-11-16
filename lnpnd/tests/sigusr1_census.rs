@@ -170,6 +170,122 @@ async fn census_after_sigusr1(dump_complete: impl Fn(&str) -> bool) -> String {
     text
 }
 
+/// The role's own census event (order 1515), asked for by the same signal.
+const PN_CENSUS: &str = "PN_CENSUS";
+
+/// One `PN_CENSUS` event, from the signal and not the ten-minute period,
+/// carrying every table column and the resident set. The dump's own copy
+/// of the line ([`assert_dump_tracks_the_role`]) is not an event.
+fn assert_pn_census(text: &str) {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| l.contains(PN_CENSUS))
+        .map(plain)
+        .filter(|l| !l.starts_with("PN_CENSUS "))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one SIGUSR1, one PN_CENSUS; it said:\n{text}"
+    );
+    let line = lines[0].as_str();
+    assert!(line.contains("occasion=\"signal\""), "{line}");
+    for column in lnpnd::census::COLUMNS
+        .iter()
+        .chain(&["tables", "rss_kb", "stored"])
+    {
+        assert!(
+            line.contains(&format!("{column}=")),
+            "no {column} in {line}"
+        );
+    }
+    let rss = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("rss_kb="))
+        .and_then(|value| value.parse::<u64>().ok());
+    assert!(rss.is_some_and(|kb| kb > 0), "{line}");
+}
+
+/// Order 1648: the dump carries the role's census line under the node's,
+/// and its total, the `tracked` the gap line subtracts, is the node's
+/// total plus the role's `tables`.
+fn assert_dump_tracks_the_role(text: &str, gap: &str) {
+    let number_after = |prefix: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no `{prefix}` line; it said:\n{text}"))
+    };
+    let node = number_after("=== Node total estimated: ");
+    let total = number_after("=== Total estimated: ");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("PN_CENSUS "))
+        .unwrap_or_default();
+    let tables = line
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("tables="))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("no tables= in the dump's line: {line}"));
+    assert!(tables > 0, "the role holds tables: {line}");
+    assert_eq!(
+        total,
+        node + tables,
+        "the total must hold the role's tables; {line}"
+    );
+    if !gap.contains("(model, not subtracted)") {
+        assert_eq!(gap_term(gap, "- tracked "), Some(total), "{gap}");
+    }
+}
+
+/// The start's store limit line (order 1548): one, before the census, the
+/// default's source on a config without a limit, every field a number.
+fn assert_store_limit_line(text: &str) {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| l.contains("PN_STORE_LIMIT"))
+        .map(plain)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one start, one PN_STORE_LIMIT; it said:\n{text}"
+    );
+    let line = lines[0].as_str();
+    assert!(line.contains("source=\"default\""), "{line}");
+    let field = |key: &str| {
+        line.split_whitespace()
+            .find_map(|f| f.strip_prefix(&format!("{key}=")))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let bytes = field("bytes").unwrap_or_else(|| panic!("no bytes= in {line}"));
+    assert!(
+        bytes > 0 && bytes <= lnpnd::store_limit::DEFAULT_STORE_LIMIT_BYTES,
+        "{line}"
+    );
+    assert!(field("ram_mb").is_some(), "no ram_mb= in {line}");
+    assert!(field("index_mb").is_some(), "no index_mb= in {line}");
+}
+
+/// `line` without the terminal colours the stderr formatter adds.
+fn plain(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The lines periculum's parser needs from any build, exactly once.
 fn assert_census_shape(text: &str) -> String {
     let gaps: Vec<&str> = text
@@ -205,24 +321,35 @@ fn assert_census_shape(text: &str) -> String {
 #[cfg(not(feature = "heap-accounting"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn sigusr1_prints_the_census_with_live_n_a() {
-    let text = census_after_sigusr1(|t| t.lines().any(|l| l.starts_with(GAP))).await;
+    let text =
+        census_after_sigusr1(|t| t.lines().any(|l| l.starts_with(GAP)) && t.contains(PN_CENSUS))
+            .await;
     let gap = assert_census_shape(&text);
+    assert_pn_census(&text);
+    assert_dump_tracks_the_role(&text, &gap);
+    assert_store_limit_line(&text);
     assert!(gap.contains("; - live n/a;"), "{gap}");
     assert_eq!(gap_term(&gap, "- live "), None, "{gap}");
     assert!(
         !text.contains("=== Measured live: ") && !text.contains("=== Heap sample: "),
         "a plain build has nothing measured to print; it said:\n{text}"
     );
+    assert_allocator_line(&text);
 }
 
 #[cfg(feature = "heap-accounting")]
 #[tokio::test(flavor = "multi_thread")]
 async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
     let text = census_after_sigusr1(|t| {
-        t.contains("=== Measured live: ") && t.contains("=== Heap sample: ")
+        t.contains("=== Measured live: ")
+            && t.contains("=== Heap sample: ")
+            && t.contains(PN_CENSUS)
     })
     .await;
     let gap = assert_census_shape(&text);
+    assert_pn_census(&text);
+    assert_dump_tracks_the_role(&text, &gap);
+    assert_store_limit_line(&text);
     let live = gap_term(&gap, "- live ").unwrap_or_else(|| panic!("live not measured: {gap}"));
     assert!(live > 0, "{gap}");
     assert!(gap.contains("(model, not subtracted)"), "{gap}");
@@ -230,7 +357,12 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
         .lines()
         .find(|l| l.starts_with("=== Measured live: "))
         .unwrap_or_default();
-    assert!(measured.contains("allocator system"), "{measured}");
+    let allocator = if cfg!(feature = "alloc-mimalloc") {
+        "allocator mimalloc"
+    } else {
+        "allocator system"
+    };
+    assert!(measured.contains(allocator), "{measured}");
     let measured_bytes = measured["=== Measured live: ".len()..]
         .split_whitespace()
         .next()
@@ -242,6 +374,21 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
     assert!(
         text.contains("Heap accounting: on"),
         "the startup line names the build; it said:\n{text}"
+    );
+    assert_allocator_line(&text);
+}
+
+/// The startup line names the allocator the build installed (1592), the
+/// line build-deb.sh reads off the binary's bytes.
+fn assert_allocator_line(text: &str) {
+    let want = if cfg!(feature = "alloc-mimalloc") {
+        "Allocator: mimalloc"
+    } else {
+        "Allocator: system (libc)"
+    };
+    assert!(
+        text.contains(want),
+        "the startup line names the allocator ({want}); it said:\n{text}"
     );
 }
 
@@ -257,6 +404,22 @@ fn version_names_the_heap_accounting_feature() {
     assert_eq!(
         version.contains("+heapacct"),
         cfg!(feature = "heap-accounting"),
+        "{version}"
+    );
+}
+
+/// `--version` tells a mimalloc build from a libc one (1592), as lnsd's does.
+#[test]
+fn version_names_the_allocator() {
+    let out = Command::new(env!("CARGO_BIN_EXE_lnpnd"))
+        .arg("--version")
+        .output()
+        .expect("lnpnd --version runs");
+    assert!(out.status.success());
+    let version = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        version.contains("+mimalloc"),
+        cfg!(feature = "alloc-mimalloc"),
         "{version}"
     );
 }

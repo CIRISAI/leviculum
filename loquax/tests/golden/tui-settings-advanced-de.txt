@@ -1,0 +1,24 @@
+┌●┌ Erweitert ───────────────────────────────────────────────────────────────┐─┐
+│N│Relais                                                                    █ │
+│U│Solange dein Postfach offline ist, wartet Post für dich bei einem Relais  █ │
+│c│im Netz, das Loquax selbst wählt.                                         █ │
+│e│Server für öffentliche Räume: Keiner                                      █ │
+│K│1  RNS Moscow                                                             █ │
+│ │2  Cascadia                                                               █ │
+│ │3  Chatsurfer                                                             █ │
+│ │4  CTRS                                                                   █ │
+│ │5  Minuteman                                                              █ │
+│ │6  RMAP.WORLD Hub                                                         █ │
+│ │7  Save Europe                                                            █ │
+│ │8  SoCal Public                                                           █ │
+│ │9  UTN Oregon                                                             █ │
+│ │0  HADARC                                                                 █ │
+│ │m  Mehr…                                                                  █ │
+│ │n  Keiner: ✓                                                              █ │
+│ │a  Anderer Server: Adresse einfügen                                       █ │
+│ │Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne   █ │
+│ │Namen.                                                                    █ │
+│ │?  Hilfe                                                                  █ ┤
+│ │                                                                          █ │
+└─└────────────────────────────────────────────────────────────── Esc closes ┘─┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -238,6 +238,19 @@ pub enum LinkError {
         /// The configured cap the table is at.
         max: usize,
     },
+    /// [`crate::node::NodeCore::connect_keeping_free`] held the dial back:
+    /// opening it would leave fewer than `keep_free` slots of the
+    /// configured cap free for inbound links. No link was created and
+    /// nothing was sent; this is the caller's own reserve, not a refusal by
+    /// the cap, so no `LinkRefused` event is emitted.
+    ReserveHeld {
+        /// Live entries in the link table when the dial was held.
+        links: usize,
+        /// The configured cap.
+        max: usize,
+        /// The slots the caller asked to leave free.
+        keep_free: usize,
+    },
 }
 
 impl core::fmt::Display for LinkError {
@@ -268,6 +281,15 @@ impl core::fmt::Display for LinkError {
             LinkError::TableFull { max } => {
                 write!(f, "link table at its configured cap of {}", max)
             }
+            LinkError::ReserveHeld {
+                links,
+                max,
+                keep_free,
+            } => write!(
+                f,
+                "dial held: {} of {} links taken, {} kept free for inbound",
+                links, max, keep_free
+            ),
         }
     }
 }
@@ -472,8 +494,9 @@ pub struct Link {
     /// Count of keepalives sent proactively (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_sent: u64,
-    /// Count of keepalive responses received (initiator), since establishment.
-    /// Diagnostic counter only; not used for any timeout decision.
+    /// Count of keepalive round trips since establishment: the responses
+    /// received on an initiator, the echoes owed on a responder. Diagnostic
+    /// counter only; not used for any timeout decision.
     keepalives_acked: u64,
     /// When the link was established (clock milliseconds)
     established_at_ms: Option<u64>,
@@ -941,6 +964,40 @@ impl Link {
         if !rtt_seconds.is_finite() || rtt_seconds <= 0.0 {
             return Err(LinkError::InvalidRtt);
         }
+        Ok(self.finish_responder_handshake(rtt_seconds, now_ms))
+    }
+
+    /// Establish a responder link on a packet of the initiator other than the
+    /// RTT, when the RTT was lost (1624).
+    ///
+    /// The responder derived the link keys when it sent its proof, so a
+    /// packet that decrypts under them comes from the one peer that holds
+    /// them: the initiator, which went Active on that proof and is already
+    /// using the link. Without this a lost RTT strands the link for good, as
+    /// the initiator never resends it (`reference/Reticulum/RNS/Link.py:441`
+    /// sends it once, in `validate_proof`). The link's RTT is our own
+    /// measurement from the proof send, which bounds the true RTT from above,
+    /// so the keepalive and stale windows err long, never short.
+    ///
+    /// Returns the RTT in seconds; `Err` leaves the link in its handshake
+    /// (not a responder link in its handshake, or the packet did not
+    /// decrypt).
+    pub fn establish_on_initiator_packet(
+        &mut self,
+        encrypted_data: &[u8],
+        now_ms: u64,
+    ) -> Result<f64, LinkError> {
+        self.require_state(LinkState::Handshake)?;
+        self.require_responder()?;
+        let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
+        self.decrypt(encrypted_data, &mut plaintext)?;
+        Ok(self.finish_responder_handshake(0.0, now_ms))
+    }
+
+    /// The RTT of a responder link that leaves its handshake now, the larger
+    /// of `wire_rtt_seconds` and our measurement from the proof send, and the
+    /// state change that goes with it.
+    fn finish_responder_handshake(&mut self, wire_rtt_seconds: f64, now_ms: u64) -> f64 {
         let measured_seconds = match self.phase {
             LinkPhase::PendingIncoming { proof_sent_at_ms } => {
                 now_ms.saturating_sub(proof_sent_at_ms) as f64 / MS_PER_SECOND as f64
@@ -948,7 +1005,7 @@ impl Link {
             _ => 0.0,
         };
         const MAX_PLAUSIBLE_RTT_SECS: f64 = 3600.0;
-        let rtt_seconds = rtt_seconds
+        let rtt_seconds = wire_rtt_seconds
             .max(measured_seconds)
             .min(MAX_PLAUSIBLE_RTT_SECS);
 
@@ -963,7 +1020,7 @@ impl Link {
         self.state = LinkState::Active;
         self.cached_proof = None;
 
-        Ok(rtt_seconds)
+        rtt_seconds
     }
 
     /// Get the link ID
@@ -1656,7 +1713,9 @@ impl Link {
         self.keepalives_sent
     }
 
-    /// Number of keepalive responses received since establishment (diagnostic).
+    /// Number of keepalive round trips since establishment (diagnostic): on
+    /// an initiator the responses received, on a responder the keepalives it
+    /// answered, so either end can count what its link cost.
     pub fn keepalives_acked(&self) -> u64 {
         self.keepalives_acked
     }
@@ -1843,6 +1902,17 @@ impl Link {
         self.incoming_resources
             .as_slice()
             .first()
+            .map(|r| r.progress())
+    }
+
+    /// The progress of the incoming resource `resource_hash` (0.0 to 1.0),
+    /// while it is under way: the share of its parts that arrived. A
+    /// requester watching its answer for silence reads it (1461).
+    pub fn incoming_resource_progress_of(&self, resource_hash: &[u8; 32]) -> Option<f32> {
+        self.incoming_resources
+            .as_slice()
+            .iter()
+            .find(|r| r.resource_hash() == resource_hash)
             .map(|r| r.progress())
     }
 
@@ -2916,6 +2986,7 @@ impl Link {
                 return Err(LinkError::InvalidRtt);
             }
             // Responder should echo back
+            self.keepalives_acked = self.keepalives_acked.saturating_add(1);
             Ok(true)
         }
     }
@@ -3973,6 +4044,41 @@ mod tests {
         assert!(link.should_close(1_000_000 + timeout + 1));
     }
 
+    /// 1346: a peer that stops answering on a link with a long keepalive
+    /// override is stale after twice the override, not after twice the
+    /// RTT-derived interval it had before, and closed RTT * 4 + 5 s later
+    /// (Link.py:797-805). The device link of Loquax sets 230 s at both ends;
+    /// the RTT-derived value it replaces on a 50 ms TCP path is 10.3 s.
+    #[test]
+    fn a_silent_peer_on_a_long_keepalive_is_gone_after_twice_the_override() {
+        let (mut initiator, _responder) = setup_active_link_pair();
+        initiator.update_keepalive_from_rtt(0.05);
+        let established = 1_000_000;
+        initiator.mark_established(established);
+        // The old value: stale 20.6 s after the last inbound.
+        assert_eq!(initiator.stale_time_ms(), 20_571);
+        assert!(initiator.is_stale(established + 20_572));
+
+        initiator.set_keepalive_override(Some(230));
+        initiator.update_keepalive_from_rtt(0.05);
+        assert_eq!(initiator.keepalive_ms(), 230_000);
+        assert!(!initiator.should_send_keepalive(established + 229_999));
+        assert!(initiator.should_send_keepalive(established + 230_000));
+        assert!(
+            !initiator.is_stale(established + 20_572),
+            "not gone at the old bound"
+        );
+        assert!(!initiator.is_stale(established + 460_000));
+        assert!(initiator.is_stale(established + 460_001));
+        initiator.set_state(LinkState::Stale);
+        let rtt_ms = initiator.rtt_us().unwrap_or(0) / 1_000;
+        assert_eq!(
+            initiator.stale_close_timeout_ms(),
+            460_000 + 4 * rtt_ms + 5_000,
+            "closed RTT * 4 + 5 s after it went stale"
+        );
+    }
+
     #[test]
     fn test_keepalive_counters() {
         let (mut initiator, mut responder) = setup_active_link_pair();
@@ -3987,6 +4093,10 @@ mod tests {
         let init_ka = initiator.build_keepalive_packet().unwrap();
         let echo = init_ka.last().copied().unwrap();
         assert!(responder.process_keepalive(&[echo]).unwrap()); // responder echoes
+                                                                // The responder counts the round trip it answered (1346), so the
+                                                                // mailbox end of a device link can say what the link cost it.
+        assert_eq!(responder.keepalives_acked(), 1);
+        assert_eq!(responder.keepalives_sent(), 0);
 
         // Initiator processes the responder echo -> ack counter increments.
         let resp_ka = responder.build_keepalive_packet().unwrap();

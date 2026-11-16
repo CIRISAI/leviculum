@@ -24,7 +24,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
+use leviculum_lxmf::router::{AttemptFailure, MessageState, PropagationPathAttempts};
 use leviculum_lxmf::Field;
 
 use crate::mailbox_state::{Decision, Route, Stored};
@@ -120,10 +120,28 @@ pub enum Command {
     /// [`Via::Propagated`]. A message the router will not take is reported
     /// as [`OutboxEvent::Unsent`].
     SendPacked { packed: Vec<u8>, via: Via },
+    /// On a home node: the message handed out as [`OutboxEvent::Packed`] is
+    /// archived, so its proof goes out now
+    /// ([`leviculum_lxmf::router::LxmfRouter::release_proofs`]). A sender
+    /// is told DELIVERED only for a message the archive holds (1239).
+    Prove { message_id: [u8; 32] },
     /// Answered with [`OutboxEvent::Fenced`] once every command before it
     /// was taken: a runner that waits for it knows the events those
     /// commands caused were handed out before it.
     Fence { token: u64 },
+    /// Answered with [`OutboxEvent::Census`]: the engine's own tables and
+    /// its router's, for the mailbox's `MAILBOX_CENSUS` (order 1585). The
+    /// answer carries `seq` back, so the mailbox keeps only the answers to
+    /// the census it is waiting for (1732).
+    Census { seq: u64 },
+    /// Announce our own position on `lev.position` (1302,
+    /// [`crate::mesh_position`]), registering the destination of our
+    /// identity on first use: `loquax announce`, the device walk's seed of
+    /// a node nearby. A client has no identity of its own and ignores it.
+    /// It goes out as it is, plain ([`crate::mesh_position::manual`]).
+    AnnouncePosition {
+        position: leviculum_lxmf::lev_position::Position,
+    },
     /// On a client: the home node accepted a message the shell handed it
     /// with `/send`; reported as [`OutboxEvent::Queued`], so the screen
     /// names its bubble as it names one its own router queued.
@@ -141,23 +159,46 @@ pub enum Command {
     /// On a client: a mark one of the home's devices set, pulled from the
     /// archive; reported as [`OutboxEvent::HomeMarked`].
     HomeMark { mark: crate::home::wire::Mark },
+    /// On a client: the home node gave up a leg of a message sent through
+    /// it that went without an end, and tries again
+    /// ([`crate::home::KIND_STALLED`]); reported as
+    /// [`OutboxEvent::HomeStalled`].
+    HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent (1409,
+    /// [`crate::home::KIND_PN_STATUS`]); reported as
+    /// [`OutboxEvent::HomePnStatus`].
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
+    /// On a client: a hub the home heard announcing (1599,
+    /// [`crate::home::KIND_HUB`]); reported as [`OutboxEvent::HubAnnounced`],
+    /// as a hub the client heard itself would be.
+    HomeHub { hub: crate::ui::hubs::HeardHub },
+    /// On a client: the rooms a hub named when the home asked it (1643,
+    /// [`crate::home::hub_rooms`]), pulled with the hub's entry; reported
+    /// as [`OutboxEvent::HubRooms`].
+    HomeHubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
     HomeName { destination: [u8; 16], name: String },
     /// On a client: the reader's name for a peer one of the home's devices
-    /// set, `None` for none, pulled from the archive (1139); reported as
+    /// set, `None` for none, pulled from the archive (1139), and when the
+    /// home took it, unix seconds on the home's clock (1635); reported as
     /// [`OutboxEvent::HomePetname`].
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// On a client: the reader's word on a peer one of the home's devices
-    /// set, pulled from the archive (1146); reported as
+    /// set, pulled from the archive (1146), and when the home took it, unix
+    /// seconds on the home's clock (1640); reported as
     /// [`OutboxEvent::HomePeerState`].
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
 }
 
@@ -175,6 +216,30 @@ pub struct MailboxInput {
     /// Nodes that stopped answering ([`crate::mailbox::Unanswered`]): an
     /// adopted one among them is replaced, and none is adopted.
     pub excluded: Vec<[u8; 16]>,
+}
+
+/// One engine's own tables and its router's, by count and estimated heap
+/// bytes (order 1585). The messages behind the router's outbound entries
+/// are not followed, as in lnpnd's `PN_CENSUS mailbox=`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngineCensus {
+    /// The `seq` of the [`Command::Census`] this answers (1732).
+    pub seq: u64,
+    /// [`leviculum_lxmf::router::LxmfRouter::heap_bytes`]; 0 for a client,
+    /// which has no router of its own.
+    pub router_bytes: usize,
+    /// The engine's own maps and queues.
+    pub engine_bytes: usize,
+    /// Messages this run queued and not yet left.
+    pub tracked: usize,
+    /// Recipients of packed messages this run sent.
+    pub recipients: usize,
+    /// Senders whose messages wait on their key.
+    pub unheard: usize,
+    /// Events not yet taken by the daemon.
+    pub events_queued: usize,
+    /// The engine's ticks since it started (order 1723).
+    pub ticks: u64,
 }
 
 /// What the engine reports back.
@@ -204,29 +269,49 @@ pub enum OutboxEvent {
     HomeSent {
         message_id: [u8; 32],
         destination: [u8; 16],
+        /// When the sending device composed it, the message's timestamp in
+        /// unix seconds: the bubble's time on every other device.
+        sent_at: i64,
         body: Vec<u8>,
         fields: Vec<Field>,
     },
     /// A mark one of the home's devices set ([`Command::HomeMark`]).
     HomeMarked { mark: crate::home::wire::Mark },
+    /// The home node gave up a silent leg of a message and tries again
+    /// ([`Command::HomeStalled`]).
+    HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent
+    /// ([`Command::HomePnStatus`]).
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
     /// The reader's name for a peer, set on one of the home's devices
     /// ([`Command::HomePetname`]).
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// The reader's word on a peer, set on one of the home's devices
     /// ([`Command::HomePeerState`]).
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
+    /// How far a tracked message's resource has gone, in thousandths, as
+    /// the router's outbound entry says (1662): emitted when it moved, at
+    /// most once a hook. A message small enough for a packet has none.
+    Progress { message_id: [u8; 32], permille: u16 },
     /// The message left the router's outbound queue, which the router does
-    /// only in a terminal state (`leviculum-lxmf/src/router.rs:771-773`).
-    /// `last` is the last state seen for it, when there was one.
+    /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).
+    /// `last` is the last state seen for it, when there was one, and
+    /// `failure` why its last attempt failed, when one did: `Failed` alone
+    /// does not say whether a link never came or died mid-transfer (1330).
     Left {
         message_id: [u8; 32],
         last: Option<MessageState>,
+        failure: Option<AttemptFailure>,
     },
     /// A [`Command::SelectPn`] found its node. `stamp_cost` is what the node
     /// announced, i.e. what a client will have to mine per upload.
@@ -253,6 +338,22 @@ pub enum OutboxEvent {
         fields: Vec<Field>,
         /// Whether the signature verified against a known source identity.
         verified: bool,
+        /// The message's LXMF timestamp in unix seconds: when its writer
+        /// wrote it by the writer's clock (a group copy's is the home's
+        /// acceptance, its writer's own rides the `lev` pair). The bubble
+        /// shows this, not when this device fetched it (1445); 0 when not
+        /// known.
+        sent_at: i64,
+    },
+    /// The message just [`OutboxEvent::Received`] came through the
+    /// propagation network: the router handed it on as
+    /// `DeliveryMethod::Propagated` (set where a collected message is
+    /// unpacked, `leviculum-lxmf/src/router/propagation_runtime.rs`). The
+    /// screen owes its sender a propagation receipt when the message asks
+    /// for one (1395, [`crate::ui::arrival`]).
+    Propagated {
+        message_id: [u8; 32],
+        source: [u8; 16],
     },
     /// The message just [`OutboxEvent::Received`] came from a sender whose
     /// key is not known, so its signature could not be checked. The engine
@@ -277,14 +378,75 @@ pub enum OutboxEvent {
     /// name as the reference reads it from the app data
     /// (`LXMF.display_name_from_app_data`; [`crate::names::from_app_data`]),
     /// not yet sanitised: the screen does that ([`crate::names`]).
+    /// `path_response` says the announce answered a path request, as a rule
+    /// from a cache: it names the peer as well as a live one does, and says
+    /// nothing of whether the peer is there (1330). A repeat of the last
+    /// announce heard from a recipient of a packed message is one too,
+    /// however it came: a shared instance forwards an answer from the
+    /// network as a plain announce (1332, `Engine::replayed`).
     Announced {
         destination: [u8; 16],
         name: Option<String>,
+        path_response: bool,
     },
     /// A propagation node announced its `lxmf.propagation` destination: the
     /// screen's mailbox schedule syncs on its own node's
     /// (`crate::sync::SyncEvent::Announce`).
-    NodeAnnounced { destination: [u8; 16] },
+    /// `status` is the `/lev/status` version its announce says it answers
+    /// (`{"lev": {"status": 1}}` under `PN_META_CUSTOM`, lnpnd); none for a
+    /// stock node, which a sender never asks (1395).
+    /// `name` is the name it announces under `PN_META_NAME`, unsanitised:
+    /// what the screen says the relay by (1587).
+    NodeAnnounced {
+        destination: [u8; 16],
+        status: Option<u64>,
+        name: Option<String>,
+    },
+    /// A propagation node proved the upload of the queued message
+    /// `message_id`, which it stores under `transient_id`: what a sender
+    /// asks it by later (`/lev/status`, 1395, [`crate::pn_status`]).
+    /// `node` is the propagation node the router had selected, the one
+    /// that proved it.
+    Uploaded {
+        message_id: [u8; 32],
+        transient_id: [u8; 32],
+        node: Option<[u8; 16]>,
+    },
+    /// A node announced its position on `lev.position` (1302,
+    /// [`crate::mesh_position`]): `identity` is the hash of the identity
+    /// the announce proved, `location` what its app data said, timed by
+    /// when the node heard it, `name` the name it carried. A position
+    /// sealed to somebody else never becomes one
+    /// ([`crate::mesh_position::read`]). Handed to the screen as
+    /// [`crate::ui::UiEvent::MeshPosition`].
+    MeshPosition {
+        identity: [u8; 16],
+        location: leviculum_lxmf::telemetry::Location,
+        name: Option<String>,
+    },
+    /// A hub announced its `rrc.hub` destination (1599,
+    /// [`crate::ui::hubs`]): heard by this node, timed and with the hops of
+    /// the hearing, or pulled from the home ([`Command::HomeHub`]). The
+    /// screen lists it among the hubs ([`crate::ui::rooms::RoomsEvent::Heard`]);
+    /// a home keeps it for its devices.
+    HubAnnounced { hub: crate::ui::hubs::HeardHub },
+    /// A NomadNet node announced its pages (1579, `nomadnetwork.node`),
+    /// heard by this node, timed and with the hops of the hearing. A home
+    /// keeps it for its devices ([`crate::home::pages`]); a device's
+    /// Browse tab lists the nodes its own fetch hears.
+    PageAnnounced {
+        node: lnomad::discovery::DiscoveredNode,
+    },
+    /// An LXMF delivery destination announced a name (1643), heard by this
+    /// node, timed and with the hops of the hearing. A home keeps it for its
+    /// devices ([`crate::home::pages::NameRow`]), so a device of an external
+    /// mailbox names peers it never heard itself; everyone else names the
+    /// peer by [`OutboxEvent::Announced`], which the same announce raises.
+    NameHeard { row: crate::home::pages::NameRow },
+    /// On a client: the rooms a hub named when its home asked it (1643,
+    /// [`Command::HomeHubRooms`]). The server sheet lists them until the
+    /// device's own question answers.
+    HubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,
@@ -298,6 +460,16 @@ pub enum OutboxEvent {
         detail: String,
         path: Option<PropagationPathAttempts>,
     },
+    /// A propagated [`Command::SendPacked`] the router did not take since
+    /// this node does not hold the key of its `destination`: the copy on
+    /// the node is encrypted for the recipient. The recipient's path was
+    /// asked, and the announce that answers it brings the key (1406: the
+    /// router held such a leg without a word until the home's stall bound
+    /// gave it up). No queue entry, so nothing else is said of it.
+    KeyMissing {
+        message_id: [u8; 32],
+        destination: [u8; 16],
+    },
     /// A [`Command::SendPacked`] the router did not take: no queue entry, so
     /// nothing else will be said of it.
     Unsent {
@@ -307,13 +479,55 @@ pub enum OutboxEvent {
     /// Every command before the [`Command::Fence`] with this token was
     /// taken.
     Fenced { token: u64 },
+    /// The engine's tables at the moment it took a [`Command::Census`].
+    Census(EngineCensus),
     /// The message just [`OutboxEvent::Received`], packed as it came, for a
     /// home node's archive. Only an engine asked for it hands it out
-    /// ([`crate::engine::Engine::handing_out_packed`]).
+    /// ([`crate::engine::Engine::handing_out_packed`]), and that engine holds
+    /// the message's proof until a [`Command::Prove`] says it is archived.
     Packed {
         message_id: [u8; 32],
         packed: Vec<u8>,
+        arrived: Arrived,
     },
+}
+
+/// How a received message reached us, as the router read it: the `via` of a
+/// home's `HOME_ACCEPT` (1305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrived {
+    /// Over a delivery link.
+    Direct,
+    /// As one single packet, encrypted to the delivery destination.
+    Opportunistic,
+    /// Collected from a propagation node.
+    Propagated,
+    /// From an `lxm://` paper message.
+    Paper,
+}
+
+impl Arrived {
+    /// The word the event log uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Opportunistic => "opportunistic",
+            Self::Propagated => "propagated",
+            Self::Paper => "paper",
+        }
+    }
+}
+
+impl From<leviculum_lxmf::DeliveryMethod> for Arrived {
+    fn from(method: leviculum_lxmf::DeliveryMethod) -> Self {
+        use leviculum_lxmf::DeliveryMethod;
+        match method {
+            DeliveryMethod::Direct => Self::Direct,
+            DeliveryMethod::Opportunistic => Self::Opportunistic,
+            DeliveryMethod::Propagated => Self::Propagated,
+            DeliveryMethod::Paper => Self::Paper,
+        }
+    }
 }
 
 /// The engine went away — in this slice, the driver detached a panicking

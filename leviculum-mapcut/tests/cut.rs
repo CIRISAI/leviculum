@@ -356,6 +356,9 @@ fn options(threads: usize) -> CutOptions {
         notice: "test notice, ODbL".to_owned(),
         threads,
         locale: Some("de".to_owned()),
+        buildings: true,
+        pois: true,
+        round: leviculum_mapcut::cut::ROUND,
     }
 }
 
@@ -894,4 +897,655 @@ fn a_name_falls_back_to_english_where_the_locale_cannot_read_it() {
         ["Αθήνα", "Moscow", "東京", "München", "Αθήνα"]
     );
     assert_eq!(shown(None), ["Αθήνα", "Москва", "東京", "München", "Αθήνα"]);
+}
+
+/// The region `bytes` with every tile entry's blob, by tile.
+fn blobs(bytes: &[u8]) -> BTreeMap<TileId, Vec<u8>> {
+    let r = Region::from_bytes(bytes).expect("open");
+    (0..r.header().tiles)
+        .map(|n| {
+            let e = r.entry(n).expect("entry");
+            let at = e.offset as usize;
+            (e.id, bytes[at..at + e.len as usize].to_vec())
+        })
+        .collect()
+}
+
+/// Every footprint of tile `id`'s building section, rings of points.
+fn footprints_of(r: &Region<&[u8]>, id: TileId) -> Vec<Vec<Vec<(i16, i16)>>> {
+    let Some(b) = r.buildings(id).expect("section") else {
+        return Vec::new();
+    };
+    b.cells()
+        .flat_map(|c| c.footprints())
+        .map(|f| {
+            f.expect("footprint")
+                .rings()
+                .map(|r| r.points().collect())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn the_cut_writes_the_z15_buildings_and_leaves_the_tiles_as_they_were() {
+    // Without pois on either side: this test holds the version 4 rule;
+    // the poi tests hold version 5's.
+    let mut out = Cursor::new(Vec::new());
+    let opts = CutOptions {
+        pois: false,
+        ..options(2)
+    };
+    cut(&source(false), &opts, &mut out).expect("cut");
+    let with = out.into_inner();
+    let mut out = Cursor::new(Vec::new());
+    let opts = CutOptions {
+        buildings: false,
+        pois: false,
+        ..options(2)
+    };
+    cut(&source(false), &opts, &mut out).expect("cut");
+    let without = out.into_inner();
+
+    let (rw, ro) = (
+        Region::from_bytes(&with).expect("open"),
+        Region::from_bytes(&without).expect("open"),
+    );
+    rw.verify().expect("verify");
+    ro.verify().expect("verify");
+    // Version 4 either way (1291); without buildings the section count is 0.
+    assert_eq!(rw.header().version_of(), 4);
+    assert_eq!(ro.header().version_of(), 4);
+    assert_eq!(ro.building_sections(), 0);
+    // The base tiles are the same bytes with and without buildings.
+    assert_eq!(blobs(&with), blobs(&without));
+    // One section, for the busy z15 tile with its one building; the z12
+    // busy tile's building is not cut, the sea tile has none.
+    assert_eq!(rw.building_sections(), 1);
+    let id = TileId {
+        z: 15,
+        x: 17408,
+        y: 11943,
+    };
+    assert_eq!(rw.building_entry(0).expect("entry").id, id);
+    let square = vec![(100, 100), (150, 100), (150, 150), (100, 150)];
+    assert_eq!(footprints_of(&rw, id), [vec![square]]);
+}
+
+/// A building the source cut at a tile edge is in each tile as that
+/// tile's piece, once; a collinear outline, under a pixel, is dropped as
+/// degenerate; a courtyard keeps its hole.
+#[test]
+fn a_building_across_a_tile_edge_is_in_each_tile_once() {
+    let t = |z, x, y| TileId { z, x, y };
+    let tile = |buildings: Vec<Vec<Vec<[i32; 2]>>>| -> Vec<u8> {
+        Tile {
+            layers: vec![
+                layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+                layer(
+                    "buildings",
+                    buildings
+                        .iter()
+                        .map(|rings| (POLYGON, "building", polygon(rings)))
+                        .collect(),
+                ),
+            ],
+        }
+        .encode_to_vec()
+    };
+    let mut hole = square(1200, 1200, 100);
+    hole.reverse();
+    let flat = vec![[500, 500], [600, 500], [700, 500]];
+    let mut tiles = BTreeMap::new();
+    // The building over the edge between x 17408 and 17409, each tile
+    // holding its piece out to its buffer.
+    tiles.insert(
+        t(15, 17408, 11943),
+        tile(vec![
+            vec![square(4000, 100, 200)],
+            vec![square(1100, 1100, 300), hole],
+            vec![flat],
+        ]),
+    );
+    tiles.insert(t(15, 17409, 11943), tile(vec![vec![square(-96, 100, 200)]]));
+    let src = Synthetic {
+        tiles,
+        reversed: false,
+    };
+    let mut out = Cursor::new(Vec::new());
+    let stats = cut(&src, &options(1), &mut out).expect("cut");
+    let bytes = out.into_inner();
+    let r = Region::from_bytes(&bytes).expect("open");
+    r.verify().expect("verify");
+    let z15 = stats.zooms[&15];
+    assert_eq!(
+        (
+            z15.buildings_in,
+            z15.buildings_out,
+            z15.buildings_degenerate,
+            z15.building_sections
+        ),
+        (4, 3, 1, 2)
+    );
+    let west = footprints_of(&r, t(15, 17408, 11943));
+    let east = footprints_of(&r, t(15, 17409, 11943));
+    let piece = |x: i16| vec![vec![(x, 100), (x + 200, 100), (x + 200, 300), (x, 300)]];
+    assert_eq!(east, [piece(-96)]);
+    assert_eq!(west.len(), 2);
+    assert!(west.contains(&piece(4000)));
+    assert!(west.iter().any(|f| f.len() == 2), "the courtyard's hole");
+}
+
+#[test]
+fn the_oltrarno_fixture_cuts_its_buildings() {
+    const FIXTURE: &[u8] = include_bytes!("../fixtures/oltrarno.pmtiles");
+    struct InMemory;
+    impl leviculum_mapcut::pmtiles::RangeRead for InMemory {
+        fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+            let at = (offset as usize).min(FIXTURE.len());
+            let end = at.saturating_add(len as usize).min(FIXTURE.len());
+            Ok(FIXTURE[at..end].to_vec())
+        }
+    }
+    let archive = leviculum_mapcut::pmtiles::Archive::from_source(InMemory).expect("open");
+    let opts = |buildings| CutOptions {
+        bounds: Bounds {
+            west: 112_615_000,
+            south: 437_405_000,
+            east: 112_825_000,
+            north: 437_545_000,
+        },
+        zooms: 14..=15,
+        buildings,
+        ..options(2)
+    };
+    let mut with = Cursor::new(Vec::new());
+    let stats = cut(&archive, &opts(true), &mut with).expect("cut");
+    let mut without = Cursor::new(Vec::new());
+    cut(&archive, &opts(false), &mut without).expect("cut");
+    let (with, without) = (with.into_inner(), without.into_inner());
+    let r = Region::from_bytes(&with).expect("open");
+    r.verify().expect("verify");
+    assert_eq!(blobs(&with), blobs(&without));
+    let z15 = stats.zooms[&15];
+    assert_eq!(z15.building_sections, 4, "{z15:?}");
+    assert!(z15.buildings_out > 100, "{z15:?}");
+    assert_eq!(z15.buildings_over_device, 0);
+    assert!(stats.zooms[&14].buildings_in == 0, "z14 is not cut");
+    let n: usize = (0..r.building_sections())
+        .map(|n| footprints_of(&r, r.building_entry(n).expect("entry").id).len())
+        .sum();
+    assert_eq!(n as u64, z15.buildings_out);
+    println!(
+        "oltrarno buildings: pieces {} footprints {} vertices {} bytes {} of region {} (without {})",
+        z15.buildings_in,
+        z15.buildings_out,
+        z15.building_vertices,
+        z15.building_bytes,
+        with.len(),
+        without.len()
+    );
+}
+
+/// The strings of a poi, resolved: kind, name, attributes.
+fn poi_strings(
+    r: &Region<&[u8]>,
+    s: &leviculum_map::pois::Pois<'_>,
+    p: &leviculum_map::pois::Poi,
+) -> (String, Option<String>, u8, Vec<(String, String)>) {
+    let txt = |n: u32| r.string(n).expect("string").to_owned();
+    let attrs = s.attrs_of(p).map(|(k, v)| (txt(k), txt(v))).collect();
+    (txt(p.kind), p.name.map(txt), p.min_zoom, attrs)
+}
+
+/// A Protomaps 4.x tile of the travel things the cut keeps since 1685:
+/// supply pois with their opening hours, the state of a way, route
+/// marks, a border crossing, protected and military areas. Frankfurt
+/// names on the suite's Florence tile addresses, as `named_tile` does.
+fn travel_tile() -> Vec<u8> {
+    let poi = |kind: &str, props: Vec<(&'static str, Value)>, x: i32| {
+        let mut p = vec![("kind", text(kind)), ("min_zoom", number(14))];
+        p.extend(props);
+        (POINT, at(x, 200), p)
+    };
+    Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            tagged(
+                "landuse",
+                vec![
+                    (
+                        POLYGON,
+                        polygon(&[square(100, 100, 400)]),
+                        vec![("kind", text("military"))],
+                    ),
+                    (
+                        POLYGON,
+                        polygon(&[square(600, 100, 400)]),
+                        vec![("kind", text("nature_reserve")), ("access", text("no"))],
+                    ),
+                    // The control: an everyday area carries no record.
+                    (
+                        POLYGON,
+                        polygon(&[square(1100, 100, 400)]),
+                        vec![("kind", text("residential"))],
+                    ),
+                ],
+            ),
+            tagged(
+                "pois",
+                vec![
+                    poi("drinking_water", vec![("access", text("yes"))], 300),
+                    poi(
+                        "spring",
+                        vec![("name", text("Lohrbergquelle")), ("elevation", number(185))],
+                        500,
+                    ),
+                    poi(
+                        "fuel",
+                        vec![
+                            ("name", text("Tankstelle Mainkai")),
+                            ("opening_hours", text("24/7")),
+                        ],
+                        700,
+                    ),
+                    poi("shelter", vec![("kind_detail", text("lean_to"))], 900),
+                    poi(
+                        "camp_site",
+                        vec![("name", text("Campingplatz Niederrad"))],
+                        1100,
+                    ),
+                    // A kind no code names: kept verbatim, skipped by a
+                    // reader that does not know it.
+                    poi("border_control", vec![], 1300),
+                    // Unnamed street furniture is a poi too.
+                    poi("bench", vec![], 1500),
+                    // The locale's name, where it differs, as `name:alt`.
+                    poi(
+                        "viewpoint",
+                        vec![
+                            ("name", text("Belvedere")),
+                            ("name:de", text("Aussichtspunkt")),
+                        ],
+                        1700,
+                    ),
+                    // In the buffer: its neighbour's.
+                    (POINT, at(-20, 200), vec![("kind", text("bench"))]),
+                ],
+            ),
+            tagged(
+                "roads",
+                vec![
+                    (
+                        LINESTRING,
+                        line(&[[0, 3000], [4000, 3000]]),
+                        vec![
+                            ("kind", text("path")),
+                            ("kind_detail", text("track")),
+                            ("surface", text("gravel")),
+                            ("tracktype", text("grade2")),
+                            ("sac_scale", text("hiking")),
+                            ("trail_visibility", text("good")),
+                            ("ford", text("yes")),
+                            ("access", text("private")),
+                        ],
+                    ),
+                    (
+                        LINESTRING,
+                        line(&[[0, 3500], [4000, 3500]]),
+                        vec![
+                            ("kind", text("highway")),
+                            ("name", text("A 66")),
+                            ("ref", text("A 66")),
+                            ("network", text("DE:BAB")),
+                            ("oneway", text("yes")),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    }
+    .encode_to_vec()
+}
+
+/// 1685: the cut keeps what OpenStreetMap carries. A cut of the
+/// Frankfurt travel tile carries the supply pois with their attributes,
+/// the state of the way, the route marks and the protected areas, and a
+/// reader gets them back by the region's own strings.
+#[test]
+fn the_cut_keeps_the_travel_things_the_source_carries() {
+    let mut tiles = BTreeMap::new();
+    let id = TileId {
+        z: 15,
+        x: 17408,
+        y: 11943,
+    };
+    tiles.insert(id, travel_tile());
+    let src = Synthetic {
+        tiles,
+        reversed: false,
+    };
+    let opts = CutOptions {
+        zooms: 15..=15,
+        ..options(2)
+    };
+    let mut out = Cursor::new(Vec::new());
+    let stats = cut(&src, &opts, &mut out).expect("cut");
+    let bytes = out.into_inner();
+    let r = Region::from_bytes(&bytes).expect("open");
+    r.verify().expect("verify");
+    assert_eq!(r.header().version_of(), 5);
+    assert_eq!(r.poi_sections(), 1);
+    let s = r.pois(id).expect("pois").expect("a section");
+
+    // The pois: every kind kept verbatim, the buffer one left out.
+    let pois: Vec<_> = s.pois().map(|p| poi_strings(&r, &s, &p)).collect();
+    assert_eq!(pois.len(), 8);
+    let find = |kind: &str| {
+        pois.iter()
+            .find(|(k, ..)| k == kind)
+            .unwrap_or_else(|| panic!("{kind} missing"))
+    };
+    let (_, name, min_zoom, attrs) = find("drinking_water");
+    assert_eq!((name.as_deref(), *min_zoom), (None, 14));
+    assert_eq!(attrs, &[("access".to_owned(), "yes".to_owned())]);
+    let (_, name, _, attrs) = find("spring");
+    assert_eq!(name.as_deref(), Some("Lohrbergquelle"));
+    assert!(attrs.contains(&("elevation".to_owned(), "185".to_owned())));
+    let (_, name, _, attrs) = find("fuel");
+    assert_eq!(name.as_deref(), Some("Tankstelle Mainkai"));
+    assert!(attrs.contains(&("opening_hours".to_owned(), "24/7".to_owned())));
+    assert!(find("shelter")
+        .3
+        .contains(&("kind_detail".to_owned(), "lean_to".to_owned())));
+    assert_eq!(
+        find("camp_site").1.as_deref(),
+        Some("Campingplatz Niederrad")
+    );
+    find("border_control");
+    assert_eq!(find("bench").1, None);
+    let (_, name, _, attrs) = find("viewpoint");
+    assert_eq!(name.as_deref(), Some("Belvedere"));
+    assert!(attrs.contains(&("name:alt".to_owned(), "Aussichtspunkt".to_owned())));
+
+    // The ways: the path's state, the road's route marks, the protected
+    // areas' kinds; the residential area and the earth carry no record.
+    let fx = r.fixture(id).expect("fixture").expect("a tile");
+    let features: Vec<_> = fx.features().collect();
+    let txt = |n: u32| r.string(n).expect("string").to_owned();
+    let mut by_class: BTreeMap<(u8, u16), Vec<(String, String)>> = BTreeMap::new();
+    for w in s.ways() {
+        let f = &features[usize::from(w.feature)];
+        let attrs = s.way_attrs_of(&w).map(|(k, v)| (txt(k), txt(v))).collect();
+        by_class.insert((f.class.wire().0, w.feature), attrs);
+    }
+    assert_eq!(by_class.len(), 4, "{by_class:?}");
+    let of_class = |c: Class| -> Vec<&Vec<(String, String)>> {
+        by_class
+            .iter()
+            .filter(|((w, _), _)| *w == c.wire().0)
+            .map(|(_, a)| a)
+            .collect()
+    };
+    let path = of_class(Class::Path);
+    assert_eq!(path.len(), 1);
+    for (k, v) in [
+        ("kind_detail", "track"),
+        ("surface", "gravel"),
+        ("tracktype", "grade2"),
+        ("sac_scale", "hiking"),
+        ("trail_visibility", "good"),
+        ("ford", "yes"),
+        ("access", "private"),
+    ] {
+        assert!(
+            path[0].contains(&(k.to_owned(), v.to_owned())),
+            "path lost {k}: {path:?}"
+        );
+    }
+    let road = of_class(Class::MajorRoad);
+    assert_eq!(road.len(), 1);
+    for (k, v) in [("ref", "A 66"), ("network", "DE:BAB"), ("oneway", "yes")] {
+        assert!(
+            road[0].contains(&(k.to_owned(), v.to_owned())),
+            "road lost {k}: {road:?}"
+        );
+    }
+    let areas = of_class(Class::Urban);
+    assert_eq!(areas.len(), 2, "military and nature reserve, nothing else");
+    assert!(areas
+        .iter()
+        .any(|a| a.contains(&("kind".to_owned(), "military".to_owned()))));
+    assert!(areas.iter().any(
+        |a| a.contains(&("kind".to_owned(), "nature_reserve".to_owned()))
+            && a.contains(&("access".to_owned(), "no".to_owned()))
+    ));
+
+    // The z15 stats carry the counts the report cites.
+    let z15 = stats.zooms[&15];
+    assert_eq!((z15.pois, z15.poi_ways, z15.poi_sections), (8, 4, 1));
+    assert!(z15.poi_bytes > 0);
+}
+
+/// The fixture archives cut their pois: the measurement of 1685. The
+/// tile blobs are the same bytes with and without them, and the numbers
+/// print for the report.
+#[test]
+fn the_fixture_archives_measure_their_pois() {
+    for (name, fixture, bounds, zooms) in [
+        (
+            "oltrarno",
+            &include_bytes!("../fixtures/oltrarno.pmtiles")[..],
+            Bounds {
+                west: 112_615_000,
+                south: 437_405_000,
+                east: 112_825_000,
+                north: 437_545_000,
+            },
+            14..=15,
+        ),
+        (
+            "grunewald",
+            &include_bytes!("../fixtures/grunewald.pmtiles")[..],
+            Bounds {
+                west: 132_250_000,
+                south: 524_700_000,
+                east: 132_310_000,
+                north: 524_730_000,
+            },
+            12..=15,
+        ),
+    ] {
+        struct InMemory(Vec<u8>);
+        impl leviculum_mapcut::pmtiles::RangeRead for InMemory {
+            fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+                let at = (offset as usize).min(self.0.len());
+                let end = at.saturating_add(len as usize).min(self.0.len());
+                Ok(self.0[at..end].to_vec())
+            }
+        }
+        let archive = leviculum_mapcut::pmtiles::Archive::from_source(InMemory(fixture.to_vec()))
+            .expect("open");
+        let opts = |pois| CutOptions {
+            bounds,
+            zooms: zooms.clone(),
+            pois,
+            ..options(2)
+        };
+        let mut with = Cursor::new(Vec::new());
+        let stats = cut(&archive, &opts(true), &mut with).expect("cut");
+        let mut without = Cursor::new(Vec::new());
+        cut(&archive, &opts(false), &mut without).expect("cut");
+        let (with, without) = (with.into_inner(), without.into_inner());
+        let r = Region::from_bytes(&with).expect("open");
+        r.verify().expect("verify");
+        assert_eq!(r.header().version_of(), 5);
+        assert_eq!(blobs(&with), blobs(&without));
+        let deepest = *zooms.end();
+        let z = stats.zooms[&deepest];
+        assert!(r.poi_sections() > 0, "{name}");
+        assert!(z.pois > 10, "{name}: {z:?}");
+        for shallow in zooms.clone().filter(|z| *z != deepest) {
+            let s = stats.zooms[&shallow];
+            assert_eq!((s.pois, s.poi_sections), (0, 0), "only the deepest is cut");
+        }
+        println!(
+            "{name} pois: pois {} ways {} attrs {} sections {} poi_bytes {} \
+             of region {} (without {}, labels {} buildings {})",
+            z.pois,
+            z.poi_ways,
+            z.poi_attrs,
+            z.poi_sections,
+            z.poi_bytes,
+            with.len(),
+            without.len(),
+            z.label_bytes,
+            z.building_bytes,
+        );
+    }
+}
+
+/// A line whose vertices lie far outside the tile (1727, audit of 1707):
+/// the joined-end search walks the cells of every segment's box, which
+/// for a segment of 3·10^8 units each way was 5·10^12 cells, so the cut
+/// never returned. Clipped to the tile and its stated window it returns
+/// at once, and the line stays in the tile.
+#[test]
+fn a_line_reaching_far_past_the_tile_is_cut_at_once() {
+    let far = 300_000_000;
+    let raw = Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            layer(
+                "roads",
+                vec![(
+                    LINESTRING,
+                    "major_road",
+                    line(&[[-far, -far], [2048, 2048], [far, far]]),
+                )],
+            ),
+        ],
+    }
+    .encode_to_vec();
+    let layers = leviculum_map::profile::layers(leviculum_map::profile::CUT_1, 15)
+        .expect("profile 1 at z15");
+    assert!(layers.tolerance > 0, "the held simplification runs");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(cut_tile(&raw, layers).map(|(blob, st)| (blob.is_some(), st)));
+    });
+    let (has_blob, st) = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the cut returns in under one second")
+        .expect("cut");
+    assert!(has_blob);
+    assert_eq!(st.features_out, 2, "the earth and the road: {st:?}");
+}
+
+/// One deepest zoom for the geometry, the names and the pois (1727, the
+/// audit of 1707): a cut asked for a zoom deeper than the source has in
+/// the box takes the deepest zoom the source has as the region's deepest
+/// for all three. The geometry did so already; the names and the pois
+/// took the zoom asked for, so a z14-16 cut of a z14-15 source carried no
+/// poi and dropped the names only the deepest zoom carries.
+#[test]
+fn a_zoom_the_source_lacks_moves_no_part_of_the_deepest_cut() {
+    struct InMemory(&'static [u8]);
+    impl leviculum_mapcut::pmtiles::RangeRead for InMemory {
+        fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+            let at = (offset as usize).min(self.0.len());
+            let end = at.saturating_add(len as usize).min(self.0.len());
+            Ok(self.0[at..end].to_vec())
+        }
+    }
+    let archive = leviculum_mapcut::pmtiles::Archive::from_source(InMemory(include_bytes!(
+        "../fixtures/oltrarno.pmtiles"
+    )))
+    .expect("open");
+    let cut_to = |hi: u8| {
+        let opts = CutOptions {
+            bounds: Bounds {
+                west: 112_615_000,
+                south: 437_405_000,
+                east: 112_825_000,
+                north: 437_545_000,
+            },
+            zooms: 14..=hi,
+            ..options(2)
+        };
+        let mut out = Cursor::new(Vec::new());
+        let stats = cut(&archive, &opts, &mut out).expect("cut");
+        (stats, out.into_inner())
+    };
+    let (have, have_bytes) = cut_to(15);
+    let (asked, asked_bytes) = cut_to(16);
+    assert!(
+        !asked.zooms.contains_key(&16) || asked.zooms[&16].tiles == 0,
+        "the source has no z16: {:?}",
+        asked.zooms.get(&16)
+    );
+    let (h, a) = (have.zooms[&15], asked.zooms[&15]);
+    assert!(h.pois > 10, "{h:?}");
+    assert_eq!(
+        (
+            a.pois,
+            a.poi_ways,
+            a.point_labels,
+            a.line_labels,
+            a.label_bytes
+        ),
+        (
+            h.pois,
+            h.poi_ways,
+            h.point_labels,
+            h.line_labels,
+            h.label_bytes
+        ),
+    );
+    assert_eq!(blobs(&asked_bytes), blobs(&have_bytes));
+}
+
+/// A footprint over the device's vertex capacity at the corner-exact
+/// tolerance 0 (1727, the audit of 1707: `footprints` resimplifies from
+/// tolerance 1 when the base is 0, a branch no fixture reached). A round
+/// building of 6,000 corners comes back simplified, kept, and within
+/// [`leviculum_map::buildings::MAX_VERTICES`].
+#[test]
+fn a_footprint_over_the_device_capacity_is_resimplified_and_kept() {
+    use leviculum_map::buildings::MAX_VERTICES;
+    use leviculum_mapcut::cut::{footprints, ZoomStats, BUILDING_TOLERANCE};
+
+    assert_eq!(BUILDING_TOLERANCE, 0);
+    let n = 6000;
+    let mut ring: Vec<[i32; 2]> = Vec::new();
+    for i in 0..n {
+        let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+        let p = [
+            2048 + (1500.0 * a.cos()).round() as i32,
+            2048 + (1500.0 * a.sin()).round() as i32,
+        ];
+        if ring.last() != Some(&p) {
+            ring.push(p);
+        }
+    }
+    assert!(ring.len() > MAX_VERTICES, "{} corners", ring.len());
+    let mut st = ZoomStats::default();
+    let started = std::time::Instant::now();
+    let out = footprints(&[vec![ring]], &mut st);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(out.len(), 1, "kept: {st:?}");
+    assert!(st.resimplified >= 1, "{st:?}");
+    assert_eq!(
+        (
+            st.buildings_out,
+            st.buildings_degenerate,
+            st.buildings_over_device
+        ),
+        (1, 0, 0)
+    );
+    let corners: usize = out[0].iter().map(Vec::len).sum();
+    assert!(
+        (16..=MAX_VERTICES).contains(&corners),
+        "{corners} corners after resimplifying"
+    );
 }

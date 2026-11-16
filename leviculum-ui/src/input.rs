@@ -248,6 +248,87 @@ pub trait InputBuffer {
     /// Put the cursor before the `at`th character, or at the end when the
     /// text is shorter: where a click in the field lands.
     fn set_cursor(&mut self, at: usize);
+    /// Make the field hold `text`, the cursor at its end: a draft put back
+    /// when its conversation opens again.
+    fn set_value(&mut self, text: &str);
+}
+
+/// The display column of a field's cursor: the width of the characters
+/// before it, a wide character counting two. What `tui_input::Input`'s
+/// `visual_cursor` answers, over any [`InputBuffer`], so a core that draws a
+/// caret names no editor.
+pub fn visual_cursor(field: &impl InputBuffer) -> usize {
+    let value = field.value();
+    let end = value
+        .char_indices()
+        .nth(field.cursor())
+        .map_or(value.len(), |(at, _)| at);
+    unicode_width::UnicodeWidthStr::width(&value[..end])
+}
+
+/// How many display columns of a field to scroll past so its cursor stays
+/// inside `width` columns, measured in whole characters from the start.
+/// `tui_input::Input`'s `visual_scroll`, over any [`InputBuffer`].
+pub fn visual_scroll(field: &impl InputBuffer, width: usize) -> usize {
+    let scroll = visual_cursor(field).max(width) - width;
+    let mut skipped = 0;
+    let mut chars = field.value().chars();
+    while skipped < scroll {
+        match chars.next() {
+            Some(c) => skipped += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
+            None => break,
+        }
+    }
+    skipped
+}
+
+/// A field that holds its text and cursor and edits nothing by key: the
+/// field of a core whose platform brings its own text field (a phone's, a
+/// window's, a board's touch keyboard) and hands the text in with
+/// [`InputBuffer::set_value`]. `no_std`, so a core built for a board names a
+/// field without the terminal's editor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Line {
+    text: String,
+    cursor: usize,
+}
+
+impl InputBuffer for Line {
+    fn value(&self) -> &str {
+        &self.text
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn edit(&mut self, _key: &KeyEvent) -> bool {
+        false
+    }
+
+    fn take(&mut self) -> String {
+        self.cursor = 0;
+        core::mem::take(&mut self.text)
+    }
+
+    fn newline(&mut self) {
+        let at = self
+            .text
+            .char_indices()
+            .nth(self.cursor)
+            .map_or(self.text.len(), |(at, _)| at);
+        self.text.insert(at, '\n');
+        self.cursor += 1;
+    }
+
+    fn set_cursor(&mut self, at: usize) {
+        self.cursor = at.min(self.text.chars().count());
+    }
+
+    fn set_value(&mut self, text: &str) {
+        self.text = String::from(text);
+        self.cursor = self.text.chars().count();
+    }
 }
 
 /// The terminal's field: `tui-input`, edited through [`input_request`], the
@@ -287,6 +368,11 @@ impl InputBuffer for tui_input::Input {
     fn set_cursor(&mut self, at: usize) {
         let end = tui_input::Input::value(self).chars().count();
         self.handle(InputRequest::SetCursor(at.min(end)));
+    }
+
+    fn set_value(&mut self, text: &str) {
+        // The yank buffer stays: `Ctrl-y` still brings back what was cut.
+        *self = core::mem::take(self).with_value(text.to_string());
     }
 }
 
@@ -539,5 +625,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The caret column and the scroll a core reads off any field are the
+    /// terminal editor's own, wide characters and all, so a frontend that
+    /// switches fields draws the caret where it was.
+    #[test]
+    fn the_visual_cursor_and_scroll_are_the_editors() {
+        for text in [
+            "",
+            "abc",
+            "lxmf@abc:/page/index.mu",
+            "日本語のページ",
+            "a日b本c",
+        ] {
+            for at in 0..=text.chars().count() {
+                let editor = field(text, at);
+                let mut line = Line::default();
+                line.set_value(text);
+                line.set_cursor(at);
+                assert_eq!(
+                    visual_cursor(&line),
+                    editor.visual_cursor(),
+                    "{text:?} at {at}"
+                );
+                for width in [0, 1, 3, 8] {
+                    assert_eq!(
+                        visual_scroll(&line, width),
+                        editor.visual_scroll(width),
+                        "{text:?} at {at} in {width}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The platform's field without the terminal's editor.
+#[cfg(test)]
+mod line {
+    use super::*;
+
+    /// Keys edit nothing; the text comes in whole, the cursor at its end,
+    /// and goes out whole.
+    #[test]
+    fn a_line_takes_its_text_whole_and_no_key() {
+        let mut line = Line::default();
+        assert!(!line.edit(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        line.set_value("päge");
+        assert_eq!((line.value(), line.cursor()), ("päge", 4));
+        line.set_cursor(2);
+        line.newline();
+        assert_eq!((line.value(), line.cursor()), ("pä\nge", 3));
+        line.set_cursor(99);
+        assert_eq!(line.cursor(), 5);
+        assert_eq!(line.take(), "pä\nge");
+        assert_eq!((line.value(), line.cursor()), ("", 0));
     }
 }

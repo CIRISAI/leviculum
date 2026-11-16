@@ -337,6 +337,9 @@ pub enum AnnounceSlot {
     Own,
     /// The `lxmf.propagation` role, when this boot runs one.
     Propagation,
+    /// The board's `lev.position`, when it shares its position (order
+    /// 1301, [`crate::PositionShare`]).
+    Position,
 }
 
 impl AnnounceSlot {
@@ -351,8 +354,12 @@ impl AnnounceSlot {
     /// unconditional, and the first contact that announce invites is
     /// exactly what delivers the clock seed.
     #[must_use]
+    ///
+    /// The position announce is clock-gated for the board's own reason and
+    /// one more: its fix age is counted from the emission, so a receiver
+    /// dates the fix by the announce's own timestamp.
     pub const fn is_clock_gated(self) -> bool {
-        matches!(self, Self::Own)
+        matches!(self, Self::Own | Self::Position)
     }
 
     /// How long after this slot's first announce the second follows,
@@ -371,7 +378,7 @@ impl AnnounceSlot {
     #[must_use]
     pub const fn start_gap_ms(self) -> Option<u64> {
         match self {
-            Self::Own => None,
+            Self::Own | Self::Position => None,
             Self::Propagation => Some(PN_START_ANNOUNCE_GAP_MS),
         }
     }
@@ -382,6 +389,7 @@ impl AnnounceSlot {
         match self {
             Self::Own => "periodic",
             Self::Propagation => "pn-periodic",
+            Self::Position => "position-periodic",
         }
     }
 }
@@ -521,9 +529,16 @@ pub const PN_START_ANNOUNCE_GAP_MS: u64 = 10 * 1_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualAnnounce {
     /// Send both announces now; the cadence has booked them.
-    Now,
-    /// The budget does not allow the set yet; both slots fire on their own
-    /// in `wait_ms`.
+    Now {
+        /// The position slot was booked with them: send the position
+        /// announce too, after the other two. `false` when the press did
+        /// not ask for it, or when the slot's own spacing since its last
+        /// announce has not passed, in which case the slot was brought
+        /// forward to that moment instead.
+        position: bool,
+    },
+    /// The budget does not allow the set yet; every slot the press asked
+    /// for fires on its own in `wait_ms`.
     Deferred {
         /// How long until the budget allows it.
         wait_ms: u64,
@@ -544,6 +559,13 @@ pub struct AnnounceCadence {
     budget: DutyBudget,
     own: PeriodicAnnounce,
     propagation: PeriodicAnnounce,
+    position: PeriodicAnnounce,
+    /// The fix the last position announce carried, which the 25 m advance
+    /// measures from.
+    position_sent: Option<Fix>,
+    /// The CHTM's hour-long channel load, hundredths of a percent, which
+    /// thins the position announce ([`crate::thinned_interval_ms`]).
+    channel_load_e4: u16,
 }
 
 impl Default for AnnounceCadence {
@@ -566,6 +588,9 @@ impl AnnounceCadence {
             },
             own: PeriodicAnnounce::new(crate::PERIODIC_ANNOUNCE_INITIAL_DELAY_MS),
             propagation: PeriodicAnnounce::new(PN_ANNOUNCE_INITIAL_DELAY_MS),
+            position: PeriodicAnnounce::new(crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS),
+            position_sent: None,
+            channel_load_e4: 0,
         }
     }
 
@@ -580,6 +605,7 @@ impl AnnounceCadence {
     pub fn arm(&mut self, now_ms: u64) {
         self.own.arm(now_ms);
         self.propagation.arm(now_ms);
+        self.position.arm(now_ms);
     }
 
     /// Tell the cadence what a frame costs and what the band allows.
@@ -675,17 +701,64 @@ impl AnnounceCadence {
         // minute owes the mesh one announce, not six. On a carrier whose
         // band derives no lawful allowance the budget's spacing is zero,
         // and the floor is then the only thing holding that case.
-        let spacing = {
-            let budget = self.budget.min_interval_ms();
-            let floor = MOVEMENT_SAMPLE_INTERVAL_MS;
-            if budget > floor {
-                budget
-            } else {
-                floor
-            }
-        };
+        let spacing = self.trigger_spacing_ms();
         self.own.trigger(now_ms, spacing);
         self.propagation.trigger(now_ms, spacing);
+        self.position.trigger(now_ms, spacing);
+    }
+
+    /// The spacing a brought-forward announce keeps from the last one: the
+    /// budget's, never below the trigger floor. What [`trigger`]
+    /// (Self::trigger) applies, named for the position advance.
+    const fn trigger_spacing_ms(&self) -> u64 {
+        let budget = self.budget.min_interval_ms();
+        if budget > MOVEMENT_SAMPLE_INTERVAL_MS {
+            budget
+        } else {
+            MOVEMENT_SAMPLE_INTERVAL_MS
+        }
+    }
+
+    /// Tell the cadence the channel load the CHTM measured over the last
+    /// hour (`channel_load_long`, hundredths of a percent).
+    pub fn set_channel_load(&mut self, channel_load_long_e4: u16) {
+        self.channel_load_e4 = channel_load_long_e4;
+    }
+
+    /// The position announce's interval: the cadence's, thinned by the
+    /// channel load ([`crate::thinned_interval_ms`]).
+    #[must_use]
+    pub const fn position_interval_ms(&self, now_ms: u64) -> u64 {
+        crate::thinned_interval_ms(self.interval_ms(now_ms), self.channel_load_e4)
+    }
+
+    /// A position announce carrying `fix` went out: the 25 m advance
+    /// measures from here.
+    pub fn note_position_sent(&mut self, fix: Fix) {
+        self.position_sent = Some(fix);
+    }
+
+    /// The 25 m advance (order 1301): a fix that moved
+    /// [`crate::POSITION_ADVANCE_DISTANCE_M`] from the last position
+    /// announced brings the next position announce forward to the earliest
+    /// moment the budget allows, stretched by the channel's thinning like
+    /// the interval itself. Never later than it already was, never earlier
+    /// than that spacing after the last one. Returns whether it moved the
+    /// deadline, the edge a caller logs.
+    ///
+    /// Before the first position announce there is nothing to measure
+    /// from, and the boot deadline stands.
+    pub fn advance_position(&mut self, now_ms: u64, fix: Fix) -> bool {
+        let Some(sent) = self.position_sent else {
+            return false;
+        };
+        if !moved_at_least(fix, sent, crate::POSITION_ADVANCE_DISTANCE_M) {
+            return false;
+        }
+        let spacing = crate::thinned_interval_ms(self.trigger_spacing_ms(), self.channel_load_e4);
+        let before = self.position.wait_ms(now_ms);
+        self.position.trigger(now_ms, spacing);
+        self.position.wait_ms(now_ms) < before
     }
 
     /// Somebody asked for both announces now (a button press, Codeberg
@@ -704,7 +777,19 @@ impl AnnounceCadence {
     /// [`trigger`](Self::trigger) adds: the caller has its own rate limit
     /// ([`crate::BUTTON_ANNOUNCE_MIN_INTERVAL_MS`]), and the floor exists
     /// for triggers that arrive in bursts nobody chose.
-    pub fn manual(&mut self, now_ms: u64) -> ManualAnnounce {
+    ///
+    /// `position` is the caller's answer to "would a position announce go
+    /// out now": the share resolves to owner or everyone and there is a
+    /// fix (order 1316). When it is `true` the position slot is booked in
+    /// the same press, under the same spacing, after the delivery half:
+    /// the delivery and propagation halves decide whether the press goes
+    /// out now, and the position joins them when its own last announce is
+    /// at least the spacing ago. When it is not, the slot is brought
+    /// forward to that moment, like a deferred press, so the position is
+    /// still answered by its own tick as early as the band allows. When
+    /// `position` is `false` the slot is untouched, and a press does what
+    /// it did before order 1316.
+    pub fn manual(&mut self, now_ms: u64, position: bool) -> ManualAnnounce {
         let spacing = self.budget.min_interval_ms();
         let earliest = self
             .own
@@ -713,13 +798,24 @@ impl AnnounceCadence {
         if earliest > now_ms {
             self.own.trigger(now_ms, spacing);
             self.propagation.trigger(now_ms, spacing);
+            if position {
+                self.position.trigger(now_ms, spacing);
+            }
             return ManualAnnounce::Deferred {
                 wait_ms: earliest - now_ms,
             };
         }
         self.own.book(now_ms, spacing);
         self.propagation.book(now_ms, spacing);
-        ManualAnnounce::Now
+        if !position {
+            return ManualAnnounce::Now { position: false };
+        }
+        if self.position.earliest_ms(now_ms, spacing) > now_ms {
+            self.position.trigger(now_ms, spacing);
+            return ManualAnnounce::Now { position: false };
+        }
+        self.position.book(now_ms, spacing);
+        ManualAnnounce::Now { position: true }
     }
 
     /// Poll one slot. `clock_ok` is the caller's plausibility answer; it
@@ -741,6 +837,7 @@ impl AnnounceCadence {
                     gap
                 }
             }
+            _ if slot == AnnounceSlot::Position => self.position_interval_ms(now_ms),
             _ => self.interval_ms(now_ms),
         };
         let gate = clock_ok || !slot.is_clock_gated();
@@ -779,6 +876,7 @@ impl AnnounceCadence {
         match slot {
             AnnounceSlot::Own => &self.own,
             AnnounceSlot::Propagation => &self.propagation,
+            AnnounceSlot::Position => &self.position,
         }
     }
 
@@ -786,6 +884,7 @@ impl AnnounceCadence {
         match slot {
             AnnounceSlot::Own => &mut self.own,
             AnnounceSlot::Propagation => &mut self.propagation,
+            AnnounceSlot::Position => &mut self.position,
         }
     }
 }
@@ -1365,7 +1464,10 @@ mod tests {
         cadence.set_budget(budget);
         let spacing = budget.min_interval_ms();
         let press = t0() + 1_000;
-        assert_eq!(cadence.manual(press), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
         for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
             assert_eq!(
                 cadence.wait_ms(slot, press),
@@ -1392,10 +1494,13 @@ mod tests {
         cadence.set_budget(budget);
         let spacing = budget.min_interval_ms();
         let first = t0() + 1_000;
-        assert_eq!(cadence.manual(first), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(first, false),
+            ManualAnnounce::Now { position: false }
+        );
         let second = first + 10_000;
         assert_eq!(
-            cadence.manual(second),
+            cadence.manual(second, false),
             ManualAnnounce::Deferred {
                 wait_ms: spacing - 10_000
             }
@@ -1422,8 +1527,113 @@ mod tests {
             Some(Decision::Announce)
         );
         let due = cadence.wait_ms(AnnounceSlot::Own, first);
-        assert_eq!(cadence.manual(first + 60_000), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(first + 60_000, false),
+            ManualAnnounce::Now { position: false }
+        );
         assert_eq!(cadence.wait_ms(AnnounceSlot::Own, first), due);
+    }
+
+    /// Order 1316: a double press on a board that shares its position and
+    /// has a fix books the position slot with the other two, so the
+    /// position goes out on the same press and the next position tick is
+    /// spaced from it. Positive control: the same press without the
+    /// position (sharing off, or no fix) leaves the slot on its boot
+    /// deadline, so the booking assertion is not vacuous.
+    #[test]
+    fn a_double_press_with_position_shared_books_the_position_slot() {
+        let budget = a_lora_budget();
+        let spacing = budget.min_interval_ms();
+        let press = t0() + 1_000;
+        let boot_due = crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS - 1_000;
+        assert!(
+            spacing > boot_due,
+            "the booking is visible over the boot deadline"
+        );
+
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        cadence.set_budget(budget);
+        assert_eq!(
+            cadence.manual(press, true),
+            ManualAnnounce::Now { position: true }
+        );
+        for slot in [
+            AnnounceSlot::Own,
+            AnnounceSlot::Propagation,
+            AnnounceSlot::Position,
+        ] {
+            assert_eq!(
+                cadence.wait_ms(slot, press),
+                spacing,
+                "every slot the press sent is booked against the budget ({slot:?})"
+            );
+        }
+
+        let mut control = AnnounceCadence::new();
+        control.arm(t0());
+        control.set_budget(budget);
+        assert_eq!(
+            control.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
+        assert_eq!(
+            control.wait_ms(AnnounceSlot::Position, press),
+            boot_due,
+            "control: a press without the position leaves its slot alone"
+        );
+    }
+
+    /// Order 1316: with sharing off the double press books the delivery and
+    /// propagation slots and nothing else, as it did before. Positive
+    /// control: a position announce sent inside the spacing keeps the
+    /// position out of a press that asks for it (rule 5 spaces the slot
+    /// from its own last announce), and the slot is brought forward to the
+    /// moment the band allows instead of being dropped.
+    #[test]
+    fn a_double_press_with_sharing_off_books_only_the_two_halves() {
+        let budget = a_lora_budget();
+        let spacing = budget.min_interval_ms();
+        let press = t0() + 1_000;
+
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        cadence.set_budget(budget);
+        let position_due = cadence.wait_ms(AnnounceSlot::Position, press);
+        assert_eq!(
+            cadence.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
+        for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
+            assert_eq!(cadence.wait_ms(slot, press), spacing, "{slot:?} booked");
+        }
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Position, press),
+            position_due,
+            "sharing off: the position slot is untouched"
+        );
+
+        // Control: the position went out recently on its own tick, the two
+        // halves did not, and a press asks for all three.
+        let mut control = AnnounceCadence::new();
+        control.arm(t0());
+        control.set_budget(budget);
+        let sent = t0() + crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS;
+        assert_eq!(
+            control.poll(AnnounceSlot::Position, sent, true),
+            Some(Decision::Announce)
+        );
+        let late_press = sent + 10_000;
+        assert_eq!(
+            control.manual(late_press, true),
+            ManualAnnounce::Now { position: false },
+            "control: the position is spaced from its own last announce"
+        );
+        assert_eq!(
+            control.wait_ms(AnnounceSlot::Position, late_press),
+            spacing - 10_000,
+            "control: and brought forward to the moment the band allows"
+        );
     }
 
     // -- The two slots ---------------------------------------------------
@@ -1636,5 +1846,212 @@ mod tests {
     fn the_slot_tokens_are_stable() {
         assert_eq!(AnnounceSlot::Own.as_str(), "periodic");
         assert_eq!(AnnounceSlot::Propagation.as_str(), "pn-periodic");
+        assert_eq!(AnnounceSlot::Position.as_str(), "position-periodic");
+    }
+
+    // -- The position announce (order 1301) -------------------------------
+
+    /// What one scripted run of the position slot put on the air.
+    struct Track {
+        /// When each position announce went out.
+        sent: std::vec::Vec<u64>,
+        /// When each delivery announce went out.
+        own: std::vec::Vec<u64>,
+    }
+
+    /// Drive the cadence the way `leviculum_nrf::announce` does, from boot
+    /// for `minutes`: a movement sample and a 25 m advance once a minute,
+    /// both slots polled every ten seconds, a position announce suppressed
+    /// while `track` says there is no fix. `track(minute)` is the board's
+    /// position, metres north of the start, or `None` for no fix.
+    fn run(
+        cadence: &mut AnnounceCadence,
+        minutes: u64,
+        track: impl Fn(u64) -> Option<i64>,
+    ) -> Track {
+        let mut out = Track {
+            sent: std::vec::Vec::new(),
+            own: std::vec::Vec::new(),
+        };
+        cadence.arm(t0());
+        let mut now = t0();
+        let end = t0() + minutes * 60_000;
+        while now < end {
+            let minute = (now - t0()) / 60_000;
+            let fix = track(minute).map(fix_at);
+            if (now - t0()).is_multiple_of(step()) {
+                cadence.note_fix(now, fix);
+                if let Some(fix) = fix {
+                    cadence.advance_position(now, fix);
+                }
+            }
+            if cadence.poll(AnnounceSlot::Own, now, true) == Some(Decision::Announce) {
+                out.own.push(now);
+            }
+            match fix {
+                None => {
+                    cadence.withhold(AnnounceSlot::Position, now, crate::POSITION_NO_FIX_RETRY_MS);
+                }
+                Some(fix) => {
+                    if cadence.poll(AnnounceSlot::Position, now, true) == Some(Decision::Announce) {
+                        cadence.note_position_sent(fix);
+                        out.sent.push(now);
+                    }
+                }
+            }
+            now += 10_000;
+        }
+        out
+    }
+
+    /// The scripted day: twenty minutes still, forty walking north at
+    /// 80 m a minute, sixty still again, ten without a fix, twenty still.
+    fn day(minute: u64) -> Option<i64> {
+        match minute {
+            0..=19 => Some(0),
+            20..=59 => Some((minute as i64 - 19) * 80),
+            60..=119 => Some(40 * 80),
+            120..=129 => None,
+            _ => Some(40 * 80),
+        }
+    }
+
+    fn gaps(at: &[u64]) -> std::vec::Vec<u64> {
+        at.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    /// The cadence under a scripted fix track, at our LoRa defaults on the
+    /// 10 % sub-band: delivery (554 ms) plus the sealed position (two
+    /// frames) is three frames a set.
+    #[test]
+    fn the_position_announce_rides_the_cadence_under_a_scripted_walk() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.set_budget(DutyBudget {
+            frame_airtime_ms: 554,
+            frames_per_set: 3,
+            lawful_duty_e4: 1_000,
+        });
+        // 554 * 3 * 10_000 * 10 / 1_000: the budget's spacing.
+        let spacing = 166_200;
+        assert_eq!(cadence.budget().min_interval_ms(), spacing);
+        let track = run(&mut cadence, 150, day);
+        let s = &track.sent;
+
+        // Boot: the first position announce 50 s after boot, ten after the
+        // delivery announce.
+        assert_eq!(
+            track.own[0],
+            t0() + crate::PERIODIC_ANNOUNCE_INITIAL_DELAY_MS
+        );
+        assert_eq!(s[0], t0() + crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS);
+        // Standing still: nothing more until the board moves. The first
+        // sample of the walk is 80 m from the last position announced, so
+        // the 25 m advance brings the next one forward at once, two
+        // minutes before the movement proof (three samples) would.
+        let walk_start = t0() + 20 * 60_000;
+        assert_eq!(s[1], walk_start, "the advance acts on the first fix: {s:?}");
+        // Walking 80 m a minute, every advance waits out the budget's
+        // spacing and no more than one poll beyond it.
+        let walk: std::vec::Vec<u64> = s
+            .iter()
+            .copied()
+            .filter(|t| *t >= walk_start && *t < t0() + 60 * 60_000)
+            .collect();
+        for gap in gaps(&walk) {
+            assert!(gap >= spacing, "never inside the cap's spacing: {gap}");
+            assert!(gap <= spacing + 10_000, "the 25 m advance: {gap}");
+        }
+        assert_eq!(walk.len(), 15, "{walk:?}");
+        // Stopped: the fast cadence runs out its fifteen minutes, then the
+        // hourly floor; no position announce in the no-fix window.
+        let no_fix = (t0() + 120 * 60_000)..(t0() + 130 * 60_000);
+        assert!(s.iter().all(|t| !no_fix.contains(t)), "{s:?}");
+        let after_stop: std::vec::Vec<u64> = s
+            .iter()
+            .copied()
+            .filter(|t| *t >= t0() + 60 * 60_000)
+            .collect();
+        // Fifteen minutes of the fast cadence, then the hourly floor.
+        assert_eq!(after_stop.len(), 5, "{after_stop:?}");
+        assert!(
+            gaps(&after_stop)
+                .iter()
+                .all(|g| *g >= MOVING_ANNOUNCE_INTERVAL_MS),
+            "{after_stop:?}"
+        );
+    }
+
+    /// The cap arithmetic: over the scripted walk the board's own
+    /// announces, delivery and sealed position together, stay inside the
+    /// tenth of the lawful duty its own announces may spend.
+    #[test]
+    fn the_walk_stays_inside_the_own_announce_share() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.set_budget(DutyBudget {
+            frame_airtime_ms: 554,
+            frames_per_set: 3,
+            lawful_duty_e4: 1_000,
+        });
+        let track = run(&mut cadence, 60, |minute| Some(minute as i64 * 80));
+        // The airtimes `leviculum-lxmf/tests/lev_position_airtime.rs` pins.
+        let airtime_ms = track.own.len() as u64 * 554 + track.sent.len() as u64 * 913;
+        // 10 % lawful, a tenth of it: 1 % of the hour, 36 s.
+        let share_ms = 3_600_000 / 100;
+        assert!(
+            airtime_ms <= share_ms,
+            "{airtime_ms} ms of own announces in an hour ({} delivery, {} position)",
+            track.own.len(),
+            track.sent.len()
+        );
+    }
+
+    /// With the channel at twice the announce cap the position announce
+    /// takes twice the interval; the delivery announce is not thinned.
+    #[test]
+    fn a_full_channel_thins_the_position_and_nothing_else() {
+        let mut cadence = AnnounceCadence::new();
+        let now = settled(&mut cadence);
+        cadence.set_channel_load(400);
+        assert_eq!(cadence.interval_ms(now), STILL_ANNOUNCE_INTERVAL_MS);
+        assert_eq!(
+            cadence.position_interval_ms(now),
+            STILL_ANNOUNCE_INTERVAL_MS
+        );
+        let mut moving = AnnounceCadence::new();
+        let mut now = settled(&mut moving);
+        for n in 1..=MOVEMENT_MIN_CONSECUTIVE_FIXES as i64 {
+            now += step();
+            moving.note_fix(now, Some(fix_at(n * 100)));
+        }
+        moving.set_channel_load(400);
+        assert_eq!(moving.interval_ms(now), MOVING_ANNOUNCE_INTERVAL_MS);
+        assert_eq!(
+            moving.position_interval_ms(now),
+            2 * MOVING_ANNOUNCE_INTERVAL_MS
+        );
+        // A board walking through a full channel advances no sooner than
+        // the thinned spacing either.
+        let track = run(&mut moving, 60, |minute| Some(minute as i64 * 80));
+        for gap in gaps(&track.sent[1..]) {
+            assert!(gap >= 2 * MOVEMENT_SAMPLE_INTERVAL_MS, "{gap}");
+        }
+    }
+
+    /// A fix that has not moved 25 m does not bring the position forward,
+    /// and before the first position announce nothing does.
+    #[test]
+    fn the_advance_needs_25_m_and_a_first_announce() {
+        let mut cadence = AnnounceCadence::new();
+        let now = settled(&mut cadence);
+        assert!(!cadence.advance_position(now, fix_at(1_000)));
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Position, now, true),
+            Some(Decision::Announce)
+        );
+        cadence.note_position_sent(fix_at(0));
+        assert!(!cadence.advance_position(now, fix_at(20)));
+        assert!(cadence.advance_position(now, fix_at(30)));
+        // Already brought forward: a second fix past 25 m moves nothing.
+        assert!(!cadence.advance_position(now, fix_at(40)));
     }
 }

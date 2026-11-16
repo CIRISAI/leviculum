@@ -72,6 +72,7 @@ fn the_analysis_reads_what_the_writer_writes() {
             value = 13u64,
             dup = false,
             via = "resource",
+            local_only = index == 2,
         );
     }
     tracing::debug!(
@@ -151,11 +152,35 @@ fn the_analysis_reads_what_the_writer_writes() {
         bytes = 500u64,
     );
 
+    // The heap census through its own emitter (order 1515), twice: the
+    // analysis reports the first and the last line per table.
+    for (store_index, rss_kb) in [(1000usize, 50_000u64), (3000, 70_000)] {
+        lnpnd::census::PnCensus {
+            store_index,
+            rss_kb,
+            stored: 2,
+            // Order 1586: the transport tables beside it, one over none.
+            transport: lnpnd::census::TransportCensus {
+                bytes: store_index as u64,
+                tables: vec![
+                    ("known_identities", store_index, Some(4096)),
+                    ("remembered_at", 3, None),
+                ],
+            },
+            ..lnpnd::census::PnCensus::default()
+        }
+        .log("periodic");
+    }
+
     let report = analyse(&log);
 
     // Phase 2: accepted and rejected, rejections split by reason.
     assert!(field(&report, "accepted ").contains('3'), "{report}");
     assert!(field(&report, "duplicates").contains('1'), "{report}");
+    assert!(
+        field(&report, "local only").starts_with("local only     1 "),
+        "{report}"
+    );
     assert!(field(&report, "rejected ").contains('3'), "{report}");
     assert!(field(&report, "invalid_stamp").contains('2'), "{report}");
     assert!(field(&report, "store_failed").contains('1'), "{report}");
@@ -164,6 +189,13 @@ fn the_analysis_reads_what_the_writer_writes() {
     let store = field(&report, "last reported");
     assert!(store.contains("20.0 %"), "store utilisation: {store}");
     assert!(field(&report, "evicted ").contains('1'), "{report}");
+    // Order 1295: where the accepted messages went, as `--status` says it.
+    // Only the round that ended ok forwarded anything.
+    assert_eq!(
+        field(&report, "flow "),
+        "flow             3 accepted, 2 delivered to clients, 2 forwarded to peers, 1 evicted",
+        "{report}"
+    );
 
     // Phase 4: per-peer rounds, and a round that ended other than ok.
     assert!(report.contains(&peer_a[..16]), "peer A missing:\n{report}");
@@ -183,6 +215,25 @@ fn the_analysis_reads_what_the_writer_writes() {
 
     // Phase 6/7: the heartbeat is recognised, and nothing is unaccounted for.
     assert!(field(&report, "heartbeats").contains('1'), "{report}");
+    let census = field(&report, "heap census");
+    assert!(
+        census.contains("2 PN_CENSUS line(s)") && census.contains("rss 50000 -> 70000 kB"),
+        "{report}"
+    );
+    assert!(
+        field(&report, "store_index ").contains("1.0 ->        3.0 kB"),
+        "{report}"
+    );
+    let transport = field(&report, "transport tables");
+    assert!(transport.contains("2 PN_TRANSPORT line(s)"), "{report}");
+    assert!(
+        field(&report, "known_identities ").contains("1000 ->     3000 of 4096"),
+        "{report}"
+    );
+    assert!(
+        field(&report, "remembered_at ").contains("NO CEILING"),
+        "{report}"
+    );
     assert!(
         report.contains("every PN_* event in this log is one the analysis accounts for"),
         "{report}"

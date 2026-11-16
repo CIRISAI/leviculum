@@ -9,13 +9,10 @@ use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
 
 use core::ops::Range;
 
-use leviculum_ui::help::{
-    key_col, overlay_rect, rows, scroll_bounds, HelpGroup, HELP_GAP, HELP_INDENT,
-};
+use leviculum_ui::help::{cut, overlay_rect, rows, scroll_bounds, segments, HelpGroup, Part};
 use leviculum_ui::theme::Theme;
 
 use crate::geometry::{from_ratatui, to_ratatui};
@@ -37,8 +34,6 @@ pub fn render(
     no_color: bool,
     theme: Theme,
 ) {
-    let col = key_col(groups);
-
     // Group titles are dim; under `no_color` the reverse-video fill already
     // delineates them, so drop the DIM (no DIM under reverse) and let the plain
     // style show through.
@@ -50,25 +45,17 @@ pub fn render(
     };
     let keys_style = chrome_text_style(no_color, theme).add_modifier(Modifier::BOLD);
     let desc_style = muted;
+    let style = |part: Part| match part {
+        Part::Title => title_style,
+        Part::Keys => keys_style,
+        Part::Desc => desc_style,
+    };
 
-    // Each line as segments of (characters, style): a title, or an entry's
-    // keys cell and its padded description. They reproduce [`lines`] exactly,
-    // so a drawn row ([`rows`], a character range of one line) is styled by
-    // cutting its line's segments to that range.
-    let mut segments: Vec<Vec<(String, Style)>> = Vec::new();
-    for (gi, group) in groups.iter().enumerate() {
-        if gi > 0 {
-            segments.push(Vec::new());
-        }
-        segments.push(vec![(group.title.to_string(), title_style)]);
-        for e in &group.entries {
-            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
-            segments.push(vec![
-                (format!("{HELP_INDENT}{}", e.keys), keys_style),
-                (format!("{}{}", " ".repeat(pad), e.desc), desc_style),
-            ]);
-        }
-    }
+    // Each line as its segments ([`segments`]), which reproduce
+    // [`leviculum_ui::help::lines`]
+    // exactly, so a drawn row ([`rows`], a character range of one line) is
+    // styled by cutting its line's segments to that range ([`cut`]).
+    let segments = segments(groups);
 
     // Sized to the widest line plus its two borders, so no line wraps in a
     // normal-width terminal; a narrower one wraps by [`rows`]. The rectangle
@@ -93,7 +80,7 @@ pub fn render(
         .into_iter()
         .skip(offset)
         .take(inner_h)
-        .map(|row| styled_row(&segments[row.line], row.chars))
+        .map(|row| styled_row(&segments[row.line], row.chars, style))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(visible)).block(block), overlay);
     if max > 0 {
@@ -105,20 +92,16 @@ pub fn render(
     }
 }
 
-/// The characters `chars` of a line given as styled segments, each keeping
-/// its segment's style.
-fn styled_row(segments: &[(String, Style)], chars: Range<usize>) -> RtLine<'static> {
-    let mut spans = Vec::new();
-    let mut at = 0;
-    for (text, style) in segments {
-        let len = text.chars().count();
-        let from = chars.start.max(at);
-        let to = chars.end.min(at + len);
-        if from < to {
-            let part: String = text.chars().skip(from - at).take(to - from).collect();
-            spans.push(RtSpan::styled(part, *style));
-        }
-        at += len;
-    }
-    RtLine::from(spans)
+/// One drawn row: its line's segments cut to its characters, styled.
+fn styled_row(
+    segments: &[(String, Part)],
+    chars: Range<usize>,
+    style: impl Fn(Part) -> Style,
+) -> RtLine<'static> {
+    RtLine::from(
+        cut(segments, chars)
+            .into_iter()
+            .map(|(text, part)| RtSpan::styled(text, style(part)))
+            .collect::<Vec<_>>(),
+    )
 }

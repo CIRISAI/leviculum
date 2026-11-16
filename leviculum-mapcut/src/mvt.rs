@@ -33,6 +33,60 @@ pub struct Name {
     pub alternate: Option<String>,
 }
 
+/// Attribute keys the cut keeps on a point of interest when the source
+/// carries them (1685, `loquax-expedition-map.md` section 4: supply with
+/// its opening hours). The daily build today carries `kind_detail` and
+/// `elevation`; the rest are kept the day a source ships them, with no
+/// code change.
+pub const POI_ATTRS: &[&str] = &["kind_detail", "elevation", "opening_hours", "access", "fee"];
+
+/// Attribute keys the cut keeps on a way: the state of a way (surface,
+/// track grade, hiking difficulty, trail visibility, fords, access) and
+/// a marked route's marks (`ref`, `network`, `route`). The daily build
+/// today carries `kind_detail`, `ref`, `network`, `route`, `service` and
+/// `oneway`; the way-state keys are kept the day a source ships them.
+pub const WAY_ATTRS: &[&str] = &[
+    "kind_detail",
+    "surface",
+    "tracktype",
+    "sac_scale",
+    "trail_visibility",
+    "ford",
+    "access",
+    "ref",
+    "network",
+    "route",
+    "service",
+    "oneway",
+];
+
+/// Area kinds whose identity the drawn class collapses and the cut keeps
+/// as a `kind` attribute: protected and military areas (1685).
+pub const PROTECTED_KINDS: &[&str] = &[
+    "protected_area",
+    "nature_reserve",
+    "national_park",
+    "military",
+    "naval_base",
+    "danger_area",
+];
+
+/// A point of interest of the `pois` layer, every kind kept verbatim
+/// (1685: all points of interest go into the data).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcePoi {
+    /// The source's kind: `drinking_water`, `fuel`, `shelter`, `bench`.
+    pub kind: String,
+    /// The source's `min_zoom`, rounded down; 0 where it has none.
+    pub min_zoom: u8,
+    /// The name, where it has one.
+    pub name: Option<Name>,
+    /// In tile units, possibly in the tile's buffer.
+    pub at: [i32; 2],
+    /// The [`POI_ATTRS`] the feature carries, in that order.
+    pub attrs: Vec<(&'static str, String)>,
+}
+
 /// A named point the map labels: a place, a water, a park.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourcePoint {
@@ -57,6 +111,10 @@ pub struct SourceFeature {
     /// A named road's or waterway's kind, the source's `min_zoom` (0 where
     /// it has none) and name, which the cut labels.
     pub label: Option<(LabelKind, u8, Name)>,
+    /// The travel attributes the cut keeps (1685): a line's [`WAY_ATTRS`],
+    /// and for an area of a [`PROTECTED_KINDS`] kind its `kind` and
+    /// access. Empty unless the decode was asked for pois.
+    pub attrs: Vec<(&'static str, String)>,
 }
 
 /// A decoded tile: features in tile order (layer by layer, feature by
@@ -65,6 +123,8 @@ pub struct SourceFeature {
 pub struct Decoded {
     pub features: Vec<SourceFeature>,
     pub points: Vec<SourcePoint>,
+    /// The points of interest, when the decode was asked for them.
+    pub pois: Vec<SourcePoi>,
     pub skipped: usize,
 }
 
@@ -100,6 +160,38 @@ impl<'a> Props<'a> {
                 .or(v.uint_value.map(|i| i as f64))
                 .or(v.string_value.as_deref().and_then(|s| s.parse().ok()))
         })
+    }
+
+    /// `key` (or schema 3.x's `pmap:<key>`) as text: a string as it is,
+    /// a number formatted, a boolean as `yes`/`no`.
+    fn any_text(&self, key: &str) -> Option<String> {
+        let v = self
+            .value(key)
+            .or_else(|| self.value(&format!("pmap:{key}")))?;
+        if let Some(s) = v.string_value.as_deref() {
+            return (!s.trim().is_empty()).then(|| s.to_owned());
+        }
+        if let Some(i) = v
+            .int_value
+            .or(v.sint_value)
+            .or_else(|| v.uint_value.and_then(|u| i64::try_from(u).ok()))
+        {
+            return Some(i.to_string());
+        }
+        if let Some(f) = v.double_value.or(v.float_value.map(f64::from)) {
+            return Some(f.to_string());
+        }
+        v.bool_value.map(|b| match b {
+            true => "yes".to_owned(),
+            false => "no".to_owned(),
+        })
+    }
+
+    /// The keys of `list` the feature carries, in `list`'s order.
+    fn attrs(&self, list: &[&'static str]) -> Vec<(&'static str, String)> {
+        list.iter()
+            .filter_map(|k| Some((*k, self.any_text(k)?)))
+            .collect()
     }
 
     /// The name, and the one `locale` shows where it differs; `None`
@@ -289,19 +381,21 @@ fn line_flags(l: &Layer, f: &Feature) -> u8 {
     flags
 }
 
-/// Decode one uncompressed MVT tile, names left out.
+/// Decode one uncompressed MVT tile, names and pois left out.
 pub fn decode(raw: &[u8]) -> Res<Decoded> {
-    decode_named(raw, None, false)
+    decode_named(raw, None, false, false)
 }
 
 /// Decode one uncompressed MVT tile, and when `names` is set the names the
 /// map labels as well: the local name, with `locale`'s (`de`, `en`) where
-/// it differs.
-pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decoded> {
+/// it differs. When `pois` is set, every point of the `pois` layer and
+/// the features' travel attributes too (1685).
+pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool, pois: bool) -> Res<Decoded> {
     let tile = Tile::decode(raw)?;
     let mut out = Decoded {
         features: Vec::new(),
         points: Vec::new(),
+        pois: Vec::new(),
         skipped: 0,
     };
     for l in &tile.layers {
@@ -332,13 +426,24 @@ pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decode
                 feature: f,
             };
             if geometry == POINT {
+                let mut used = false;
+                // A park or water poi is a label point AND a poi: the
+                // label names the map, the poi record is the data.
+                if pois && l.name == "pois" {
+                    if let Some(p) = poi(kind, &props, f, locale)? {
+                        out.pois.push(p);
+                        used = true;
+                    }
+                }
                 if names {
                     if let Some(p) = point(l.name.as_str(), kind, &props, f, locale)? {
                         out.points.push(p);
-                        continue;
+                        used = true;
                     }
                 }
-                out.skipped += 1;
+                if !used {
+                    out.skipped += 1;
+                }
                 continue;
             }
             let Some((k, class)) = class_of(&l.name, kind, geometry) else {
@@ -374,12 +479,22 @@ pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decode
                 let min_zoom = props.number(&["min_zoom", "pmap:min_zoom"]);
                 Some((lk, small(min_zoom), props.name(locale)?))
             });
+            let attrs = match (pois, k) {
+                (true, Kind::Line) => props.attrs(WAY_ATTRS),
+                (true, Kind::Area) if PROTECTED_KINDS.contains(&kind) => {
+                    let mut a = kind_attr(kind);
+                    a.extend(props.attrs(&["kind_detail", "access"]));
+                    a
+                }
+                _ => Vec::new(),
+            };
             out.features.push(SourceFeature {
                 kind: k,
                 class,
                 flags,
                 parts,
                 label,
+                attrs,
             });
         }
     }
@@ -389,6 +504,33 @@ pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decode
 /// A source number as a byte, rounded down; 0 where there is none.
 fn small(v: Option<f64>) -> u8 {
     v.map_or(0, |v| v.floor().clamp(0.0, 255.0) as u8)
+}
+
+/// The one `kind` attribute of a protected or military area.
+fn kind_attr(kind: &str) -> Vec<(&'static str, String)> {
+    vec![("kind", kind.to_owned())]
+}
+
+/// The point of interest a feature of the `pois` layer is: every kind,
+/// named or not, kept verbatim (1685).
+fn poi(kind: &str, props: &Props<'_>, f: &Feature, locale: Option<&str>) -> Res<Option<SourcePoi>> {
+    if kind.is_empty() {
+        return Ok(None);
+    }
+    let Some(at) = GeometryDecoder::new(&f.geometry)
+        .decode_points()?
+        .first()
+        .copied()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SourcePoi {
+        kind: kind.to_owned(),
+        min_zoom: small(props.number(&["min_zoom", "pmap:min_zoom"])),
+        name: props.name(locale),
+        at,
+        attrs: props.attrs(POI_ATTRS),
+    }))
 }
 
 /// The labelled point a feature of `layer` with `kind` is, if it is one: a

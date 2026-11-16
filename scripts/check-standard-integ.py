@@ -35,7 +35,13 @@ each of them:
 
 Plus the prerequisite file both runners read (scripts/integ-prerequisites.txt):
 every target it names must exist, so a renamed suite cannot keep a skip
-that describes nothing.
+that describes nothing, and must be named `<dir>/<target>`: a bare name two
+packages share is refused with that reason (1306). The selftest also holds
+scripts/integ-targets.sh's integ_run_groups to running a target whose name an
+excluded one shares from its own package (land gate on ee9541af). And a target with required features that the file
+names runs in its recipe, not in either runner, so that recipe must run it
+through scripts/with-prerequisites.sh naming it, or the forge runs the tests
+the file excludes everywhere else (forge pipeline 598, 2026-10-31, 1167).
 
 The checker's own fixtures run first, every time: a guard that has never been
 seen to fire is not known to work.
@@ -49,6 +55,13 @@ Usage:
       print `<dir>/<target><TAB><features><TAB><recipe or ->` for every
       test target with required features, and check nothing: the rule
       scripts/ci-gate-integ.sh excludes by
+  python3 scripts/check-standard-integ.py --wrapped [--justfile PATH]
+      print `<dir>/<target><TAB><recipe>` for every test target with
+      required features whose recipe runs it through
+      scripts/with-prerequisites.sh naming it (rule 4b), and check nothing:
+      scripts/ci-gate-integ.sh accepts a by-name entry of
+      scripts/integ-prerequisites.txt for such a target, which its own run
+      excludes, because that recipe applies it (1203)
 """
 
 import argparse
@@ -68,6 +81,9 @@ FORGE_RUNNER = "scripts/ci-gate-integ.sh"
 FORGE_RULE = "check-standard-integ.py --gated"
 ELSEWHERE = "scripts/standard-integ-elsewhere.txt"
 PREREQUISITES = "scripts/integ-prerequisites.txt"
+# The wrapper a recipe runs a gated target's tests through so that file's
+# declarations reach them.
+PREREQ_RUNNER = "scripts/with-prerequisites.sh"
 
 
 def dump_recipes(justfile):
@@ -178,6 +194,26 @@ def claimed_by(claims, target):
     return None
 
 
+def runs_through_wrapper(source, recipe, target):
+    """Does `recipe`'s body run `target` through PREREQ_RUNNER, naming it?"""
+    body = recipe_body(source, recipe) or ""
+    wrapped = re.compile(
+        re.escape(PREREQ_RUNNER) + r"[^\n]*\s" + re.escape(target) + r"(\s|$)", re.M
+    )
+    return wrapped.search(body) is not None
+
+
+def wrapped_targets(source, metadata, claims):
+    """[(target, recipe)] of every target with required features whose
+    claimed recipe runs it through PREREQ_RUNNER: what `--wrapped` prints."""
+    out = []
+    for target, features in sorted(metadata.items()):
+        recipe = claimed_by(claims, target) if features else None
+        if recipe is not None and runs_through_wrapper(source, recipe, target):
+            out.append((target, recipe))
+    return out
+
+
 def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_runner):
     """One line per way `standard` or the forge gate can miss a target.
 
@@ -280,16 +316,43 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_run
         )
 
     # 4. The prerequisites name real targets.
+    claim_lines = lines
     shown, lines = prerequisites
     for number, fields in lines:
         where = f"{shown}:{number}"
         if len(fields) < 2:
             out.append(f"{where}: needs `<path> <dir>/<target> [<test>]`.")
             continue
+        if "/" not in fields[1]:
+            same = sorted(t for t in enumerated if t.rsplit("/", 1)[-1] == fields[1])
+            if len(same) > 1:
+                out.append(
+                    f"{where}: names the bare target {fields[1]}, which exists "
+                    f"in {len(same)} packages ({', '.join(same)}); `cargo test "
+                    f"--test {fields[1]}` selects all of them, so excluding by "
+                    f"that name would drop the others without a word. Qualify "
+                    f"it as <dir>/{fields[1]} (1306)."
+                )
+                continue
         if fields[1] not in enumerated:
             out.append(
                 f"{where}: names {fields[1]}, which is not a test target in "
                 f"this tree. Drop the line, or follow the rename."
+            )
+
+    # 4b. A gated target's prerequisites reach the recipe that runs it.
+    declared = sorted({fields[1] for _, fields in lines if len(fields) >= 2} & set(gated))
+    for target in declared:
+        recipe = claimed_by(claim_lines, target)
+        if recipe is None:
+            continue
+        if not runs_through_wrapper(source, recipe, target):
+            out.append(
+                f"{shown} declares prerequisites of {target}, which requires "
+                f"features and runs in recipe `{recipe}`, not in {RUNNER} or "
+                f"{FORGE_RUNNER}; `{recipe}` does not run it through "
+                f"`{PREREQ_RUNNER} {target}`, so a host without the "
+                f"prerequisite runs the tests the file excludes (1167)."
             )
     return out
 
@@ -306,7 +369,7 @@ orphan:
     cargo test -p a --test lonely
 
 tui:
-    {{manifest}} g -- cargo test -p a --features tui --test gated
+    {{manifest}} g -- bash scripts/with-prerequisites.sh a/gated -- cargo test -p a --features tui --test gated
 
 standard: fast tui
     {{manifest}} x -- cargo test -p a --test interop
@@ -383,6 +446,18 @@ def selftest():
             "`ci-gate` does not run `tui`: the forge tests a/gated nowhere",
         ),
         (
+            "a gated target with a prerequisite, its recipe through the wrapper",
+            FIXTURE_JUSTFILE, targets, gated, good_claims + [gated_claim],
+            prereqs + [(2, ["reference/x", "a/gated", "one_test"])], None,
+        ),
+        (
+            "a gated target with a prerequisite, its recipe without the wrapper",
+            FIXTURE_JUSTFILE.replace("bash scripts/with-prerequisites.sh a/gated -- ", ""),
+            targets, gated, good_claims + [gated_claim],
+            prereqs + [(2, ["reference/x", "a/gated", "one_test"])],
+            "does not run it through `scripts/with-prerequisites.sh a/gated`",
+        ),
+        (
             "the forge runner drops the required-features rule",
             FIXTURE_JUSTFILE, targets, gated, good_claims + [gated_claim], prereqs,
             "scripts/ci-gate-integ.sh no longer runs",
@@ -400,6 +475,90 @@ def selftest():
                 failed.append(f"{label}: expected no finding, got {got}")
             elif expect is not None and not any(expect in line for line in got):
                 failed.append(f"{label}: expected a finding with `{expect}`, got {got}")
+    # `--wrapped`, which scripts/ci-gate-integ.sh trusts to call a by-name
+    # line for a target it excludes applied elsewhere (1203): the wrapped
+    # recipe is listed, the same recipe without the wrapper is not.
+    claims = good_claims + [gated_claim]
+    got = wrapped_targets(FIXTURE_JUSTFILE, gated, claims)
+    if got != [("a/gated", "tui")]:
+        failed.append(f"--wrapped on the clean fixture: expected [('a/gated', 'tui')], got {got}")
+    bare = FIXTURE_JUSTFILE.replace("bash scripts/with-prerequisites.sh a/gated -- ", "")
+    got = wrapped_targets(bare, gated, claims)
+    if got:
+        failed.append(f"--wrapped with the recipe unwrapped: expected nothing, got {got}")
+    failed += run_groups_selftest()
+    return failed
+
+
+def run_groups(all_targets, selected):
+    """scripts/integ-targets.sh's integ_run_groups: [(dir or "-", name)]."""
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail; . scripts/integ-targets.sh && integ_run_groups \"$1\" \"$2\"",
+            "run_groups",
+            "\n".join(sorted(all_targets)),
+            "\n".join(sorted(selected)),
+        ],
+        cwd=REPO_DIR,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "integ_run_groups failed")
+    return [tuple(line.split("\t")) for line in proc.stdout.splitlines() if line]
+
+
+def run_groups_selftest():
+    """A second package with a target of the same name as an excluded one
+    (lnomad and loquax `scene_golden`, land gate on ee9541af): the survivor
+    runs from its own package, never as a workspace-wide name that would take
+    the excluded one along, and is never dropped."""
+    failed = []
+    cases = [
+        (
+            "two packages share a name and one is excluded",
+            {"a/same", "b/same", "a/plain"},
+            {"b/same", "a/plain"},
+            [("-", "plain"), ("b", "same")],
+        ),
+        (
+            "two packages share a name and both run",
+            {"a/same", "b/same", "a/plain"},
+            {"a/same", "b/same", "a/plain"},
+            [("-", "plain"), ("-", "same")],
+        ),
+        (
+            "both of a shared name are excluded",
+            {"a/same", "b/same", "a/plain"},
+            {"a/plain"},
+            [("-", "plain")],
+        ),
+    ]
+    for label, all_targets, selected, want in cases:
+        got = sorted(run_groups(all_targets, selected))
+        if got != sorted(want):
+            failed.append(f"integ_run_groups, {label}: expected {want}, got {got}")
+    # The bare name of the same fixture in the prerequisite file is refused
+    # with the reason; its qualified form is accepted.
+    enumerated = {"a/same", "b/same", "a/plain"}
+    meta = {t: [] for t in enumerated}
+    claims = [(1, ["a/plain", "standard", "standard-integ.sh"])]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "Justfile")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(FIXTURE_JUSTFILE)
+        for label, line, expect in [
+            ("a bare name two packages share", "same", "exists in 2 packages (a/same, b/same)"),
+            ("the same name qualified", "a/same", None),
+        ]:
+            pre = [(1, ["reference/x", line])]
+            got = findings(path, enumerated, meta, ("fixture", claims), ("fixture", pre), FIXTURE_FORGE_RUNNER)
+            if expect is None and got:
+                failed.append(f"{label}: expected no finding, got {got}")
+            elif expect is not None and not any(expect in g for g in got):
+                failed.append(f"{label}: expected a finding with `{expect}`, got {got}")
     return failed
 
 
@@ -407,7 +566,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--justfile", default=os.path.join(REPO_DIR, "Justfile"))
     parser.add_argument("--gated", action="store_true")
+    parser.add_argument("--wrapped", action="store_true")
     args = parser.parse_args()
+
+    if args.wrapped:
+        try:
+            claims = data_lines(os.path.join(REPO_DIR, ELSEWHERE))
+            with open(args.justfile, encoding="utf-8") as handle:
+                source = handle.read()
+            for target, recipe in wrapped_targets(source, metadata_targets(), claims):
+                print(f"{target}\t{recipe}")
+        except (RuntimeError, OSError) as error:
+            print(f"check-standard-integ: could not list wrapped targets: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.gated:
         try:

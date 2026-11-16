@@ -42,11 +42,11 @@
 //! duller than the async API. It is **not** primarily
 //! `futures::executor::block_on` over a smuggled [`super::PacketSender`]: that
 //! sender takes the core lock only after its `.await` has reserved room in
-//! the channel (`leviculum-std/src/driver/sender.rs:92-104`), so whenever the
+//! the channel (`leviculum-std/src/driver/sender.rs:89-101`), so whenever the
 //! channel has room, which is nearly always, such a call gets past the
 //! channel and deadlocks on the mutex.
 //!
-//! And no `block_on` is needed to get there. 89 public methods of this crate
+//! And no `block_on` is needed to get there. 94 public methods of this crate
 //! open by taking the core lock: 53 on [`super::ReticulumNode`] —
 //! `has_path`, `hops_to`, `get_identity`, `transport_stats`,
 //! `link_is_established` and so on — and five on [`super::PacketSender`] and
@@ -57,7 +57,7 @@
 //! one instance of the rule, and not the instance a consumer is likely to
 //! hit.
 //!
-//! That 89 is a census, not an estimate: `scripts/check-core-lock-census.py`
+//! That 94 is a census, not an estimate: `scripts/check-core-lock-census.py`
 //! rebuilds the list from the sources and pins it in
 //! `scripts/core-lock-census.txt`, so the fifty-ninth arrives as a diff and
 //! its author is asked whether it has to be public at all. Two revisions of
@@ -119,10 +119,10 @@
 //!   walks a work queue of `TickOutput`s, routing every event through
 //!   `LxmfRouter::handle_event` and pushing the output that produces back onto
 //!   the queue.
-//! * `absorb` (leviculum-lxmf-node/src/processor.rs:534) is the same loop
+//! * `absorb` (leviculum-lxmf-node/src/processor.rs:544) is the same loop
 //!   inside a real hook: it re-feeds each event to the router *and* forwards
 //!   it on the returned `TickOutput`, under a round cap —
-//!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:93).
+//!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:94).
 //!
 //! # Registration happens before the channel exists
 //!
@@ -237,7 +237,7 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 /// **It may not own a handle to the node it runs inside.** Both methods are
 /// called with the core mutex held, and that mutex is not reentrant, so any
 /// call that re-locks it hangs the node. That is not confined to the async
-/// API: 89 public methods of this crate lock the core — `has_path`,
+/// API: 94 public methods of this crate lock the core — `has_path`,
 /// `hops_to`, `get_identity`, `transport_stats` and 49 more on
 /// [`super::ReticulumNode`], plus five on [`super::PacketSender`] and
 /// [`super::LinkHandle`] — and one of them in an `on_event` body is a
@@ -253,7 +253,7 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 ///
 /// # The one call on `core` that must not be made
 ///
-/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:1940`) is `pub`
+/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:2009`) is `pub`
 /// and reachable on the handle. It is the composed single call that
 /// `docs/src/concepts/core-lock-budget.md` was written about: 141 ms under the
 /// lock for a 1 MiB payload, a 32 % inbound-throughput stall (Codeberg #152).

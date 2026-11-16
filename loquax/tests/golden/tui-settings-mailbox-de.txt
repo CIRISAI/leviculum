@@ -1,0 +1,40 @@
+┌● Loquax────────────────┐┌  messages──────────────────────────────────────────┐
+│Noch keine              ││                                                    │
+│Unterhaltungen: :new    ││                                                    │
+│conversation beginnt    ││                                                    │
+│eine mit dem Code eines ││                                                    │
+│Kontakts.               ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ ┌ Postfach ────────────────────────────────────────────────────────────────┐ │
+│ │Welches Postfach                                                          │ │
+│ │Name: Lew Palm                                                            │ │
+│ │Adresse: 5a3e910c7742d81b6f03a4e258c92d80                                 │ │
+│ │Das ist auch deine Adresse: Postfach und du sind eine Identität.          │ │
+│ │Läuft auf: miauhaus                                                       │ │
+│ │Version: 0.9.7                                                            │ │
+│ │                                                                          │ │
+│ │Verbindung                                                                │ │
+│ │Dieses Gerät verbunden seit 12 Min.                                       │ │
+│ │Letzter Kontakt: gerade eben                                              │ │
+│ │Verbindung zu miauhaus, geschirmt (das Handy hört nur sein Postfach)      │ │
+│ │                                                                          │ │
+│ │Geräte dieses Postfachs                                                   │ │
+│ │Fairphone: dieses Gerät                                                   │ │
+│ │M9: zuletzt da vor 2 Std.                                                 │ │
+│ │Laptop: noch nie verbunden                                                │ │
+│ │Ein Gerät wird am Postfach selbst hinzugefügt oder entfernt.              │ │
+│ │c  Meinen Code zeigen                                                     │ │
+│ │                                                                          │ │
+│ │a row's key runs it · q back                                              │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

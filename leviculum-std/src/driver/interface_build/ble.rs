@@ -185,6 +185,7 @@ mod tests {
                 transport_enabled: false,
                 default_announce_rate: Default::default(),
                 identity_hash: [0x5A; 16],
+                goodbyes: crate::interfaces::RadioGoodbyes::new(),
             }
         }
     }
@@ -209,6 +210,12 @@ mod tests {
         assert_eq!(
             handles[0].info.kind,
             leviculum_core::traits::InterfaceKind::Ble
+        );
+        // Codeberg #230, order 1380: BLE is a radio and declares the
+        // announce re-hear evidence rule for its direct links.
+        assert_eq!(
+            handles[0].info.path_choice,
+            leviculum_core::transport::PathChoice::HopsAndLoss
         );
     }
 

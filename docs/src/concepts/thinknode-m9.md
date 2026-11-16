@@ -295,7 +295,7 @@ LR1110MB1DXS shield's PA table (`LR1110MB1DXS_PA_TABLE`,
 `leviculum-nrf/src/boards/t1000e.rs:143-145`).
 
 The driver's README has a section headed "Worked example: ThinkNode M9
-(incomplete)" (`leviculum-lr11xx/README.md:142-163`). Its values come from
+(incomplete)" (`leviculum-lr11xx/README.md:142-165`). Its values come from
 Meshtastic's M9 variant, and some were probed on a bench:
 
 - the TCXO at 3.3 V;
@@ -304,7 +304,7 @@ Meshtastic's M9 variant, and some were probed on a bench:
   clean `GetErrors`, so a 32.768 kHz crystal is fitted.
 
 On one M9 the driver initialised, ran CAD, transmitted, and received
-frames over the air (`leviculum-lr11xx/README.md:261-269`). There is still
+frames over the air (`leviculum-lr11xx/README.md:263-271`). There is still
 no `Board` constant for the M9. The PA table and whether the DC-DC
 inductor is fitted cannot be settled without the Elecrow schematic.
 
@@ -343,6 +343,90 @@ and `leviculum-esp/README.md` on that branch.
 - According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), `KB_LED` (GPIO46) lights nothing at either level
   on a version-2 board.
 
+### The keyboard controller, measured
+
+Read on 2026-11-04 21:03 CET by Lew at the device, keys pressed at random
+under our image `thinknode_m9` at 2621fd18, which read register 0x01 of
+0x6D eight bytes every 10 ms and printed each answer as a `KBRAW <ms>
+<hex>` line (the reviewer's capture; its first 60 presses and its 42
+distinct answers are in `loquax-m9/tests/keyboard/capture-20261104.txt`
+and `distinct-20261104.txt`):
+
+- **It is not a matrix.** 13,838 reads, 139 non-zero. An idle read is all
+  zeros; a press makes exactly one read non-zero, and that read carries
+  one code in all eight bytes (`6b6b6b6b6b6b6b6b`). Two presses 10 ms
+  apart came as two reads (`0x65`, then `0x83`), so the 10 ms poll saw
+  every press. So the controller is read one code per press, and the
+  same code in every byte says the read does not advance through
+  registers: one byte would do. Whether a one- or two-byte read, or
+  register 0x00 or 0x02, answers the same is not yet asked of the board;
+  the image keeps the eight-byte read the capture proved and refuses an
+  answer whose bytes disagree (`[KB] answer=mixed`).
+- **The codes are ASCII for the characters:** `0x61`..`0x7a` a to z,
+  `0x20` the space, `0x30` zero, `0x24` `$`, `0x26` `&`; `0x0d` Enter,
+  `0x08` Backspace. The symbols arrive as their own codes, so the
+  controller resolves its layers itself. No upper-case letter was
+  pressed in the capture.
+- **The keys that are no character** sent `0x81`..`0x86`, `0x90` and
+  `0xb4`..`0xb7`. Their roles (`SPECIALS`, `loquax-m9/src/keyboard.rs`)
+  are measured since 1459, by the reviewer's walk of 2026-11-06 20:17:
+
+  | Code   | Key            | Role                                        |
+  |--------|----------------|---------------------------------------------|
+  | `0x81` | two bubbles    | the chats list                              |
+  | `0x82` | house          | the start screen                            |
+  | `0x83` | square bubble  | a new message to the contact under the cursor |
+  | `0x84` | position pin   | named, no action until the position sheet   |
+  | `0x85` | map            | the map tab                                 |
+  | `0x86` | back arrow     | back                                        |
+  | `0xb4` | ring left      | left; in a chat a page up (1529)            |
+  | `0xb5` | ring up        | up; in a chat a line up (1529)              |
+  | `0xb6` | ring down      | down; in a chat a line down (1529)          |
+  | `0xb7` | ring right     | right; in a chat a page down (1529)         |
+  | `0x0d` | ring centre    | Enter (ASCII CR, 21:03:13)                  |
+
+  In a chat the ring reads by the line (1529, the rule in
+  `loquax/src/ui/pager.rs`, its keys in
+  [Loquax: keys, mouse and layout](loquax-keys-and-layout.md), "Moving"):
+  up and down move the view a line and the selection follows the lines;
+  left and right page a screen less a line. The list stays an entry a
+  press. A held ring key scrolls as long as the controller answers its
+  code again, each answer a press.
+
+  1440's provisional table had `0x84`..`0x86` rotated (back, pin, map).
+  The walk's note named `0xb6` right and `0xb7` down: the codes rise in
+  the order the walk pressed the ring (down before right), and the note
+  read them the other way round. Lew at the device on 2026-11-07 (1528,
+  board log `2026-11-07f`) pressed down and nothing moved, pressed right
+  and the selection went down; the table follows his hand since. `0x90`, once seen on
+  2026-11-04, is no key the walk pressed and stays unnamed
+  (`special_0x90`) until a capture shows it.
+- **No key-up, no state byte.** No read carries a release. The last byte
+  of the `KB` line the provisional matrix decoder printed beside each
+  answer (`86868686868602`) looked like a state byte; it is the code's
+  two low bits, the two matrix positions the bitmap table read from the
+  answer's byte 6 (`every_captured_answer_is_one_code_and_the_kb_state_byte_was_its_low_bits`).
+- **No repeat.** The controller does not repeat a held key: Lew held
+  the house key 1.2 s on the 840cdaae bench (2026-11-08 13:0x) and the
+  board did what a tap does, it opened the house page (1561). So no
+  feature on the board may rely on a held key; the walker's `hold` step
+  injects repeats every 200 ms (`HOLD_REPEAT_MS`,
+  `loquax-m9/src/kbraw.rs`) and simulates what the hardware does not do,
+  which is why window 13 saw 1532's held-key switch fire (`via=hold`)
+  where Lew's hand never could. What the long-press time of register
+  0x03 makes it send is still the walk's.
+
+**The walk** (for the reviewer, one flash of the current image): attach
+the reader, press each key once in layout order, row by row from the top
+left, then the controls in the fixed order bubbles, house, square bubble,
+back, pin, map, ring left, up, down, right, centre, then hold one letter
+for two seconds and press one letter with Shift and one with Sym. Each
+press prints `KBRAW <ms> <code x8>` and then `KEY <ms> code=0x6b name=k`;
+a control prints its role (`name=chats`, `name=ring_up`),
+which the walk checks against the order pressed, and a `special_0x..`
+name is a code `SPECIALS` (`loquax-m9/src/keyboard.rs`) does not know
+yet. A held letter's lines tell whether the controller repeats.
+
 ### GNSS
 
 - According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), an AG3352 answered the Airoha `$PAIR` boot init on
@@ -364,6 +448,29 @@ and `leviculum-esp/README.md` on that branch.
   and the HDLC transport, multiplexed on one line with XON/XOFF flow
   control. The multiplexing rules live in `serial-mux`, a member crate
   of ours since 943 (`leviculum-nrf/serial-mux`).
+- 2026-11-01 (1238, 1242, #483): the M9's UART obeys a received XOFF,
+  so a raw 0x13 from the host mutes it until a reset. lnsd drives it with
+  `serial_mux = yes` on its `SerialInterface` block, which escapes 0x11 and
+  0x13 in every frame and strips the board's flow bytes on read; periculum
+  escapes every frame it writes to an LNode.
+- 2026-11-01 (1249, #483, #471): **plugging the M9 in is enough.** Its
+  capability report states `serial_mux=1` (fact `0xF0` behind the accepted
+  types, `docs/src/firmware/usb-control-envelope.md`), and its `[BOARD]`
+  boot line carries the same token. A `SerialInterface` block without the
+  `serial_mux` key asks for the report before any other frame and turns the
+  mux on when it reads the fact; the key is only an override. The M9 answered
+  the query in 7 ms, 6 of 6 rig runs (1238), and lnsd waits at most two
+  queries of one second each. The firmware side is a commit on the port's
+  local probe branch on the rig host (on top of f1ebf9dc), not in the port
+  yet; a build without it answers without the fact and still needs the key.
+- 2026-11-01 (1243, #483): a probe build of the port stops obeying a
+  received XOFF (fork commit f1ebf9dc, a local branch on the rig host, not
+  in the port yet). Software flow control stays on so the UART can still
+  send XOFF when its receive FIFO fills, and `force_xon` is held high so a
+  received 0x13 is deleted without stopping the transmitter. The raw 1238
+  frame is now refused as malformed and the board keeps talking, 9 of 9
+  runs. While the old build was muted, its node loop kept announcing on
+  LoRa with the outgoing serial queue full.
 
 ### GPIO10
 
@@ -371,6 +478,98 @@ and `leviculum-esp/README.md` on that branch.
   interrupt (an input), while the README says it is "held high" (an
   output). This page keeps the question open until a schematic or a
   probe decides it.
+
+## The board as the UI sees it
+
+*Written for the messenger UI plan (1343; [A messenger whose core runs
+anywhere](handheld-messenger.md), "The M9 frontend: the plan, measured").*
+One place for the facts a UI slice builds on. Everything here is measured
+on our unit or carried from the sourced sections above; the schematic is
+still missing ("Bring-up plan", step 1), and nothing below rests on
+another firmware's header.
+
+- **Display.** ST7789, 320 wide and 240 high as mounted (landscape; the
+  community port's MADCTL 0xB0, the map-fill observation under
+  "Display"), RGB565, no touch. A full frame is 153,600 bytes, and its
+  flush over the shared 40 MHz SPI bus with DMA was measured at 30.8 ms
+  from SRAM and 31.5 ms from PSRAM, 99.8 % of the line rate
+  (`docs/drafts/map-measurement-2026-10.md`, "Device rows, measured
+  2026-10-26"). So a full-frame UI can never exceed about 32 Hz, and the
+  bus is saturated: the lever is partial updates, which the ST7789's
+  column/row address window gives for free. The bus is shared with the
+  LR1110 and the SD card, so a long flush and a radio interrupt contend;
+  what that costs is measured on the board, not assumed.
+- **Type.** Two sizes since 1532 (`loquax-m9/src/font.rs`), both from
+  the `no_std` atlases of `embedded-graphics-unicodefonts` and measured on
+  the host at the panel's 0.1524 mm a pixel. The default is the 9 x 15:
+  an x of 7 px (1.07 mm), a capital of 10 px (1.52 mm), 35 x 16 cells,
+  five blank pixels at the right. The large size is the 10 x 20 of 1428:
+  an x of 8 px (1.22 mm), a capital of 13 px (1.98 mm), 32 x 12 cells.
+  The 6 x 10 lacks the delivery ladder's tick and clock, the 7 x 13,
+  7 x 14 and 8 x 13 lack the tick, and the 6 x 12 sets the same 5 px x
+  that was too small at arm's length (Lew, 2026-11-04). The list, the
+  chat, the group screens, the pairing and the overview follow the
+  reader's size, the top bar with them, as one cell row of the same
+  grid; the map's cells, its hint line, pins and names stay on the
+  large grid, which its picture is laid on (1531). Since 1561 a third,
+  very small size is offered, the 6 x 12 (53 x 20 cells, x 5 px): Lew
+  asked for it on 2026-11-08 although 5 px was hard for him on
+  2026-11-04, his choice to offer. The reader switches on the settings
+  behind the house key (`loquax-m9/src/house.rs`): the row "Schrift",
+  Left or Right steps it ("sehr klein", "klein", "groß"), Enter confirms,
+  Back keeps the size. The held house key of 1532 is gone: the
+  controller repeats no held key ("No repeat" above). The client
+  record's byte 6, bits 0-1, keeps the choice across a power cycle (0
+  small, 1 large as 1532's flag was, 2 very small); a board without a
+  home has no record and starts small.
+  There is no tab bar on the M9 (the scene's `Viewing::tabs` is off):
+  the map and the house have keys of their own.
+- **Input.** The 37-key QWERTY behind the I2C controller at 0x6D (V1.1,
+  "Two hardware revisions") is the whole input: no touch, no encoder.
+  The INT line does not fire per key, so the firmware polls while the
+  panel is lit, and the keyboard light does nothing on a version-2 board
+  (both: "The keypad"). The controller sends one ASCII code per press
+  and resolves its layers itself ("The keyboard controller, measured");
+  which code each navigation and side key sends is the walk's; a held
+  key does not repeat (1561).
+- **Memory.** 512 KB SRAM, 8 MB PSRAM (came up with 8,388,608 bytes in
+  the map measurement), 16 MB flash. How much SRAM is free beside the
+  radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
+  `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
+  `leviculum-esp/src/lib.rs:423`); the UI budgets on the messenger page
+  say what has to replace it.
+- **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
+  +17 dBm ("What the community port measured"). For the UI it is the
+  link the messenger rides; the status screen's facts (mode, announce,
+  duty) are the same as every board's.
+- **GNSS.** An AG3352 with an own fix ("Two conflicts the device
+  settles"). So sharing a position is possible on the M9, which neither
+  desktop target can ([Loquax: one messenger on every
+  target](loquax-targets.md), "GNSS on the desktop").
+- **Battery facts the UI shows.** Voltage on GPIO13 through the 2:1
+  divider; the charger ends at 4.35 V, so a gauge that assumes a 4.2 V
+  chemistry misreads a full battery; USB power present is GPIO1 low
+  (all under "Power").
+- **Sound.** A buzzer behind a transistor on GPIO9, nothing else.
+
+What the board lacks, one sentence each, under the all-targets rule
+(every feature moves its platform layer on all targets where technically
+possible; [Loquax: one messenger on every target](loquax-targets.md),
+"The M9" has the per-row list):
+
+- **No microphone, no speaker:** a voice message neither records nor
+  plays here; the M9 shows that one arrived and how long it is, and the
+  buzzer announces it.
+- **No camera:** a contact or admission code is never scanned; it is
+  typed on the 37 keys or written over the USB control link, and the M9
+  shows its own code as a QR on the display for a phone to scan.
+- **No touch:** every intent a sheet or a menu offers must be reachable
+  from the key table; a feature that only a gesture can reach on another
+  target is refused for the scene, the same consistency rule the
+  navigation page applies to views.
+- **No file system a user can reach:** attachments are listed and small
+  photos drawn, but "open with" and "save to" have no meaning; a file is
+  fetched by a paired device instead.
 
 ## Decided
 
@@ -422,7 +621,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
 4. **Give the rig an ESP32 side.** Nothing on the rig handles this chip
    family as an LNode today:
    - `lnflash` knows two transports, `uf2-msc` and `dfu-serial`
-     (`Transport`, `lnflash/src/manifest.rs:129-139`). An ESP32-S3 has no
+     (`Transport`, `lnflash/src/manifest.rs:138-148`). An ESP32-S3 has no
      UF2 and no DFU and is written with `espflash`.
    - periculum's LNode profile identifies a board by its USB vendor string
      and interface numbers (`periculum/periculum/devices/lnode.toml:24-32`).
@@ -434,7 +633,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      step for either.
    - The host toolchain pin stays at 1.97.1 until esp-rs ships a
      non-prerelease Xtensa toolchain of the same generation (decided
-     2026-10-05, `scripts/install-ci.sh:379-383`, `rust-toolchain.toml:17`).
+     2026-10-05, `scripts/install-ci.sh:433-437`, `rust-toolchain.toml:17`).
    - **2026-10-25, how the rig should recognise an M9 (#473).** USB
      cannot: the CH340K publishes `1a86:7522`, no manufacturer string and
      no serial number, so it looks like every other CH340, and periculum's
@@ -483,10 +682,10 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      and then RTS one after the other, and one line moving alone pulls
      EN through the CH340K. A termios reader that opens the port without
      moving the lines (the `m9-listen4.py` shape) does not reset it.
-   - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` writes
+   - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` wrote
      an ESP32 through the ROM loader with `espflash` (preferred, it carries
      its own stubs and takes the ELF) or `esptool`, with `--no-stub` when
-     the esptool package lacks the chip's stub. A catalogue entry states
+     the esptool package lacks the chip's stub. A catalogue entry stated
      the loader's facts as `[board.<name>.esp]`, `chip` and `baud`; the
      M9's rate is 230400, because its CH340K lost bytes at 460800 and
      921600. No M9 entry is in the catalogue yet: lnflash's control half
@@ -494,7 +693,10 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      a control-only entry keyed on `1a86:7522` would point every control
      session at every CH340 on the bus. The entry lands with the
      single-port host link or with the first bundle that carries an M9
-     image.
+     image. **2026-11-08 (#476):** no flash run reached the module, so it was
+     removed with the catalogue section; commit 39071420 holds both for
+     the day the M9 entry lands. Until then lnflash names an M9 on the bus
+     in one line and leaves it alone.
 5. **Acceptance at the rig:**
    - the boot proof;
    - the display. Since 2026-10-25 (980) the status page and its
@@ -551,16 +753,21 @@ compared with the T1000-E's numbers.
 - **SRAM after WiFi and BLE:** how much of the 512 KB is left once both
   stacks are up.
 - **WiFi as a TCP interface** without a host attached.
-- **The keyboard:** which controller it is (ESP32-S2 or STC8H), its
-  I2C protocol beyond the one command the Meshtastic variant writes,
-  and the input model on top of it.
+- **The keyboard:** which controller it is (ESP32-S2 or STC8H). Its
+  protocol is measured (one code per press, "The keyboard controller,
+  measured"); open are the names of the eleven codes that are no
+  character, repeat, and what Shift, Sym and the long press send, all
+  read by the walk.
 
 ## Not yet built
 
-All of it, apart from the driver: the `Board` constant, a board file and
-binary, the keyboard, the display UI, the menu, the rig's ESP32 flashing
-and device profile, the gates for the ESP32 recipes, and the acceptance
-runs.
+All of it, apart from the driver and the Loquax image of 1361 (a board
+file and binary that light the panel, read the keyboard controller and
+draw the messenger's fixture screens, nothing on the air; [A messenger
+whose core runs anywhere](handheld-messenger.md), "Slice four, host
+half"): the `Board` constant for the radio, the node on the board, the
+menu, the rig's ESP32 flashing and device profile, the gates for the
+ESP32 recipes, and the acceptance runs.
 
 ## See also
 

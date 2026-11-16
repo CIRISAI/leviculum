@@ -74,6 +74,57 @@ pub fn lines(groups: &[HelpGroup]) -> Vec<String> {
     lines
 }
 
+/// What a stretch of a help line is: a group's title, an entry's keys (with
+/// the indent before them) or its description (with the padding before it).
+/// Each renderer styles the three its own way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Title,
+    Keys,
+    Desc,
+}
+
+/// [`lines`] as stretches of [`Part`]s, one list per line: joined, each
+/// list is its line, character for character.
+pub fn segments(groups: &[HelpGroup]) -> Vec<Vec<(String, Part)>> {
+    let col = key_col(groups);
+    let mut out = Vec::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            out.push(Vec::new());
+        }
+        out.push(alloc::vec![(group.title.to_string(), Part::Title)]);
+        for e in &group.entries {
+            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
+            out.push(alloc::vec![
+                (format!("{HELP_INDENT}{}", e.keys), Part::Keys),
+                (format!("{}{}", " ".repeat(pad), e.desc), Part::Desc),
+            ]);
+        }
+    }
+    out
+}
+
+/// The characters `chars` of a line given as [`segments`], each stretch
+/// keeping its part: what one drawn [`HelpRow`] shows.
+pub fn cut(segments: &[(String, Part)], chars: Range<usize>) -> Vec<(String, Part)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (text, part) in segments {
+        let len = text.chars().count();
+        let from = chars.start.max(at);
+        let to = chars.end.min(at + len);
+        if from < to {
+            out.push((
+                text.chars().skip(from - at).take(to - from).collect(),
+                *part,
+            ));
+        }
+        at += len;
+    }
+    out
+}
+
 /// Where the overlay is drawn over `area`: centred, the widest line plus its
 /// two borders wide and every drawn row ([`rows`]) plus the borders high, each
 /// cut to the area. The renderer draws here and a program's click hit-tests
@@ -204,6 +255,49 @@ mod tests {
         assert_eq!(cut("  j / k    scroll", 9), ["  j / k", "scroll"]);
         assert_eq!(cut("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(cut("ab ↑↓ cd", 5), ["ab ↑↓", "cd"]);
+    }
+
+    /// The segments joined are the lines, and a row's cut joined is the
+    /// row's characters of its line.
+    #[test]
+    fn the_segments_are_the_lines_and_a_cut_is_the_row() {
+        let groups = [HelpGroup {
+            title: "Move",
+            entries: alloc::vec![
+                HelpEntry {
+                    keys: "j / k",
+                    desc: "line down / up",
+                },
+                HelpEntry {
+                    keys: "g",
+                    desc: "top",
+                },
+            ],
+        }];
+        let lines = lines(&groups);
+        let segs = segments(&groups);
+        let joined: Vec<String> = segs
+            .iter()
+            .map(|l| l.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        assert_eq!(joined, lines);
+        let area = Rect::new(0, 0, 14, 10);
+        for row in rows(&groups, area) {
+            let got: String = super::cut(&segs[row.line], row.chars.clone())
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect();
+            let want: String = lines[row.line]
+                .chars()
+                .skip(row.chars.start)
+                .take(row.chars.len())
+                .collect();
+            assert_eq!(got, want);
+        }
+        assert_eq!(
+            super::cut(&segs[1], 0..4),
+            [("  j ".to_string(), Part::Keys)]
+        );
     }
 
     #[test]

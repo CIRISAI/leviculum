@@ -29,12 +29,26 @@ use tokio::signal::unix::{signal, SignalKind};
 
 /// Measured live heap, under the default-off `heap-accounting` feature
 /// (550): the same counting shim lnsd installs (`leviculum-cli/src/lnsd.rs`),
-/// for the same reason. It only counts and forwards to `System`, so the
-/// node runs the allocator it would run without it.
-#[cfg(feature = "heap-accounting")]
+/// for the same reason. It only counts and forwards to the allocator below
+/// it, so the node runs the allocator it would run without it.
+#[cfg(all(feature = "heap-accounting", not(feature = "alloc-mimalloc")))]
 #[global_allocator]
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
+
+/// mimalloc instead of the libc allocator, under the default
+/// `alloc-mimalloc` feature (1592), as lnsd since 766: on miauhaus the
+/// lnpnd on musl's mallocng grew about 70 MB an hour in anonymous mappings
+/// no table owned, the retention lnsd showed there before it moved.
+/// Counted, in the same shim, when `heap-accounting` is on too.
+#[cfg(all(feature = "heap-accounting", feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingOver<mimalloc::MiMalloc> =
+    leviculum_std::heap_accounting::CountingOver(mimalloc::MiMalloc);
+
+#[cfg(all(not(feature = "heap-accounting"), feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// `--version`: the crate version, the build id, `+heapacct` in an
 /// instrumented build and the commit in parentheses, composed by build.rs the
@@ -59,8 +73,9 @@ const VERSION: &str = env!("LEVICULUM_VERSION");
                   lxmd nodes alike.\n\n\
                   Set LEVICULUM_EVENT_LOG=<path> for one structured line per \
                   accepted upload (PN_ACCEPT), rejected upload (PN_REJECT), \
-                  mailbox request (PN_GET), eviction (PN_EVICT), peering \
-                  change (PN_PEER), offer round (PN_OFFER), sync round \
+                  mailbox request (PN_GET), eviction (PN_EVICT), departure \
+                  with its reason (PN_DEPART), status query (PN_STATUS), \
+                  peering change (PN_PEER), offer round (PN_OFFER), sync round \
                   (PN_SYNC) and own-mailbox delivery (PN_MAILBOX), plus a \
                   PN_STORE line every 8 minutes carrying store size against \
                   the limit -- which is also the log's liveness heartbeat. \
@@ -171,7 +186,8 @@ struct Args {
     sync_limit_kb: Option<u64>,
 
     /// Message store capacity in kilobytes (config:
-    /// message_storage_limit, which is in megabytes).
+    /// message_storage_limit, which is in megabytes). Unset, the default
+    /// of 500 MB is bounded by the host's RAM (lnpnd(1)).
     #[arg(long)]
     store_limit_kb: Option<u64>,
 
@@ -372,7 +388,8 @@ struct Effective {
     node_announce_at_start: bool,
     autopeer: bool,
     autopeer_maxdepth: u8,
-    store_limit_kb: u64,
+    /// The limit the config or a flag set, `None` for the default.
+    store_limit_kb: Option<u64>,
     transfer_limit_kb: u64,
     sync_limit_kb: u64,
     stamp_cost: u8,
@@ -381,6 +398,7 @@ struct Effective {
     remote_peering_cost_max: u8,
     max_peers: usize,
     static_peers: Vec<[u8; 16]>,
+    prioritised_destinations: Vec<[u8; 16]>,
     from_static_only: bool,
     max_inbound_syncs: usize,
     auth_required: bool,
@@ -408,6 +426,30 @@ fn peering_config(effective: &Effective) -> leviculum_lxmf::PeeringConfig {
     }
 }
 
+/// The store limit's line, and the warning when a configured limit's
+/// index would take more than the RAM rule allows (order 1548).
+fn log_store_limit(limit: &lnpnd::store_limit::StoreLimit) {
+    use lnpnd::store_limit::megabytes;
+    let ram_mb = limit.ram_bytes.map_or(0, megabytes);
+    let index_mb = megabytes(limit.index_bytes());
+    tracing::info!(
+        event = "PN_STORE_LIMIT",
+        bytes = limit.bytes,
+        source = limit.source.as_str(),
+        ram_mb = ram_mb,
+        index_mb = index_mb,
+    );
+    if limit.exceeds_ram_rule() {
+        tracing::warn!(
+            "lnpnd: the message store limit of {} MB needs about {index_mb} MB of RAM \
+             for its index when full, the host has {ram_mb} MB; a quarter of it \
+             holds a store of {} MB",
+            megabytes(limit.bytes),
+            limit.ram_bound_bytes.map_or(0, megabytes),
+        );
+    }
+}
+
 fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::ConfigError> {
     // `enable_node = no` would ask for an lxmd that is only a mailbox;
     // that job is loquax's. Refusing beats silently running the role the
@@ -421,6 +463,8 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
                 .to_string(),
         });
     }
+    let limits =
+        lnpnd::config::SizeLimits::resolve(file, args.transfer_limit_kb, args.sync_limit_kb)?;
     Ok(Effective {
         node_name: args
             .name
@@ -446,24 +490,17 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             .autopeer_maxdepth
             .or(file.get_u8("propagation", "autopeer_maxdepth")?)
             .unwrap_or(lnpnd::config::DEFAULT_AUTOPEER_MAXDEPTH),
-        store_limit_kb: args.store_limit_kb.unwrap_or(
-            file.get_u64("propagation", "message_storage_limit")?
-                .map(|megabytes| megabytes * 1000)
-                .unwrap_or(500_000),
-        ),
-        transfer_limit_kb: args.transfer_limit_kb.unwrap_or(
-            // Both spellings, newer one wins, as in `apply_config`
-            // (`lxmd.py:165-177`).
-            file.get_u64("propagation", "propagation_message_max_accepted_size")?
-                .or(file.get_u64("propagation", "propagation_transfer_max_accepted_size")?)
-                .unwrap_or(4),
-        ),
-        sync_limit_kb: args.sync_limit_kb.unwrap_or(
-            file.get_u64("propagation", "propagation_sync_max_accepted_size")?
-                .unwrap_or(32),
-        ),
-        // Unset costs are the role's own defaults, 13 / 3 / 1 (Lead,
-        // 2026-09-12), one source with the board's.
+        // `None` leaves the limit to the RAM rule (`lnpnd::store_limit`).
+        store_limit_kb: match args.store_limit_kb {
+            Some(kb) => Some(kb),
+            None => file
+                .get_u64("propagation", "message_storage_limit")?
+                .map(|megabytes| megabytes * 1000),
+        },
+        transfer_limit_kb: limits.transfer_kb,
+        sync_limit_kb: limits.sync_kb,
+        // Unset costs are the role's own defaults, 13 / 0 / 1 (Lead,
+        // 2026-09-12; flexibility 0 since 1294), one source with the board's.
         stamp_cost: args.stamp_cost.unwrap_or(
             file.get_u8("propagation", "propagation_stamp_cost_target")?
                 .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().stamp_cost),
@@ -507,6 +544,12 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             }
             hashes
         },
+        // lxmd reads the list and prioritises each valid hash
+        // (`reference/LXMF/LXMF/Utilities/lxmd.py:214-217`, `:446-450`);
+        // a bad hash is a config error here, as in `static_peers`.
+        prioritised_destinations: file
+            .get_hash_list("propagation", "prioritise_destinations")?
+            .unwrap_or_default(),
         from_static_only: args.from_static_only
             || file
                 .get_bool("propagation", "from_static_only")?
@@ -532,9 +575,7 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             .map(|minutes| minutes * 60),
         // The reference clamps to ≥ 1 (`max(1, …)`, `lxmd.py:91`).
         mailbox_stamp_cost: file.get_u8("lxmf", "stamp_cost")?.unwrap_or(12).max(1),
-        delivery_limit_kb: file
-            .get_u64("lxmf", "delivery_transfer_max_accepted_size")?
-            .unwrap_or(1000),
+        delivery_limit_kb: limits.delivery_kb,
         on_inbound: args
             .on_inbound
             .clone()
@@ -587,6 +628,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         );
         leviculum_std::heap_accounting::configure_sampler_from_env();
     }
+    // Both ways, as lnsd's, so a field node's log names its allocator
+    // whichever build it runs; build-deb.sh reads the mimalloc line off the
+    // binary, so each arm is a whole literal.
+    #[cfg(feature = "alloc-mimalloc")]
+    tracing::info!("Allocator: mimalloc");
+    #[cfg(not(feature = "alloc-mimalloc"))]
+    tracing::info!("Allocator: system (libc)");
 
     let data_dir = args
         .data_dir
@@ -619,11 +667,17 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             store_dir.path.display()
         );
     }
-    let mut store =
-        match FilePropagationStore::open(&store_dir.path, effective.store_limit_kb * 1000) {
-            Ok(store) => store,
-            Err(error) => return failure(format!("message store: {error}")),
-        };
+    // The default store limit follows the host's RAM, so a full store's
+    // index cannot push the daemon into the OOM killer (order 1548).
+    let store_limit = lnpnd::store_limit::resolve(
+        effective.store_limit_kb.map(|kb| kb.saturating_mul(1000)),
+        lnpnd::store_limit::host_ram_bytes(),
+    );
+    log_store_limit(&store_limit);
+    let mut store = match FilePropagationStore::open(&store_dir.path, store_limit.bytes) {
+        Ok(store) => store,
+        Err(error) => return failure(format!("message store: {error}")),
+    };
     // Once per store, before the node exists (`lnpnd::reprice_stored_values`).
     if !store.stamp_values_true() {
         let started = std::time::Instant::now();
@@ -641,7 +695,17 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         "lnpnd: message store holds {} message(s), {} of {} kB free",
         store.len(),
         store_free_kb(&store),
-        effective.store_limit_kb
+        store_limit.bytes / 1000
+    );
+    // What the start cost, and whether the index file spared it the walk
+    // (order 1376: 130 s at 323 597 messages before it did).
+    let opened = store.open_profile();
+    eprintln!(
+        "lnpnd: message store opened in {} ms, index file {}, {} from it, {} file(s) read",
+        opened.total_us / 1000,
+        opened.index_file.as_str(),
+        opened.from_index_file,
+        opened.files_read
     );
     // From here on the durable writes run on the store's own writer thread,
     // not in the hooks that hold the core lock (order 1081); the re-pricing
@@ -675,8 +739,26 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         stamp_cost_flexibility: effective.stamp_cost_flexibility,
         peering_cost: effective.peering_cost,
         name: effective.node_name.clone().map(String::into_bytes),
+        prioritised_destinations: effective.prioritised_destinations.clone(),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
+    // Honoured, but said: a message stamped below what a stock peer takes
+    // from us stays on this node until it expires (order 1294).
+    if leviculum_lxmf::PropagationNode::new(
+        leviculum_lxmf::MemoryPropagationStore::new(0),
+        node_config.clone(),
+    )
+    .accepts_below_stock_peers()
+    {
+        tracing::warn!(
+            "lnpnd: stamp cost {} minus flexibility {} accepts messages a stock \
+             propagation node refuses (it demands {}); they stay here until they \
+             expire",
+            effective.stamp_cost,
+            effective.stamp_cost_flexibility,
+            leviculum_lxmf::STOCK_PEER_MIN_STAMP_VALUE
+        );
+    }
     let peering = peering_config(&effective);
     let peer_store = match leviculum_std::FilePeerStore::open(data_dir.join("peers")) {
         Ok(store) => store,
@@ -701,9 +783,17 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             delivery_limit_kb: effective.delivery_limit_kb,
             ignored,
         }),
-        store_limit_bytes: effective.store_limit_kb * 1000,
+        store_limit_bytes: store_limit.bytes,
         delivery_limit_kb: effective.delivery_limit_kb,
     });
+
+    // The duplicate list's departed ids, beside the message store: a
+    // message collected before a restart stays a duplicate after it.
+    let engine = engine.with_departures_path(data_dir.join("departures"));
+    // The role's own heap census (`PN_CENSUS`, order 1515): SIGUSR1 asks
+    // for a line at the next tick, the printer marks what it took.
+    let census = engine.census_handle();
+    let printed = census.clone();
 
     // `node_builder` owns the driver configuration, including the reason
     // this daemon has no application event channel (Codeberg #419).
@@ -746,6 +836,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     let on_inbound = effective.on_inbound.clone();
     let printer = std::thread::spawn(move || {
         while let Ok(event) = events.recv() {
+            printed.event_taken();
             report(event, &messages_dir, on_inbound.as_deref());
         }
     });
@@ -760,7 +851,9 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // SIGUSR1 prints the memory census, lnsd's signal for lnsd's dump and in
     // lnsd's shape (`leviculum_std::reticulum::compose_diagnostic_dump`), so
     // periculum's soak census reads either daemon with one parser (550). On
-    // stderr, which is where every other line of this daemon goes.
+    // stderr, which is where every other line of this daemon goes. It also
+    // asks the role for its `PN_CENSUS` line, which the engine writes at its
+    // next tick, into the event log (order 1515).
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(sigterm) => sigterm,
         Err(error) => return failure(format!("signal handling: {error}")),
@@ -776,7 +869,18 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
                 Err(error) => return failure(format!("signal handling: {error}")),
             },
             _ = sigterm.recv() => break "SIGTERM",
-            _ = sigusr1.recv() => eprint!("{}", census_dump(&node)),
+            _ = sigusr1.recv() => {
+                let (taken, _) = census.latest();
+                census.request();
+                // The engine takes the census at its next tick; the dump
+                // waits for it so its total holds the role's tables of
+                // now, and takes the last one if the tick is late.
+                let deadline = tokio::time::Instant::now() + CENSUS_WAIT;
+                while census.latest().0 == taken && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                eprint!("{}", census_dump(&node, census.dump_section()));
+            }
         }
     };
     eprintln!("lnpnd: shutting down ({received})");
@@ -785,16 +889,37 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The SIGUSR1 dump: the composed census, then the measured live line in a
-/// build that can measure it. Written in one piece, because periculum tells
-/// a fresh dump from the last by its `gap:` line and reads each section as
-/// the last line of its kind.
-fn census_dump(node: &leviculum_std::ReticulumNode) -> String {
+/// How long a SIGUSR1 dump waits for the census it asked the engine for.
+const CENSUS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The SIGUSR1 dump: the node's census, the role's `PN_CENSUS` line under
+/// it, one total over both, then the measured live line in a build that
+/// can measure it. The total is what the `gap:` line subtracts as
+/// `tracked`, so it holds the role's tables (order 1648): before, it held
+/// the transport's alone and the gap's `unaccounted` counted the whole
+/// store index. Written in one piece, because periculum tells a fresh dump
+/// from the last by its `gap:` line and reads each section as the last
+/// line of its kind.
+fn census_dump(node: &leviculum_std::ReticulumNode, role: Option<(String, u64)>) -> String {
+    let (own, own_bytes) = role.unwrap_or_else(|| {
+        (
+            "PN_CENSUS none yet: the engine has not registered\n".into(),
+            0,
+        )
+    });
     #[allow(unused_mut)]
-    let mut dump = leviculum_std::reticulum::compose_diagnostic_dump(node.diagnostic_dump());
+    let mut dump = leviculum_std::census::compose_multi_node_dump(
+        &[("lnpnd".to_string(), node.diagnostic_dump())],
+        &own,
+        own_bytes,
+    );
     #[cfg(feature = "heap-accounting")]
     dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
-        "system",
+        if cfg!(feature = "alloc-mimalloc") {
+            "mimalloc"
+        } else {
+            "system"
+        },
     ));
     dump
 }
@@ -1034,6 +1159,24 @@ mod tests {
 [logging]\n\
   loglevel = 4\n";
 
+    /// No limit in the config and none on the command line leaves the
+    /// limit to the RAM rule; a flag wins over the file (order 1548).
+    #[test]
+    fn an_unset_store_limit_is_left_to_the_ram_rule() {
+        let empty = RawConfig::parse("[propagation]\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        assert_eq!(
+            resolve(&args, &empty).expect("resolves").store_limit_kb,
+            None
+        );
+        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("parses");
+        let args = Args::parse_from(["lnpnd", "--store-limit-kb", "2000"]);
+        assert_eq!(
+            resolve(&args, &file).expect("resolves").store_limit_kb,
+            Some(2000)
+        );
+    }
+
     #[test]
     fn the_public_node_config_resolves_key_for_key() {
         let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("the live config shape parses");
@@ -1047,7 +1190,7 @@ mod tests {
         assert!(effective.autopeer);
         assert_eq!(effective.autopeer_maxdepth, 4);
         // Megabytes in the file, kilobytes in the daemon (`lxmd.py:158-159`).
-        assert_eq!(effective.store_limit_kb, 1_000_000);
+        assert_eq!(effective.store_limit_kb, Some(1_000_000));
         // The older of the two spellings; kilobytes either way.
         assert_eq!(effective.transfer_limit_kb, 256);
         assert!(!effective.auth_required);
@@ -1069,8 +1212,9 @@ mod tests {
         );
     }
 
-    /// A config that names no cost runs the Lead's decision of 2026-09-12:
-    /// stamp cost 13 with flexibility 3, peering cost 1. Peering cost 0
+    /// A config that names no cost runs the Lead's decision of 2026-09-12,
+    /// stamp cost 13 and peering cost 1, with flexibility 0 since order
+    /// 1294 (13 and up, what a stock peer takes from us). Peering cost 0
     /// would leave every stock lxmd peer unable to sync toward us
     /// (`peering_key_ready` returns false on a falsy cost,
     /// `reference/LXMF/LXMF/LXMPeer.py:228`). The mailbox's own stamp cost
@@ -1086,9 +1230,39 @@ mod tests {
                 effective.stamp_cost_flexibility,
                 effective.peering_cost
             ],
-            [13, 3, 1]
+            [13, 0, 1]
         );
         assert_eq!(effective.mailbox_stamp_cost, 12);
+    }
+
+    /// A config that names no size limit runs lxmd's, 256 KB per message
+    /// and 10 240 KB per sync (`reference/LXMF/LXMF/LXMRouter.py:55`,
+    /// `:59`), the values the example config shows; 4 and 32 until 1294.
+    #[test]
+    fn an_unset_size_limit_resolves_to_the_references() {
+        let file = RawConfig::parse("[propagation]\nenable_node = yes\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(
+            (effective.transfer_limit_kb, effective.sync_limit_kb),
+            (256, 10_240)
+        );
+    }
+
+    /// `prioritise_destinations` reaches the role (order 1294): it was
+    /// parsed, warned about and dropped.
+    #[test]
+    fn prioritise_destinations_is_honoured() {
+        let file = RawConfig::parse(
+            "[propagation]\nprioritise_destinations = \
+             41d20c727598a3fbbdf9106133a3a0ed, d924b81822ca24e68e2effea99bcb8cf\n",
+        )
+        .expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(effective.prioritised_destinations.len(), 2);
+        assert_eq!(effective.prioritised_destinations[0][0], 0x41);
+        assert!(file.inert_keys().is_empty());
     }
 
     /// A config that names no autopeer depth peers six hops deep, the depth
@@ -1143,7 +1317,9 @@ mod tests {
         let template = lnpnd::config::EXAMPLE_CONFIG;
         for line in [
             "# propagation_stamp_cost_target = 13",
-            "# propagation_stamp_cost_flexibility = 3",
+            "# propagation_stamp_cost_flexibility = 0",
+            "# propagation_message_max_accepted_size = 256",
+            "# propagation_sync_max_accepted_size = 10240",
             "# peering_cost = 1",
             "\nautopeer_maxdepth = 6\n",
         ] {

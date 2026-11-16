@@ -41,10 +41,19 @@
 # needs a core-side inbound Resource cancel).
 2    -p leviculum-lxmf --test direct_delivery_attempts
 
+# 0 -> 2 (2026-11-02, 1305): the two N-home losses of the study
+# docs/drafts/mailbox-for-friends-study-2026-11.md, red on today's code by
+# design and kept on record until their fixes land: the ratchet loss
+# (comes off with H1, shared-seed ratchets) and the path flap (comes off with
+# H3, mesh-only announcing for a phone home). Run by hand with
+# `cargo test -p leviculum-lxmf --test two_homes -- --ignored`.
+2    -p leviculum-lxmf --test two_homes
+
 # Four of these need hardware or a live service: two RNode cases wanting a
 # board on /dev/ttyACM0, two i2p cases wanting a running i2pd SAM bridge.
 # The i2p pair runs under `just i2p-live` (T-0009), which starts a private
-# i2pd for it; the reviewer runs that weekly beside `emulated-corpus`.
+# I2P network on loopback for it (1576, no internet); the reviewer runs that
+# beside `emulated-corpus`.
 #
 # 4 -> 5 (2026-09-21): append_cost, added by 20261fbb as the evidence behind
 # docs/src/concepts/core-lock-budget.md "A durable store append is inside the
@@ -55,7 +64,16 @@
 # hand with LEVICULUM_APPEND_BENCH_DIR pointed at a real disk, whenever that
 # doc section is re-measured or the store's write/fsync/rename/fsync path
 # changes. Nothing in the release path re-measures it.
-5    -p leviculum-std --lib
+# 5 -> 6 (2026-11-03, order 1376, #478): open_cost_at_field_scale prices the
+# store's open over 320 000 files, the walk against the index file, part by
+# part. Its fixture is 1.3 GB on disk at a block a file and takes five seconds
+# to write, and the figure that matters is the cold one, which needs the page
+# cache dropped as root; no tier should do either per run. What it measured is
+# pinned deterministically by a_reopen_reads_no_file_the_index_file_names and
+# its three siblings, which run in the suite. Run by hand with
+# LEVICULUM_OPEN_BENCH_DIR on a real disk whenever the open or the index file
+# changes.
+6    -p leviculum-std --lib
 1    -p leviculum-std --doc
 9    -p leviculum-std --test mvr
 
@@ -97,7 +115,17 @@
 # the acceptance for `lnstatus --origin` (952, #471). Observed group:
 # run-status-parity.sh runs it by name in `just standard` and the land
 # gate's status-parity step, its EXPECTED moved to 5 in the same commit.
-24   -p leviculum-std --test rnsd_interop
+#
+# 24 -> 25 (2026-11-01): a_seventeenth_client_from_one_source_is_refused_and_
+# the_sixteen_lose_nothing (1229), the per-source TCP cap against a release
+# lnsd. Observed group: scripts/run-soak.sh runs it by name in the smoke
+# variant (`just standard`), beside loadtest_tcp_hub_smoke.
+#
+# 25 -> 26 (2026-11-01): a_path_request_burst_is_answered_alike_on_both_stacks
+# (1169), the reference measurement for the board's queued-copy drop. Observed
+# group: run-status-parity.sh runs the status_parity_tests:: module by name in
+# `just standard`, its EXPECTED moved to 6 in the same commit.
+26   -p leviculum-std --test rnsd_interop
 
 # ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
 # docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched
@@ -155,6 +183,12 @@
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
 # a release and whenever the stamp code changes (see the test's header).
+# 1 -> line removed (2026-11-10, order 1658): -p loquax --test
+# mailbox_growth_soak (the_mailbox_does_not_grow_with_uptime, the mailbox's
+# two-hour growth soak, order 1585) is a reviewer's window job through
+# `just mailbox-growth-soak`. Its target has required-features = ["tui"],
+# and this census builds the workspace with default features only, so the
+# unit is invisible here and a pin for it reads as a removed unit.
 1    -p loquax --test stamp_timing
 
 # 0 -> 1 (2026-10-26, order 1009): hook_profile_under_field_load is the
@@ -169,14 +203,43 @@
 # which runs in the suite. Run by hand with LNPND_LOAD_DIR on the disk under
 # test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
 # engine's hooks or the stores' write paths change.
-1    -p lnpnd --lib
-
-# The three rns-rs interop arms of the direct-link upgrade (+ciris,
-# leviculum#70), added 2026-10-05. They cannot be routed into a tier: each
-# needs a process from another implementation (lelloman/rns-rs's `rnsd`, or a
-# small rns-rs peer program) started beside the test, which no tier builds or
-# runs. The leviculum-only arms in the same file run in every tier. They are
-# run by name with `-- --ignored` and the LEVICULUM_INTEROP_* variables their
-# doc comments describe, whenever the upgrade's wire or either
-# implementation's version changes.
-3    -p leviculum-std --test direct_link_upgrade
+# 1 -> 2 (2026-10-31, order 1171, #478): sync_tick_cost_over_a_field_sized_store
+# prices one outbound sync tick, one sync link coming up and one batch plan
+# over a file store of 300 000 messages, the store as it was against the
+# store as it is. Filling it writes 300 000 files (11 s release on the
+# coder host, 1.2 GB on disk at a block a file), which no tier should do per run. What it measured is pinned deterministically by
+# a_sync_round_asks_the_store_without_walking_it, which runs in the suite.
+# Run by hand with LNPND_BENCH_DIR (lnpnd/src/peering.rs, the test's docs)
+# whenever the peering path or the file store's indexes change.
+# 2 -> 3 (2026-11-03, order 1295, #478): expiry_tick_cost_over_a_field_sized_store
+# prices one maintenance tick over a file store of 300 000 messages spread
+# over 40 days, the whole-store expiry walk against the receive-time index,
+# idle, at the first backlog and in steady state. Same fill cost as the one
+# above. What it measured is pinned deterministically by
+# an_expiry_tick_reads_what_expired_not_the_store, which runs in the suite.
+# Run by hand with LNPND_BENCH_DIR (lnpnd/src/expiry_cost.rs, the test's
+# docs) whenever the expiry sweep or the file store's indexes change.
+# 3 -> 5 (2026-11-03, order 1370, #478): two more of the same kind.
+# processed_and_eviction_cost_at_field_scale prices the processed-id cache at
+# 1 M and 10 M ids (bytes per id, the daily prune, a lookup) and make_room over
+# a full 2 GB store of about 6 M messages; it holds about 1.5 GB of RAM at its
+# peak, which no tier should spend per run (lnpnd/src/walk_cost.rs).
+# unhandled_cost_over_a_field_sized_store prices the per-peer unhandled count
+# and the rotation's count over a file store of 320 000 messages, the same
+# fill as the two above (lnpnd/src/peering.rs). Run both by hand, the
+# commands are in the tests' docs, whenever those paths change.
+5    -p lnpnd --lib
+# 0 -> 1 (2026-11-03, order 1376, #478): a_field_size_store_starts_and_answers_within_five_seconds
+# starts the lnpnd binary on the 320 000-file fixture of open_cost_at_field_scale
+# and asks it --status within 5 s. It needs that fixture on a disk, which no
+# tier holds; the restart, the shutdown's write and the damaged file are
+# pinned by the_index_file_survives_a_restart_and_a_damaged_one_costs_one_walk
+# in the same file, which runs in the suite. Run by hand with
+# LNPND_START_BENCH_STORE naming the fixture, after the bench above.
+1    -p lnpnd --test store_index_at_start
+# 0 -> 1 (2026-11-07, order 1515, LV-1000): pn_tables_stay_flat_once_the_store_is_full
+# is a 20-minute soak of the release daemon on a 300 000-message store with 14
+# peers, longer than any tier spends on one test; the census it reads is pinned
+# by sigusr1_census and census::tests, which run in the suite. Run it with
+# `just pn-growth-soak`.
+1    -p lnpnd --test pn_growth_soak

@@ -395,10 +395,11 @@ async fn run_send_steps<O: Outbox>(
                         return Err(gave_up(id, state, on_link));
                     }
                 }
-                OutboxEvent::State { .. } => {}
+                OutboxEvent::State { .. } | OutboxEvent::Progress { .. } => {}
                 OutboxEvent::Left {
                     message_id: id,
                     last,
+                    ..
                 } if Some(id) == message_id => {
                     // The router removes an entry only in a terminal state, so
                     // a removal we did not already act on means the terminal
@@ -421,18 +422,29 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::PnUnavailable { .. }
                 | OutboxEvent::Mailbox(_)
                 | OutboxEvent::Received { .. }
+                | OutboxEvent::Propagated { .. }
                 | OutboxEvent::Unverified { .. }
                 | OutboxEvent::Verified { .. }
                 | OutboxEvent::Announced { .. }
                 | OutboxEvent::NodeAnnounced { .. }
+                | OutboxEvent::Uploaded { .. }
+                | OutboxEvent::MeshPosition { .. }
+                | OutboxEvent::HubAnnounced { .. }
+                | OutboxEvent::PageAnnounced { .. }
+                | OutboxEvent::NameHeard { .. }
+                | OutboxEvent::HubRooms { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }
                 | OutboxEvent::Unsent { .. }
+                | OutboxEvent::KeyMissing { .. }
                 | OutboxEvent::Fenced { .. }
+                | OutboxEvent::Census(_)
                 | OutboxEvent::Packed { .. }
                 | OutboxEvent::HomeSent { .. }
                 | OutboxEvent::HomeMarked { .. }
+                | OutboxEvent::HomeStalled { .. }
+                | OutboxEvent::HomePnStatus { .. }
                 | OutboxEvent::HomePetname { .. }
                 | OutboxEvent::HomePeerState { .. } => {}
             }
@@ -630,6 +642,7 @@ pub async fn run_send_propagated<O: Outbox, E: Effects>(
                 OutboxEvent::Left {
                     message_id: id,
                     last,
+                    ..
                 } if Some(id) == message_id => {
                     let state = last.or(last_state).unwrap_or(MessageState::Failed);
                     return if given_up(state) {
@@ -1303,6 +1316,7 @@ mod tests {
             OutboxEvent::Left {
                 message_id: DIRECT_ID,
                 last: Some(MessageState::Cancelled),
+                failure: None,
             },
             OutboxEvent::PnSelected {
                 destination: PN,

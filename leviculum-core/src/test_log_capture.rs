@@ -138,6 +138,10 @@ mod tests {
     // A non-capturing thread must not leak events into a capturing thread's
     // buffer, and the capturing thread must see its own.
     #[test]
+    #[cfg_attr(
+        target_family = "wasm",
+        ignore = "+ciris #108: wasm32-wasip1 has no threads"
+    )]
     fn capture_is_thread_local() {
         let ((), logs) = with_captured_logs(|| {
             tracing::debug!(target: "tlc_local", "OWN_EVENT");

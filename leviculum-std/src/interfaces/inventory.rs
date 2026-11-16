@@ -34,9 +34,13 @@
 //! | its accepted IPC clients | `LocalInterface[rns/<instance>]` | LocalInterface.py:372-374 |
 //! | TCP listener | `TCPServerInterface[<section>/<ip>:<port>]` | TCPInterface.py:666-672 |
 //! | its accepted connections | `TCPInterface[Client on <section>/<ip>:<port>]` | TCPInterface.py:443-449, 577 |
+//! | I2P interface | `I2PInterface[<section>]` | I2PInterface.py:1020-1021 |
+//! | its configured peers | `I2PInterfacePeer[<section> to <peer>]` | I2PInterface.py:833-834, 936 |
+//! | its accepted connections | `I2PInterfacePeer[Connected peer on <section>]` | I2PInterface.py:833-834, 946 |
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use leviculum_core::traits::InterfaceMode;
@@ -115,6 +119,157 @@ pub(crate) fn local_client_short_name(index: usize, socket: &str) -> String {
     format!("{index}@\0{socket}")
 }
 
+/// `I2PInterface[<section>]` (I2PInterface.py:1021): the parent row of an
+/// I2P section, which carries no packets itself.
+#[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+pub(crate) fn i2p_parent_name(section: &str) -> String {
+    format!("I2PInterface[{section}]")
+}
+
+/// `<section> to <peer>`, a configured peer's `name` (I2PInterface.py:936),
+/// with the peer address exactly as the config lists it.
+#[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+pub(crate) fn i2p_peer_short_name(section: &str, peer: &str) -> String {
+    format!("{section} to {peer}")
+}
+
+/// `Connected peer on <section>`, an accepted connection's `name`
+/// (I2PInterface.py:946). Every accepted connection of one section carries
+/// the same name in the reference.
+#[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+pub(crate) fn i2p_accepted_short_name(section: &str) -> String {
+    format!("Connected peer on {section}")
+}
+
+/// `I2PInterfacePeer[<name>]` (I2PInterface.py:834) over either short name.
+#[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+pub(crate) fn i2p_peer_name(short_name: &str) -> String {
+    format!("I2PInterfacePeer[{short_name}]")
+}
+
+/// The reference's `I2PInterface.BITRATE_GUESS` (I2PInterface.py:838), the
+/// bitrate every I2P row reports when the config sets none.
+pub(crate) const I2P_BITRATE_GUESS: i64 = 256_000;
+
+/// The tunnel state of one I2P peer, the reference's `i2p_tunnel_state`
+/// (I2PInterface.py:396-398, 427): `Init` until the first stream, then
+/// `Active` or `Stale` by the read clock, as its read watchdog sets it
+/// (I2PInterface.py:681-687). Written by the stream task, read by the status
+/// builder.
+#[derive(Debug, Default)]
+pub(crate) struct I2pTunnelState(AtomicU8);
+
+/// One value of [`I2pTunnelState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TunnelState {
+    /// `TUNNEL_STATE_INIT`: no stream has run yet.
+    Init,
+    /// `TUNNEL_STATE_ACTIVE`: a byte arrived within the stale threshold.
+    Active,
+    /// `TUNNEL_STATE_STALE`: nothing arrived for longer than it.
+    Stale,
+}
+
+impl TunnelState {
+    /// The `tunnelstate` text `get_interface_stats` reports
+    /// (Reticulum.py:1358-1365), which rnstatus prints as it is.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            TunnelState::Init => "Creating Tunnel",
+            TunnelState::Active => "Tunnel Active",
+            TunnelState::Stale => "Tunnel Unresponsive",
+        }
+    }
+}
+
+impl I2pTunnelState {
+    pub(crate) fn get(&self) -> TunnelState {
+        match self.0.load(Ordering::Relaxed) {
+            1 => TunnelState::Active,
+            2 => TunnelState::Stale,
+            _ => TunnelState::Init,
+        }
+    }
+
+    /// Set the state, returning the one it replaced.
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn set(&self, state: TunnelState) -> TunnelState {
+        let raw = match state {
+            TunnelState::Init => 0,
+            TunnelState::Active => 1,
+            TunnelState::Stale => 2,
+        };
+        match self.0.swap(raw, Ordering::Relaxed) {
+            1 => TunnelState::Active,
+            2 => TunnelState::Stale,
+            _ => TunnelState::Init,
+        }
+    }
+}
+
+/// What the parent row of an I2P section reports beyond the common keys:
+/// whether it is connectable, the endpoint's b32 once known, and whether the
+/// endpoint is up (Reticulum.py:1346-1356, I2PInterface.py:296 and 308).
+///
+/// The b32 sits in a watch channel because discovery waits on it: a
+/// connectable interface learns its address only from its key, which a fresh
+/// node has only after its first `SESSION CREATE`.
+#[derive(Debug)]
+pub(crate) struct I2pEndpoint {
+    /// The section's `connectable`.
+    pub connectable: bool,
+    b32: tokio::sync::watch::Sender<Option<String>>,
+    online: AtomicBool,
+}
+
+impl I2pEndpoint {
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn new(connectable: bool) -> Self {
+        Self {
+            connectable,
+            b32: tokio::sync::watch::Sender::new(None),
+            online: AtomicBool::new(false),
+        }
+    }
+
+    /// The endpoint's address without the `.b32.i2p` suffix, as the reference
+    /// keeps it in `interface.b32`; `None` until the key is known.
+    pub(crate) fn b32(&self) -> Option<String> {
+        self.b32.borrow().clone()
+    }
+
+    /// Record the endpoint's address. Setting the same value again wakes no
+    /// waiter.
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn set_b32(&self, b32: &str) {
+        self.b32.send_if_modified(|current| {
+            if current.as_deref() == Some(b32) {
+                false
+            } else {
+                *current = Some(b32.to_string());
+                true
+            }
+        });
+    }
+
+    /// A receiver that sees the address once it is known.
+    pub(crate) fn watch_b32(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.b32.subscribe()
+    }
+
+    /// The parent row's `status`: the reference sets `online` when the
+    /// endpoint's session is up (I2PInterface.py:308) and never for a section
+    /// that is not connectable.
+    pub(crate) fn is_online(&self) -> bool {
+        self.online.load(Ordering::Relaxed)
+    }
+
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::Relaxed);
+    }
+}
+
 /// Presentation identity of one reported interface row.
 #[derive(Debug, Clone)]
 pub(crate) struct InterfaceIdentity {
@@ -163,6 +318,9 @@ pub(crate) struct ListenerRow {
     /// kernel-assigned port, which is how a caller learns it (Codeberg #221);
     /// `None` for non-IP listeners (the shared-instance Unix socket).
     pub bound_addr: Option<SocketAddr>,
+    /// The TCP server's admission tracker (1190), which `lnstatus` reads its
+    /// connection counters from; `None` for every other listener.
+    pub admission: Option<Arc<Mutex<crate::interfaces::tcp_admission::ConnTracker>>>,
 }
 
 /// The reporting-side interface inventory (see the module docs).
@@ -190,6 +348,21 @@ pub(crate) struct InterfaceInventory {
     /// without one (#471): the origin of a row no section names when no
     /// section is left. Configured for a node built in code.
     config_origin: InterfaceOrigin,
+    /// The I2P state of each I2P parent row, by listener id.
+    i2p_endpoints: BTreeMap<usize, Arc<I2pEndpoint>>,
+    /// The tunnel state of each I2P peer, by interface id.
+    i2p_tunnels: BTreeMap<usize, Arc<I2pTunnelState>>,
+    /// Spawned interfaces that name a parent but add nothing to its client
+    /// count or byte counters: an I2P section's configured peers, which the
+    /// reference gives a parent with `parent_count = False`
+    /// (I2PInterface.py:940-941) and never adds to the list its client count
+    /// is the length of.
+    uncounted: BTreeSet<usize>,
+    /// The daily pseudonym of an accepted TCP connection's source, by
+    /// interface id (order 1678): the tag every log line about the
+    /// connection carries, served beside its address as `src_tag` so the
+    /// operator can match the two while the connection lives.
+    src_tags: BTreeMap<usize, String>,
 }
 
 /// Shared handle: the accept loops write, the stats builder reads.
@@ -211,15 +384,88 @@ impl InterfaceInventory {
         self.spawned.insert(id, identity);
     }
 
+    /// Record the source pseudonym of a spawned connection (order 1678).
+    pub(crate) fn set_src_tag(&mut self, id: usize, tag: String) {
+        self.src_tags.insert(id, tag);
+    }
+
+    /// The source pseudonym of a spawned connection, if it has one.
+    pub(crate) fn src_tag(&self, id: usize) -> Option<&str> {
+        self.src_tags.get(&id).map(String::as_str)
+    }
+
     /// Drop a spawned interface and bank its byte counters on its parent, so a
     /// listener's totals do not fall when a client disconnects.
     pub(crate) fn remove_spawned(&mut self, id: usize, rxb: u64, txb: u64) {
+        self.i2p_tunnels.remove(&id);
+        self.src_tags.remove(&id);
+        let counted = !self.uncounted.remove(&id);
         if let Some(identity) = self.spawned.remove(&id) {
+            if !counted {
+                return;
+            }
             if let Some(parent) = identity.parent.and_then(|p| self.listeners.get_mut(&p)) {
                 parent.departed_rxb += rxb;
                 parent.departed_txb += txb;
             }
         }
+    }
+
+    /// Register an I2P section's parent row: a listener row plus its I2P
+    /// state.
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn add_i2p_parent(
+        &mut self,
+        id: usize,
+        row: ListenerRow,
+        endpoint: Arc<I2pEndpoint>,
+    ) {
+        self.listeners.insert(id, row);
+        self.i2p_endpoints.insert(id, endpoint);
+    }
+
+    /// Register an I2P peer, configured (`counted == false`) or accepted, with
+    /// the tunnel state its stream task keeps.
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
+    pub(crate) fn add_i2p_peer(
+        &mut self,
+        id: usize,
+        identity: InterfaceIdentity,
+        tunnel: Arc<I2pTunnelState>,
+        counted: bool,
+    ) {
+        self.spawned.insert(id, identity);
+        self.i2p_tunnels.insert(id, tunnel);
+        if !counted {
+            self.uncounted.insert(id);
+        }
+    }
+
+    /// The I2P state of listener `id`, when it is an I2P parent row.
+    pub(crate) fn i2p_endpoint(&self, id: usize) -> Option<&Arc<I2pEndpoint>> {
+        self.i2p_endpoints.get(&id)
+    }
+
+    /// The I2P state of the parent row of section `section`.
+    pub(crate) fn i2p_endpoint_of_section(&self, section: &str) -> Option<Arc<I2pEndpoint>> {
+        self.i2p_endpoints
+            .iter()
+            .find(|(id, _)| {
+                self.listeners
+                    .get(id)
+                    .is_some_and(|l| l.identity.short_name == section)
+            })
+            .map(|(_, e)| Arc::clone(e))
+    }
+
+    /// The tunnel state of I2P peer `id`.
+    pub(crate) fn i2p_tunnel(&self, id: usize) -> Option<TunnelState> {
+        self.i2p_tunnels.get(&id).map(|t| t.get())
+    }
+
+    /// Whether interface `id` adds to its parent's client count and bytes.
+    pub(crate) fn counts_toward_parent(&self, id: usize) -> bool {
+        !self.uncounted.contains(&id)
     }
 
     pub(crate) fn identity(&self, id: usize) -> Option<&InterfaceIdentity> {
@@ -383,6 +629,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: None,
+                admission: None,
             },
         );
         inv.set_section_origin("s", InterfaceOrigin::Configured);
@@ -443,6 +690,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: Some("127.0.0.1:1".parse().unwrap()),
+                admission: None,
             },
         );
         inv.add_spawned(

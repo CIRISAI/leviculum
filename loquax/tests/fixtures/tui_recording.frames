@@ -1,0 +1,198 @@
+=== locked 80x24
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
+│▌Anna Schulz            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├● to Anna Schulz─────────── Enter send · Esc cancel ┤
+│                        ││● REC 00:07  ▆▇▆▅▁▁▁▁▁▅▆▇▆▅▅▆▇  p pause · Enter send│
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== locked 120x40
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+│▌Anna Schulz                      ││                                                                                  │
+│▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                 No messages yet                                  │
+│                                  │├● to Anna Schulz───────────────────────────────────────── Enter send · Esc cancel ┤
+│                                  ││● REC 00:07  ▅▁▁▁▁▁▅▆▇▆▅▅▆▇▆▅▅▆▇▆▅▁▁▁▁▁▅▆▇▆▅▅▆▇  p pause · Esc cancel · Enter send│
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== paused, nothing heard 80x24
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
+│▌Anna Schulz            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├● to Anna Schulz─────────── Enter send · Esc cancel ┤
+│                        ││○ REC 00:03  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  p resume · Enter send│
+│                        ││Nothing heard. Is the microphone allowed? · allow   │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== paused, nothing heard 120x40
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+│▌Anna Schulz                      ││                                                                                  │
+│▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                 No messages yet                                  │
+│                                  │├● to Anna Schulz───────────────────────────────────────── Enter send · Esc cancel ┤
+│                                  ││○ REC 00:03  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  Space play · p resume · Esc cancel · Enter send│
+│                                  ││Nothing heard. Is the microphone allowed? · allow                                 │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== preview at the cap 80x24
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
+│▌Anna Schulz            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├● to Anna Schulz─────────── Enter send · Esc cancel ┤
+│                        ││○ REC 10:00  ▇▇▇▇▇▇▇▇▇▇▇▇▇▇  Space play · Enter send│
+│                        ││That is as long as a voice message can be           │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== preview at the cap 120x40
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+│▌Anna Schulz                      ││                                                                                  │
+│▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                 No messages yet                                  │
+│                                  │├● to Anna Schulz───────────────────────────────────────── Enter send · Esc cancel ┤
+│                                  ││○ REC 10:00  ▆▇▇▇▆▇▇▇▅▇▇▇▅▇▇▇▅▇▇▇▆▇▇▇▆▇▇▇▆▇▇  Space play · Esc cancel · Enter send│
+│                                  ││That is as long as a voice message can be                                         │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit

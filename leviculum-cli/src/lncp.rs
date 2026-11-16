@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{ArgAction, Parser};
 use tracing_subscriber::EnvFilter;
 
-use leviculum_std::config::Config;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{Destination, DestinationType, Direction};
 
@@ -38,6 +38,11 @@ struct Args {
     /// Increase verbosity
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
 
     /// Decrease verbosity
     #[arg(short, long, action = ArgAction::Count)]
@@ -155,10 +160,9 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
 
     // Handle -p/--print-identity (no node needed)
     if args.print_identity {
@@ -168,6 +172,18 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Determine instance name and storage directory from config
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
+
+    // Find the shared instance, or start lnsd as our child (#471 step 4).
+    // Held to the end of `run`: the daemon it started goes with us.
+    let _instance = leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    )
+    .map_err(|e| format!("lncp: {e}\n{}", choice.hint_for(&instance_name)))?;
+    // A started lnsd wrote its first-start file into an empty directory.
+    let config = config.or_else(|| daemon_rpc::load_config(&config_dir));
     let storage_path = daemon_rpc::resolve_storage_path(&config_dir, config.as_ref());
 
     // Connect to daemon
@@ -185,10 +201,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // off the config directory entirely (Codeberg #241).
         .storage_path(storage_path)
         .build_sync()
-        .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose))?;
+        .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose, &choice))?;
     node.start()
         .await
-        .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose))?;
+        .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose, &choice))?;
     let mut events = node.take_event_receiver().ok_or("no event receiver")?;
 
     let (_, progress_quiet) = output_levels(args.verbose, args.quiet, args.silent);
@@ -284,16 +300,22 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn daemon_connect_error(instance_name: &str, error: &dyn std::fmt::Display, verbose: u8) -> String {
+fn daemon_connect_error(
+    instance_name: &str,
+    error: &dyn std::fmt::Display,
+    verbose: u8,
+    choice: &ConfigDirChoice,
+) -> String {
     format!(
         "Could not connect to a running Reticulum daemon on rns/{}.\n\
-         Start lnsd or rnsd first.{}",
+         Start lnsd or rnsd first.{}\n{}",
         instance_name,
         if verbose > 0 {
             format!("\nDetail: {}", error)
         } else {
             String::new()
-        }
+        },
+        choice.hint_for(instance_name)
     )
 }
 

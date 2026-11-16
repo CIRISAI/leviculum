@@ -20,7 +20,12 @@
 //! discovery loop (or the browser, opportunistically) can present a live list of
 //! reachable nodes to open.
 
-use std::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::constants::NAME_HASHBYTES;
@@ -29,7 +34,10 @@ use leviculum_core::{Destination, ReceivedAnnounce};
 /// The maximum number of nodes the registry retains. Discovery runs for the
 /// whole session and a busy mesh announces far more nodes than a user can act
 /// on, so the registry is a bounded FIFO: once it is full, learning a new node
-/// evicts the oldest-inserted one. RAM only — never persisted.
+/// evicts the oldest-inserted one. RAM only — never persisted. A host with
+/// more memory raises its own registry's bound
+/// ([`NomadNodeRegistry::with_capacity`]): Loquax on a desktop or a phone
+/// keeps as many as its home remembers (1578).
 pub const NODE_CAPACITY: usize = 500;
 
 /// The app name a NomadNet node destination is registered under.
@@ -111,12 +119,28 @@ pub fn decode_node_name(app_data: &[u8]) -> Option<String> {
 }
 
 /// Current wall-clock time in whole seconds since the Unix epoch, or `0` if the
-/// clock is before the epoch. Used to stamp `first_seen`/`last_seen`.
+/// clock is before the epoch. Used to stamp `first_seen`/`last_seen`. A
+/// platform layer's: a board without a wall clock hands its time in.
+#[cfg(feature = "std")]
 pub fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// The most stations a list says a node is away (1632, walk 4). The hop
+/// count is the path table's, as the announce carried it; the protocol
+/// allows up to 127, and on the public mesh an announce that went round a
+/// loop of bridged interfaces arrives with counts like 108 and 110. No
+/// reader can use "over 110 stations", and no path that long carries a
+/// page, so a count above this says nothing on screen, as an unknown one.
+pub const PLAUSIBLE_HOPS: u32 = 32;
+
+/// The hop count a list shows: `None` when unknown or above
+/// [`PLAUSIBLE_HOPS`].
+pub fn shown_hops(hops: Option<u32>) -> Option<u32> {
+    hops.filter(|h| *h <= PLAUSIBLE_HOPS)
 }
 
 /// A NomadNet node learned from one or more announces.
@@ -164,19 +188,51 @@ impl DiscoveredNode {
 /// The registry is a bounded FIFO of [`NODE_CAPACITY`] nodes: a re-announce of a
 /// known node upserts in place and keeps its slot; a new node appends and, when
 /// that would exceed the capacity, evicts the oldest-inserted node first.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct NomadNodeRegistry {
     nodes: BTreeMap<[u8; 16], DiscoveredNode>,
     /// First-seen sequence per node, so the list keeps a stable discovery order
     /// independent of the hash-ordered map.
     order: BTreeMap<[u8; 16], u64>,
     next_seq: u64,
+    /// How many nodes it keeps before the oldest-inserted goes.
+    capacity: usize,
+}
+
+impl Default for NomadNodeRegistry {
+    fn default() -> Self {
+        Self::with_capacity(NODE_CAPACITY)
+    }
 }
 
 impl NomadNodeRegistry {
-    /// A fresh, empty registry.
+    /// A fresh, empty registry of [`NODE_CAPACITY`] nodes.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fresh, empty registry that keeps `capacity` nodes (at least one).
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            nodes: BTreeMap::new(),
+            order: BTreeMap::new(),
+            next_seq: 0,
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// How many nodes it keeps.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Keep `capacity` nodes from now on (at least one); a smaller bound
+    /// evicts the oldest-inserted at once.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(1);
+        while self.nodes.len() > self.capacity {
+            self.evict_oldest();
+        }
     }
 
     /// Filter and upsert an announce. Returns `true` when it was a NomadNet node
@@ -268,10 +324,10 @@ impl NomadNodeRegistry {
     }
 
     /// Append a brand-new node, evicting the oldest-inserted one first when the
-    /// registry is already at [`NODE_CAPACITY`]. The caller has already confirmed
+    /// registry is already at its capacity. The caller has already confirmed
     /// `node.dest_hash` is unseen.
     fn insert_new(&mut self, node: DiscoveredNode) {
-        if self.nodes.len() >= NODE_CAPACITY {
+        if self.nodes.len() >= self.capacity {
             self.evict_oldest();
         }
         let dest_hash = node.dest_hash;
@@ -362,6 +418,24 @@ mod tests {
 
         // A wholly different app name is rejected.
         assert!(!name_hash_is_nomad_node(&name_hash("lxmf", &["delivery"])));
+    }
+
+    /// 1578: a host raises its own bound; the default stays the board's 500,
+    /// and lowering the bound evicts the oldest at once.
+    #[test]
+    fn a_registry_keeps_the_capacity_its_host_gives_it() {
+        let mut reg = NomadNodeRegistry::with_capacity(4096);
+        for i in 0..1000u32 {
+            let mut dest = [0u8; 16];
+            dest[..4].copy_from_slice(&i.to_be_bytes());
+            reg.upsert(dest, None, None, u64::from(i));
+        }
+        assert_eq!(reg.len(), 1000, "past the default bound");
+        assert_eq!(NomadNodeRegistry::new().capacity(), NODE_CAPACITY);
+        reg.set_capacity(10);
+        assert_eq!(reg.len(), 10);
+        let first = reg.nodes()[0].last_seen;
+        assert_eq!(first, 990, "the oldest went first");
     }
 
     #[test]

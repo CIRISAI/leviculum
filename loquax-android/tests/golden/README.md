@@ -16,3 +16,10 @@ the host's fonts.
 The picture is a produced work of OpenStreetMap data: © OpenStreetMap
 contributors, <https://www.openstreetmap.org/copyright>, under the Open
 Database License (ODbL) 1.0; see `leviculum-map/fixtures/README.md`.
+
+`rooms-room.json`: the Rooms tab's answer (`RoomsScreen`, 1384) as Java
+decodes it, in German, drawn by `tests/rooms.rs`,
+`the_phone_works_a_room_through_the_schema`: a room joined from the input
+field, another's join, a line, our action echoed as "du", a hub notice,
+and the field empty again after a line over the hub's limit was kept in
+it. Compared as text; `LOQUAX_WRITE_GOLDEN=1` writes it again.

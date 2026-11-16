@@ -300,6 +300,29 @@ fn expiry_purges_only_what_is_older_than_thirty_days() {
     assert!(node.store().contains(&fresh).unwrap());
 }
 
+/// LV-1003: `knows` is the one reading behind both the ingest's duplicate
+/// test and the `/offer` answer. A message held is known, and so is one
+/// collected and purged; one never seen is not.
+#[test]
+fn a_collected_message_stays_known_after_it_left_the_store() {
+    let mut node = node(64 * 1024);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 1), 100, stamp_of_value_zero));
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 2), 100, stamp_of_value_zero));
+    assert!(node.store_mut().purge(&collected).unwrap());
+    node.note_confirmed_deletion(&collected, 200);
+
+    assert!(node.knows(&held, 300), "held in the store");
+    assert!(!node.store().contains(&collected).unwrap());
+    assert!(node.knows(&collected, 300), "collected and purged");
+    assert!(!node.knows(&[0x99; 32], 300), "never seen");
+
+    // The ingest agrees: offered again, it is a duplicate.
+    match node.handle_upload(&envelope(7, 2), 300, stamp_of_value_zero) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_full_store_displaces_by_age_times_size() {
     // Room for roughly two field-sized messages.
@@ -326,31 +349,85 @@ fn a_full_store_displaces_by_age_times_size() {
     assert!(node.store().contains(&accepted_id(&outcome)).unwrap());
 }
 
+/// A prioritised destination's message outlives a heavier-by-age one of
+/// another destination: its weight is a tenth (`get_weight`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1064`). Without the list the same
+/// store culls it first, being the oldest (order 1294).
+#[test]
+fn a_prioritised_destination_is_culled_last() {
+    let run = |prioritised: Vec<[u8; DESTINATION_LENGTH]>| {
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(340),
+            PropagationNodeConfig {
+                prioritised_destinations: prioritised,
+                ..cost_free()
+            },
+        );
+        let kept = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+        let other = accepted_id(&node.handle_upload(&envelope(9, 2), 9 * DAY, stamp_of_value_zero));
+        let _ = node.handle_upload(&envelope(9, 3), 10 * DAY, stamp_of_value_zero);
+        (
+            node.store().contains(&kept).unwrap(),
+            node.store().contains(&other).unwrap(),
+        )
+    };
+    assert_eq!(run(vec![[7; DESTINATION_LENGTH]]), (true, false));
+    assert_eq!(run(Vec::new()), (false, true), "the control: oldest goes");
+}
+
+/// A message bigger than the whole store fails without culling: every
+/// eviction would be for nothing, and the store would be empty after
+/// (the review's suspected fault, order 1294).
+#[test]
+fn a_body_larger_than_the_store_evicts_nothing() {
+    let mut node = node(340);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let outcome = node.handle_upload(&envelope_sized(7, 2, 400), DAY, stamp_of_value_zero);
+    assert!(
+        matches!(outcome, UploadOutcome::StoreFailed(StorageError::Full)),
+        "{outcome:?}"
+    );
+    assert!(node.store().contains(&held).unwrap(), "nothing culled");
+}
+
 #[test]
 fn the_resource_gate_follows_the_announced_sync_limit() {
-    let node = node(64 * 1024);
-    // Default field 4 is 32 (kilobytes of 1000 bytes).
+    // Field 4 named, 32 (kilobytes of 1000 bytes), under what the store
+    // holds, so the announced limit is the one the gate applies.
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            sync_limit_kb: 32,
+            ..cost_free()
+        },
+    );
     assert!(node.accepts_resource_of(32_000));
     assert!(!node.accepts_resource_of(32_001));
 }
 
+/// A host node that names no limit announces lxmd's, `PROPAGATION_LIMIT`
+/// 256 and `SYNC_LIMIT` 40 times that (`reference/LXMF/LXMF/LXMRouter.py:55`,
+/// `:59`), so lnpnd and the interop helper look like stock lxmd to a peer
+/// (order 1664). The store holds the whole sync limit, which a node's
+/// announce is otherwise held to. A board names its own, `board_role_config`.
 #[test]
-fn announce_defaults_are_the_concept_papers_numbers() {
+fn announce_defaults_are_the_references_numbers() {
     let node = PropagationNode::new(
-        MemoryPropagationStore::new(64 * 1024),
+        MemoryPropagationStore::new(20_000_000),
         PropagationNodeConfig::default(),
     );
     let announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1_700_000_000)).unwrap();
     assert!(!announce.legacy_support);
     assert!(announce.enabled);
     assert_eq!(announce.timebase, 1_700_000_000);
-    assert_eq!(announce.transfer_limit_kb, 4);
-    assert_eq!(announce.sync_limit_kb, 32);
+    assert_eq!(announce.transfer_limit_kb, 256);
+    assert_eq!(announce.sync_limit_kb, 10_240);
     assert!(announce.metadata.is_empty());
 }
 
 /// Field 5 of a default node's own announce is the Lead's decision of
-/// 2026-09-12: stamp cost 13 with flexibility 3, peering cost 1. Peering
+/// 2026-09-12, stamp cost 13 and peering cost 1, with flexibility 0 since
+/// order 1294 (so it accepts 13 and up, what a stock peer takes). Peering
 /// cost 0 would be wire-legal and dead: a stock peer's
 /// `peering_key_ready` returns false on a falsy cost
 /// (`reference/LXMF/LXMF/LXMPeer.py:228`) and its sync never pushes to us.
@@ -367,8 +444,25 @@ fn the_default_config_announces_the_decided_costs() {
             announce.stamp_cost_flexibility,
             announce.peering_cost
         ],
-        [13, 3, 1]
+        [13, 0, 1]
     );
+    assert_eq!(node.min_accepted_cost(), STOCK_PEER_MIN_STAMP_VALUE);
+    assert!(!node.accepts_below_stock_peers());
+}
+
+/// A cost a stock peer would refuse to take from us is honoured but
+/// flagged, so the host can say so at start (order 1294).
+#[test]
+fn a_floor_below_the_stock_peers_is_flagged() {
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            stamp_cost_flexibility: 3,
+            ..PropagationNodeConfig::default()
+        },
+    );
+    assert_eq!(node.min_accepted_cost(), 10);
+    assert!(node.accepts_below_stock_peers());
 }
 
 /// The board's deferred-durability path: a store flush that failed after
@@ -1853,4 +1947,667 @@ fn list_pressure_reports_throttling_instead_of_hiding_stored_mail() {
         MessageListResponse::Error(PeerError::Throttled)
     );
     assert!(node.store().contains(&id).unwrap());
+}
+
+/// Orders 1295 and 1370, leviculum#478: the processed-ID cache forgets an
+/// entry once its bucket (a week) is past the 180-day window, not before,
+/// and keeps the younger ones.
+#[test]
+fn the_processed_cache_is_pruned_a_bucket_after_its_oldest_is_due() {
+    const DAY: u64 = 24 * 60 * 60;
+    let mut node = node(64 * 1024);
+    let old = envelope(7, 1);
+    let young = envelope(7, 2);
+    let start = 1_000;
+    let _ = accepted_id(&node.handle_upload(&old, start, stamp_of_value_zero));
+    let _ = accepted_id(&node.handle_upload(&young, start + 100 * DAY, stamp_of_value_zero));
+    let is_duplicate =
+        |node: &mut PropagationNode<MemoryPropagationStore>, bytes: &[u8], now| match node
+            .handle_upload(bytes, now, stamp_of_value_zero)
+        {
+            UploadOutcome::Accepted { duplicate, .. } => duplicate,
+            other => panic!("{other:?}"),
+        };
+
+    // Due by the window, inside the slack: the store forgot both, the
+    // cache still knows both.
+    let due = start + PROCESSED_ID_EXPIRY_SECS + 10;
+    assert_eq!(
+        node.tick(due).len(),
+        2,
+        "both messages expired from the store"
+    );
+    assert!(is_duplicate(&mut node, &old, due));
+    assert!(is_duplicate(&mut node, &young, due));
+
+    // Past the slack: the old one is forgotten and stored again as new,
+    // the young one is still a duplicate.
+    let pruned = due + PROCESSED_ID_PRUNE_SLACK_SECS;
+    assert!(node.tick(pruned).is_empty());
+    assert!(!is_duplicate(&mut node, &old, pruned));
+    assert!(is_duplicate(&mut node, &young, pruned));
+}
+
+/// The memory store, its whole-store walks counted.
+struct WalkCounted {
+    store: MemoryPropagationStore,
+    walks: core::cell::Cell<usize>,
+}
+
+impl PropagationStore for WalkCounted {
+    fn append(
+        &mut self,
+        transient_id: &TransientId,
+        received_at: u64,
+        stamp_value: u8,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.store
+            .append(transient_id, received_at, stamp_value, body)
+    }
+    fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+        self.walks.set(self.walks.get() + 1);
+        self.store.for_each(visit)
+    }
+    fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        self.store.purge(transient_id)
+    }
+    fn free_space(&self) -> u64 {
+        self.store.free_space()
+    }
+    fn capacity(&self) -> u64 {
+        self.store.capacity()
+    }
+    fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        self.store.contains(transient_id)
+    }
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// A memory store of `capacity` filled until an append fails, bodies of 120
+/// to 520 bytes for one of eight destinations, received over the 30 days
+/// before `now`.
+fn full_store(capacity: u64, now: u64, state: &mut u64) -> WalkCounted {
+    let mut store = MemoryPropagationStore::new(capacity);
+    loop {
+        let mut transient_id = [0u8; 32];
+        for chunk in transient_id.chunks_mut(8) {
+            chunk.copy_from_slice(&next_random(state).to_le_bytes());
+        }
+        let len = 120 + (next_random(state) % 401) as usize;
+        let body = vec![(next_random(state) % 8) as u8; len];
+        let received_at = now - next_random(state) % (30 * DAY);
+        if store.append(&transient_id, received_at, 0, &body).is_err() {
+            break;
+        }
+    }
+    WalkCounted {
+        store,
+        walks: core::cell::Cell::new(0),
+    }
+}
+
+/// The eviction order before order 1370: every stored message weighed and
+/// stably sorted, heaviest first (`get_weight`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`, sorted at `:1194`).
+fn weight_order(
+    store: &MemoryPropagationStore,
+    prioritised: &[[u8; DESTINATION_LENGTH]],
+    now: u64,
+) -> Vec<TransientId> {
+    let mut weighted: Vec<(f64, TransientId)> = Vec::new();
+    store
+        .for_each(&mut |meta| {
+            let age = now.saturating_sub(meta.received_at);
+            let age_weight = (age as f64 / (4.0 * DAY as f64)).max(1.0);
+            let priority = if prioritised.contains(&meta.destination_hash) {
+                0.1
+            } else {
+                1.0
+            };
+            weighted.push((priority * age_weight * meta.size as f64, meta.transient_id));
+        })
+        .unwrap();
+    weighted.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap());
+    weighted.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Order 1370: a full append evicts exactly what the whole-store sort it
+/// replaced evicted, the heaviest first until the body fits, over random
+/// stores with sizes, ages and a prioritised destination; and the uploads
+/// after it, inside the reference's store-job cadence, keep taking the
+/// sorted order's next messages.
+#[test]
+fn eviction_takes_the_reference_weight_order_from_one_walk() {
+    let now = 1_790_000_000;
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    for case in 0..40 {
+        let store = full_store(20_000 + next_random(&mut state) % 40_000, now, &mut state);
+        let prioritised = vec![[(next_random(&mut state) % 8) as u8; DESTINATION_LENGTH]];
+        let order = weight_order(&store.store, &prioritised, now);
+        let config = PropagationNodeConfig {
+            prioritised_destinations: prioritised,
+            ..cost_free()
+        };
+        let mut node = PropagationNode::new(store, config);
+        let mut evicted: Vec<TransientId> = Vec::new();
+        for upload in 0..6u8 {
+            let bytes = envelope_sized(9, upload, 200 + 60 * upload as usize);
+            match node.handle_upload(&bytes, now + upload as u64, stamp_of_value_zero) {
+                UploadOutcome::Accepted {
+                    duplicate: false,
+                    evicted: displaced,
+                    ..
+                } => evicted.extend(displaced.iter().map(|eviction| eviction.transient_id)),
+                other => panic!("case {case}, upload {upload}: {other:?}"),
+            }
+        }
+        assert!(
+            !evicted.is_empty(),
+            "case {case}: a full store evicted nothing"
+        );
+        assert_eq!(
+            evicted,
+            order[..evicted.len()],
+            "case {case}: not the reference's weight order"
+        );
+    }
+}
+
+/// Order 1370: uploads into a full store walk it once per
+/// [`EVICTION_CANDIDATE_FRACTION`] of its capacity, not once per upload, at
+/// 4 MB and 16 MB alike, and again once the candidates are
+/// [`EVICTION_CANDIDATES_SECS`] old. The candidate list holds what one
+/// fraction is worth, not the store. The positive control is the walk
+/// count of the sort it replaced: one per upload that found the store
+/// full.
+#[test]
+fn a_full_store_is_walked_once_per_candidate_fraction_not_per_upload() {
+    let now = 1_790_000_000;
+    let mut state = 0x2545_f491_4f6c_dd1d;
+    for capacity in [4 << 20u64, 16 << 20] {
+        let mut node = PropagationNode::new(full_store(capacity, now, &mut state), cost_free());
+        let messages = node.store().store.len();
+        let uploads = 200usize;
+        let (mut displacing, mut most_candidates) = (0usize, 0usize);
+        for upload in 0..uploads {
+            let bytes = envelope_sized((upload / 256) as u8 + 9, upload as u8, 300);
+            match node.handle_upload(&bytes, now + 1, stamp_of_value_zero) {
+                UploadOutcome::Accepted {
+                    duplicate: false,
+                    evicted,
+                    ..
+                } => displacing += usize::from(!evicted.is_empty()),
+                other => panic!("{capacity}: upload {upload}: {other:?}"),
+            }
+            most_candidates = most_candidates.max(node.eviction_candidates.len());
+        }
+        let walks = node.store().walks.get();
+        // 200 uploads of about 330 stored bytes against candidates worth
+        // capacity / 1024 plus one upload each walk.
+        let fraction = capacity / EVICTION_CANDIDATE_FRACTION;
+        let bound = (uploads as u64 * 340).div_ceil(fraction + 300) + 1;
+        std::eprintln!(
+            "MAKE_ROOM_PIN capacity={capacity} messages={messages} uploads={uploads} \
+             displacing={displacing} walks={walks} bound={bound} most_candidates={most_candidates}"
+        );
+        assert!(
+            displacing > uploads / 2,
+            "{capacity}: the store was not full"
+        );
+        assert!(
+            walks as u64 <= bound,
+            "{capacity}: {walks} walks exceed {bound}"
+        );
+        assert!(
+            walks * 4 < displacing,
+            "{capacity}: {walks} walks for {displacing} full uploads, the sort's count"
+        );
+        assert!(
+            (most_candidates as u64) * 120 <= fraction + 2 * 520,
+            "{capacity}: {most_candidates} candidates for {fraction} bytes"
+        );
+
+        // Past the cadence the first full upload weighs afresh, whatever
+        // candidates are left.
+        let before = node.store().walks.get();
+        let late = now + 1 + EVICTION_CANDIDATES_SECS;
+        let displaced = (0..50u8).find(|seed| {
+            let bytes = envelope_sized(200, *seed, 300);
+            matches!(
+                node.handle_upload(&bytes, late, stamp_of_value_zero),
+                UploadOutcome::Accepted { evicted, .. } if !evicted.is_empty()
+            )
+        });
+        assert!(
+            displaced.is_some(),
+            "{capacity}: the store stopped being full"
+        );
+        assert_eq!(
+            node.store().walks.get(),
+            before + 1,
+            "{capacity}: stale candidates reused"
+        );
+    }
+}
+
+/// Order 1394: each path out of the store records its own reason, and
+/// `/lev/status` answers it. Collected by a `haves` confirmation,
+/// displaced by a full store, expired by the tick, delivered to the own
+/// mailbox; a stored one is held, a never-seen one unknown.
+#[test]
+fn every_path_out_of_the_store_records_its_reason() {
+    use crate::lev_status::{DepartureReason, MessageStatus};
+
+    let mut node = node(340);
+    node.serve_lev_status();
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    assert_eq!(node.status_of(&collected), MessageStatus::Held);
+    let acknowledge = MessageGetRequest::acknowledge(vec![collected]);
+    node.handle_get(
+        &acknowledge.encode().unwrap(),
+        &[7; DESTINATION_LENGTH],
+        DAY,
+    )
+    .unwrap();
+
+    let displaced = accepted_id(&node.handle_upload(&envelope(7, 2), DAY, stamp_of_value_zero));
+    let kept = accepted_id(&node.handle_upload(&envelope(7, 3), 9 * DAY, stamp_of_value_zero));
+    let newest = accepted_id(&node.handle_upload(&envelope(7, 4), 10 * DAY, stamp_of_value_zero));
+    assert!(!node.store().contains(&displaced).unwrap());
+
+    assert!(node.store_mut().purge(&kept).unwrap());
+    node.note_delivered_locally(&kept, 11 * DAY);
+
+    let expired = node.tick(10 * DAY + MESSAGE_EXPIRY_SECS + 1);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].transient_id, newest);
+
+    let fresh = node.take_fresh_departures();
+    assert_eq!(
+        fresh,
+        vec![
+            (collected, DepartureReason::Collected),
+            (displaced, DepartureReason::Evicted),
+            (kept, DepartureReason::Delivered),
+            (newest, DepartureReason::Expired),
+        ]
+    );
+    assert!(node.take_fresh_departures().is_empty(), "taken once");
+
+    // The tick also dropped what left more than the window ago: the
+    // collected and the displaced one left at day 1, before the window.
+    assert_eq!(node.status_of(&collected), MessageStatus::Unknown);
+    assert_eq!(node.status_of(&displaced), MessageStatus::Unknown);
+    assert_eq!(node.status_of(&kept), MessageStatus::Delivered);
+    assert_eq!(node.status_of(&newest), MessageStatus::Expired);
+    assert_eq!(node.status_of(&[0x55; 32]), MessageStatus::Unknown);
+}
+
+/// Inside the window every reason answers as itself.
+#[test]
+fn the_status_answers_each_reason_inside_the_window() {
+    use crate::lev_status::{decode_answer, MessageStatus};
+
+    let mut node = node(340);
+    node.serve_lev_status();
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let acknowledge = MessageGetRequest::acknowledge(vec![collected]);
+    node.handle_get(&acknowledge.encode().unwrap(), &[7; DESTINATION_LENGTH], 1)
+        .unwrap();
+    let displaced = accepted_id(&node.handle_upload(&envelope(7, 2), 2, stamp_of_value_zero));
+    let _ = node.handle_upload(&envelope(7, 3), 9 * DAY, stamp_of_value_zero);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 4), 10 * DAY, stamp_of_value_zero));
+    assert!(!node.store().contains(&displaced).unwrap());
+
+    let answer = node.answer_lev_status(&[collected, displaced, held, [0x55; 32]]);
+    assert_eq!(
+        decode_answer(&answer).unwrap().unwrap(),
+        vec![
+            (collected, MessageStatus::Collected),
+            (displaced, MessageStatus::Evicted),
+            (held, MessageStatus::Held),
+            ([0x55; 32], MessageStatus::Unknown),
+        ]
+    );
+}
+
+/// An expired id answers `expired` after a restart too, but the restore
+/// does not make it a duplicate: the file held no expired ids before
+/// order 1394, and a peer that offers one past the window received it
+/// after us, a new copy here too. (Before the restart the RAM duplicate
+/// cache still holds it from the accept, unchanged by this order.)
+#[test]
+fn an_expired_departure_is_answered_but_not_restored_as_a_duplicate() {
+    use crate::lev_status::{DepartureReason, MessageStatus};
+
+    let mut node = node(64 * 1024);
+    node.track_departures();
+    let bytes = envelope(7, 1);
+    let id = accepted_id(&node.handle_upload(&bytes, 0, stamp_of_value_zero));
+    let now = MESSAGE_EXPIRY_SECS + 1;
+    assert_eq!(node.tick(now).len(), 1);
+    assert_eq!(node.status_of(&id), MessageStatus::Expired);
+    assert_eq!(
+        node.departures()
+            .map(|(id, d)| (*id, *d))
+            .collect::<Vec<_>>(),
+        vec![(
+            id,
+            Departure {
+                at_secs: now,
+                reason: DepartureReason::Expired
+            }
+        )]
+    );
+
+    let mut restarted = self::node(64 * 1024);
+    let departure = Departure {
+        at_secs: now,
+        reason: DepartureReason::Expired,
+    };
+    assert_eq!(restarted.restore_departures([(id, departure)], now + 1), 1);
+    assert_eq!(restarted.status_of(&id), MessageStatus::Expired);
+    match restarted.handle_upload(&bytes, now + 1, stamp_of_value_zero) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(!duplicate),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The announce carries `{"lev": {"status": 1}}` under `PN_META_CUSTOM`
+/// only on a node that serves the path: a board, which does not, announces
+/// what it did before.
+#[test]
+fn only_a_node_that_serves_the_status_announces_it() {
+    use crate::lev_status::{announced_version, PN_META_CUSTOM};
+
+    let mut node = node(64 * 1024);
+    let plain = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+    assert!(plain.metadata.iter().all(|(key, _)| *key != PN_META_CUSTOM));
+    assert_eq!(announced_version(&plain), None);
+
+    node.track_departures();
+    let tracking = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+    assert_eq!(
+        announced_version(&tracking),
+        None,
+        "tracking alone is not serving"
+    );
+
+    node.serve_lev_status();
+    let serving = node.announce_app_data(1);
+    let announce = PropagationNodeAnnounce::decode(&serving).unwrap();
+    assert_eq!(announced_version(&announce), Some(1));
+    // The whole entry, key and value, is 16 bytes on the wire.
+    let raw = &announce
+        .metadata
+        .iter()
+        .find(|(key, _)| *key == PN_META_CUSTOM)
+        .unwrap()
+        .1;
+    assert_eq!(
+        raw.as_slice(),
+        b"\x81\xa3lev\x81\xa6status\x01",
+        "{{\"lev\": {{\"status\": 1}}}}"
+    );
+    assert_eq!(serving.len(), plain_len(&node) + 2 + raw.len());
+
+    fn plain_len(node: &PropagationNode<MemoryPropagationStore>) -> usize {
+        let mut announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+        announce.metadata.retain(|(key, _)| *key != PN_META_CUSTOM);
+        announce.encode().unwrap().len()
+    }
+}
+
+/// Order 1558 (LV-1000): the duplicate list is bounded by count, not only
+/// by time. On a near-empty store the floor holds: past it the oldest
+/// processed ids and departures go, the newest stay duplicates and keep
+/// their `/lev/status` answer, and neither half ever holds more than its
+/// bound plus the departures' eighth of slack, the departures held by the
+/// host's [`PropagationNode::bound_departures`].
+#[test]
+fn the_duplicate_list_is_held_to_its_count_bound() {
+    use crate::lev_status::MessageStatus;
+
+    let mut node = node(64 * 1024);
+    node.track_departures();
+    let (processed_cap, departed_cap) = dup_caps(0);
+    assert_eq!(processed_cap, DUP_IDS_FLOOR);
+    let id_of = |n: u32| {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        id[4..8].copy_from_slice(&n.wrapping_mul(0x9e37_79b9).to_be_bytes());
+        id
+    };
+    let total = (DUP_IDS_FLOOR + DUP_IDS_FLOOR / 4) as u32;
+    for n in 0..total {
+        node.note_delivered_locally(&id_of(n), 1_000 + u64::from(n));
+        // As a host does each time it takes the departures.
+        node.bound_departures();
+        let counts = node.dup_counts();
+        assert!(counts.processed <= processed_cap, "{counts:?}");
+        assert!(
+            counts.departed <= departed_cap + departed_cap / 8,
+            "{counts:?}"
+        );
+    }
+    let counts = node.dup_counts();
+    assert_eq!(counts.processed_cap, processed_cap);
+    assert_eq!(counts.departed_cap, departed_cap);
+    assert!(
+        counts.processed >= processed_cap - processed_cap / 8,
+        "{counts:?}"
+    );
+    assert!(counts.departed >= departed_cap, "{counts:?}");
+    let newest = id_of(total - 1);
+    let now = 1_000 + u64::from(total);
+    assert!(node.knows(&newest, now));
+    assert_eq!(node.status_of(&newest), MessageStatus::Delivered);
+    let oldest = id_of(0);
+    assert!(
+        !node.knows(&oldest, now),
+        "the oldest id outlived the bound"
+    );
+    assert_eq!(node.status_of(&oldest), MessageStatus::Unknown);
+
+    // A restore of more departures than the bound keeps the newest.
+    let mut restarted = self::node(64 * 1024);
+    let departures = (0..total).map(|n| {
+        (
+            id_of(n),
+            Departure {
+                at_secs: 1_000 + u64::from(n),
+                reason: crate::lev_status::DepartureReason::Delivered,
+            },
+        )
+    });
+    restarted.restore_departures(departures, now);
+    let counts = restarted.dup_counts();
+    assert!(
+        counts.departed <= departed_cap + departed_cap / 8,
+        "{counts:?}"
+    );
+    assert!(counts.processed <= processed_cap, "{counts:?}");
+    assert!(restarted.knows(&newest, now));
+}
+
+/// Order 1558: the bound follows the store's count as it is when the list
+/// reaches it, not as a tick last read it. A store holding more than the
+/// floor's worth gets its two ids a message without any tick.
+#[test]
+fn the_duplicate_bound_follows_the_store_without_a_tick() {
+    let stored = DUP_IDS_FLOOR / 2 + 8_192;
+    let mut store = MemoryPropagationStore::new(u64::MAX / 4);
+    for n in 0..stored as u32 {
+        let mut body = vec![0u8; MIN_BODY_LEN];
+        body[..4].copy_from_slice(&n.to_be_bytes());
+        let mut id = [0xeeu8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        store.append(&id, 1_000, 0, &body).unwrap();
+    }
+    // No departures tracked, so only the processed ids' own path can read
+    // the count.
+    let mut node = PropagationNode::new(store, cost_free());
+    let (processed_cap, _) = dup_caps(stored);
+    assert!(processed_cap > DUP_IDS_FLOOR);
+    for n in 0..processed_cap as u32 {
+        let mut id = [0x11u8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        node.note_delivered_locally(&id, 2_000 + u64::from(n));
+    }
+    let counts = node.dup_counts();
+    assert_eq!(counts.processed_cap, processed_cap, "{counts:?}");
+    assert_eq!(counts.departed_cap, 0, "{counts:?}");
+    assert!(counts.processed > DUP_IDS_FLOOR, "{counts:?}");
+    assert!(counts.processed <= processed_cap, "{counts:?}");
+}
+
+// ---- the heap refusal a board logs (order 1676, LV-1006) ----
+
+/// A node over two stored 200 B messages for destination 7, serving to
+/// `serve_cap` beside an 8 000 B serve limit (the board's shape).
+fn heap_capped(serve_cap: Option<usize>) -> (PropagationNode<FakeBodySource>, [TransientId; 2]) {
+    let (first, first_body) = seeded(7, 1, 200);
+    let (second, second_body) = seeded(7, 2, 200);
+    let (mut store, _) = FakeBodySource::new(64 * 1024);
+    store.seed(first, 10, &first_body);
+    store.seed(second, 10, &second_body);
+    let node = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_limit_bytes: Some(8_000),
+            serve_cap_bytes: serve_cap,
+            ..cost_free()
+        },
+    );
+    (node, [first, second])
+}
+
+fn fetch_both(ids: [TransientId; 2], limit_kb: u64) -> Vec<u8> {
+    MessageGetRequest {
+        wants: Some(ids.to_vec()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(limit_kb)),
+    }
+    .encode()
+    .unwrap()
+}
+
+/// One 200 B message accounts to 24 + 232 + 16 = 272 B. A heap cap one
+/// byte under that serves nothing although the client and the serve limit
+/// would take both: the round is the heap's refusal, and the mail stays.
+#[test]
+fn a_heap_cap_under_one_message_is_a_heap_refusal_and_keeps_the_mail() {
+    let (mut node, ids) = heap_capped(Some(271));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, purged } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert!(plan.is_empty());
+    assert!(purged.is_empty());
+    assert_eq!(plan.heap_withheld(), 2);
+    assert!(node.refused_for_heap(&outcome));
+    assert_eq!(
+        node.encode_fetch(plan).unwrap(),
+        vec![0x90],
+        "the wire answer is the empty list"
+    );
+    assert!(node.store().contains(&ids[0]).unwrap());
+    assert!(node.store().contains(&ids[1]).unwrap());
+
+    // The heap frees: the same request is served whole.
+    node.set_serve_cap_bytes(Some(8_000));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, .. } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.served_ids(), ids.to_vec());
+    assert_eq!(plan.heap_withheld(), 0);
+    assert!(!node.refused_for_heap(&outcome));
+}
+
+/// A cap that funds one of the two serves it and withholds the other: a
+/// short answer, which the protocol allows, not a refusal.
+#[test]
+fn a_heap_cap_that_funds_some_mail_is_a_short_answer_not_a_refusal() {
+    let (mut node, ids) = heap_capped(Some(272));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, .. } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.count(), 1);
+    assert_eq!(plan.heap_withheld(), 1);
+    assert!(!node.refused_for_heap(&outcome));
+}
+
+/// The client's own limit is not the heap: a round its limit empties,
+/// with or without a looser heap cap, withholds nothing for the heap.
+#[test]
+fn a_round_the_clients_limit_empties_is_no_heap_refusal() {
+    for cap in [None, Some(8_000)] {
+        let (mut node, ids) = heap_capped(cap);
+        // 0 kB: the client takes nothing at all.
+        let outcome = node
+            .handle_get(&fetch_both(ids, 0), &[7; DESTINATION_LENGTH], 0)
+            .unwrap();
+        let GetOutcome::Fetch { plan, .. } = &outcome else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        assert!(plan.is_empty());
+        assert_eq!(plan.heap_withheld(), 0, "cap {cap:?}");
+        assert!(!node.refused_for_heap(&outcome), "cap {cap:?}");
+    }
+}
+
+/// The list form: a heap cap that funds no id answers `ERROR_THROTTLED`
+/// and is the heap's refusal; the same answer forced by the serve limit
+/// is not, and a list the heap funds is not either.
+#[test]
+fn a_throttled_list_is_a_heap_refusal_only_when_the_heap_caused_it() {
+    let list = MessageGetRequest::list().encode().unwrap();
+
+    let (mut node, _) = heap_capped(Some(34));
+    let outcome = node.handle_get(&list, &[7; DESTINATION_LENGTH], 0).unwrap();
+    let GetOutcome::List { response, count } = &outcome else {
+        panic!("the list request must return a list");
+    };
+    assert_eq!(*count, 0);
+    assert_eq!(
+        MessageListResponse::decode(response).unwrap(),
+        MessageListResponse::Error(PeerError::Throttled)
+    );
+    assert!(node.refused_for_heap(&outcome));
+
+    let (store, _) = FakeBodySource::new(64 * 1024);
+    let mut limited = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_limit_bytes: Some(34),
+            serve_cap_bytes: Some(34),
+            ..cost_free()
+        },
+    );
+    let outcome = limited
+        .handle_get(&list, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert!(!limited.refused_for_heap(&outcome));
+
+    let (mut funded, _) = heap_capped(Some(8_000));
+    let outcome = funded
+        .handle_get(&list, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert!(matches!(outcome, GetOutcome::List { count: 2, .. }));
+    assert!(!funded.refused_for_heap(&outcome));
 }

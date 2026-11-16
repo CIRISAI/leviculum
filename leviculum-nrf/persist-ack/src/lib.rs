@@ -88,6 +88,29 @@ pub struct PersistGate {
     /// `seq << 1 | durable`. One word so a reader never sees a sequence
     /// number from one save beside an outcome from another.
     done: AtomicU32,
+    /// The ticket a requester gave up waiting for and answered
+    /// [`Answer::Pending`] (order 1626), `0` for none. The store task's
+    /// [`PersistGate::finish`] reads it to say "this one landed late", so
+    /// the log carries the line a host that was told "pending" looks for.
+    owed: AtomicU32,
+}
+
+/// What the answering task may tell the host once its wait is over.
+///
+/// Three states, not two (order 1626): until 2026-11-10 a write the store
+/// task was still retrying when the wait ran out was answered as lost, and
+/// the Pocket's media profile then landed 2.3 s after the board had called
+/// it lost. The next boot came up on it, and the harness that believed the
+/// refusal skipped 17 cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// On the page: ack.
+    Durable,
+    /// The store task gave up: a reset loses the value.
+    Lost,
+    /// The store task is still writing it: the value is applied and will
+    /// land unless the store task later gives up, which it logs.
+    Pending,
 }
 
 impl Default for PersistGate {
@@ -102,6 +125,23 @@ impl PersistGate {
         Self {
             issued: AtomicU32::new(0),
             done: AtomicU32::new(0),
+            owed: AtomicU32::new(0),
+        }
+    }
+
+    /// The answer for `ticket` when the requester's wait is over: settled
+    /// if the store task has reported it, [`Answer::Pending`] if it has
+    /// not. Never [`Answer::Lost`] for a write nobody gave up on — that is
+    /// the whole of order 1626. A pending answer is remembered, so the
+    /// [`finish`](Self::finish) that settles it can say it landed late.
+    pub fn answer_at_deadline(&self, ticket: SaveTicket) -> Answer {
+        match self.poll(ticket) {
+            Some(Persisted::Durable) => Answer::Durable,
+            Some(Persisted::Lost) => Answer::Lost,
+            None => {
+                self.owed.fetch_max(ticket.0, Ordering::AcqRel);
+                Answer::Pending
+            }
         }
     }
 
@@ -127,7 +167,11 @@ impl PersistGate {
     /// — including the read-compare-write skip, which is
     /// [`Persisted::Durable`]: the value is on the page, it just did not
     /// need writing.
-    pub fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
+    ///
+    /// Returns `true` when this outcome settles a ticket that was already
+    /// answered [`Answer::Pending`]: the store task logs that the write
+    /// landed (or was lost) after the host was told it was still under way.
+    pub fn finish(&self, ticket: SaveTicket, outcome: Persisted) -> bool {
         let packed = (ticket.0 << 1) | u32::from(outcome == Persisted::Durable);
         // `fetch_max` rather than `store`: the store task finishes a
         // record's tickets in issue order, but a displaced request is
@@ -135,6 +179,13 @@ impl PersistGate {
         // could only ever fail to satisfy a ticket, never wrongly
         // satisfy one.
         self.done.fetch_max(packed, Ordering::AcqRel);
+        let owed = self.owed.load(Ordering::Acquire);
+        owed != 0
+            && owed <= ticket.0
+            && self
+                .owed
+                .compare_exchange(owed, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
     /// Whether `ticket`'s value is settled, and how.
@@ -325,10 +376,10 @@ mod tests {
 
     /// What the client read off the wire.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Answer {
+    enum Reply {
         Acked,
         PersistFailed,
-        PersistTimedOut,
+        PersistPending,
     }
 
     struct Board {
@@ -353,7 +404,7 @@ mod tests {
         /// `budget` bounds the wait the way the firmware's
         /// `PERSIST_CONFIRM_WITHIN` does — a client must not hang forever
         /// on a wedged store task.
-        fn set(&mut self, value: Value, policy: AckPolicy, budget: u32) -> Answer {
+        fn set(&mut self, value: Value, policy: AckPolicy, budget: u32) -> Reply {
             self.ram = value;
             let ticket = self.gate.issue();
             self.flash.request(ticket, value);
@@ -366,18 +417,22 @@ mod tests {
                 if policy == AckPolicy::WhenPersisted {
                     if let Some(outcome) = self.gate.poll(ticket) {
                         return match outcome {
-                            Persisted::Durable => Answer::Acked,
-                            Persisted::Lost => Answer::PersistFailed,
+                            Persisted::Durable => Reply::Acked,
+                            Persisted::Lost => Reply::PersistFailed,
                         };
                     }
                 }
                 self.flash.step(&self.gate);
             }
             match policy {
-                AckPolicy::WhenPersisted => Answer::PersistTimedOut,
+                AckPolicy::WhenPersisted => match self.gate.answer_at_deadline(ticket) {
+                    super::Answer::Durable => Reply::Acked,
+                    super::Answer::Lost => Reply::PersistFailed,
+                    super::Answer::Pending => Reply::PersistPending,
+                },
                 // Both stopgaps answer the same way whatever the flash is
                 // doing — which is exactly the defect.
-                _ => Answer::Acked,
+                _ => Reply::Acked,
             }
         }
 
@@ -396,7 +451,7 @@ mod tests {
     #[test]
     fn old_ordering_the_ack_is_followed_by_a_reset_that_loses_the_setting() {
         let mut board = Board::new(OLD, 3);
-        assert_eq!(board.set(NEW, AckPolicy::WhenApplied, 100), Answer::Acked);
+        assert_eq!(board.set(NEW, AckPolicy::WhenApplied, 100), Reply::Acked);
         board.reset();
         assert_eq!(
             board.ram, OLD,
@@ -408,7 +463,7 @@ mod tests {
     #[test]
     fn ack_after_the_store_task_confirms_survives_the_same_reset() {
         let mut board = Board::new(OLD, 3);
-        assert_eq!(board.set(NEW, AckPolicy::WhenPersisted, 100), Answer::Acked);
+        assert_eq!(board.set(NEW, AckPolicy::WhenPersisted, 100), Reply::Acked);
         board.reset();
         assert_eq!(board.ram, NEW);
     }
@@ -424,10 +479,7 @@ mod tests {
         let queued_ahead = board.gate.issue();
         board.flash.request(queued_ahead, OTHER);
 
-        assert_eq!(
-            board.set(NEW, AckPolicy::AfterMargin(4), 100),
-            Answer::Acked
-        );
+        assert_eq!(board.set(NEW, AckPolicy::AfterMargin(4), 100), Reply::Acked);
         board.reset();
         assert_eq!(
             board.ram, OTHER,
@@ -441,7 +493,7 @@ mod tests {
         let queued_ahead = board.gate.issue();
         board.flash.request(queued_ahead, OTHER);
 
-        assert_eq!(board.set(NEW, AckPolicy::WhenPersisted, 100), Answer::Acked);
+        assert_eq!(board.set(NEW, AckPolicy::WhenPersisted, 100), Reply::Acked);
         board.reset();
         assert_eq!(board.ram, NEW);
     }
@@ -452,7 +504,7 @@ mod tests {
         board.flash.wedged = true;
         assert_eq!(
             board.set(NEW, AckPolicy::WhenPersisted, 100),
-            Answer::PersistFailed,
+            Reply::PersistFailed,
             "a write that errored must reach the client as an error, not as an ack"
         );
         board.reset();
@@ -469,9 +521,71 @@ mod tests {
 
         assert_eq!(
             board.set(NEW, AckPolicy::WhenPersisted, 10),
-            Answer::PersistTimedOut,
+            Reply::PersistPending,
             "the wait is bounded and says so rather than blocking the port"
         );
+    }
+
+    /// Order 1626 in miniature: the write takes longer than the answer
+    /// window (the Pocket's took 5 s against a 2.5 s window). The answer is
+    /// pending, not lost, and the value is on the page once the store task
+    /// finishes, which reports that it settled a pending answer.
+    #[test]
+    fn a_write_slower_than_the_window_is_pending_and_then_lands() {
+        let mut board = Board::new(OLD, 10);
+        assert_eq!(
+            board.set(NEW, AckPolicy::WhenPersisted, 4),
+            Reply::PersistPending,
+            "a write still under way must not be answered as lost"
+        );
+        // The store task keeps going after the answer; the last step is
+        // the one that finishes the ticket.
+        let ticket = SaveTicket(1);
+        for _ in 0..5 {
+            board.flash.step(&board.gate);
+            assert_eq!(board.gate.poll(ticket), None);
+        }
+        let (t, value) = board.flash.queue[0];
+        board.flash.queue.clear();
+        board.flash.page = value;
+        assert!(
+            board.gate.finish(t, Persisted::Durable),
+            "the finish that settles a pending answer has to say so, or the \
+             `persist landed` line the host waits for never comes"
+        );
+        board.reset();
+        assert_eq!(board.ram, NEW, "pending was the truth: the value landed");
+    }
+
+    /// The flag is about the ticket that was answered pending, and it is
+    /// spent once: an on-time save is not reported as late, and neither is
+    /// the next one after a late one.
+    #[test]
+    fn only_the_finish_of_a_pending_answer_reports_late() {
+        let gate = PersistGate::new();
+        let on_time = gate.issue();
+        assert!(!gate.finish(on_time, Persisted::Durable));
+        assert_eq!(gate.answer_at_deadline(on_time), Answer::Durable);
+
+        let late = gate.issue();
+        assert_eq!(gate.answer_at_deadline(late), Answer::Pending);
+        assert!(gate.finish(late, Persisted::Lost));
+        assert_eq!(gate.answer_at_deadline(late), Answer::Lost);
+
+        let next = gate.issue();
+        assert!(!gate.finish(next, Persisted::Durable));
+    }
+
+    /// A store task that gives up after the answer went out reports that
+    /// too, so `persist gave up` can name the record the host was told was
+    /// pending.
+    #[test]
+    fn a_pending_answer_can_still_end_lost() {
+        let gate = PersistGate::new();
+        let ticket = gate.issue();
+        assert_eq!(gate.answer_at_deadline(ticket), Answer::Pending);
+        assert!(gate.finish(ticket, Persisted::Lost));
+        assert_eq!(gate.poll(ticket), Some(Persisted::Lost));
     }
 
     /// All three persisted control records, each with its own gate, each
@@ -486,7 +600,7 @@ mod tests {
             let mut board = Board::new(stored, 3);
             assert_eq!(
                 board.set(set_to, AckPolicy::WhenPersisted, 100),
-                Answer::Acked,
+                Reply::Acked,
                 "{record}"
             );
             board.reset();

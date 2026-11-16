@@ -1,0 +1,352 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Familie"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Familie"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "Group(Members { group: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]) })",
+          "label_key": "group_members"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "b0503a",
+            "fg": "ffffff",
+            "initials": "2",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Familie"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_1",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Brot ist da"
+              },
+              "resource": "bubble_1",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), target: [162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), target: Some([162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162, 162]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90], keys: [1] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780109940,
+            "body": "Brot ist da",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_1",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_group_delivered"
+              }
+            },
+            "msg_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Brot ist da",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1780109940,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_1",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_2",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Wer kommt mit?"
+              },
+              "resource": "bubble_2",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), target: [161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]), target: Some([161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161, 161]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90], keys: [2] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110240,
+            "body": "Wer kommt mit?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_2",
+            "live": null,
+            "liveness": null,
+            "mark": "arrived",
+            "mark_node": {
+              "activate": null,
+              "mark": "arrived",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_arrived"
+              }
+            },
+            "msg_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Wer kommt mit?",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_2",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Familie"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "Group(Members { group: Peer([90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]) })",
+        "label_key": "group_members"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "2",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Familie"
+    }
+  },
+  "whereabouts": null
+}

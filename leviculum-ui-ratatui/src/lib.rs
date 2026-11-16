@@ -13,19 +13,37 @@
 //!
 //! A program keeps its own labels, its screen layout and its state; these
 //! take them as arguments.
+//!
+//! Without the default `terminal` feature only [`style`] is left, `no_std`
+//! plus `alloc`: the bridge from styled lines to ratatui text that a board
+//! draws through mousefood as the terminal draws through crossterm.
 
+#![cfg_attr(not(feature = "terminal"), no_std)]
+
+extern crate alloc;
+
+#[cfg(feature = "terminal")]
 pub mod background;
+#[cfg(feature = "terminal")]
 pub mod chip;
+#[cfg(feature = "terminal")]
 pub mod event;
+#[cfg(feature = "terminal")]
 pub mod footer;
+#[cfg(feature = "terminal")]
 pub mod geometry;
+#[cfg(feature = "terminal")]
 pub mod help;
 #[cfg(feature = "images")]
 pub mod images;
+#[cfg(feature = "terminal")]
 pub mod spinner;
 pub mod style;
+#[cfg(feature = "terminal")]
 pub mod terminal;
+#[cfg(feature = "terminal")]
 pub mod toast;
 
 pub use style::to_ratatui_text;
+#[cfg(feature = "terminal")]
 pub use terminal::{CrosstermTerminal, TerminalGuard, TerminalOps};

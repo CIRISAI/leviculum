@@ -1,0 +1,24 @@
+┌  Loquax (verbindet)────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt              ││                                                    │
+│▌du: hi                 ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  ┌────────────────────────────────┐│
+│                        ││                  │⚠ Not sent. Its details say why.││
+│                        ││                  └────────────────────────────────┘│
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

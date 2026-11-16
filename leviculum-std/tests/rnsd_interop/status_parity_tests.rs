@@ -891,7 +891,7 @@ fn is_quiet(stats: &Value) -> bool {
 
 /// One tick of the 1 Hz traffic counter, on BOTH stacks: ours samples the byte
 /// counters once a second and caches `(delta * 8) / elapsed`
-/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:407-438),
+/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:439-470),
 /// Python's `Transport.count_traffic_loop` does the same.
 const SPEED_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 
@@ -2078,7 +2078,7 @@ fn assert_inventory_parity(lnsd: &[InventoryRow], rnsd: &[InventoryRow], phase: 
 ///   2. one connected TCP peer, waited for by the path it announces (a state
 ///      both stacks reach observably, never a sleep).
 ///
-/// Deliberate, pinned deviations (see `docs/src/concepts/client-tools.md`):
+/// Deliberate, pinned deviations, each a decision this test holds in place:
 ///   * an IPC client's `short_name` carries a connection index that the
 ///     reference derives from the LIVE client count at accept time
 ///     (LocalInterface.py:441); ours mirrors that, but the index is templated
@@ -2614,7 +2614,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // `tx_unaccounted` is additive on exactly the same terms: it counts the
     // frames an RNode modem was handed and never accounted for on its own
     // airtime ledger, a packet-loss condition no reference key names. It is
-    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-486) and
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-508) and
     // so appears on this TCP interface too, reading 0 — the honest value for
     // a medium that keeps no such ledger. Reference tolerance re-measured on
     // the pinned vendor tree for this key: rnstatus reads interface fields
@@ -2681,6 +2681,9 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "tx_stale_drops",
         "tx_unaccounted",
         "origin",
+        // Order 1678: the sampled row is the spawned connection, which lnsd
+        // logs by a daily pseudonym served here beside its address.
+        "src_tag",
     ];
     let ours_only_queued: BTreeSet<String> = additive_ours
         .iter()
@@ -2972,4 +2975,118 @@ async fn served_program_count_agrees_across_status_clients() {
 
         program.stop().await.ok();
     }
+}
+
+// =========================================================================
+// Path responses to a burst of path requests (1169, Refs #24)
+// =========================================================================
+
+/// The PATH_RESPONSE frames for `dest` among what a daemon sent back.
+fn path_responses_for(frames: &[CapturedFrame], dest: &DestinationHash) -> usize {
+    frames
+        .iter()
+        .filter_map(|f| leviculum_core::packet::Packet::unpack(&f.bytes).ok())
+        .filter(|p| {
+            p.flags.packet_type == leviculum_core::packet::PacketType::Announce
+                && p.context == leviculum_core::packet::PacketContext::PathResponse
+                && p.destination_hash == *dest.as_bytes()
+        })
+        .count()
+}
+
+/// Three path requests for one known destination, each with a fresh tag,
+/// spaced like the 2026-10-31 `lora_lnode_rncp_bidir_seq` red measured them
+/// on the answering board (beta, 03:12:55.251 / 58.010 / 59.258), and the
+/// same three inside one `PATH_REQUEST_GRACE` (0.4 s): how many path
+/// responses does each stack put on the requesting interface?
+///
+/// The spaced case is 2.5 s apart, longer than the reference's worst answer
+/// latency (the 0.4 s grace plus one `announces_check_interval` of 1.0 s and
+/// one `job_interval` of 0.25 s, Transport.py:81, :176, :182), so each
+/// request finds the previous answer sent on both stacks and the count is
+/// deterministic. The packed case depends on where the reference's job tick
+/// falls, so it is printed and not asserted.
+///
+/// The same driver on both daemons, byte-identical frames. One connection
+/// announces the destination, a second one asks, so the count on the second
+/// is the answer volume and nothing else. The reference
+/// (`Transport.path_request`, Transport.py:2945-3000) inserts one
+/// announce-table entry per non-duplicate request, replacing an unfired one,
+/// and fires it after the grace; a targeted path response is never held by
+/// the announce cap, which only covers `attached_interface == None`
+/// (Transport.py:1193-1194 vs :1246-1283). So it answers each spaced request
+/// and collapses requests inside one grace.
+#[tokio::test]
+#[ignore = "spawns Python daemons; run via --include-ignored after the tier3"]
+async fn a_path_request_burst_is_answered_alike_on_both_stacks() {
+    init_tracing();
+
+    let identity = Identity::generate(&mut OsRng);
+    let (announce, dest) = build_announce_for(&identity, "pr_burst");
+    let spaced: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| build_path_request_raw_with_tag(dest.as_bytes(), &[0xC0 + i; 16]))
+        .collect();
+    let packed: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| build_path_request_raw_with_tag(dest.as_bytes(), &[0xD0 + i; 16]))
+        .collect();
+
+    let mut counts = Vec::new();
+    for stack in [Stack::Rnsd, Stack::Lnsd] {
+        let daemon = ParityDaemon::start(stack).await;
+        let mut origin = Injector::attach(connect_injector(&daemon).await);
+        let asker = Injector::attach(connect_injector(&daemon).await);
+        // Both spawned interfaces up before the announce, so the asker's
+        // interface exists when the path is learned.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        origin.send(&announce).await;
+        let hex = hex::encode(dest.as_bytes());
+        wait_paths(
+            &daemon,
+            "the announced path",
+            Duration::from_secs(15),
+            |p| p.contains(&hex),
+        )
+        .await;
+        // Let the rebroadcasts of the announce itself run out.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+
+        let mut asker = asker;
+        let before = path_responses_for(&asker.captured(), &dest);
+        for (i, pr) in spaced.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+            }
+            asker.send(pr).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let after_spaced = path_responses_for(&asker.captured(), &dest);
+        for (i, pr) in packed.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            asker.send(pr).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let after_packed = path_responses_for(&asker.captured(), &dest);
+        let row = (
+            stack.label(),
+            after_spaced - before,
+            after_packed - after_spaced,
+            asker.captured().len(),
+        );
+        println!(
+            "PR_BURST stack={} spaced_requests=3 spaced_responses={} \
+             packed_requests=3 packed_responses={} asker_frames={}",
+            row.0, row.1, row.2, row.3
+        );
+        counts.push(row);
+    }
+    assert_eq!(
+        counts[0].1, counts[1].1,
+        "both stacks must answer the same spaced requests with the same number of path responses: {counts:?}"
+    );
+    assert_eq!(
+        counts[0].3, counts[1].3,
+        "volume check: both askers must see the same number of frames: {counts:?}"
+    );
 }

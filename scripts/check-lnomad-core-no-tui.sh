@@ -10,11 +10,13 @@
 #           and nothing there is gated on the `tui` feature. The second half
 #           is what the build below cannot see: a terminal import behind
 #           `cfg(feature = "tui")` compiles away exactly when it is checked.
-#   graph   lnomad without default features has no terminal crate in its
-#           resolved normal-dependency graph, whichever crate would pull it
-#           (tui-input's default features pull both ratatui and crossterm).
+#   graph   lnomad without default features but with `std` (the platform
+#           layer a window builds on; without `std` the core is `no_std`,
+#           which `just lnomad-core-no-std` holds) has no terminal crate in
+#           its resolved normal-dependency graph, whichever crate would pull
+#           it (tui-input's default features pull both ratatui and crossterm).
 #   build   that configuration compiles and lints clean: `cargo clippy -p
-#           lnomad --lib --no-default-features -- -D warnings`. Lint-clean
+#           lnomad --lib --no-default-features --features std -- -D warnings`. Lint-clean
 #           matters as much as compiling: an item only the frontend reads is
 #           dead code here, which is the sign it belongs in the frontend or in
 #           the core's public frontend API, not in a `pub(crate)` corner.
@@ -63,8 +65,9 @@ check_source() {
 
 # check_graph <workspace-root> <cargo lock flag> [<package> <feature flag>]
 check_graph() {
-    local tree pkg="${3:-lnomad}" feat="${4:---no-default-features}"
-    if ! tree="$(cd "$1" && cargo tree "$2" -p "$pkg" "$feat" \
+    local tree pkg="${3:-lnomad}" feat="${4:---no-default-features --features=std}"
+    # shellcheck disable=SC2086 # $feat is one or two flags
+    if ! tree="$(cd "$1" && cargo tree "$2" -p "$pkg" $feat \
         -e normal --prefix none 2>&1)"; then
         echo "$TAG ERROR cargo tree failed:"
         printf '%s\n' "$tree" | sed 's/^/  /'
@@ -82,7 +85,8 @@ check_graph() {
         mapfile -t hits < <(printf '%s\n' "${hits[@]}" | sort -u)
         for name in "${hits[@]}"; do
             echo "$TAG FAIL $pkg ($feat) carries $name"
-            echo "$TAG   path: $(cd "$1" && cargo tree "$2" -p "$pkg" "$feat" \
+            # shellcheck disable=SC2086 # $feat is one or two flags
+            echo "$TAG   path: $(cd "$1" && cargo tree "$2" -p "$pkg" $feat \
                 -e normal -i "$name" --prefix none 2>/dev/null | tr '\n' ' ')"
         done
         echo "$TAG A terminal crate is an optional dependency behind lnomad's tui"
@@ -119,16 +123,22 @@ selftest() {
     printf 'use ratatui::layout::Rect;\n' >> "$tmp/lnomad/src/app/model.rs"
     rc2=0
     out="$(check_source "$tmp")" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "use ratatui::layout::Rect"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "use ratatui::layout::Rect" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: an injected ratatui import was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
     fi
-    sed -i -E 's/^tui-input = \{ version = "0.15", default-features = false \}$/tui-input = "0.15"/' \
+    # The dependency is optional since slice 4a (lnomad's `std` feature),
+    # which the graph check turns on.
+    sed -i -E 's/^tui-input = \{ version = "0.15", default-features = false, optional = true \}$/tui-input = { version = "0.15", optional = true }/' \
         "$tmp/lnomad/Cargo.toml"
+    if ! grep -qx 'tui-input = { version = "0.15", optional = true }' "$tmp/lnomad/Cargo.toml"; then
+        echo "$TAG SELFTEST FAIL: could not inject tui-input's default features into lnomad's manifest copy; the pattern above no longer matches its tui-input line"
+        return 1
+    fi
     rc2=0
     out="$(check_graph "$tmp" --offline)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "carries ratatui" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: tui-input with default features was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -157,7 +167,7 @@ selftest_ui() {
     printf 'use ratatui::layout::Rect;\n' >> "$tmp/leviculum-ui/src/lib.rs"
     rc2=0
     out="$(check_source "$tmp" leviculum-ui/src)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "use ratatui::layout::Rect"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "use ratatui::layout::Rect" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: an injected ratatui import in leviculum-ui was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -172,7 +182,7 @@ selftest_ui() {
     fi
     rc2=0
     out="$(check_graph "$tmp" --offline leviculum-ui --all-features)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "carries ratatui" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: tui-input with default features in leviculum-ui was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -189,7 +199,7 @@ case "${1:-}" in
         ;;
     --build)
         (cd "$ROOT" && cargo clippy --frozen -p lnomad --lib --no-default-features \
-            --quiet -- -D warnings)
+            --features std --quiet -- -D warnings)
         echo "$TAG ok   lnomad's core builds and lints clean without the tui feature"
         ;;
     --ui-static)

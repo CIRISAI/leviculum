@@ -3,12 +3,19 @@ resolver = "2"
 members = [
     "leviculum-core",
     "leviculum-micron",
+    # Reticulum Relay Chat (#232, 1379): the envelope codec and a client's
+    # link state, `no_std`, for Loquax's Rooms.
+    "leviculum-rrc",
     "leviculum-mapfill",
     "leviculum-map",
     "leviculum-mapcut",
     "leviculum-map-tool",
+    # The map store: lnmapcut writes signed piece stores, lnmapd serves
+    # them over HTTP and Reticulum (K4, docs/src/concepts/map-server.md).
+    "lnmapd",
     "leviculum-ui",
     "leviculum-ui-ratatui",
+    "leviculum-ui-iced",
     "lnomad",
     "lblogd",
     "leviculum-lxmf",
@@ -19,6 +26,12 @@ members = [
     "leviculum-proxy",
     "lnflash",
     "loquax",
+    # Loquax on the ThinkNode M9 (#232, #473): the scene through mousefood,
+    # `no_std`; the firmware links it, the host draws its goldens.
+    "loquax-m9",
+    # The boards' allocators on the host (1569): the M9's pull workload
+    # under the heap the firmware links, measured. A lab, not a library.
+    "leviculum-heap-lab",
     # The Android app's JNI library (`loquax-android/`), built for Android by
     # the make flow there. Not a default member, like leviculum-ffi: a cdylib
     # the musl default drops.
@@ -43,10 +56,12 @@ members = [
 default-members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-rrc",
     "leviculum-mapfill",
     "leviculum-map",
     "leviculum-mapcut",
     "leviculum-map-tool",
+    "lnmapd",
     "leviculum-ui",
     "leviculum-ui-ratatui",
     "lnomad",
@@ -57,6 +72,8 @@ default-members = [
     "leviculum-proxy",
     "lnflash",
     "loquax",
+    "loquax-m9",
+    "leviculum-heap-lab",
     "lnpnd",
     "lndecode",
     "vectors-verify",
@@ -76,7 +93,7 @@ default-members = [
 # leviculum-mapfill/measure and leviculum-mapfill/m9 are the map measurement's
 # host harness and M9 firmware (#474). Their own workspaces keep the harness's
 # protobuf decoder and the firmware's Xtensa toolchain out of this graph.
-exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg"]
+exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg", "vendor/iced_debug", "vendor/iced_tiny_skia"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
@@ -89,12 +106,46 @@ exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapf
 # vendor/termbg is the published 0.6.2 with one line changed, its crossterm
 # requirement raised to 0.29 (the API it uses did not change). Drop the patch
 # once a termbg release asks for 0.29 itself.
+#
+# iced_debug is vendored for the window's frame meter (1441): iced times
+# every frame's view, layout, interact, draw and present in it, and without
+# its `enable` feature (which streams to iced's comet tool over a socket)
+# the spans are empty. The patch adds `set_sink`, a function a window hands
+# the finished spans to, so `loquax --fps` measures what iced itself does
+# per frame, the software renderer's rasterise and present included. Until
+# a sink is set a span costs a check of a OnceLock.
+#
+# iced_tiny_skia is vendored for the window's present (1456): iced 0.14.1
+# draws a frame's damage once per grouped rectangle, every quad or
+# paragraph a rectangle cuts through a clip mask, and a scroll frame of a
+# real chat is 26 to 60 such rectangles (121 ms at 1276x2099, 13 ms drawn
+# whole). The patch, `whole_when_fragmented` in `window/compositor.rs`,
+# draws the whole window when the damage fragments; the headless surface
+# the bench measures calls the same function. iced's renderer type is
+# fixed by its feature, so a wrapper of our own cannot reach the present.
+# Since 1442 it also takes away work where a rectangle is a rectangle
+# (`fast.rs`): the background and the clip mask written as rows, an
+# opaque picture at its own size (the map's frame) copied as rows, a
+# glyph blended in place in tiny-skia's arithmetic without a pipeline,
+# the same bytes tiny-skia writes, held to it by leviculum-ui-iced's
+# `fast_paths` tests.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
 termbg = { path = "vendor/termbg" }
+iced_debug = { path = "vendor/iced_debug" }
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 
 [workspace.package]
-version = "0.34.1+ciris.1"
+# The development window, not a release. Every build between 0.9.0 and
+# 0.10.0 says so, so a package installed anywhere reads as on the way to
+# something instead of claiming a release it is not. The tag for 0.9.0
+# points at the commit below this one; this line opens the window after it.
+#
+# `-dev` is the semver spelling. Debian reads a `-` as the start of a
+# Debian revision and sorts it ABOVE the release, so the packaging
+# translates it to `~` when it derives a Debian version — the comparison
+# is run, not reasoned, in scripts/deb-stamp.sh and its selftest.
+version = "0.35.0+ciris.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"

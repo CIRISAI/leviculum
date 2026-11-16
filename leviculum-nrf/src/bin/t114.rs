@@ -39,6 +39,17 @@ async fn main(spawner: Spawner) {
         t114::PANIC_LED_PIN,
         t114::PANIC_LED_ACTIVE_LOW,
     );
+    // A button held through the boot is the factory reset (order 1511):
+    // watched here, before any persisted page is read and before the
+    // SoftDevice, so the erase is a direct one and nothing below reads a
+    // page it is about to lose. Returns at once when nothing is held.
+    leviculum_nrf::power::factory_reset_at_boot(
+        p.P1_10.reborrow(),
+        &t114::POWER,
+        p.NVMC.reborrow(),
+        &t114::CONFIG,
+    )
+    .await;
     // A block that takes `early` in, so the borrow below is of the block's
     // own binding and its storage ends with the block. `early` carries the
     // previous boot's log tail (3 KiB); a local `main` has borrowed keeps
@@ -140,7 +151,7 @@ async fn main(spawner: Spawner) {
         &spawner,
         leviculum_nrf::button::ButtonWiring {
             pin: p.P1_10.into(),
-            active_high: false,
+            power: &t114::POWER,
             board: "t114",
         },
     );

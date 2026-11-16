@@ -25,14 +25,24 @@ use std::time::Duration;
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder};
 use leviculum_std::{Error as StdError, ReticulumNode};
 
+pub mod census;
 pub mod client;
 pub mod config;
+pub mod departures;
 pub mod engine;
 pub(crate) mod hook_profile;
 pub mod identity;
 pub mod mailbox;
 pub(crate) mod peering;
+pub mod store_limit;
 pub(crate) mod validation;
+
+#[cfg(test)]
+mod expiry_cost;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod walk_cost;
 
 pub use validation::reprice_stored_values;
 

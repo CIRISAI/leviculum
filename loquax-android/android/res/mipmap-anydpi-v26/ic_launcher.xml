@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Written by loquax-android/scripts/render-icon.py; edit the script.
+     The jackdaw on the accent; the monochrome layer is what Android 13 on
+     tints for a themed home screen. -->
+<adaptive-icon xmlns:a='http://schemas.android.com/apk/res/android'>
+  <background a:drawable='@color/ic_launcher_background'/>
+  <foreground a:drawable='@drawable/ic_launcher_foreground'/>
+  <monochrome a:drawable='@drawable/ic_launcher_monochrome'/>
+</adaptive-icon>

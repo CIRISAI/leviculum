@@ -507,7 +507,7 @@ grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
 
 # --- Case: the same commit published twice --------------------------------
 #
-# The triggered publish and the 04:00 fallback cron both fire on a day nothing
+# The triggered publish and the 09:05 fallback cron both fire on a day nothing
 # landed, so the second run publishes the commit the tag already names. The
 # current set is then the same code again; renaming it would throw away the
 # fallback generation for a copy of what replaces it. So: no rename, the

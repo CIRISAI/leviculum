@@ -60,6 +60,23 @@ pub enum LabelKind {
     Village,
     Suburb,
     Neighbourhood,
+    /// A country's name, over the world outline where no region covers
+    /// the view (1683). Declared after the places and before
+    /// [`LabelKind::Water`], so it is neither a place, a line nor a road;
+    /// [`place`] serves it first of all kinds ([`LabelKind::priority`]).
+    Country,
+    /// A sea, a gulf, a bay: [`LabelKind::Water`] names a lake's area,
+    /// this the ocean's.
+    Sea,
+    /// A mountain range's name, and a peak's
+    /// (`expedition-map-concept-2026-11.md`, section 2).
+    Range,
+    /// A desert's name.
+    Desert,
+    /// A time zone's label (1684): its IANA name, which the frontend
+    /// replaces with the zone's local time, at the zone's anchor
+    /// ([`crate::timezones::labels`]).
+    TimeZone,
     /// A lake, a river, a sea: the name of a water area.
     Water,
     Park,
@@ -75,13 +92,18 @@ pub enum LabelKind {
 
 impl LabelKind {
     /// Every kind, in the order [`place`] serves them.
-    pub const ALL: [LabelKind; 12] = [
+    pub const ALL: [LabelKind; 17] = [
+        LabelKind::Country,
         LabelKind::City,
         LabelKind::Town,
         LabelKind::District,
         LabelKind::Village,
         LabelKind::Suburb,
         LabelKind::Neighbourhood,
+        LabelKind::Sea,
+        LabelKind::Range,
+        LabelKind::Desert,
+        LabelKind::TimeZone,
         LabelKind::Water,
         LabelKind::Park,
         LabelKind::River,
@@ -99,6 +121,11 @@ impl LabelKind {
             LabelKind::Village => 4,
             LabelKind::Suburb => 5,
             LabelKind::Neighbourhood => 6,
+            LabelKind::Country => 7,
+            LabelKind::Sea => 8,
+            LabelKind::Range => 9,
+            LabelKind::Desert => 10,
+            LabelKind::TimeZone => 11,
             LabelKind::Water => 16,
             LabelKind::Park => 17,
             LabelKind::River => 18,
@@ -130,10 +157,21 @@ impl LabelKind {
     }
 
     /// The order [`place`] serves labels in, lowest first: pins come before
-    /// all of them, then places by class, then waters and parks, then
-    /// rivers, then streets, major roads first.
+    /// all of them, then countries, then places by class, then waters and
+    /// parks, then rivers, then streets, major roads first.
+    ///
+    /// A country before a city (1712), at every zoom: only the world table
+    /// brings countries, so this orders the world view alone, z0 to the
+    /// outline's deepest, and there a country is the larger fact. A city
+    /// first would let a capital that stands on its country's label point
+    /// take it (at z2 Paris took France's and Moscow Russia's in 1683's
+    /// goldens) and leave the countries of the view unnamed. A region's
+    /// own names carry no country and keep their order.
     pub fn priority(self) -> u8 {
-        self as u8
+        match self {
+            LabelKind::Country => 0,
+            other => other as u8 + 1,
+        }
     }
 }
 
@@ -538,6 +576,10 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
 pub struct ViewLabel {
     pub kind: LabelKind,
     pub rank: u8,
+    /// The shallowest view zoom that shows it: the label's own, for a
+    /// line the least of its pieces'. The ladder a frame that moves holds
+    /// the names it carries to (1205).
+    pub min_zoom: u8,
     /// What the map shows: the name in the locale the region was cut for
     /// where the cut kept one, else the local name, never both.
     pub text: String,
@@ -585,7 +627,8 @@ impl<S: Storage> Region<S> {
         type Piece = ((u32, u32), Vec<(i64, i64)>);
         // Kind, local name, the name shown where it differs.
         type Name = (LabelKind, u32, Option<u32>);
-        let mut groups: Vec<(Name, Vec<Piece>)> = Vec::new();
+        // Each with the least `min_zoom` of its pieces.
+        let mut groups: Vec<(Name, u8, Vec<Piece>)> = Vec::new();
         let strings = self.string_count();
         for tile in view.tiles(self.zooms()) {
             let Some(e) = self.find_labels(tile.id)? else {
@@ -630,6 +673,7 @@ impl<S: Storage> Region<S> {
                 out.push(ViewLabel {
                     kind: p.kind,
                     rank: p.rank,
+                    min_zoom: p.min_zoom,
                     text,
                     local,
                     at: world(i64::from(p.x), i64::from(p.y)),
@@ -663,9 +707,10 @@ impl<S: Storage> Region<S> {
                 let to4096 = |v: i16| i64::from(v) << i32::from(fx.shift().max(0));
                 let key = (l.kind, l.string, s.alternate(n));
                 let at = groups.iter().position(|g| g.0 == key).unwrap_or_else(|| {
-                    groups.push((key, Vec::new()));
+                    groups.push((key, l.min_zoom, Vec::new()));
                     groups.len() - 1
                 });
+                groups[at].1 = groups[at].1.min(l.min_zoom);
                 for r in f.rings() {
                     let Some((x0, y0)) = r.points().next() else {
                         continue;
@@ -674,11 +719,11 @@ impl<S: Storage> Region<S> {
                         .points()
                         .map(|(x, y)| (origin.0 + scale(x), origin.1 + scale(y)))
                         .collect();
-                    groups[at].1.push((world(to4096(x0), to4096(y0)), line));
+                    groups[at].2.push((world(to4096(x0), to4096(y0)), line));
                 }
             }
         }
-        for ((kind, string, alternate), pieces) in groups {
+        for ((kind, string, alternate), min_zoom, pieces) in groups {
             let joined: Vec<Piece> = join_pieces(pieces)
                 .into_iter()
                 .filter(|(_, line)| line.iter().any(|&p| inside(p)))
@@ -700,6 +745,7 @@ impl<S: Storage> Region<S> {
                 out.push(ViewLabel {
                     kind,
                     rank: 0,
+                    min_zoom,
                     text: text.clone(),
                     local: local.clone(),
                     at,

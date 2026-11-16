@@ -40,6 +40,10 @@ final class MsgPack {
                 out.write(0xd3);
                 be(out, n, 8);
             }
+        } else if (value instanceof Double || value instanceof Float) {
+            // A real (1269, the photo viewer's zoom): always float 64.
+            out.write(0xcb);
+            be(out, Double.doubleToLongBits(((Number) value).doubleValue()), 8);
         } else if (value instanceof String) {
             byte[] utf8 = ((String) value).getBytes(StandardCharsets.UTF_8);
             int n = utf8.length;

@@ -17,6 +17,11 @@ NRF="$PWD"
 # shellcheck source-path=SCRIPTDIR/../..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$NRF/../scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$NRF/../scripts/nrf-rustflags.sh"
 elfdir="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
@@ -44,7 +49,7 @@ for bin in t114 rak4631; do
         record-log) features="$base_features,store-spike-record-log" ;;
         sequential) features="$base_features,store-spike-sequential" ;;
         esac
-        cargo build --release --bin "$bin" --features "$features" >/dev/null
+        nrf_cargo build --release --bin "$bin" --features "$features" >/dev/null
         cp "$elfdir/$bin" "$out/$bin-$variant"
     done
 

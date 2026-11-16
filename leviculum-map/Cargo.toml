@@ -26,6 +26,10 @@ embedded-graphics = "0.8"
 # `atan`, `sinh`), which `core` does not have. Already in the lock through
 # num-traits. Used per pin and per viewport change, never per vertex.
 libm = "0.2"
+# The height pieces' tiles are zstd frames (order 1740): a pure-Rust,
+# `no_std` decoder, so the boards and the Android facade read them through
+# the same code. `hash` checks each frame's content checksum.
+ruzstd = { version = "0.9", default-features = false, features = ["hash"] }
 
 [dev-dependencies]
 # The golden images of `tests/golden.rs` are PNG files; the crate is in the

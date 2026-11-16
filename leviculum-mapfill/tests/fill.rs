@@ -4,6 +4,7 @@
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
+use leviculum_mapfill::coverage::Coverage;
 use leviculum_mapfill::fill::{fill_rings, Edge, FillError, FillRule, Filler, Scratch};
 use leviculum_mapfill::stroke::{isqrt, stroke, stroke_pen, Pen};
 use leviculum_mapfill::SUBPIXEL;
@@ -63,6 +64,127 @@ impl DrawTarget for Canvas {
         }
         Ok(())
     }
+}
+
+impl Coverage for Canvas {}
+
+/// What each pixel was covered by, in 256ths, when the filler blends its
+/// span ends: 256 for a pixel set hard. A pixel touched twice panics.
+struct Cover {
+    w: u32,
+    h: u32,
+    alpha: Vec<u16>,
+}
+
+impl Cover {
+    fn new(w: u32, h: u32) -> Self {
+        Self {
+            w,
+            h,
+            alpha: vec![0; (w * h) as usize],
+        }
+    }
+
+    fn put(&mut self, x: i32, y: i32, a: u16) {
+        assert!(
+            x >= 0 && y >= 0 && (x as u32) < self.w && (y as u32) < self.h,
+            "outside at {x},{y}"
+        );
+        let at = (y as u32 * self.w + x as u32) as usize;
+        assert_eq!(self.alpha[at], 0, "({x}, {y}) touched twice");
+        self.alpha[at] = a;
+    }
+
+    fn row(&self, y: u32) -> &[u16] {
+        &self.alpha[(y * self.w) as usize..((y + 1) * self.w) as usize]
+    }
+}
+
+impl OriginDimensions for Cover {
+    fn size(&self) -> Size {
+        Size::new(self.w, self.h)
+    }
+}
+
+impl DrawTarget for Cover {
+    type Color = BinaryColor;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I: IntoIterator<Item = Pixel<BinaryColor>>>(
+        &mut self,
+        it: I,
+    ) -> Result<(), Self::Error> {
+        for Pixel(p, _) in it {
+            self.put(p.x, p.y, 256);
+        }
+        Ok(())
+    }
+}
+
+impl Coverage for Cover {
+    fn smooth(&self) -> bool {
+        true
+    }
+
+    fn blend(&mut self, x: i32, y: i32, _: BinaryColor, alpha: u8) -> Result<(), Self::Error> {
+        assert!(alpha > 0 && alpha < 255, "a blend of {alpha}");
+        self.put(x, y, u16::from(alpha));
+        Ok(())
+    }
+}
+
+/// 1422: a span's end pixels are blended by the share of them it covers,
+/// the pixels between set hard, each pixel once: across a slanted edge the
+/// coverage of a row sums to the span's width, the first and last pixel
+/// partly covered where the edge crosses them, and a target that does not
+/// blend gets the hard spans it always got.
+#[test]
+fn span_ends_are_blended_by_their_coverage() {
+    // A parallelogram: left edge from (2, 0) to (6, 8), right edge from
+    // (10.5, 0) to (14.5, 8), so every row's span is 8.5 pixels wide.
+    let ring = [
+        Point::new(2 * SUBPIXEL, 0),
+        Point::new(21 * SUBPIXEL / 2, 0),
+        Point::new(29 * SUBPIXEL / 2, 8 * SUBPIXEL),
+        Point::new(6 * SUBPIXEL, 8 * SUBPIXEL),
+    ];
+    let mut st = Store::new(64, 8);
+    let mut c = Cover::new(20, 8);
+    let r = fill_rings(
+        &mut st.scratch(),
+        c.bounding_box(),
+        &[&ring[..]],
+        &mut c,
+        BinaryColor::On,
+        FillRule::NonZero,
+    );
+    assert!(r.is_ok());
+    for y in 0..8u32 {
+        let row = c.row(y);
+        let sum: u32 = row.iter().map(|&a| u32::from(a)).sum();
+        // 8.5 pixels, give or take a 256th at each blended end.
+        assert!((sum as i32 - 8 * 256 - 128).abs() <= 2, "row {y}: {row:?}");
+        let partial = row.iter().filter(|&&a| a > 0 && a < 256).count();
+        assert!((1..=2).contains(&partial), "row {y}: {row:?}");
+        // The left end at x = 2 + (y + 0.5) / 2: a fraction of it covered.
+        let left = (2.0 + (f64::from(y) + 0.5) / 2.0) as usize;
+        assert!(row[left] > 0 && row[left] < 256, "row {y}: {row:?}");
+        assert!(row[..left].iter().all(|&a| a == 0));
+    }
+    // The same ring into a target that does not blend: the hard spans.
+    let mut hard = Canvas::new(20, 8);
+    let mut st = Store::new(64, 8);
+    let _ = fill_rings(
+        &mut st.scratch(),
+        hard.bounding_box(),
+        &[&ring[..]],
+        &mut hard,
+        BinaryColor::On,
+        FillRule::NonZero,
+    );
+    assert!(hard.hits.iter().all(|&h| h <= 1));
+    let filled: u32 = hard.hits.iter().map(|&h| u32::from(h)).sum();
+    assert!((8 * 8..=8 * 9).contains(&filled), "{filled}");
 }
 
 /// A point at whole pixel coordinates, in sub-pixels.

@@ -13,7 +13,14 @@
 //!   next request is accepted and proved;
 //! * outbound: `connect` at the cap returns `LinkError::TableFull` and
 //!   creates nothing;
-//! * default (`None`) stays unbounded — the host behaviour.
+//! * default (`None`) stays unbounded — the host behaviour;
+//! * the client reserve (order 1666, LV-1006): a propagation node with
+//!   `max_links = 2` whose peering dials through
+//!   [`NodeCore::connect_keeping_free`] with one slot kept free holds one
+//!   peering link, the second dial is held (`ReserveHeld`), and a client's
+//!   link request is admitted and proved. The control dials through plain
+//!   `connect`, as the board did before 1666: peering takes both slots and
+//!   the client is refused.
 
 extern crate std;
 
@@ -233,4 +240,110 @@ fn unbounded_default_accepts_past_any_small_count() {
         );
     }
     assert_eq!(responder.link_count(), 5);
+}
+
+/// A peer destination the propagation node dials; nothing answers, as on
+/// the bench where the board's mined peers had gone away.
+fn peer_dest() -> (crate::DestinationHash, [u8; 32]) {
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let hash = *Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["peer"],
+    )
+    .unwrap()
+    .hash();
+    (hash, signing_key)
+}
+
+#[test]
+fn peering_keeps_a_slot_for_the_client() {
+    let (mut pn, pn_hash, pn_key, iface) = make_responder(Some(2));
+
+    let (peer_a, key_a) = peer_dest();
+    let (peer_b, key_b) = peer_dest();
+    let _dialled = pn
+        .connect_keeping_free(peer_a, &key_a, 1)
+        .expect("the first peering dial leaves one slot free");
+    assert_eq!(pn.link_count(), 1);
+
+    let held = pn.connect_keeping_free(peer_b, &key_b, 1);
+    assert_eq!(
+        held.map(|(id, ..)| id),
+        Err(LinkError::ReserveHeld {
+            links: 1,
+            max: 2,
+            keep_free: 1
+        }),
+        "a second peering dial would take the client's slot"
+    );
+    assert_eq!(pn.link_count(), 1, "the held dial created nothing");
+    let out = pn.handle_timeout();
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkRefused { .. })),
+        "a held dial is not a refusal and emits no LinkRefused"
+    );
+
+    let raw = link_request_raw(pn_hash, &pn_key);
+    let out = pn.handle_packet(InterfaceId(iface), &raw);
+    assert_eq!(
+        action_data(&out).len(),
+        1,
+        "the client's link request is admitted and proved"
+    );
+    assert_eq!(pn.link_count(), 2);
+    assert_eq!(
+        pn.pending_inbound_links(&pn_hash),
+        1,
+        "the proved client is pending until its RTT arrives; the outbound \
+         peering link is not counted"
+    );
+    assert_eq!(pn.pending_inbound_links(&peer_a), 0);
+}
+
+#[test]
+fn control_peering_through_plain_connect_takes_the_clients_slot() {
+    let (mut pn, pn_hash, pn_key, iface) = make_responder(Some(2));
+
+    let (peer_a, key_a) = peer_dest();
+    let (peer_b, key_b) = peer_dest();
+    let _first = pn.connect(peer_a, &key_a).expect("first peering link");
+    let _second = pn.connect(peer_b, &key_b).expect("second peering link");
+    assert_eq!(pn.link_count(), 2, "peering holds both slots");
+
+    let raw = link_request_raw(pn_hash, &pn_key);
+    let out = pn.handle_packet(InterfaceId(iface), &raw);
+    assert!(
+        action_data(&out).is_empty(),
+        "with both slots held by peering the client is refused"
+    );
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::LinkRefused {
+                links: 2,
+                max: 2,
+                ..
+            }
+        )),
+        "the refusal is the cap's LINK_REFUSED reason=budget"
+    );
+    assert_eq!(pn.pending_inbound_links(&pn_hash), 0);
+}
+
+#[test]
+fn keeping_free_on_an_uncapped_node_always_dials() {
+    let (mut pn, _, _, _) = make_responder(None);
+    for _ in 0..3 {
+        let (peer, key) = peer_dest();
+        let _dialled = pn
+            .connect_keeping_free(peer, &key, 1)
+            .expect("no cap, no reserve to hold");
+    }
+    assert_eq!(pn.link_count(), 3);
 }

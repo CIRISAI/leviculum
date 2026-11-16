@@ -3,6 +3,7 @@
 //! (normal return, `?`, panic unwind, and a panic's own message).
 
 use std::io::{self, Stdout, Write};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crossterm::cursor::MoveTo;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -173,6 +174,112 @@ pub fn draw_synced<W: Write>(
     }
 }
 
+/// A terminal's writer that can hold what a frame writes (1455), so a
+/// frame that changes nothing on the screen writes nothing at all:
+/// ratatui writes its attribute reset and the cursor's state on every
+/// draw, and the synchronized update's begin and end around it, a few
+/// dozen bytes the terminal (and an ssh or mosh link) is woken for on
+/// every pass of the program's loop. Passes everything through while it
+/// holds nothing; [`draw_changed`] holds a frame through its [`Drawn`].
+pub struct Held<W: Write> {
+    inner: W,
+    held: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl<W: Write> Held<W> {
+    /// `inner` held by the [`Drawn`] given with it.
+    pub fn new(inner: W) -> (Self, Drawn) {
+        let held = Arc::new(Mutex::new(None));
+        let drawn = Drawn {
+            held: Arc::clone(&held),
+            buffer: None,
+            bytes: Vec::new(),
+        };
+        (Self { inner, held }, drawn)
+    }
+
+    fn holding(&self) -> std::sync::MutexGuard<'_, Option<Vec<u8>>> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<W: Write> Write for Held<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(held) = self.holding().as_mut() {
+            held.extend_from_slice(buf);
+            return Ok(buf.len());
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.holding().is_some() {
+            return Ok(());
+        }
+        self.inner.flush()
+    }
+}
+
+/// The last frame [`draw_changed`] wrote, its cells and its bytes, and
+/// the hold on its terminal's [`Held`] writer.
+pub struct Drawn {
+    held: Arc<Mutex<Option<Vec<u8>>>>,
+    buffer: Option<ratatui::buffer::Buffer>,
+    bytes: Vec<u8>,
+}
+
+impl Drawn {
+    fn hold(&self, on: bool) -> Option<Vec<u8>> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        match on {
+            true => held.replace(Vec::new()),
+            false => held.take(),
+        }
+    }
+}
+
+/// [`draw_synced`], written only when it changes the screen (1455): the
+/// frame is drawn with its bytes held, and they are thrown away when its
+/// cells are those of the last frame written and its bytes are too (no
+/// cell, the same cursor). ratatui keeps its own copy of the last frame
+/// either way, which is these cells, so the next frame's diff is right.
+/// Whether it was written. `last` is the one [`Held::new`] gave with the
+/// terminal's writer.
+pub fn draw_changed<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<Held<W>>>,
+    last: &mut Drawn,
+    render: impl FnOnce(&mut Frame),
+) -> io::Result<bool> {
+    let _ = last.hold(true);
+    let begun = terminal
+        .backend_mut()
+        .queue(BeginSynchronizedUpdate)
+        .map(|_| ());
+    let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.draw(render).map(|frame| frame.buffer.clone())
+    }));
+    let ended = terminal
+        .backend_mut()
+        .queue(EndSynchronizedUpdate)
+        .map(|_| ());
+    let bytes = last.hold(false).unwrap_or_default();
+    // A frame that panics wrote nothing yet: the begin is held with it.
+    let buffer = match drawn {
+        Ok(drawn) => drawn?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    begun.and(ended)?;
+    if last.buffer.as_ref() == Some(&buffer) && last.bytes == bytes {
+        return Ok(false);
+    }
+    let out = terminal.backend_mut();
+    out.write_all(&bytes)?;
+    out.flush()?;
+    last.buffer = Some(buffer);
+    last.bytes = bytes;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +428,89 @@ mod tests {
         let text = String::from_utf8(sink.0.borrow().clone()).expect("utf8");
         assert!(text.starts_with("\x1b[?2026h"), "{text:?}");
         assert!(text.ends_with("\x1b[?2026l"), "{text:?}");
+    }
+
+    /// A terminal left alone writes nothing (1455): five seconds of the
+    /// loop's 20 ms passes drawing the same screen, the cursor in the
+    /// same place, write the first frame and then at most its cursor's
+    /// bytes once (the first pass after a change has no cell to write but
+    /// its own cursor bytes are new); nothing after. The controls: a
+    /// clock that moves a cell every pass writes every pass; a cursor
+    /// that moves writes; [`draw_synced`], which the loop drew with
+    /// before, writes every pass of the unchanged screen.
+    #[test]
+    fn an_unchanged_screen_writes_nothing() {
+        use ratatui::layout::{Position, Rect};
+        use ratatui::widgets::Paragraph;
+        use ratatui::{TerminalOptions, Viewport};
+        type Screen = Terminal<CrosstermBackend<Held<Sink>>>;
+        let terminal = || -> (Screen, Drawn, Sink) {
+            let sink = Sink::default();
+            let (writer, drawn) = Held::new(sink.clone());
+            let terminal = Terminal::with_options(
+                CrosstermBackend::new(writer),
+                TerminalOptions {
+                    viewport: Viewport::Fixed(Rect::new(0, 0, 30, 4)),
+                },
+            )
+            .expect("a terminal");
+            (terminal, drawn, sink)
+        };
+        const PASSES: u32 = 250;
+        // Idle: the same words and cursor every pass.
+        let (mut idle, mut last, sink) = terminal();
+        let written = || sink.0.borrow().len();
+        let mut writes = Vec::new();
+        for _ in 0..PASSES {
+            let before = written();
+            draw_changed(&mut idle, &mut last, |f| {
+                f.render_widget(Paragraph::new("Anna: see you at ten"), f.area());
+                f.set_cursor_position(Position::new(3, 2));
+            })
+            .expect("drawn");
+            writes.push(written() - before);
+        }
+        let passes_written = writes.iter().filter(|&&n| n > 0).count();
+        assert!(writes[0] > 20, "the first frame: {writes:?}");
+        assert!(
+            passes_written <= 2,
+            "{passes_written} passes wrote: {:?}",
+            &writes[..8]
+        );
+        assert!(writes[2..].iter().all(|&n| n == 0), "{:?}", &writes[..8]);
+        // The control: a cell that changes every pass writes every pass.
+        let (mut ticking, mut ticked, ticks) = terminal();
+        let mut wrote = 0;
+        for i in 0..PASSES {
+            let before = ticks.0.borrow().len();
+            draw_changed(&mut ticking, &mut ticked, |f| {
+                f.render_widget(Paragraph::new(format!("{:03}", i % 1000)), f.area());
+            })
+            .expect("drawn");
+            wrote += usize::from(ticks.0.borrow().len() > before);
+        }
+        assert_eq!(wrote, PASSES as usize);
+        // The control: the cursor moved, nothing else.
+        let before = written();
+        let moved = draw_changed(&mut idle, &mut last, |f| {
+            f.render_widget(Paragraph::new("Anna: see you at ten"), f.area());
+            f.set_cursor_position(Position::new(4, 2));
+        })
+        .expect("drawn");
+        assert!(moved && written() > before);
+        // The control: before 1455 every pass wrote, the screen unchanged.
+        let plain = Sink::default();
+        let mut before_1455 = sink_terminal(&plain);
+        let mut wrote = 0;
+        for _ in 0..PASSES {
+            let before = plain.0.borrow().len();
+            draw_synced(&mut before_1455, |f| {
+                f.render_widget(Paragraph::new("Anna"), f.area());
+                f.set_cursor_position(Position::new(3, 1));
+            })
+            .expect("drawn");
+            wrote += usize::from(plain.0.borrow().len() > before);
+        }
+        assert_eq!(wrote, PASSES as usize);
     }
 }

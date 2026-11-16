@@ -34,6 +34,23 @@ fn emit_build_sha() {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/index");
     }
+    // A commit on a branch moves the branch's ref, not HEAD, which still
+    // names the branch: an image built just before a commit kept the
+    // parent's sha (1521b found it in the esp script, 1537 here). Watch
+    // the ref's own file, and packed-refs where a ref may live instead, in
+    // the common git dir (a worktree's refs live there).
+    if let (Some(common), Some(name)) = (
+        run_git(&["rev-parse", "--git-common-dir"]),
+        run_git(&["symbolic-ref", "-q", "HEAD"]),
+    ) {
+        // Only files that exist: cargo re-runs a script on every build
+        // while a path it watches is missing.
+        for path in [format!("{common}/{name}"), format!("{common}/packed-refs")] {
+            if std::path::Path::new(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    }
     // Emitting ANY rerun-if-changed replaces cargo's default
     // "rerun on any package file change", so the sources have to be
     // listed explicitly. Without this an edit under `src/` left the

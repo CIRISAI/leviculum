@@ -123,6 +123,13 @@ impl<S: Sinks> Feedback<S> {
         self.raise_led_and_buzzer(leviculum_feedback::release_now());
     }
 
+    /// A held button has reached the very long press (order 1511):
+    /// `power-off` on the LED and the buzzer. The board switches off at the
+    /// release.
+    pub fn power_off(&self) {
+        self.raise_led_and_buzzer(leviculum_feedback::power_off());
+    }
+
     /// A message for the user arrived: one short on the notification LED
     /// where the board has one, else on the LED, and one short buzz where
     /// there is a buzzer.

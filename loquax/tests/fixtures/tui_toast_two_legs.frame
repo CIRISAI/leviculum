@@ -1,5 +1,5 @@
-┌  Loquax (attaching)────┐┌  <abababab…>  unknown───────── no propagation node ┐
-│▌<abababab…>            ││                                                    │
+┌  Loquax (connecting)───┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown                ││                                                    │
 │▌you: hi                ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -13,12 +13,12 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│┌────────────────────────────────────────────────────────────────────────────┐│
-││⚠ not sent: direct: no route to abababababababababababababababab after      ││
-││30.0s: no announce from it has reached this node, so there is no key to     ││
-││encrypt to and no path to send over.; propagated: no propagation node: no p…││
-│└────────────────────────────────────────────────────────────────────────────┘│
-│                        │├● to <abababab…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  ┌────────────────────────────────┐│
+│                        ││                  │⚠ Not sent. Its details say why.││
+│                        ││                  └────────────────────────────────┘│
+│                        │├● to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

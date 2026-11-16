@@ -111,7 +111,7 @@ pub fn via(method: &str, reason: &str) {
 pub fn pn(node: &[u8; 16], source: &str, cost: Option<u64>) {
     tracing::debug!(
         event = "LNMSG_PN",
-        node = %to_hex(node),
+        pn = %to_hex(node),
         source = %scalar(source),
         cost = %cost.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
     );
@@ -173,6 +173,85 @@ pub fn done_without_path(code: u8, path_requests: u32, path_wait_ms: u64) {
 /// the log greps for.
 pub fn store_failed(detail: &str) {
     tracing::warn!(event = "LNMSG_STORE_FAILED", detail = %scalar(detail));
+}
+
+// The home's own record (1305, study `docs/drafts/mailbox-for-friends-study-
+// 2026-11.md` section 6, "structured events on the home"): what a home
+// accepted, proved, synced and announced, so the N-home cells count per home
+// what today's free-text `HOME ...` lines only describe. Identities and
+// message ids are their first eight hex characters, as `jl` shortens them.
+
+/// A home kept a received message in its archive, new or held already:
+/// `msg` its id, `from` the sender, `via` how it came (`direct` over a link,
+/// `opportunistic` as one packet, `propagated` from a propagation node),
+/// `home` the identity the home answers for.
+pub fn home_accept(msg: &[u8; 32], from: &[u8; 16], via: &str, home: &[u8; 16]) {
+    tracing::info!(
+        event = "HOME_ACCEPT",
+        msg = %id8(msg),
+        from = %short_hex(from),
+        via = %via,
+        home = %short_hex(home),
+    );
+}
+
+/// A home released the delivery proof of an archived message (1239: only
+/// once it is archived). Not said for a propagated one, which has no proof.
+pub fn home_prove(msg: &[u8; 32], home: &[u8; 16]) {
+    tracing::info!(
+        event = "HOME_PROVE",
+        msg = %id8(msg),
+        home = %short_hex(home),
+    );
+}
+
+/// One exchange of archive entries with another home of the identity:
+/// `pulled` the entries taken in, `pushed` the ones handed over, `ratchets`
+/// whether both hold the same ring after it (`same`) or not (`differ`).
+/// Today's only such exchange is the move (1281); the N-home sync of study
+/// section 2.5 says the same line.
+pub fn home_sync(peer_home: &[u8; 16], pulled: usize, pushed: usize, ratchets: &str) {
+    tracing::info!(
+        event = "HOME_SYNC",
+        peer_home = %short_hex(peer_home),
+        pulled = pulled,
+        pushed = pushed,
+        ratchets = %ratchets,
+    );
+}
+
+/// A home announced the identity: `kind` the destination (`delivery`, the
+/// LXMF address; `position`, `lev.position`), `iface` where it went
+/// (`all` for a broadcast on every interface, the only form today).
+pub fn home_announce(home: &[u8; 16], iface: &str, kind: &str) {
+    tracing::info!(
+        event = "HOME_ANNOUNCE",
+        home = %short_hex(home),
+        iface = %iface,
+        kind = %kind,
+    );
+}
+
+/// A mailbox refused a device's request (1677, invariant 3 of
+/// `docs/src/concepts/loquax-mailbox-roles.md`): `device` the identity
+/// the link was identified with, in full, as `loquax mailbox devices`
+/// names it; `ask` the request (`sync`, `pages`, `join`, ...);
+/// `reason` why (`not-admitted`, `token`, `expired`). Every request of a
+/// device not admitted ends here, whatever it asked and whether or not
+/// it parsed: the door is the pairing, not the port.
+pub fn home_refuse(device: &[u8; 16], ask: &str, reason: &str) {
+    tracing::info!(
+        event = "HOME_REFUSE",
+        device = %to_hex(device),
+        ask = %scalar(ask),
+        reason = %reason,
+    );
+}
+
+fn id8(id: &[u8; 32]) -> String {
+    let mut hex = to_hex(&id[..4]);
+    hex.truncate(8);
+    hex
 }
 
 // The debug log (leviculum 1002). Not structured events: plain `info` lines
@@ -250,6 +329,114 @@ pub fn verify_result(source: &[u8; 16], message_id: &[u8; 32], valid: bool) {
         short_hex(source),
         id,
         if valid { "valid" } else { "invalid" }
+    );
+}
+
+/// How the link to a hub of the Rooms stands (1652): `linking`, `ready`,
+/// or why it is down (`no_path`, `no_answer`, `lost`, `node_gone`,
+/// `left`). Before 1652 the rooms' code logged nothing, and a phone's
+/// trace could not tell "never asked" from "connecting".
+pub fn rooms_link(hub: &[u8; 16], state: &str) {
+    tracing::debug!(
+        event = "ROOMS_LINK",
+        hub = %to_hex(hub),
+        state = %scalar(state),
+    );
+}
+
+/// The hub's WELCOME (1652), with the version it gave (`-` for none).
+pub fn rooms_welcome(hub: &[u8; 16], version: Option<&str>) {
+    tracing::debug!(
+        event = "ROOMS_WELCOME",
+        hub = %to_hex(hub),
+        version = %scalar(version.unwrap_or("-")),
+    );
+}
+
+/// How many rooms a hub named (1652): `via` is `link` for the chosen
+/// hub's `/list` after its WELCOME, `peek` for a server sheet's question;
+/// `answered` is false when the hub gave no list in time and only its
+/// greeting was read, or when a question brought nothing at all; `why`
+/// says how such a question ended (1669, walk 12, finding 68: the sheet
+/// gave up with no line), `timeout` when its budget ran out, `-` when the
+/// list came.
+pub fn rooms_list(hub: &[u8; 16], rooms: usize, via: &str, answered: bool, why: &str) {
+    tracing::debug!(
+        event = "ROOMS_LIST",
+        hub = %to_hex(hub),
+        rooms = rooms,
+        via = %scalar(via),
+        answered = answered,
+        why = %scalar(why),
+    );
+}
+
+/// A join asked of the hub and how it went (1652): `ok` when the hub said
+/// we are in, not when it refused or the session would not send it.
+pub fn rooms_join(room: &str, ok: bool) {
+    tracing::debug!(
+        event = "ROOMS_JOIN",
+        room = %scalar(room),
+        ok = ok,
+    );
+}
+
+/// The server "suggested" marks (1653, walk 8, 41), at a start and
+/// whenever it moves: `hub` the one or `-`, `why` `marked`, `in_use` (a
+/// hub in force marks none) or `none_fits` (no named shipped hub heard
+/// that answers), `fits` how many could carry the mark.
+pub fn rooms_suggest(hub: Option<&[u8; 16]>, why: &str, fits: usize) {
+    tracing::debug!(
+        event = "ROOMS_SUGGEST",
+        hub = %hub.map_or_else(|| String::from("-"), |h| to_hex(h)),
+        why = %scalar(why),
+        fits = fits,
+    );
+}
+
+/// A page the browser asked for and how it went (1653, walk 8, 40: the
+/// places sheet closed once with "Link fehlgeschlagen" and nobody could
+/// tell a tap from a link dropped while idle): `state` `asked`, `ok`,
+/// `failed` or `aborted` (1667: another ask took its place, `why`
+/// `superseded`, or the browser stopped, `stopped`), `why` the failure in
+/// English or `-`.
+pub fn browse_fetch(dest: &[u8; 16], path: &str, state: &str, why: &str) {
+    tracing::debug!(
+        event = "BROWSE_FETCH",
+        dest = %to_hex(dest),
+        path = %scalar(path),
+        state = %scalar(state),
+        why = %scalar(why),
+    );
+}
+
+/// Explore came to the front and whether it asked the mailbox for its list
+/// (1667, walk 11, finding 63: a walk could not tell an ask that did not
+/// fire from one that fired unseen): `ask` `yes` or `no`, `reason`
+/// `asked`, `recent` (an ask began `since_ms` ago, under the minute) or
+/// `no_mailbox` (the device told of no mailbox link).
+pub fn explore_open(ask: bool, reason: &str, since_ms: Option<u64>) {
+    tracing::debug!(
+        event = "EXPLORE_OPEN",
+        ask = if ask { "yes" } else { "no" },
+        reason = %scalar(reason),
+        since_ms = %since_ms.map_or_else(|| String::from("-"), |ms| ms.to_string()),
+    );
+}
+
+/// The mailbox's `/about` as a device read it (1669, walk 12, finding 67:
+/// the plain `HOME about` line never reached the phone's logcat, which
+/// carries structured events only, so the commits behind a version were
+/// nowhere a walk could read them): its machine, its version and ours,
+/// commits included, its start in unix seconds or `-`, its devices.
+pub fn home_about(host: &str, version: &str, ours: &str, started: Option<i64>, devices: usize) {
+    tracing::debug!(
+        event = "HOME_ABOUT",
+        host = %scalar(host),
+        version = %scalar(version),
+        ours = %scalar(ours),
+        started = %started.map_or_else(|| String::from("-"), |s| s.to_string()),
+        devices = devices,
     );
 }
 

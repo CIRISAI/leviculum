@@ -49,6 +49,34 @@ pub struct ViewTile {
     pub origin: Point,
 }
 
+impl ViewTile {
+    /// The tile `dz` zooms coarser that holds this one, placed so that its
+    /// part over this tile lands where this tile would; `None` past
+    /// [`MAX_OVERZOOM`]. What stands in for a tile not arrived yet
+    /// (`Region::stand_in`, 1291).
+    pub fn up(&self, dz: u8) -> Option<Self> {
+        let overzoom = self.overzoom.checked_add(dz)?;
+        if overzoom > MAX_OVERZOOM || dz > self.id.z {
+            return None;
+        }
+        let size = 1i32 << (12 + u32::from(self.overzoom));
+        let id = TileId {
+            z: self.id.z - dz,
+            x: self.id.x >> dz,
+            y: self.id.y >> dz,
+        };
+        let (ix, iy) = (self.id.x - (id.x << dz), self.id.y - (id.y << dz));
+        Some(Self {
+            id,
+            overzoom,
+            origin: Point::new(
+                self.origin.x - ix as i32 * size,
+                self.origin.y - iy as i32 * size,
+            ),
+        })
+    }
+}
+
 impl Viewport {
     /// A view of `width` x `height` pixels (each at least 1) at `zoom`
     /// (clamped to [`MAX_VIEW_ZOOM`]).

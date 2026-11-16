@@ -275,6 +275,7 @@ pub(crate) fn spawn_ble_interface(
         transit: true,
         kind: InterfaceKind::Ble,
         ingress_control: None,
+        path_choice: leviculum_core::transport::PathChoice::HopsAndLoss,
     };
 
     // The carrier-teardown hook (#443 follow-on): BLE links are

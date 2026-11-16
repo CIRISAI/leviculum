@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Written by loquax-android/scripts/render-icon.py; edit the script. -->
+<vector xmlns:a='http://schemas.android.com/apk/res/android'
+        a:width='108dp' a:height='108dp'
+        a:viewportWidth='108' a:viewportHeight='108'>
+  <path a:fillColor="#ffffff" a:pathData="M51,39 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0 Z"/>
+  <path a:fillColor="#ffffff" a:pathData="M68,33.5 L82,37.5 L68.5,39.5 Z"/>
+  <path a:fillColor="#ffffff" a:pathData="M68.5,42 L80,46 L67,47.5 Z"/>
+  <path a:fillColor="#ffffff" a:pathData="M54,32 C43,38 37,50 40,62 L30,77 L46,71 C58,72 70,63 68,44 Z"/>
+  <path a:strokeColor="#ffffff" a:strokeWidth="3" a:strokeLineCap="round" a:pathData="M51,70 L49,80 M58,68 L58,80"/>
+  <path a:fillColor="#3a7d44" a:pathData="M61.8,37 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0 Z"/>
+</vector>

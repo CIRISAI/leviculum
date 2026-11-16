@@ -842,6 +842,45 @@ fn no_event_site_carries_a_free_text_message() {
     );
 }
 
+/// No event site writes a key the layer writes itself.
+///
+/// The layer puts `node=` second and `t=` last on every line, so a site
+/// field of either name renders the key twice, and a first-match parser
+/// reads the site's value as the line's. `RESOURCE_RW` wrote its round
+/// time as `t` until 1294, and a miauhaus line read
+/// `round=1 t=161 ... t=314207`. A site's `node` is worse: the layer
+/// skips it (`render_line`, `event_log.rs`), so its value never reaches
+/// the event log at all, which is how `LNMSG_PN` logged no node until
+/// 1294.
+///
+/// `IDENTITY` alone keeps a `node` field, beside the `identity` the event
+/// log renders: periculum reads `event="IDENTITY" node=<hex32>` off the
+/// fmt log (`ble_participants.rs`, `trace.rs`), where nothing is skipped.
+#[test]
+fn no_event_site_writes_a_layer_key() {
+    const FROZEN_NODE_KEY: &str = "IDENTITY";
+    let offenders: Vec<String> = all_sites()
+        .into_iter()
+        .filter(|s| s.keys.contains("t") || (s.keys.contains("node") && s.event != FROZEN_NODE_KEY))
+        .map(|s| format!("  {}  at {}:{}", s.event, s.file, s.line))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these event sites write `t` or `node`, which the layer adds to \
+         every line; name the field for what it measures:\n{}",
+        offenders.join("\n")
+    );
+    let declared: Vec<&str> = EVENT_CATALOG
+        .iter()
+        .filter(|s| s.required_keys.iter().any(|k| *k == "t" || *k == "node"))
+        .map(|s| s.name)
+        .collect();
+    assert!(
+        declared.is_empty(),
+        "EVENT_CATALOG entries requiring a layer key: {declared:?}"
+    );
+}
+
 /// The same rule stated on the catalogue side: a declared event that
 /// requires a `message` key is a broken line by construction.
 #[test]

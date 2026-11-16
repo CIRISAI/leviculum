@@ -24,7 +24,7 @@
 //! of that frame is complete and in order --
 //! `PKT_RX(Local) -> PATH_LOOKUP -> PKT_FORWARD -> PKT_TX -> send queue 1
 //! packet -> acquisition jitter 360ms -> TX 131 bytes to serial` -- and
-//! `port.write_all` + `port.flush` (`interfaces/rnode.rs:3191,3204`) both
+//! `port.write_all` + `port.flush` (`interfaces/rnode.rs:3202,3215`) both
 //! returned, so the whole frame reached the firmware.
 //!
 //! WHAT THE TWO MODEMS SAY. The RNode firmware reports `airtime_short` and
@@ -441,8 +441,7 @@ fn the_sf7_cell_cannot_decide_what_its_far_modem_heard() {
 /// Our own airtime model is not the firmware's cost model, and the gap is
 /// worth having pinned: anything that prices a wait against a frame's air
 /// (`interfaces/rnode.rs::tx_hold`, which since 2026-09-23 holds the next
-/// frame for the previous one's airtime, and `compute_spacing_ms`) is using
-/// the longer of the two. For a hold that is the safe direction — it waits
+/// frame for the previous one's airtime) is using the longer of the two. For a hold that is the safe direction — it waits
 /// past the end of the air rather than into it — and the margin is 66 ms on
 /// an SF10 probe, 3 % of the frame.
 #[test]

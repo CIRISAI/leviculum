@@ -370,3 +370,25 @@ pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
 pub const PANIC_LED_PORT: u8 = 0;
 pub const PANIC_LED_PIN: u8 = 24;
 pub const PANIC_LED_ACTIVE_LOW: bool = false;
+
+/// The button, LED and off pins of the 8 s off and the boot-time factory
+/// reset (order 1511, `crate::power`). Off: the LED (P0.24, active high)
+/// and the buzzer's enable ([`BuzzerEnable`], P1.05) go low. The button
+/// is active high with a pull-down, so it senses high.
+#[cfg(feature = "softdevice")]
+pub const POWER: crate::power::PowerFacts = crate::power::PowerFacts {
+    button_active_high: true,
+    led: (PANIC_LED_PORT, PANIC_LED_PIN, PANIC_LED_ACTIVE_LOW),
+    off_pins: &[
+        crate::power::OffPin {
+            port: 0,
+            pin: 24,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 5,
+            high: false,
+        },
+    ],
+};

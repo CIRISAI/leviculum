@@ -35,7 +35,9 @@ pub(crate) async fn connect_hooked(
 }
 
 /// [`connect_hooked`] for a `host:port` string, resolved asynchronously — for
-/// dialers that hold unresolved addresses (the I2P SAM bridge).
+/// dialers that hold unresolved addresses (the I2P SAM bridge, its only
+/// caller, hence the gate).
+#[cfg(feature = "i2p")]
 pub(crate) async fn connect_hooked_host(
     addr: &str,
     hook: Option<&OutboundSocketHook>,

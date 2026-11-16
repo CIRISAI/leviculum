@@ -55,6 +55,11 @@ NRF="$ROOT/leviculum-nrf"
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$ROOT/scripts/nrf-rustflags.sh"
 OUT="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 
 # The bootloader's USER_FLASH_END: the three persistence pages at and above it
@@ -62,53 +67,12 @@ OUT="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 # (docs/src/concepts/lnode-flashing.md). The store must stop at it.
 USER_FLASH_END=$((0xEA000))
 
-find_tool() { # find_tool <suffix> -> prints a readelf/nm binary
-    local want="$1"
-    if command -v "arm-none-eabi-$want" >/dev/null 2>&1; then
-        echo "arm-none-eabi-$want"
-        return 0
-    fi
-    local d
-    for d in "$(rustc --print sysroot)/lib/rustlib/"*/bin; do
-        if [ -x "$d/llvm-$want" ]; then
-            echo "$d/llvm-$want"
-            return 0
-        fi
-    done
-    echo "[store-gap] no $want found. Install binutils-arm-none-eabi," >&2
-    echo "[store-gap] or add the rustup llvm-tools component." >&2
-    return 1
-}
-
-READELF="$(find_tool readelf)"
-NM="$(find_tool nm)"
-
-# stdin: `readelf -lW` output. stdout: the highest flash byte the image
-# occupies, decimal. Segments whose physical address is in RAM are the .bss/
-# .uninit kind and carry no file content; a segment with FileSiz 0 carries none
-# either.
-image_end() {
-    python3 -c '
-import re, sys
-end = 0
-for line in sys.stdin:
-    f = line.split()
-    if len(f) < 6 or f[0] != "LOAD":
-        continue
-    try:
-        phys, filesz = int(f[3], 16), int(f[4], 16)
-    except ValueError:
-        continue
-    if filesz == 0 or phys >= 0x100000:   # 1 MiB of flash on the nRF52840
-        continue
-    end = max(end, phys + filesz)
-if end == 0:
-    print("no flash PT_LOAD segment found: readelf output not understood",
-          file=sys.stderr)
-    sys.exit(2)
-print(end)
-'
-}
+# The tool lookup and the image-end measurement are shared with
+# check-nrf-flash-budget.sh, which reads the same ELFs for a different edge.
+# shellcheck source=scripts/nrf-elf.sh
+source "$ROOT/scripts/nrf-elf.sh"
+READELF="$(nrf_elf_tool store-gap readelf)"
+NM="$(nrf_elf_tool store-gap nm)"
 
 symbol() { # symbol <elf> <name> -> prints its value, decimal
     local value
@@ -123,7 +87,7 @@ symbol() { # symbol <elf> <name> -> prints its value, decimal
 
 build() {
     # shellcheck disable=SC2086 # feature list is intentionally word-split
-    (cd "$NRF" && cargo build --release --bin "$1" --features "$2")
+    (cd "$NRF" && nrf_cargo build --release --bin "$1" --features "$2")
 }
 
 check() {
@@ -133,7 +97,7 @@ check() {
         exit 1
     }
 
-    end="$("$READELF" -lW "$elf" | image_end)"
+    end="$("$READELF" -lW "$elf" | nrf_image_end)"
     base="$(symbol "$bin" "$elf" __srecord_store)"
     store_end="$(symbol "$bin" "$elf" __erecord_store)"
     boot="$(symbol "$bin" "$elf" __sboot_record)"

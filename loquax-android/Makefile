@@ -2,12 +2,28 @@
 # Gradle, no AndroidX, the SDK's command line tools, and the Rust library
 # of this directory's crate cross-built by cargo with the NDK's linker.
 # README.md says what to install; docs/drafts/loquax-android-2026-10.md why.
+#
+#   make debug      debug APK for phones: arm64-v8a and armeabi-v7a
+#   make waydroid   debug APK for x86_64 only, bin/loquax-debug-x86_64.apk:
+#                   Waydroid and the emulator, where the scripted device
+#                   walk runs (scripts/device-walk.py,
+#                   docs/src/concepts/loquax-device-walk.md)
 
 # --- Project ---
 APP_MODULE=loquax
 NAMESPACE=network.leviculum.loquax
-VERSION_CODE?=1
-VERSION_NAME?=0.1
+# The versionName is loquax's version, the one the app itself shows (the
+# build stamp, the mailbox page's "älter" comparison): an APK that said
+# 0.1.8 around a library stamped 0.1.9 read as two builds (walk 11, 1667).
+# The versionCode lives in this directory's Cargo.toml, `[package.metadata
+# .android] version-code`, which has to grow for a phone to accept the APK
+# as an update; scripts/bump-touched.py raises it whenever loquax or this
+# crate moves (1226, 1667). A command line VERSION_CODE=... or
+# VERSION_NAME=... still wins, for a one-off build.
+CARGO_TOML:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))Cargo.toml
+LOQUAX_TOML:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))../loquax/Cargo.toml
+VERSION_CODE?=$(shell sed -n 's/^version-code *= *\([0-9][0-9]*\).*/\1/p' $(CARGO_TOML))
+VERSION_NAME?=$(shell sed -n 's/^version *= *"\([^"]*\)".*/\1/p' $(LOQUAX_TOML) | head -n 1)
 
 # --- SDK / tools ---
 SDK?=/usr/lib/android-sdk
@@ -38,6 +54,11 @@ NDKBIN=$(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
 ABIS?=arm64-v8a armeabi-v7a
 REPO=$(realpath $(PROJ)/../..)
 CARGO_TARGET_DIR?=$(REPO)/target
+# Cargo features for the native library, empty for the product: the globe
+# build (1710, 1762) is `make debug FEATURES=loquax/globe-world
+# APK_SUFFIX=-debug-globe`, the world view as the orthographic globe
+# instead of Equal Earth.
+FEATURES?=
 CARGO_HOME?=$(HOME)/.cargo
 LIBNAME=libloquax_android.so
 TRIPLE_arm64-v8a=aarch64-linux-android
@@ -46,9 +67,14 @@ CLANG_arm64-v8a=aarch64-linux-android
 CLANG_armeabi-v7a=armv7a-linux-androideabi
 ENV_arm64-v8a=AARCH64_LINUX_ANDROID
 ENV_armeabi-v7a=ARMV7_LINUX_ANDROIDEABI
+# x86_64 for Waydroid and the emulator (`make waydroid`), never in a phone's APK.
+TRIPLE_x86_64=x86_64-linux-android
+CLANG_x86_64=x86_64-linux-android
+ENV_x86_64=X86_64_LINUX_ANDROID
 # The cc crate's names for the C compiler, for SQLite inside the store.
 CC_ENV_arm64-v8a=aarch64_linux_android
 CC_ENV_armeabi-v7a=armv7_linux_androideabi
+CC_ENV_x86_64=x86_64_linux_android
 # 16 KiB pages: Android 15 devices may run with them; a library aligned to
 # 4 KiB needs a compatibility mode there, and one whose RELRO segment ends
 # off a 16 KiB boundary crashes. NDK r28 aligns by default, r27 needs both
@@ -88,11 +114,13 @@ KEYSTORE?=$(PROJ)/$(APP_MODULE).keystore
 APK_SUFFIX?=
 AAPT_EXTRA_FLAGS?=
 PACKAGE_NAME?=$(NAMESPACE)
+# Whether the screens the device walk opens directly are exported (1193).
+WALK_EXPORTED?=false
 
 PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).apk
 UNALIGNED_PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).unaligned.apk
 
-.PHONY: all release debug build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass FORCE
+.PHONY: all release debug waydroid build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass print-version FORCE
 
 all: release
 
@@ -109,7 +137,17 @@ debug: KEYSTORE=$(PROJ)/debug.keystore
 debug: APK_SUFFIX=-debug
 debug: AAPT_EXTRA_FLAGS=--debug-mode
 debug: PACKAGE_NAME=$(NAMESPACE).debug
+debug: WALK_EXPORTED=true
 debug: $(PROJ)/debug.keystore build
+
+# The debug APK with the x86_64 library alone, under its own name so it
+# never stands in for a phone's: the device walk installs it in Waydroid
+# on hamster, which runs x86_64 Android. Same package, same debug key. A
+# second make, because a prerequisite list (`native`'s) is expanded when
+# the Makefile is read, before a target's own ABIS could apply; variables
+# on the command line win over `debug`'s APK_SUFFIX.
+waydroid:
+	$(MAKE) debug ABIS=x86_64 APK_SUFFIX=-debug-x86_64
 
 build: compile native pack
 
@@ -127,6 +165,7 @@ manifest: | $(BIN)
 	    -e 's|{{PACKAGE_NAME}}|$(PACKAGE_NAME)|g' \
 	    -e 's|{{MIN_SDK}}|$(MIN_API)|g' \
 	    -e 's|{{TARGET_SDK}}|$(TARGET_SDK)|g' \
+	    -e 's|{{WALK_EXPORTED}}|$(WALK_EXPORTED)|g' \
 	    $(PROJ)/AndroidManifest.xml > $(GENMANIFEST)
 	$(AAPT) package -f -m --custom-package $(NAMESPACE) -J $(PROJ)/src -M $(GENMANIFEST) -S $(PROJ)/res -I $(ANDJAR)
 
@@ -148,7 +187,8 @@ $(BIN)/lib/%/$(LIBNAME): FORCE
 	CARGO_TARGET_$(ENV_$*)_RUSTFLAGS="$(RUSTFLAGS_ANDROID)" \
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
 	cargo build --manifest-path $(REPO)/Cargo.toml -p loquax-android \
-		--release --locked --target $(TRIPLE_$*)
+		--release --locked --target $(TRIPLE_$*) \
+		$(if $(strip $(FEATURES)),--features $(FEATURES))
 	mkdir -p $(@D)
 	cp $(CARGO_TARGET_DIR)/$(TRIPLE_$*)/release/$(LIBNAME) $@
 
@@ -171,6 +211,9 @@ pack:
 	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) assets/emoji.tsv assets/emoji-LICENSE-UNICODE.txt
 	$(ZIPALIGN) -f 4 $(UNALIGNED_PACKAGE) $(PACKAGE)
 	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass $(KSPASS_ARG) $(PACKAGE)
+	# The APK says the version the app shows, or the build fails (1667).
+	$(AAPT) dump badging $(PACKAGE) | grep -q "versionCode='$(VERSION_CODE)' versionName='$(VERSION_NAME)'" \
+		|| { echo "$(PACKAGE): badging does not say versionName $(VERSION_NAME) versionCode $(VERSION_CODE)" >&2; exit 1; }
 
 uninstall:
 	$(ADB) uninstall $(NAMESPACE)
@@ -197,6 +240,10 @@ start-debug:
 
 logcat:
 	$(ADB) shell logcat | grep Runtime
+
+# What the manifest step will stamp, for scripts/bump-touched.py's selftest.
+print-version:
+	@echo VERSION_CODE=$(VERSION_CODE) VERSION_NAME=$(VERSION_NAME)
 
 clean:
 	rm -rf $(BIN) $(PROJ)/obj

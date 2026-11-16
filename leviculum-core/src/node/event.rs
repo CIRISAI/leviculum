@@ -107,6 +107,26 @@ pub enum NodeEvent {
         interface_index: usize,
     },
 
+    /// A packet addressed to one of our Single destinations that no
+    /// retained ratchet and not the identity key could decrypt (or that
+    /// ratchet enforcement refused). It is dropped and NOT proven, as the
+    /// reference proves only what `Destination.receive` accepted
+    /// (`RNS/Transport.py:2159-2160`): a proof here would tell the sender
+    /// its message landed.
+    ///
+    /// Which ratchet the sender used cannot be told: the token carries
+    /// only the sender's ephemeral key, and the reference learns the
+    /// ratchet id only from the key that decrypted (`RNS/Identity.py`,
+    /// `decrypt`).
+    PacketUndecryptable {
+        /// The destination hash it was addressed to
+        destination: DestinationHash,
+        /// The encrypted payload's length in bytes
+        len: usize,
+        /// Interface it arrived on
+        interface_index: usize,
+    },
+
     /// Delivery confirmation for a sent packet
     PacketDeliveryConfirmed {
         /// The packet hash identifying the sent packet
@@ -589,6 +609,30 @@ pub enum NodeEvent {
         requested_at: f64,
     },
 
+    /// A request for a registered `AllowList` handler was refused: the link
+    /// carried no identity, or one the list does not hold.
+    ///
+    /// Nothing goes on the wire because of this event: the core drops the
+    /// request exactly as before, which is what a Python requester of
+    /// `/status` sees. It exists so an endpoint that answers a refusal with a
+    /// typed reply of its own (the board's `/dfu`, Codeberg #235,
+    /// [`crate::node::remote_dfu`]) and a board that must log who knocked can
+    /// see the refusal; the boards build core without `tracing`, so the
+    /// core's own debug line never reaches their debug port.
+    RequestRefused {
+        /// The link that carried the request
+        link_id: LinkId,
+        /// The destination the request was addressed to
+        destination_hash: DestinationHash,
+        /// Unique request identifier (truncated packet hash)
+        request_id: [u8; TRUNCATED_HASHBYTES],
+        /// The request path string of the handler that refused
+        path: String,
+        /// The identity the link was identified with, `None` when the
+        /// requester never identified
+        requester: Option<[u8; TRUNCATED_HASHBYTES]>,
+    },
+
     /// Response received for a previously sent request.
     ResponseReceived {
         /// The link that received the response
@@ -765,6 +809,7 @@ impl NodeEvent {
             | NodeEvent::ResourceCompleted { link_id, .. }
             | NodeEvent::ResourceFailed { link_id, .. }
             | NodeEvent::RequestReceived { link_id, .. }
+            | NodeEvent::RequestRefused { link_id, .. }
             | NodeEvent::ResponseReceived { link_id, .. }
             | NodeEvent::RequestTimedOut { link_id, .. } => Some(link_id),
             NodeEvent::AnnounceReceived { .. }
@@ -773,6 +818,7 @@ impl NodeEvent {
             | NodeEvent::PathRequestReceived { .. }
             | NodeEvent::PathLost { .. }
             | NodeEvent::PacketReceived { .. }
+            | NodeEvent::PacketUndecryptable { .. }
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
@@ -829,6 +875,10 @@ impl NodeEvent {
             // payloads and their per-packet confirmation, the per-chunk
             // resource progress tick, and the disposable retransmit notice.
             NodeEvent::PacketReceived { .. }
+            // One per packet a peer encrypted to a key we do not hold: the
+            // volume of the traffic itself, so data plane like the arrival
+            // it stands in for.
+            | NodeEvent::PacketUndecryptable { .. }
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::MessageReceived { .. }
@@ -936,8 +986,10 @@ impl NodeEvent {
             }
 
             // Request/response — RequestReceived needs a reply, the rest carry
-            // correlation state. One per request. CONTROL.
+            // correlation state. One per request. CONTROL. A refusal is one per
+            // refused request and may owe a typed reply (`/dfu`).
             NodeEvent::RequestReceived { .. }
+            | NodeEvent::RequestRefused { .. }
             | NodeEvent::ResponseReceived { .. }
             | NodeEvent::RequestTimedOut { .. } => EventClass::Control,
 
@@ -973,6 +1025,7 @@ impl NodeEvent {
             NodeEvent::PacketDropped { .. } => "PacketDropped",
             NodeEvent::AnnounceTransmitted { .. } => "AnnounceTransmitted",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
+            NodeEvent::PacketUndecryptable { .. } => "PacketUndecryptable",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",
             NodeEvent::LinkEstablished { .. } => "LinkEstablished",
@@ -1000,6 +1053,7 @@ impl NodeEvent {
             NodeEvent::ResourceCompleted { .. } => "ResourceCompleted",
             NodeEvent::ResourceFailed { .. } => "ResourceFailed",
             NodeEvent::RequestReceived { .. } => "RequestReceived",
+            NodeEvent::RequestRefused { .. } => "RequestRefused",
             NodeEvent::ResponseReceived { .. } => "ResponseReceived",
             NodeEvent::RequestTimedOut { .. } => "RequestTimedOut",
             NodeEvent::InterfaceDown(_) => "InterfaceDown",

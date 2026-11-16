@@ -33,6 +33,16 @@ loquax/tui_snapshot loquax-tui cargo test -p loquax --features tui --bins --test
 loquax/home_node loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node
 # Needs the `history` feature, which the tui build carries.
 loquax/import loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import
+loquax/wire_props loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props
+loquax/scene_golden loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden
+loquax/mailbox_receipts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts
+loquax/mailbox_setup loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup
+loquax/mailbox_mesh loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh
+loquax/device_receipts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
+loquax/relay_group loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group
+loquax/operation_counts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts
+loquax/mailbox_census loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts --test mailbox_census
+loquax/mailbox_growth_soak loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts --test mailbox_census --test mailbox_growth_soak
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations

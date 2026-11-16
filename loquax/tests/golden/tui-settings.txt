@@ -1,0 +1,24 @@
+┌●┌ Settings ────────────────────────────────────────────────────────────────┐─┐
+│N│1  Profile                                                                │ │
+│:│   Name, address, QR code                                                 │ │
+│o│2  Mailbox                                                                │ │
+│c│   Which mailbox, connection, devices                                     │ │
+│ │3  Appearance                                                             │ │
+│ │   Light or dark, the map                                                 │ │
+│ │4  Chats                                                                  │ │
+│ │   Photo size                                                             │ │
+│ │5  Notifications                                                          │ │
+│ │   New messages, muted chats                                              │ │
+│ │6  Privacy                                                                │ │
+│ │   Read receipts, blocked contacts, positions you shared                  │ │
+│ │7  Maps                                                                   │ │
+│ │   Maps on this device, automatic download                                │ │
+│ │8  Backup                                                                 │ │
+│ │   Back up the mailbox                                                    │ │
+│ │9  Advanced                                                               │ │
+│ │   Relay and more                                                         │ │
+│ │                                                                          │ │
+│ │1-9 open a section · q close                                              │ ┤
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.34.0+ciris.3"
+version = "0.35.0+ciris.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1046,7 +1046,7 @@ version = "0.1.0"
 
 [[package]]
 name = "leviculum-lr11xx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.34.0+ciris.3"
+version = "0.35.0+ciris.1"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-nrf"
-version = "0.4.0"
+version = "0.4.9"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",

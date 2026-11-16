@@ -14,7 +14,41 @@ linker = "flip-link"
 # one fingerprint instead of rebuilding each other's artifacts. Registry and
 # git dependencies are unaffected: cargo compiles them with `--cap-lints
 # allow`, which caps a forced `-D` back to `allow`.
-rustflags = ["-C", "link-arg=-Tlink.x", "-D", "warnings"]
+#
+# The last three flags buy flash back without changing what the code does
+# (order 1300, #359). On 2026-11-02 the Pocket image (rak4631 with
+# rak-baseboard) no longer linked: FLASH overflowed by 56 B. Measured on that
+# image, each added on top of the one before:
+#   --icf=all                 +3816 B  lld folds byte-identical functions,
+#                                      mostly BTreeMap monomorphs whose key
+#                                      and value types have the same layout.
+#                                      Rust promises no distinct function
+#                                      addresses, and nothing here compares
+#                                      them; addr2line on a folded PC names
+#                                      one of the twins, which is the price.
+#                                      `--icf=safe` won 0 B: rustc emits no
+#                                      address-significance table.
+#   -inline-threshold=10      +2856 B  every value from 6 to 10 gives the same
+#                                      image (LLVM counts 5 per instruction);
+#                                      the opt-level "z" default and 0 are
+#                                      larger, 13 and up grow fast.
+#   target-cpu=cortex-m4      +1704 B  the nRF52840's actual core; the triple
+#                                      alone tunes for a generic v7E-M.
+# `scripts/check-nrf-flash-budget.sh` holds the result: every image keeps
+# 8 KiB free or `just nrf-flash-budget` goes red.
+#
+# The path remap (`--remap-path-prefix`, order 1368) is not here: its values
+# are the building host's paths, which a tracked file cannot name.
+# scripts/nrf-rustflags.sh asks for them at build time and appends them
+# through CARGO_TARGET_THUMBV7EM_NONE_EABIHF_RUSTFLAGS, which cargo merges with
+# this list. A plain `cargo build` without it links the same code with the
+# long paths in its panic strings.
+rustflags = [
+    "-C", "link-arg=-Tlink.x", "-D", "warnings",
+    "-C", "link-arg=--icf=all",
+    "-C", "llvm-args=-inline-threshold=10",
+    "-C", "target-cpu=cortex-m4",
+]
 
 [build]
 target = "thumbv7em-none-eabihf"

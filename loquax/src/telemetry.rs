@@ -5,9 +5,19 @@
 //! both read with the codec of `leviculum-lxmf`:
 //!
 //! - `FIELD_TELEMETRY`, one node's own readings. Who measured is the
-//!   message's signed source.
-//! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Who measured is the row's
-//!   source hash; the message's source only delivered it (`via`).
+//!   message's signed source, except in a group's copy of a member's
+//!   message: the home signs that with the group, and the writer travels in
+//!   `lev.group_copy` (1687). That name is a claim the signature does not
+//!   cover; [`read`] files under the source, and only the caller, who
+//!   knows the reader's groups, may file under the claimed writer
+//!   ([`read_as`], [`claimed_writer`]).
+//! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Each row names who
+//!   measured it, and that name is a claim too: anyone can send a stream
+//!   naming anyone. A row is filed under its measurer only where the
+//!   caller says the deliverer is a collector the reader chose
+//!   ([`Rows::Measurers`]); otherwise it is dropped and counted
+//!   ([`Read::dropped_rows`], the audit of 1787). The message's source
+//!   only delivered a row it files (`via`).
 //!
 //! Every reading with a location becomes one [`Fix`]. A blob that does not
 //! decode is [`Unreadable`]: kept raw with its message, and named in
@@ -23,6 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+use leviculum_lxmf::lev::Lev;
 use leviculum_lxmf::msgpack::{self, Number};
 use leviculum_lxmf::telemetry::{decode_stream_field_value, Location, Telemetry};
 use leviculum_lxmf::Field;
@@ -63,6 +74,20 @@ pub struct Fix {
     /// The packed Telemeter the reading came from, for what we cannot decode
     /// yet.
     pub telemetry: Vec<u8>,
+    /// How it came: in a message, or announced to the mesh (1302).
+    pub source: Source,
+}
+
+/// How a position came.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// In a message's telemetry field: kept by the store with its message.
+    #[default]
+    Telemetry,
+    /// In a `lev.position` announce ([`crate::mesh_position`]): a state the
+    /// screen holds and the store does not, since the node announces it
+    /// again at its cadence.
+    Mesh,
 }
 
 impl Fix {
@@ -98,7 +123,29 @@ impl Fix {
     pub fn stale(&self, now: i64) -> bool {
         now.saturating_sub(self.fix_time()) > STALE_AFTER_SECS
     }
+
+    /// The battery's charge in whole percent, when the Telemeter it came
+    /// in carried a battery sensor (1386).
+    pub fn battery(&self) -> Option<u8> {
+        let telemetry = Telemetry::decode(&self.telemetry).ok()?;
+        let percent = telemetry.battery?.charge_percent.as_f64();
+        percent
+            .is_finite()
+            .then(|| libm::round(percent.clamp(0.0, 100.0)) as u8)
+    }
+
+    /// How late it arrived: the seconds from its fix time to its receive
+    /// time, when that is more than [`LATE_AFTER_SECS`] (1386); the peer
+    /// was out of reach meanwhile.
+    pub fn late_secs(&self) -> Option<i64> {
+        let late = self.received_at? - self.fix_time();
+        (late > LATE_AFTER_SECS).then_some(late)
+    }
 }
+
+/// A fix that arrives more than this after its fix time arrived late
+/// (1386): the segment it ends is dashed.
+pub const LATE_AFTER_SECS: i64 = 30 * 60;
 
 /// A telemetry field whose value did not decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +163,20 @@ pub struct Unreadable {
 pub struct Read {
     pub fixes: Vec<Fix>,
     pub unreadable: Vec<Unreadable>,
+    /// The stream rows with a position that were filed under nobody: the
+    /// deliverer is no collector the reader chose ([`Rows::Dropped`]).
+    pub dropped_rows: usize,
+}
+
+/// Whom a `FIELD_TELEMETRY_STREAM` row is filed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rows {
+    /// Under the measurer each row names: the deliverer is a collector
+    /// the reader chose, whose word on who measured counts.
+    Measurers,
+    /// Under nobody: anyone can name anyone in a row, so a stream from a
+    /// deliverer the reader did not choose moves no pin. Only counted.
+    Dropped,
 }
 
 /// Whether the fields carry telemetry at all.
@@ -126,8 +187,33 @@ pub fn has_telemetry(fields: &[Field]) -> bool {
 }
 
 /// The positions in `fields`, from a message whose signed source is
-/// `source`, received at `received_at`.
+/// `source`, received at `received_at`: the message's own readings filed
+/// under `source`, whatever writer a `lev.group_copy` names, and no
+/// stream row filed at all ([`Rows::Dropped`]).
 pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Read {
+    read_as(source, source, fields, received_at, Rows::Dropped)
+}
+
+/// The writer a group copy names (1687): `lev.group_copy`'s sender. Any
+/// sender can put any address there, so the name is worth what its signed
+/// source is: the caller files a fix under it only through
+/// `ui::copy_writer` (the audits of 1757), else under the source.
+pub fn claimed_writer(fields: &[Field]) -> Option<leviculum_lxmf::lev::GroupCopy> {
+    Lev::from_fields(fields).and_then(|lev| lev.group_copy)
+}
+
+/// [`read`] with the message's own readings filed under `writer`, which
+/// the caller has established: the source itself, or the member of the
+/// source's group a checked group copy names; and the stream rows as
+/// `rows` says, which the caller has established too. `via` stays
+/// `source`.
+pub fn read_as(
+    writer: [u8; 16],
+    source: [u8; 16],
+    fields: &[Field],
+    received_at: Option<i64>,
+    rows: Rows,
+) -> Read {
     let mut out = Read::default();
     let fix = |peer: [u8; 16], location: Location, telemetry: &[u8]| Fix {
         peer,
@@ -136,6 +222,7 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
         received_at,
         location,
         telemetry: telemetry.to_vec(),
+        source: Source::Telemetry,
     };
     for (key, value) in fields {
         match *key {
@@ -143,7 +230,7 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
                 Some(blob) => match Telemetry::decode(blob) {
                     Ok(telemetry) => {
                         if let Some(location) = telemetry.location {
-                            out.fixes.push(fix(source, location, blob));
+                            out.fixes.push(fix(writer, location, blob));
                         }
                     }
                     Err(e) => out.unreadable.push(Unreadable {
@@ -159,8 +246,8 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
                 }),
             },
             FIELD_TELEMETRY_STREAM => match decode_stream_field_value(value) {
-                Ok(rows) => {
-                    for (n, row) in rows.iter().enumerate() {
+                Ok(entries) => {
+                    for (n, row) in entries.iter().enumerate() {
                         let Ok(peer) = <[u8; 16]>::try_from(row.source.as_slice()) else {
                             out.unreadable.push(Unreadable {
                                 field: *key,
@@ -170,11 +257,13 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
                             continue;
                         };
                         match Telemetry::decode(&row.telemetry) {
-                            Ok(telemetry) => {
-                                if let Some(location) = telemetry.location {
+                            Ok(telemetry) => match (telemetry.location, rows) {
+                                (Some(location), Rows::Measurers) => {
                                     out.fixes.push(fix(peer, location, &row.telemetry));
                                 }
-                            }
+                                (Some(_), Rows::Dropped) => out.dropped_rows += 1,
+                                (None, _) => {}
+                            },
                             Err(e) => out.unreadable.push(Unreadable {
                                 field: *key,
                                 detail: format!(
@@ -210,6 +299,17 @@ pub fn unreadable_line(source: &[u8; 16], message_id: &[u8; 32], u: &Unreadable)
     )
 }
 
+/// `tui.log`'s line for stream rows filed under nobody ([`Rows::Dropped`]):
+/// the source is no collector the reader chose, so who measured them is a
+/// claim nobody vouches for.
+pub fn dropped_rows_line(source: &[u8; 16], message_id: &[u8; 32], rows: usize) -> String {
+    format!(
+        "TELEMETRY_ROWS_DROPPED source={} message={} rows={rows} reason=no-chosen-collector",
+        to_hex(source),
+        to_hex(&message_id[..8]),
+    )
+}
+
 fn unwrap_bin(value: &[u8]) -> Option<&[u8]> {
     let mut p = 0;
     msgpack::read_bin(value, &mut p).ok()
@@ -241,6 +341,85 @@ pub fn unpack_fields(packed: &[u8]) -> Option<Vec<Field>> {
 
 /// `43.77310 N 11.25600 E`: five decimals, a tenth of the wire's
 /// micro-degrees (about a metre), rounded half away from zero.
+/// What a traveller wants to know of the place `l` lies at (1684): the
+/// country with its emergency numbers, the side of the road and the
+/// currency (Wikidata, through [`leviculum_map::countries`]), and the
+/// magnetic declination there on the fix's day (WMM2025, through
+/// [`leviculum_map::declination`]), which turns a compass bearing into a
+/// true one. A place in no country, or one the table has nothing for,
+/// gives only what is known.
+fn place_rows(rows: &mut Vec<String>, l: &Location) {
+    use leviculum_map::countries::{self, Side};
+    let (lat, lon) = (
+        f64::from(l.latitude_e6) / 1e6,
+        f64::from(l.longitude_e6) / 1e6,
+    );
+    if let Some(f) = countries::country_at(lat, lon).and_then(countries::facts) {
+        rows.push(format!("  country   {}", f.name));
+        let numbers: Vec<String> = f
+            .numbers()
+            .map(|n| {
+                let mut services = Vec::new();
+                if n.police {
+                    services.push("police");
+                }
+                if n.ambulance {
+                    services.push("ambulance");
+                }
+                if n.fire {
+                    services.push("fire");
+                }
+                match services.is_empty() {
+                    true => n.digits.to_string(),
+                    false => format!("{} {}", n.digits, services.join("/")),
+                }
+            })
+            .collect();
+        if !numbers.is_empty() {
+            rows.push(format!("  emergency {}", numbers.join(", ")));
+        }
+        if let Some(side) = f.driving {
+            rows.push(format!(
+                "  driving   on the {}",
+                match side {
+                    Side::Left => "left",
+                    Side::Right => "right",
+                }
+            ));
+        }
+        if let Some(currency) = f.currency {
+            rows.push(format!("  currency  {currency}"));
+        }
+    }
+    let day = fix_wall(l.last_update, 0).civil();
+    let year = i32::try_from(day.year)
+        .ok()
+        .and_then(|y| leviculum_map::declination::decimal_year(y, day.month, day.day));
+    if let Some(year) = year {
+        let km = f64::from(l.altitude_e2) / 100_000.0;
+        let d = leviculum_map::declination::declination(lat, lon, km, year);
+        if d.is_finite() {
+            let tenths = libm::round(d.abs() * 10.0) as i64;
+            rows.push(format!(
+                "  magnetic  {}.{}° {} of true north",
+                tenths / 10,
+                tenths % 10,
+                if d < 0.0 { "west" } else { "east" }
+            ));
+        }
+    }
+}
+
+/// `location`'s altitude over sea level in centimetres: its ellipsoid
+/// height less the geoid's undulation where it lies (1684).
+pub fn above_sea_level(location: &Location) -> i32 {
+    leviculum_map::geoid::height_above_sea_level_cm(
+        location.latitude_e6,
+        location.longitude_e6,
+        location.altitude_e2,
+    )
+}
+
 pub fn coordinates(location: &Location) -> String {
     format!(
         "{} {}",
@@ -351,6 +530,17 @@ pub fn report_line(read: &Read) -> String {
     }
 }
 
+/// What a row folded from a run of `count` reports adds to its position
+/// line, the first of them at `since` (1184): ` · 14 updates since 14:45`;
+/// nothing for a report alone.
+pub fn run_words(count: usize, since: Option<&WallTime>) -> String {
+    match (count, since) {
+        (0 | 1, _) => String::new(),
+        (n, Some(at)) => format!(" · {n} updates since {}", at.hh_mm()),
+        (n, None) => format!(" · {n} updates"),
+    }
+}
+
 /// The detail view's rows for the telemetry in `fields`: every sensor the
 /// codec decoded, per reading, with the peer of a stream row named. A fix
 /// time ahead of `received_at` by more than [`FUTURE_TOLERANCE_SECS`] is
@@ -415,9 +605,13 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
     let before = rows.len();
     if let Some(l) = &t.location {
         rows.push(format!("  position  {}", coordinates(l)));
+        place_rows(rows, l);
+        // The wire's altitude is the GNSS height over the WGS84 ellipsoid,
+        // as Android and Sideband report it; shown over sea level by the
+        // EGM2008 geoid (1684), which is up to a hundred metres apart.
         rows.push(format!(
-            "  altitude  {} m",
-            hundredths(i64::from(l.altitude_e2))
+            "  altitude  {} m above sea level",
+            hundredths(i64::from(above_sea_level(l)))
         ));
         rows.push(format!(
             "  speed     {} m/s",
@@ -432,6 +626,9 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
         }
         let wall = fix_wall(l.last_update, offset_secs);
         let c = wall.civil();
+        // Out of reach meanwhile (1386): the map dashes the line it ends.
+        let late = when.received_at.map(|at| at - l.last_update);
+        let late = late.filter(|&secs| secs > LATE_AFTER_SECS);
         let ahead = when
             .received_at
             .is_some_and(|at| l.last_update > at.saturating_add(FUTURE_TOLERANCE_SECS));
@@ -447,6 +644,9 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
                 ""
             }
         ));
+        if let Some(secs) = late {
+            rows.push(format!("  arrived   {} late", span(secs)));
+        }
     }
     if let Some(time) = t.time {
         rows.push(format!(
@@ -621,7 +821,13 @@ mod tests {
             appearance: None,
         });
         let fields = vec![(FIELD_TELEMETRY_STREAM, encode_stream_field_value(&rows))];
-        let read = read(COLLECTOR, &fields, Some(NOW));
+        // From a deliverer the reader did not choose: filed under nobody,
+        // counted (the audit of 1787).
+        let refused = read(COLLECTOR, &fields, Some(NOW));
+        assert!(refused.fixes.is_empty(), "{refused:?}");
+        assert_eq!(refused.dropped_rows, 2);
+        let read = chosen(COLLECTOR, &fields);
+        assert_eq!(read.dropped_rows, 0);
         let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
         assert_eq!(who, vec![(BOB, COLLECTOR), (CAROL, COLLECTOR)]);
         assert_eq!(
@@ -629,6 +835,108 @@ mod tests {
             "33.86880 S 151.20930 E"
         );
         assert_eq!(accuracy(&read.fixes[1].location), None, "none given");
+    }
+
+    /// 1687: the home sends a group's copy of a member's message under the
+    /// group's own address, so the message's signed source is the group and
+    /// the writer travels in `lev.group_copy`. The claim is read out for
+    /// the caller, who knows the reader's groups; [`read`] alone files
+    /// under the signed source (the audit of 1757: a stranger's "copy"
+    /// moved anyone's pin), [`read_as`] under the writer the caller
+    /// established, the group as `via`.
+    #[test]
+    fn a_group_copys_position_belongs_to_its_writer() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+
+        const GROUP: [u8; 16] = [0x60; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: BOB,
+                sent_ms: 1_793_015_000_000,
+                epoch: 3,
+            }),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let claim = claimed_writer(&fields).expect("a claim");
+        assert_eq!((claim.sender, claim.epoch), (BOB, 3));
+        let read = read(GROUP, &fields, Some(NOW));
+        assert!(read.unreadable.is_empty());
+        let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
+        assert_eq!(who, [(GROUP, GROUP)], "the signed source, not the claim");
+        let read = read_as(BOB, GROUP, &fields, Some(NOW), Rows::Dropped);
+        let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
+        assert_eq!(
+            who,
+            [(BOB, GROUP)],
+            "the writer measured it; the group delivered the copy"
+        );
+        assert_eq!(claimed_writer(&[]), None);
+    }
+
+    /// A stranger's message whose `lev` names VICTIM as a group copy's
+    /// writer, with a reading of its own: no fix is VICTIM's (the second
+    /// audit of 1757).
+    #[test]
+    fn audit_a_strangers_message_naming_a_writer_moves_nobody_elses_pin() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        const STRANGER: [u8; 16] = [0x5e; 16];
+        const VICTIM: [u8; 16] = [0x71; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: VICTIM,
+                sent_ms: 1_793_015_000_000,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let read = read(STRANGER, &fields, Some(NOW));
+        assert!(!read.fixes.is_empty(), "the stranger's reading is read");
+        assert!(read.fixes.iter().all(|f| f.peer != VICTIM), "{read:?}");
+    }
+
+    /// The same with a `lev` map that names another writer (1482) beside
+    /// the copy's: no fix is VICTIM's.
+    #[test]
+    fn audit_a_map_naming_another_writer_moves_nobody_elses_pin() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        const STRANGER: [u8; 16] = [0x5e; 16];
+        const VICTIM: [u8; 16] = [0x71; 16];
+        let mut fields: Vec<Field> = Lev {
+            group_copy: Some(GroupCopy {
+                sender: VICTIM,
+                sent_ms: 1_793_015_000_000,
+                epoch: 1,
+            }),
+            writer: Some([0x77; 16]),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec();
+        fields.push((
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        ));
+        let read = read(STRANGER, &fields, Some(NOW));
+        assert!(!read.fixes.is_empty(), "the stranger's reading is read");
+        assert!(read.fixes.iter().all(|f| f.peer != VICTIM), "{read:?}");
+    }
+
+    /// `fields` from `source`, a collector the reader chose: its rows are
+    /// filed under their measurers.
+    fn chosen(source: [u8; 16], fields: &[Field]) -> Read {
+        read_as(source, source, fields, Some(NOW), Rows::Measurers)
     }
 
     fn stream(rows: &[([u8; 16], Location)]) -> Vec<u8> {
@@ -658,9 +966,14 @@ mod tests {
         );
         let line = "◎ position 43.77500 N 11.26100 E (+2 more)";
         let fields = vec![own.clone(), (FIELD_TELEMETRY_STREAM, rows.clone())];
-        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+        assert_eq!(report_line(&chosen(BOB, &fields)), line);
+        assert_eq!(
+            report_line(&read(BOB, &fields, Some(NOW))),
+            "◎ position 43.77500 N 11.26100 E",
+            "rows from a deliverer not chosen are not counted"
+        );
         let fields = vec![(FIELD_TELEMETRY_STREAM, rows), own];
-        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+        assert_eq!(report_line(&chosen(BOB, &fields)), line);
     }
 
     /// Rows alone: none is the sender's, the line names the last row as it
@@ -673,8 +986,12 @@ mod tests {
         ]);
         let fields = vec![(FIELD_TELEMETRY_STREAM, rows)];
         assert_eq!(
-            report_line(&read(COLLECTOR, &fields, Some(NOW))),
+            report_line(&chosen(COLLECTOR, &fields)),
             "◎ position 43.77400 N 11.25800 E (+1 more)"
+        );
+        assert_eq!(
+            report_line(&read(COLLECTOR, &fields, Some(NOW))),
+            "◎ telemetry, no position"
         );
     }
 
@@ -705,6 +1022,7 @@ mod tests {
             received_at: Some(NOW),
             location: location(1, 1, 0, NOW + 3600),
             telemetry: Vec::new(),
+            source: Source::Telemetry,
         };
         assert!(ahead.ahead());
         assert_eq!(ahead.order_time(), NOW);
@@ -757,6 +1075,7 @@ mod tests {
             received_at: Some(NOW),
             location: location(1, 1, 0, NOW - STALE_AFTER_SECS),
             telemetry: Vec::new(),
+            source: Source::Telemetry,
         };
         assert!(!fix.stale(NOW), "exactly two hours is still current");
         assert!(fix.stale(NOW + 1));
@@ -797,9 +1116,62 @@ mod tests {
         let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
         assert_eq!(rows[0], "telemetry");
         assert!(rows.contains(&"  position  43.77310 N 11.25600 E".to_string()));
-        assert!(rows.contains(&"  altitude  51.20 m".to_string()));
+        // 51.20 m over the ellipsoid in Florence, where the geoid lies
+        // 45.60 m above it (EGM2008, 1684): 5.60 m above sea level.
+        assert!(
+            rows.contains(&"  altitude  5.60 m above sea level".to_string()),
+            "{rows:?}"
+        );
+        // The place's facts (1684): Italy, by Wikidata, and the WMM2025
+        // declination in Florence on 2026-10-26, rounded to a tenth (the
+        // model itself is held to NOAA's published test values in
+        // leviculum-map's `declination` test).
+        for row in [
+            "  country   Italy",
+            "  driving   on the right",
+            "  currency  EUR",
+        ] {
+            assert!(rows.contains(&row.to_string()), "{row:?} in {rows:?}");
+        }
+        assert!(
+            rows.iter().any(|r| r.starts_with("  emergency 112")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&"  magnetic  4.0° east of true north".to_string()),
+            "{rows:?}"
+        );
         assert!(rows.contains(&"  accuracy  ±5 m".to_string()));
         assert!(rows.contains(&"  battery   87.00 %, not charging".to_string()));
+    }
+
+    /// 1386: the battery a fix's Telemeter carried, in whole percent; a
+    /// fix that arrived 2 h after its fix time is late and its detail says
+    /// so, one 20 min after is not.
+    #[test]
+    fn a_fix_knows_its_battery_and_whether_it_arrived_late() {
+        let late = report(location(43_773_100, 11_256_000, 500, NOW - 7_200));
+        let fields = vec![(FIELD_TELEMETRY, late.encode_field_value())];
+        let fix = read(BOB, &fields, Some(NOW)).fixes.remove(0);
+        assert_eq!(fix.battery(), Some(87));
+        assert_eq!(fix.late_secs(), Some(7_200));
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert!(
+            rows.contains(&"  arrived   2 h late".to_string()),
+            "{rows:?}"
+        );
+
+        let soon = report(location(43_773_100, 11_256_000, 500, NOW - 1_200));
+        let fields = vec![(FIELD_TELEMETRY, soon.encode_field_value())];
+        let fix = read(BOB, &fields, Some(NOW)).fixes.remove(0);
+        assert_eq!(fix.late_secs(), None);
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert!(!rows.iter().any(|r| r.contains("arrived")), "{rows:?}");
+        let bare = Fix {
+            telemetry: Vec::new(),
+            ..fix
+        };
+        assert_eq!(bare.battery(), None);
     }
 
     #[test]

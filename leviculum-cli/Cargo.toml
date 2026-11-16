@@ -14,7 +14,7 @@ homepage.workspace = true
 # here either. It returns to this line in the same change that adds it to
 # `[package.metadata.deb] assets`; scripts/verify-deb-packaging.sh holds the
 # two together.
-description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), probe tool (lnprobe), and path tool (lnpath)"
+description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), probe tool (lnprobe), path tool (lnpath), and remote-management tool (lnmgmt)"
 
 [[bin]]
 name = "lnsd"
@@ -39,6 +39,10 @@ path = "src/lnprobe.rs"
 [[bin]]
 name = "lnpath"
 path = "src/lnpath.rs"
+
+[[bin]]
+name = "lnmgmt"
+path = "src/lnmgmt.rs"
 
 [[bin]]
 name = "lntd"
@@ -66,16 +70,17 @@ path = "src/bin/auto_crossmachine_test.rs"
 # package-only, so the integration tests and mvrs run the allocator the field
 # runs. `--no-default-features` builds lnsd on the libc allocator;
 # scripts/build-deb.sh does so under LEVICULUM_ALLOC=system.
-default = ["alloc-mimalloc", "compression", "ble", "serial"]
+default = ["alloc-mimalloc", "compression", "ble", "serial", "i2p"]
 # leviculum-std's optional parts, forwarded (#463). `compression` is the bz2
 # codec a Python peer's compressed resources need. `ble` is the Columba
 # `BLEInterface`, `serial` the byte-stream family (`SerialInterface`,
-# `RNodeInterface`, `RNodeMultiInterface`, `KISSInterface`, `PipeInterface`);
-# without one, a section of that kind refuses to start lnsd and names the
+# `RNodeInterface`, `RNodeMultiInterface`, `KISSInterface`, `PipeInterface`),
+# `i2p` the `I2PInterface`; without one, a section of that kind refuses to start lnsd and names the
 # feature. `just lnsd-minimal` builds and tests the set without the defaults.
 compression = ["leviculum-std/compression"]
 ble = ["leviculum-std/ble"]
 serial = ["leviculum-std/serial"]
+i2p = ["leviculum-std/i2p"]
 # Forwarded so the census gap line in leviculum-std subtracts the measured
 # live bytes; the global allocator itself is installed in src/lnsd.rs.
 heap-accounting = ["leviculum-std/heap-accounting"]
@@ -123,13 +128,14 @@ extended-description = """\
 Leviculum is a Rust implementation of the Reticulum network stack,
 wire-compatible with the Python reference implementation.
 
-This package installs six binaries:
+This package installs seven binaries:
   lnsd     — the Reticulum daemon (drop-in replacement for Python rnsd)
   lnstest  — the test and diagnostics tool (selftest, diag, identity, connect)
   lncp     — the file-transfer tool (drop-in for rncp)
   lnstatus — the network status tool (drop-in for rnstatus)
   lnprobe  — the reachability probe tool (drop-in for rnprobe)
   lnpath   — the path query and drop tool (drop-in for rnpath)
+  lnmgmt   — remote management of a board (dfu: enter BLE DFU on command)
 
 lnsd is configured as a systemd service running under a dedicated
 'leviculum' user, with its config directory at /etc/reticulum. Python
@@ -145,7 +151,7 @@ priority = "optional"
 # only real runtime dependency (postinst calls it to create the
 # leviculum system user).
 depends = "adduser"
-# The heap-accounting variant below is the same six binaries under another
+# The heap-accounting variant below is the same seven binaries under another
 # package name, so the two may not be installed side by side: each conflicts
 # with and replaces the other, and `dpkg -i` of either removes whichever is
 # there (Codeberg #437). leviculum-heapacct-mimalloc (508) was retired in 806,
@@ -166,12 +172,12 @@ assets = [
     ["target/release/lnstatus", "usr/bin/", "755"],
     ["target/release/lnprobe", "usr/bin/", "755"],
     ["target/release/lnpath", "usr/bin/", "755"],
-    # Source must NOT be named `config`, even though the destination is:
-    # `maintainer-scripts` below points at the same directory, and
-    # cargo-deb picks up a file named `config` there as the debconf
-    # pre-configuration script, shipping this TOML-ish file a second time
-    # as an executable control script.
-    ["../packaging/debian/reticulum-config", "etc/reticulum/config", "644"],
+    ["target/release/lnmgmt", "usr/bin/", "755"],
+    # No /etc/reticulum/config (#471, 1510): lnsd writes its first-start
+    # file into the directory itself, as rnsd does, and a shipped file would
+    # be "a configuration present", which turns the automatic layer's media
+    # off. An upgrade from a package that shipped one leaves that file to
+    # dpkg's obsolete-conffile rule: kept untouched, edited or not.
     ["../README.md", "usr/share/doc/leviculum/README.md", "644"],
     ["../CHANGELOG.md", "usr/share/doc/leviculum/CHANGELOG.md", "644"],
     # Rendered from docs/src/man/ by scripts/md2man.py; see lblogd's
@@ -182,6 +188,7 @@ assets = [
     ["../target/man/lnstatus.1", "usr/share/man/man1/lnstatus.1", "644"],
     ["../target/man/lnprobe.1", "usr/share/man/man1/lnprobe.1", "644"],
     ["../target/man/lnpath.1", "usr/share/man/man1/lnpath.1", "644"],
+    ["../target/man/lnmgmt.1", "usr/share/man/man1/lnmgmt.1", "644"],
     # Documented overrides for the two lintian tags that a
     # musl-static binary always trips; the file explains why each
     # is a deliberate deviation rather than a defect.
@@ -199,7 +206,6 @@ assets = [
 # under usr/share/doc, above.
 changelog = "../target/deb-changelog/leviculum"
 maintainer-scripts = "../packaging/debian/"
-conf-files = ["/etc/reticulum/config"]
 
 [package.metadata.deb.systemd-units]
 unit-name = "lnsd"
@@ -229,7 +235,7 @@ extended-description = """\
 Leviculum is a Rust implementation of the Reticulum network stack,
 wire-compatible with the Python reference implementation.
 
-This is the heap-accounting build of the leviculum package: the same six
+This is the heap-accounting build of the leviculum package: the same seven
 binaries, but lnsd counts every allocation, so its SIGUSR1 memory census
 reports measured live heap bytes beside the modelled total. It costs a few
 atomic operations per allocation and exists for memory investigations on a

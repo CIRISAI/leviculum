@@ -1,0 +1,460 @@
+{
+  "address": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "browser_address"
+      },
+      "resource": "address",
+      "role": "text_field",
+      "selected": false
+    },
+    "activate": {
+      "enabled": true,
+      "intent": "Activate(Address)",
+      "label_key": "browser_edit"
+    },
+    "cursor": null,
+    "editing": false,
+    "go": {
+      "enabled": true,
+      "intent": "Go { url: None }",
+      "label_key": "browser_go"
+    },
+    "hint": {
+      "args": [],
+      "key": "browser_address_hint"
+    },
+    "id": "address",
+    "value": "c0ffee00…:/page/readme.mu"
+  },
+  "help": false,
+  "names": null,
+  "page": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Reticulum · README"
+      },
+      "resource": "page",
+      "role": "page",
+      "selected": false
+    },
+    "first": 28,
+    "focus": {
+      "link": 2
+    },
+    "id": "page",
+    "lines": [
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Reticulum is a complete networking stack, and does"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  not rely on IP or higher layers, but it is"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  possible to use IP as the underlying carrier for"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Reticulum. It is therefore trivial to tunnel"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Reticulum over the Internet or private IP"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  networks."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Having no dependencies on traditional networking"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  stacks frees up overhead that has been used to"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  implement a networking stack built directly on"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  cryptographic principles, allowing resilience and"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  stable functionality, even in open and trustless"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  networks."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  No kernel modules or drivers are required."
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Reticulum runs completely in userland, and can run"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  on practically any system that runs Python."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": "#999999",
+            "bold": false,
+            "fg": "#111111",
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "   Read The Manual                                  "
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  The full documentation for Reticulum is available"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  on "
+        },
+        {
+          "field": null,
+          "link": 2,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": true,
+            "fg": "#00afff",
+            "italic": false,
+            "reverse": false,
+            "underline": true
+          },
+          "text": "this node"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "."
+        }
+      ]
+    ],
+    "total": 562
+  },
+  "places": null,
+  "state": [
+    {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "browser_hops_unknown"
+        },
+        "resource": "chip_hops",
+        "role": "chip",
+        "selected": false
+      },
+      "id": "chip_hops",
+      "text": {
+        "args": [],
+        "key": "browser_hops_unknown"
+      }
+    }
+  ],
+  "status": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [
+          "c0ffee00… · :/page/blob.mu"
+        ],
+        "key": "browser_link_target"
+      },
+      "resource": "chip_status",
+      "role": "chip",
+      "selected": false
+    },
+    "id": "chip_status",
+    "text": {
+      "args": [
+        "c0ffee00… · :/page/blob.mu"
+      ],
+      "key": "browser_link_target"
+    }
+  },
+  "toast": null,
+  "top_bar": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Reticulum · README"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": false,
+        "intent": "Forward",
+        "label_key": "browser_forward"
+      },
+      {
+        "enabled": true,
+        "intent": "Reload",
+        "label_key": "browser_reload"
+      },
+      {
+        "enabled": true,
+        "intent": "Bookmark { on: true }",
+        "label_key": "browser_bookmark"
+      },
+      {
+        "enabled": true,
+        "intent": "Identify { on: true }",
+        "label_key": "browser_identify"
+      }
+    ],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "me": ""
+        },
+        "link": null
+      }
+    },
+    "title": {
+      "raw": "Reticulum · README"
+    }
+  }
+}

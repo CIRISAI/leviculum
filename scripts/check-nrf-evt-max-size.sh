@@ -47,7 +47,7 @@ for feats in "${BUILDS[@]}"; do
         continue
     fi
 
-    if printf '%s\n' "$tree" | grep -qF "nrf-softdevice feature \"$WANT\""; then
+    if grep -qF "nrf-softdevice feature \"$WANT\"" <<<"$tree"; then
         echo "[evt-max-size] ok   $feats: nrf-softdevice/$WANT is enabled"
     else
         echo "[evt-max-size] FAIL $feats: nrf-softdevice/$WANT is NOT enabled."

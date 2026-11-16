@@ -13,7 +13,11 @@
 //! are stripped and a dot-only name is replaced, so a hostile name can never
 //! escape the target directory.
 
+use alloc::string::{String, ToString};
+
+#[cfg(feature = "std")]
 use std::io;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 
 /// The fallback filename when the URL path yields nothing usable (an empty
@@ -40,6 +44,7 @@ pub fn basename(path: &str) -> String {
 /// blob is not a map, has no `name` key, or the name is empty. Sanitisation is
 /// deliberately left to the caller (see [`choose_name`]) so this parse is
 /// testable in isolation.
+#[cfg(feature = "std")]
 pub fn parse_metadata_name(metadata: &[u8]) -> Option<String> {
     let mut cursor = std::io::Cursor::new(metadata);
     let value = rmpv::decode::read_value(&mut cursor).ok()?;
@@ -90,6 +95,7 @@ pub fn choose_name(server_name: Option<&str>, url_path: &str) -> String {
 /// `false`); any other `--output` names the exact file (`explicit` = `true`);
 /// no `--output` puts `name` into `cwd`. Only a non-explicit path is
 /// de-duplicated by the caller — naming the exact file opts into overwriting.
+#[cfg(feature = "std")]
 pub fn resolve_output(output: Option<&Path>, name: &str, cwd: &Path) -> (PathBuf, bool) {
     match output {
         None => (cwd.join(name), false),
@@ -106,12 +112,14 @@ pub fn resolve_output(output: Option<&Path>, name: &str, cwd: &Path) -> (PathBuf
 
 /// The first free variant of `path`: the path itself when nothing exists
 /// there, else ` (1)`, ` (2)`, ... inserted before the extension.
+#[cfg(feature = "std")]
 pub fn dedup_path(path: &Path) -> PathBuf {
     dedup_path_with(path, |p| p.exists())
 }
 
 /// [`dedup_path`] over an injectable existence check, so the numbering is a
 /// pure function unit tests can drive without touching the filesystem.
+#[cfg(feature = "std")]
 fn dedup_path_with(path: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
     if !exists(path) {
         return path.to_path_buf();
@@ -137,6 +145,7 @@ fn dedup_path_with(path: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
 
 /// Save `bytes` into `dir` (created if missing) under `name`, de-duplicating
 /// against existing files. Returns the path actually written.
+#[cfg(feature = "std")]
 pub fn save_to_dir(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dedup_path(&dir.join(name));
@@ -146,6 +155,7 @@ pub fn save_to_dir(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> 
 
 /// The directory the TUI saves downloads into: `$XDG_DOWNLOAD_DIR`, falling
 /// back to `$HOME/Downloads`. `None` only when neither variable is set.
+#[cfg(feature = "std")]
 pub fn download_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         if !dir.is_empty() {

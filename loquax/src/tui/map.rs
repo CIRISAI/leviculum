@@ -36,6 +36,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::{LabelKind, ViewLabel};
+use leviculum_map::ladder::{Ladder, Pass};
 use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::{MapTheme, Style as MapStyle};
@@ -598,14 +599,22 @@ fn name_style(tier: Tier, theme: MapTheme) -> impl Fn(LabelKind) -> Style {
         let dark = theme == MapTheme::Dark;
         let fg = match (tier, kind, dark) {
             (Tier::Mono, ..) => None,
-            (Tier::Ansi16, LabelKind::Water | LabelKind::River, false) => Some(Color::Indexed(4)),
-            (Tier::Ansi16, LabelKind::Water | LabelKind::River, true) => Some(Color::Indexed(12)),
+            (Tier::Ansi16, LabelKind::Water | LabelKind::River | LabelKind::Sea, false) => {
+                Some(Color::Indexed(4))
+            }
+            (Tier::Ansi16, LabelKind::Water | LabelKind::River | LabelKind::Sea, true) => {
+                Some(Color::Indexed(12))
+            }
             (Tier::Ansi16, LabelKind::Park, false) => Some(Color::Indexed(2)),
             (Tier::Ansi16, LabelKind::Park, true) => Some(Color::Indexed(10)),
             (Tier::Ansi16, _, false) => Some(Color::Indexed(0)),
             (Tier::Ansi16, _, true) => Some(Color::Indexed(15)),
-            (_, LabelKind::Water | LabelKind::River, false) => Some(Color::Rgb(0x1f, 0x4e, 0x8c)),
-            (_, LabelKind::Water | LabelKind::River, true) => Some(Color::Rgb(0x8c, 0xb4, 0xe6)),
+            (_, LabelKind::Water | LabelKind::River | LabelKind::Sea, false) => {
+                Some(Color::Rgb(0x1f, 0x4e, 0x8c))
+            }
+            (_, LabelKind::Water | LabelKind::River | LabelKind::Sea, true) => {
+                Some(Color::Rgb(0x8c, 0xb4, 0xe6))
+            }
             (_, LabelKind::Park, false) => Some(Color::Rgb(0x2e, 0x6b, 0x2e)),
             (_, LabelKind::Park, true) => Some(Color::Rgb(0x94, 0xc8, 0x8c)),
             (_, _, false) => Some(Color::Rgb(0x20, 0x20, 0x20)),
@@ -645,7 +654,7 @@ enum Picture {
     /// Kitty, or a sixel through ratatui-image's quantiser: under tmux, or
     /// past 256 colours.
     Sliced(SlicedProtocol),
-    /// A sixel of the frame's own colours ([`images::sixel_indexed`]).
+    /// A sixel of the frame's own colours ([`images::sixel_indexed_direct`]).
     Whole(images::Protocol),
 }
 
@@ -658,6 +667,8 @@ struct Painted {
     style: MapStyle,
     /// The maps directory's epoch it was painted at.
     epoch: u64,
+    /// The time zone view's minute it was painted at (1684).
+    time_zones: Option<i64>,
     fb: Vec<u16>,
     attribution: String,
     picture: Option<Picture>,
@@ -665,6 +676,8 @@ struct Painted {
     glyphs: Vec<cells::Cell>,
     /// The names of the view, placed in cells at render time.
     names: Vec<ViewLabel>,
+    /// Microseconds the paint took: the frame budget's ground (1422).
+    paint_us: u32,
 }
 
 /// One paint asked for: the view, the cells its picture covers, and the
@@ -677,6 +690,9 @@ struct Ask {
     epoch: u64,
     /// The map's style, which follows the theme ([`MapPainter::set_theme`]).
     style: MapStyle,
+    /// The time zone view at this minute, in seconds since the epoch
+    /// ([`MapPainter::set_time_zones`], 1684).
+    time_zones: Option<i64>,
 }
 
 /// What draws a view: the regions, the backend, the scratch. It does not
@@ -686,6 +702,12 @@ struct Canvas {
     painter: Painter,
     graphics: Graphics,
     pictures: Pictures,
+    /// tmux sits between ([`images::in_tmux`]): its passthrough wrapping
+    /// is `ratatui-image`'s, so a sixel goes that way. Read once at the
+    /// start and handed in, never from the environment here: a test run
+    /// from a tmux pane drew a different picture than the same test
+    /// anywhere else (1347).
+    tmux: bool,
     /// The glyph sets the text techniques fit, built once.
     sets: Sets,
 }
@@ -702,7 +724,20 @@ impl Canvas {
     /// Draw `ask`'s view, and encode it under kitty or sixel or as a text
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
+        // The terminal draws whole views, never a cache's square tiles:
+        // its world views blend into Equal Earth or the globe (1710).
+        self.painter
+            .set_world_shape(Some(loquax::picture::world_shape()));
+        let started = Instant::now();
+        let mut painted = self.paint_view(ask);
+        painted.paint_us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+        painted
+    }
+
+    /// [`paint`](Self::paint), untimed.
+    fn paint_view(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
+        self.painter.set_time_zones(ask.time_zones);
         // Places, waters and parks, and the streets and rivers, which the
         // cells name where they run level.
         let names = self.painter.labels(view, true);
@@ -713,17 +748,20 @@ impl Canvas {
                 cells: ask.cells,
                 style: ask.style,
                 epoch: ask.epoch,
+                time_zones: ask.time_zones,
                 fb: Vec::new(),
                 attribution,
                 picture: None,
                 glyphs: cells::encode(&source, encoding, &self.sets),
                 names,
+                paint_us: 0,
             };
         }
         let (w, h) = view.size();
         let Drawn {
             mut fb,
             attribution,
+            ..
         } = self.painter.draw(view, self.ink(), ask.style, 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),
@@ -734,11 +772,13 @@ impl Canvas {
             cells: ask.cells,
             style: ask.style,
             epoch: ask.epoch,
+            time_zones: ask.time_zones,
             fb,
             attribution,
             picture,
             glyphs: Vec::new(),
             names,
+            paint_us: 0,
         }
     }
 
@@ -763,10 +803,19 @@ impl Canvas {
             true => (Viewport::new(view.centre, view.zoom() + 1, fw, fh), 1usize),
             false => (Viewport::new(view.centre, view.zoom(), fw / 2, fh / 2), 2),
         };
+        // The source draws at `fine`'s grain but must keep the asked
+        // view's blend, `t` included (1710): a world view's cells are
+        // the same picture as its pixels, only finer.
+        let blend = self.painter.world_blend(view).map(|b| {
+            let (w, h) = fine.size();
+            b.resized(f64::from(fine.zoom()), w, h)
+        });
         let percent = |p: u32| p / scale as u32;
         let mut draw = |ink: Ink, p: u32| -> (Vec<cells::Rgb>, String) {
             let (w, h) = fine.size();
-            let mut drawn = self.painter.draw(&fine, ink, style, percent(p));
+            let mut drawn = self
+                .painter
+                .draw_with(&fine, blend.as_ref(), ink, style, percent(p));
             let mut flat = Vec::with_capacity(drawn.fb.len() * 3);
             if let Some(f) = Frame::new(&mut drawn.fb, w, h) {
                 f.rgb888_into(&mut flat);
@@ -805,9 +854,9 @@ impl Canvas {
     /// its palette and no quantiser; anything else goes through
     /// ratatui-image.
     fn encode(&self, fb: &mut [u16], w: u32, h: u32, cells: (u16, u16)) -> Option<Picture> {
-        if self.graphics == Graphics::Sixel {
+        if self.graphics == Graphics::Sixel && !self.tmux {
             if let Some((palette, indices)) = indexed(fb) {
-                if let Some(sixel) = images::sixel_indexed(&palette, &indices, w, h, cells) {
+                if let Some(sixel) = images::sixel_indexed_direct(&palette, &indices, w, h, cells) {
                     return Some(Picture::Whole(sixel));
                 }
             }
@@ -1008,6 +1057,12 @@ pub struct MapPainter {
     tier: Tier,
     /// The map's colour table.
     theme: MapTheme,
+    /// The time zone view (1684, [`MapPainter::set_time_zones`]).
+    time_zones: bool,
+    /// The frame budget (1422): a drag is the gesture, the paint the
+    /// ground, the names placed in cells a pass the minimal rung leaves
+    /// to the frame at rest.
+    ladder: Ladder,
 }
 
 impl MapPainter {
@@ -1038,7 +1093,9 @@ impl MapPainter {
         let painter = Painter::new(maps.clone());
         let setup = MapSetup {
             cell_px: graphics.cell_px(font),
-            zooms: painter.zooms(),
+            // Deeper than the outline where no region is: the radar's
+            // zooms (1386).
+            zooms: loquax::ui::radar::zooms(painter.zooms()),
             regions: painter.headers(),
             ..MapSetup::default()
         };
@@ -1050,6 +1107,7 @@ impl MapPainter {
                 painter,
                 graphics,
                 pictures: Pictures::new(picker, backend),
+                tmux: false,
                 sets: Sets::default(),
             })),
             painted: None,
@@ -1060,7 +1118,23 @@ impl MapPainter {
             nudge: false,
             tier: Tier::Truecolor,
             theme: MapTheme::Light,
+            time_zones: false,
+            ladder: Ladder::new(),
         }
+    }
+
+    /// Hold drags at `rung` whatever they cost: a test's.
+    /// Place no names: a measuring tool's ground ([`Painter`]'s own).
+    #[cfg(test)]
+    fn set_names_off(&mut self, off: bool) {
+        if let Engine::Inline(canvas) = &mut self.engine {
+            canvas.painter.set_names_off(off);
+        }
+    }
+
+    #[cfg(test)]
+    fn hold_rung(&mut self, rung: Option<u8>) {
+        self.ladder.hold(rung);
     }
 
     /// Draw for a screen in `tier` from the next frame on.
@@ -1074,6 +1148,13 @@ impl MapPainter {
         self.theme = theme;
     }
 
+    /// Draw the time zone view, or not, from the next frame on (1684):
+    /// the zones' borders over the picture and each one's clock in place
+    /// of the names, painted again as the minute turns.
+    pub fn set_time_zones(&mut self, on: bool) {
+        self.time_zones = on;
+    }
+
     /// The style a paint asks for: the PC's finish where the picture has
     /// the pixels for casings and round joins (kitty, sixel, octant), the
     /// M9's plain strokes in the coarser techniques.
@@ -1083,6 +1164,17 @@ impl MapPainter {
             _ => MapStyle::M9,
         };
         finish.in_theme(self.theme)
+    }
+
+    /// The same painter, drawing for a terminal behind tmux when `tmux`
+    /// ([`images::in_tmux`], read by the caller). A painter is made for a
+    /// terminal reached directly, so a test's picture is the same wherever
+    /// it runs.
+    pub fn behind_tmux(mut self, tmux: bool) -> Self {
+        if let Engine::Inline(canvas) = &mut self.engine {
+            canvas.tmux = tmux;
+        }
+        self
     }
 
     /// The same painter drawing on its own thread: a frame shows the
@@ -1134,6 +1226,7 @@ impl MapPainter {
                     && p.cells == ask.cells
                     && p.epoch == ask.epoch
                     && p.style == ask.style
+                    && p.time_zones == ask.time_zones
             })
         };
         match &mut self.engine {
@@ -1152,6 +1245,7 @@ impl MapPainter {
                         cells: done.cells,
                         epoch: done.epoch,
                         style: done.style,
+                        time_zones: done.time_zones,
                     };
                     if keep(&of, &ask, shown_for) {
                         self.painted = Some(done);
@@ -1176,8 +1270,41 @@ impl MapPainter {
             cells: (shown.area.width, shown.area.height),
             epoch: self.maps.epoch(),
             style: self.style(),
+            time_zones: self.time_zones.then(loquax::zoneclock::unix_minute),
         };
-        self.paint(ask, Instant::now());
+        let started = Instant::now();
+        match shown.moving {
+            true => self.ladder.gesture_start(),
+            false => self.ladder.gesture_end(),
+        }
+        let paints = self.paints;
+        self.paint(ask, started);
+        // A new picture's paint is the ground's time; a frame that only
+        // places labels over the last one has none.
+        let ground_us = (self.paints != paints)
+            .then(|| self.painted.as_ref().map(|p| p.paint_us))
+            .flatten();
+        if let Some(us) = ground_us {
+            self.ladder.observe(Pass::Ground, us);
+        }
+        let place = !shown.moving || self.ladder.motion_layers().has(Pass::Labels);
+        self.render_painted(frame, shown, muted, ask, place);
+        if let Some(us) = ground_us.filter(|_| shown.moving) {
+            let own = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+            self.ladder.motion_frame(us.saturating_add(own));
+        }
+    }
+
+    /// [`render`](Self::render) once `ask` is asked of the painter: the
+    /// map's names placed only with `place`.
+    fn render_painted(
+        &mut self,
+        frame: &mut TermFrame,
+        shown: &MapView,
+        muted: Style,
+        ask: Ask,
+        place: bool,
+    ) {
         let graphics = self.graphics;
         // The view is the model's, laid out for the size it last heard of;
         // the frame is the terminal's now. Between a shrink and its resize
@@ -1205,7 +1332,21 @@ impl MapPainter {
         // A picture painted for another pane size is not drawn over this
         // one: its cells would not cover the pane.
         let fits = painted.cells == ask.cells && (area.width, area.height) == ask.cells;
+        // No region here (1386): the radar's blank ground, whatever the
+        // technique; its rings are drawn with the tracks below.
+        let radar = shown.radar.as_ref();
         match graphics {
+            _ if radar.is_some() => {
+                let buf = frame.buffer_mut();
+                for row in 0..area.height {
+                    for col in 0..area.width {
+                        if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                            cell.reset();
+                            cell.set_char(' ');
+                        }
+                    }
+                }
+            }
             _ if !fits => {}
             Graphics::Halfblocks => {
                 let buf = frame.buffer_mut();
@@ -1292,10 +1433,14 @@ impl MapPainter {
                 Some((col, row, l.text.chars().count() as u16))
             })
             .collect();
-        let names = match fits {
+        let names = match fits && radar.is_none() && place {
             true => {
                 let at = leviculum_ui::Rect::new(area.x, area.y, area.width, area.height);
-                place_names(&painted.names, at, self.setup.cell_px, &taken)
+                let started = Instant::now();
+                let names = place_names(&painted.names, at, self.setup.cell_px, &taken);
+                let us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+                self.ladder.observe(Pass::Labels, us);
+                names
             }
             false => Vec::new(),
         };
@@ -1310,6 +1455,26 @@ impl MapPainter {
                 name: true,
             })
             .collect();
+        // The tracks under the pins and over the map's names (1385).
+        let dark = matches!(painted.style.theme, MapTheme::Dark);
+        if let Some(r) = radar {
+            labels.extend(r.cells.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
+        if fits || radar.is_some() {
+            labels.extend(shown.tracks.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
         labels.extend(pins);
         let buf = frame.buffer_mut();
         if matches!(graphics, Graphics::Kitty | Graphics::Sixel) {
@@ -1352,8 +1517,16 @@ impl MapPainter {
         }
         self.labels = labels;
         // The region's own line, "© OpenStreetMap contributors", or the
-        // outline's; always on the view.
-        let credit = format!("{} ", painted.attribution);
+        // outline's; always on the view. A time window that is not the
+        // default goes before it (1419): the reason older lines show.
+        let line = match radar {
+            Some(r) => r.note.as_str(),
+            None => painted.attribution.as_str(),
+        };
+        let credit = match &shown.window_word {
+            Some(word) => format!("{word} · {line} "),
+            None => format!("{line} "),
+        };
         let len = credit.chars().count() as u16;
         let x = (area.x + area.width).saturating_sub(len).max(area.x);
         if area.y + area.height >= bounds.bottom() {
@@ -1369,11 +1542,54 @@ impl MapPainter {
     }
 }
 
+/// A track cell's style: the hue, brighter or fainter by its level of
+/// four ([`loquax::ui::tracks::Age::level`]): full, the hue blended a
+/// third, two thirds and three quarters into the map's ground; at sixteen
+/// colours the hue's ANSI colour, dim below the top two levels; no colour
+/// at all on a mono terminal, dim below the top two.
+fn track_style(tier: Tier, dark: bool, hue: Option<u8>, level: u8) -> Style {
+    use loquax::ui::tracks;
+    let style = Style::default();
+    match tier {
+        Tier::Mono => match level {
+            2..=3 => style,
+            _ => style.add_modifier(Modifier::DIM),
+        },
+        Tier::Ansi16 => {
+            let style = style.fg(Color::Indexed(tracks::ansi16(hue, dark)));
+            match level {
+                2..=3 => style,
+                _ => style.add_modifier(Modifier::DIM),
+            }
+        }
+        _ => {
+            let [r, g, b] = tracks::colour(hue, dark);
+            let ground: [u8; 3] = match dark {
+                true => [0x16, 0x16, 0x16],
+                false => [0xf2, 0xef, 0xe9],
+            };
+            let keep = [1.0, 0.65, 0.4, 0.25][usize::from(3 - level.min(3))];
+            let mix =
+                |c: u8, g: u8| (f32::from(c) * keep + f32::from(g) * (1.0 - keep)).round() as u8;
+            style.fg(Color::Rgb(
+                mix(r, ground[0]),
+                mix(g, ground[1]),
+                mix(b, ground[2]),
+            ))
+        }
+    }
+}
+
 /// The labels of `shown`'s pins, styled.
 fn labels_of(shown: &MapView, muted: Style) -> Vec<Label> {
     let mut labels = Vec::new();
     for pin in &shown.pins {
         let mut style = Style::default();
+        // A node nearby that is no contact (1302): a neutral pin, in the
+        // muted grey, its announced name beside it.
+        if pin.nearby {
+            style = style.patch(muted);
+        }
         if pin.stale {
             style = style.patch(muted).add_modifier(Modifier::DIM);
         }
@@ -1884,8 +2100,10 @@ mod tests {
             })
             .expect("draw");
         let out = String::from_utf8_lossy(&bytes.0.borrow()).into_owned();
-        // The 30 x 8 picture, less the pin label over it.
-        assert!(out.matches('▀').count() >= 30 * 8 - 20, "{out:?}");
+        // The 30 x 8 picture: its blocks, the letters of the world's
+        // names over it (1683), less the pin label.
+        let letters = out.chars().filter(|c| c.is_alphanumeric()).count();
+        assert!(out.matches('▀').count() + letters >= 30 * 8 - 20, "{out:?}");
         let sgr: Vec<&str> = out
             .split("\u{1b}[")
             .skip(1)
@@ -1919,6 +2137,10 @@ mod tests {
             area,
             viewport: Viewport::new(at, 1, 30 * u32::from(cell_px.0), 8 * u32::from(cell_px.1)),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -1926,7 +2148,9 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: true,
+                own: false,
             }],
         }
     }
@@ -1979,6 +2203,24 @@ mod tests {
         assert!(text.contains("● bob · 4 min"));
     }
 
+    /// The time window (1419): no strip, no word with the default; another
+    /// window's word on the credit's row, before the credit.
+    #[test]
+    fn a_window_not_the_default_says_its_word_on_the_credit_row() {
+        let (_, plain) = drawn(Graphics::Halfblocks, None);
+        assert!(!plain.contains("This week"));
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
+        let mut view = shown(painter.setup().cell_px);
+        view.window_word = Some("This week".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &view, Style::default()));
+        let row: String = (0..32)
+            .filter_map(|x| terminal.backend().buffer().cell((x, 9)))
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(row.contains("This week · "), "{row:?}");
+    }
+
     /// The smallest shift by which every column of `cols` repeats, the
     /// copies of the world side by side; `None` where none does.
     fn period<T: PartialEq>(cols: &[T]) -> Option<usize> {
@@ -1989,9 +2231,16 @@ mod tests {
     /// columns of cell colours.
     fn halfblock_columns(view: Viewport) -> Vec<Vec<(Color, Color)>> {
         let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
+        // The names are placed per view, not per copy of the world (1683):
+        // what repeats is the ground under them.
+        painter.set_names_off(true);
         let (w, h) = view.size();
         let (cols, rows) = (w as u16, (h / 2) as u16);
         let shown = MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2013,8 +2262,11 @@ mod tests {
 
     /// The terminal shows one world at most (1131): a pane 300 pixels wide
     /// asked for z0, where the world is 256 wide, is drawn at z1 by the
-    /// model's view, and no column of it repeats. The view as asked, the
-    /// control, repeats every 256 columns.
+    /// model's view, and no column of its ground repeats. Since 1710 the
+    /// view as asked is a blended world view and holds the world once by
+    /// construction: Mercator's 256-column tiling, the old control,
+    /// cannot appear at any zoom. The names are off: they are placed per
+    /// view (1683), not per copy of the world.
     #[test]
     fn the_terminal_never_shows_the_world_twice() {
         let setup = MapSetup {
@@ -2028,7 +2280,7 @@ mod tests {
             selected: None,
         };
         let asked = Viewport::new(state.centre, 0, 300, 120);
-        assert_eq!(period(&halfblock_columns(asked)), Some(256), "the control");
+        assert_ne!(period(&halfblock_columns(asked)), Some(256), "the control");
         let view = loquax::ui::map::viewport(&state, area, &setup);
         assert_eq!(view.zoom(), 1);
         assert_eq!(period(&halfblock_columns(view)), None);
@@ -2057,6 +2309,10 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2064,7 +2320,9 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
+                own: false,
             }],
         };
         let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
@@ -2095,6 +2353,112 @@ mod tests {
         assert_eq!(frame, PINNED_NAMES, "{frame}");
     }
 
+    /// 1422: a drag is the frame budget's gesture. At the minimal rung a
+    /// frame while the pointer drags leaves the map's names out, as the
+    /// pixel screens let them ride; the frame as the button comes up puts
+    /// them back. At the full rung the drag keeps them.
+    #[test]
+    fn a_drag_at_the_minimal_rung_leaves_the_names_to_the_rest() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let shown = |moving: bool| MapView {
+            area: leviculum_ui::Rect::new(0, 0, cols, rows),
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving,
+            pins: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let mut text = |painter: &mut MapPainter, moving: bool| {
+            let Ok(_) = terminal.draw(|f| painter.render(f, &shown(moving), Style::default()));
+            let buffer = terminal.backend().buffer().clone();
+            (0..rows)
+                .flat_map(|y| (0..cols).map(move |x| (x, y)))
+                .filter_map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect::<String>()
+        };
+        painter.hold_rung(Some(2));
+        assert!(!text(&mut painter, true).contains("Piazza"), "riding");
+        assert!(painter.ladder.moving());
+        assert!(text(&mut painter, false).contains("Piazza"), "at rest");
+        assert!(!painter.ladder.moving());
+        painter.hold_rung(Some(0));
+        assert!(text(&mut painter, true).contains("Piazza"), "the full rung");
+    }
+
+    /// 1302: a node the mesh shows that is no contact is drawn beside a
+    /// friend's pin in the muted grey, its announced name beside it, the
+    /// friend's in the plain text colour; the frame pinned as text.
+    #[test]
+    fn a_node_nearby_is_drawn_grey_beside_a_friends_pin() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        painter.set_tier(Tier::Truecolor);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let area = leviculum_ui::Rect::new(0, 0, cols, rows);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let pin = |peer: u8, row: u16, text: &str, nearby: bool| PinCell {
+            peer: [peer; 16],
+            col: 2,
+            row,
+            text: text.to_string(),
+            apart: None,
+            stale: false,
+            nearby,
+            selected: false,
+            own: false,
+        };
+        let shown = MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
+            area,
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: vec![
+                pin(1, 1, "● bob · 4 min", false),
+                pin(2, 4, "● Wanderer ·353e · 2 min", true),
+            ],
+        };
+        let grey = Color::Rgb(0x80, 0x80, 0x80);
+        let muted = Style::default().fg(grey);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &shown, muted));
+        let buffer = terminal.backend().buffer().clone();
+        let line = |y: u16, from: u16, len: u16| -> String {
+            (from..from + len)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+                .collect()
+        };
+        assert_eq!(line(1, 2, 13), "● bob · 4 min");
+        assert_eq!(line(4, 2, 24), "● Wanderer ·353e · 2 min");
+        let fg = |x: u16, y: u16| buffer.cell((x, y)).expect("cell").fg;
+        assert_ne!(fg(4, 1), grey, "a friend's name is no grey");
+        for x in 2..26 {
+            assert_eq!(fg(x, 4), grey, "the node nearby is grey at column {x}");
+        }
+    }
+
     const PINNED_NAMES: &str = "\n  ● bob · 4 min  Giardino del Borgo\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                           Piazza D'Azeglio\n";
 
     /// The streets of the Florence fixture named in cells (1126): at z16
@@ -2121,6 +2485,10 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2128,7 +2496,9 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
+                own: false,
             }],
         };
         let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
@@ -2188,6 +2558,7 @@ mod tests {
                 let buffer = terminal.backend().buffer().clone();
                 let mut picture = 0;
                 let mut inked = 0;
+                let mut named = 0;
                 // The picture's cells: inside (1, 1) 30 x 8, off the pin's
                 // row, whose label covers part of it.
                 for y in 1..9 {
@@ -2197,6 +2568,12 @@ mod tests {
                         }
                         let cell = buffer.cell((x, y)).expect("cell");
                         let ch = cell.symbol().chars().next().unwrap_or(' ');
+                        if ch.is_alphanumeric() {
+                            // A name's letter, not the technique's glyph
+                            // (1683): the label tests measure those.
+                            named += 1;
+                            continue;
+                        }
                         let ok = match graphics {
                             Graphics::Octant => octants.contains(&ch),
                             Graphics::Blocks => blocks.contains(&ch),
@@ -2233,7 +2610,7 @@ mod tests {
                         }
                     }
                 }
-                assert_eq!(picture, 30 * 7);
+                assert_eq!(picture + named, 30 * 7);
                 // The coasts of Europe at z1 are drawn: some cell carries a
                 // glyph, except in the mosaic, which has none.
                 match graphics {
@@ -2338,6 +2715,7 @@ mod tests {
             painter: Painter::new(Maps::new(Some(dir.path().to_path_buf()))),
             graphics: Graphics::Octant,
             pictures: Pictures::new(None, Backend::Text),
+            tmux: false,
             sets: Sets::default(),
         };
         let view = Viewport::new(
@@ -2428,7 +2806,16 @@ mod tests {
                     c.set_symbol("▒");
                 }
             };
-            if symbol.contains("\u{1b}P") {
+            // Kitty's placeholders first: behind tmux its transmission is
+            // wrapped in a passthrough DCS, which is no sixel. ratatui-image
+            // reads tmux from the environment for every picker, so a test
+            // run from a tmux pane gets the wrapped form (1347).
+            if symbol.contains('\u{10EEEE}') {
+                let width = symbol.chars().filter(|&c| c == '\u{10EEEE}').count() as u16;
+                for dx in 0..width {
+                    picture(x + dx, y);
+                }
+            } else if symbol.contains("\u{1b}P") {
                 let width: u16 = symbol
                     .split_once("\u{1b}[")
                     .and_then(|(_, rest)| rest.split_once('X'))
@@ -2439,11 +2826,6 @@ mod tests {
                     for dx in 0..width {
                         picture(x + dx, y + dy);
                     }
-                }
-            } else if symbol.contains('\u{10EEEE}') {
-                let width = symbol.chars().filter(|&c| c == '\u{10EEEE}').count() as u16;
-                for dx in 0..width {
-                    picture(x + dx, y);
                 }
             } else if let Some(c) = self.shown.cell_mut((x, y)) {
                 *c = cell.clone();
@@ -2611,6 +2993,7 @@ mod tests {
             painter: Painter::new(open()),
             graphics: Graphics::Sixel,
             pictures: Pictures::new(Some(picker()), Backend::Graphics(ProtocolType::Sixel)),
+            tmux: false,
             sets: Sets::default(),
         };
         let mut read = Vec::new();
@@ -2635,6 +3018,7 @@ mod tests {
                     cells: (cols, rows),
                     epoch: 0,
                     style: MapStyle::M9,
+                    time_zones: None,
                 };
                 // Painted whole for the render's share: the picture is
                 // encoded again below, both ways.
@@ -2654,8 +3038,8 @@ mod tests {
                 let t4 = Instant::now();
                 let (palette, indices) = indexed(&fb).expect("at most 256 colours");
                 let t5 = Instant::now();
-                let new =
-                    images::sixel_indexed(&palette, &indices, w, h, (cols, rows)).expect("sixel");
+                let new = images::sixel_indexed_direct(&palette, &indices, w, h, (cols, rows))
+                    .expect("sixel");
                 let t6 = Instant::now();
                 before = bytes_of(&|f| images::render(f, area, &old, 0, 0));
                 after = bytes_of(&|f| images::render_whole(f, area, &new));
@@ -2699,6 +3083,7 @@ mod tests {
                 cells: (cols, rows),
                 epoch: 0,
                 style: MapStyle::M9,
+                time_zones: None,
             }
         };
         for per_s in [25u32, 50] {
@@ -2796,6 +3181,7 @@ mod tests {
             cells: (30, 8),
             epoch: 0,
             style: MapStyle::M9,
+            time_zones: None,
         }
     }
 
@@ -2806,11 +3192,13 @@ mod tests {
             cells: ask.cells,
             style: ask.style,
             epoch: ask.epoch,
+            time_zones: ask.time_zones,
             fb: Vec::new(),
             attribution: String::new(),
             picture: None,
             glyphs: Vec::new(),
             names: Vec::new(),
+            paint_us: 0,
         }
     }
 
@@ -2836,6 +3224,7 @@ mod tests {
             cells: done.cells,
             epoch: done.epoch,
             style: done.style,
+            time_zones: done.time_zones,
         };
         assert!(!keep(&of, &c, fresh), "A is dropped");
         assert_eq!(slot.start(), Some(c), "B is never painted");
@@ -2847,6 +3236,7 @@ mod tests {
             cells: done.cells,
             epoch: done.epoch,
             style: done.style,
+            time_zones: done.time_zones,
         };
         assert!(keep(&of, &c, fresh), "C is the view wanted");
         // Keys faster than paints: after CATCH_UP_MS the paint behind is
@@ -2875,6 +3265,10 @@ mod tests {
                 u32::from(area.height) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -2882,7 +3276,9 @@ mod tests {
                 text: "● Lew Mobile · 1 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
+                own: false,
             }],
         }
     }
@@ -2992,6 +3388,10 @@ mod tests {
         let cell_px = painter.setup().cell_px;
         let (cols, rows) = (60u16, 20u16);
         MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

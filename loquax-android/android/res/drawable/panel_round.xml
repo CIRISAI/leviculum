@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The empty map's box (1201): its line in text and "Share my position"
+     in the accent on the panel's colour, 17.2:1 and 5.0:1 light, 11.6:1
+     and 6.8:1 dark; the accent on the bar would be only 4.5:1 in light. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/panel" />
+    <corners android:radius="16dp" />
+</shape>

@@ -35,6 +35,14 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // of the application — no link exists to accept, and the initiator's
     // establishment retry owns recovery.
     "LinkRefused",
+    // A request an `AllowList` handler refused (#235): the core still drops
+    // it and sends nothing, exactly as before the event existed. It is for
+    // an endpoint that owes a typed refusal of its own (the board's `/dfu`)
+    // and for a board's debug line. A C application's `AllowList` handler
+    // (`lev_register_request_handler`) keeps the reference's behaviour, a
+    // silent drop the requester's own timeout resolves, so the refusal asks
+    // nothing of it; a typed code would be ABI surface with no caller.
+    "RequestRefused",
     // An announce this node learned from and relayed nowhere: pure
     // instrumentation, and the wrong shape for a C application entirely. It
     // reports the ABSENCE of a route onward for somebody else's announce,
@@ -67,6 +75,15 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // to know whether its own traffic arrived uses the delivery-confirmation
     // events it already gets. The line exists to be read from a capture.
     "PacketDropped",
+    // A packet to one of the application's own Single destinations that no
+    // key it holds opened (1185). The core already did the one thing that
+    // matters, it sends no proof, so the sender is not told it arrived; the
+    // drop is counted (`single-decrypt-fail`) and journey-logged. A C
+    // application can do nothing with it besides a log line: what makes such
+    // packets readable is holding the right ratchets before they come
+    // (`lev_destination_enable_ratchets` and its persistence), not a reaction
+    // after. Loquax reads it inside the engine, where it can.
+    "PacketUndecryptable",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into

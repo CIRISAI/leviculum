@@ -1,0 +1,24 @@
+┌  Loquax────────────────┐┌● Anna──────────────────────────────────────────────┐
+│ Bob              14:00 ││                                                    │
+│ Ich bin schon da       ││                                                    │
+│                        ││                                                    │
+│▌Anna             13:58 ││                                                    │
+│▌you: Bin unterwegs     ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││             ── Thursday 14 January ──              │
+│                        ││ Gute Nacht  21:30                                  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 1 new ────────────────────── │
+│                        ││ Kommst du morgen mit?  22:10                       │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ Bis gleich am Bahnhof  13:55                       │
+│                        ││                                                    │
+│                        ││                           ▌Bin unterwegs  13:58 ✓  │
+│                        │├  to Anna─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

@@ -1,0 +1,597 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Unknown"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Unknown"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "OpenMapAt { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]) }",
+          "label_key": "map"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "8a6420",
+            "fg": "ffffff",
+            "initials": "?",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Unknown"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_1",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "waiting"
+              },
+              "resource": "bubble_1",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [1] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "waiting",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_1",
+            "live": null,
+            "liveness": null,
+            "mark": "sending",
+            "mark_node": {
+              "activate": null,
+              "mark": "sending",
+              "resource": "state_clock",
+              "words": {
+                "args": [],
+                "key": "state_sending"
+              }
+            },
+            "msg_id": "1010101010101010101010101010101010101010101010101010101010101010",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": true,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "waiting",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "at the mailbox"
+              },
+              "resource": "bubble_2",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [2] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "at the mailbox",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_2",
+            "live": null,
+            "liveness": null,
+            "mark": "mailbox",
+            "mark_node": {
+              "activate": null,
+              "mark": "mailbox",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_mailbox"
+              }
+            },
+            "msg_id": "1111111111111111111111111111111111111111111111111111111111111111",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": true,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "at the mailbox",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "arrived, the proof"
+              },
+              "resource": "bubble_3",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [3] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "arrived, the proof",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_3",
+            "live": null,
+            "liveness": null,
+            "mark": "arrived",
+            "mark_node": {
+              "activate": null,
+              "mark": "arrived",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_arrived"
+              }
+            },
+            "msg_id": "1212121212121212121212121212121212121212121212121212121212121212",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": true,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "arrived, the proof",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "on the device"
+              },
+              "resource": "bubble_4",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [4] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "on the device",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_4",
+            "live": null,
+            "liveness": null,
+            "mark": "delivered",
+            "mark_node": {
+              "activate": null,
+              "mark": "delivered",
+              "resource": "state_ticks",
+              "words": {
+                "args": [],
+                "key": "state_delivered"
+              }
+            },
+            "msg_id": "1313131313131313131313131313131313131313131313131313131313131313",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": true,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "on the device",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "read"
+              },
+              "resource": "bubble_5",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [5] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "read",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_5",
+            "live": null,
+            "liveness": null,
+            "mark": "read",
+            "mark_node": {
+              "activate": null,
+              "mark": "read",
+              "resource": "state_ticks_read",
+              "words": {
+                "args": [
+                  "04:09"
+                ],
+                "key": "state_read"
+              }
+            },
+            "msg_id": "1414141414141414141414141414141414141414141414141414141414141414",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": true,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "read",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "not sent"
+              },
+              "resource": "bubble_6",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: [21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), target: Some([21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], keys: [6] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780110540,
+            "body": "not sent",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_6",
+            "live": null,
+            "liveness": null,
+            "mark": "failed",
+            "mark_node": {
+              "activate": {
+                "enabled": true,
+                "intent": "SendAgain { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114], key: 6 }",
+                "label_key": "scene_send_again"
+              },
+              "mark": "failed",
+              "resource": "state_failed",
+              "words": {
+                "args": [],
+                "key": "state_failed"
+              }
+            },
+            "msg_id": "1515151515151515151515151515151515151515151515151515151515151515",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "not sent",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1780110540,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_1",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "bffba8cb35f47523ae1ec907077bd572",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "bffba8cb35f47523ae1ec907077bd572"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Unknown"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "OpenMapAt { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]) }",
+        "label_key": "map"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "8a6420",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Unknown"
+    }
+  },
+  "whereabouts": null
+}

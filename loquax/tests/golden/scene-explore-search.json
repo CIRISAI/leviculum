@@ -1,0 +1,207 @@
+{
+  "card": null,
+  "chat": null,
+  "chips": [],
+  "class": "Compact",
+  "explore": {
+    "pages": {
+      "address": null,
+      "as_of": null,
+      "az": true,
+      "empty": null,
+      "groups": [
+        {
+          "heading": {
+            "args": [],
+            "key": "explore_az"
+          },
+          "rows": [
+            {
+              "bookmarked": false,
+              "cursor": true,
+              "dest": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+              "hops": {
+                "args": [
+                  2
+                ],
+                "key": "explore_hops"
+              },
+              "label": {
+                "raw": "Marcel's node"
+              },
+              "seen": {
+                "args": [
+                  10
+                ],
+                "key": "explore_seen_minutes"
+              },
+              "url": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a:/page/index.mu"
+            }
+          ]
+        }
+      ],
+      "off": null,
+      "placeholder": {
+        "args": [],
+        "key": "explore_search_hint"
+      },
+      "query": "marcel",
+      "sort": {
+        "args": [],
+        "key": "explore_sort_az"
+      },
+      "title": {
+        "args": [],
+        "key": "explore_pages"
+      }
+    },
+    "rooms": {
+      "hubs": [],
+      "joined": [],
+      "joined_cursor": null,
+      "joined_empty": {
+        "args": [],
+        "key": "explore_no_joined"
+      },
+      "open_rooms": null,
+      "servers_empty": {
+        "args": [
+          "marcel"
+        ],
+        "key": "explore_no_server_match"
+      },
+      "servers_title": {
+        "args": [],
+        "key": "explore_servers"
+      },
+      "title": {
+        "args": [],
+        "key": "explore_rooms"
+      }
+    },
+    "sheet": null
+  },
+  "list": null,
+  "screen": "explore",
+  "sheet": null,
+  "tabs": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "tabs",
+      "role": "tab_bar",
+      "selected": false
+    },
+    "active": "Explore",
+    "id": "tabs",
+    "items": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_chats"
+          },
+          "resource": "tab_chats",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Chats)",
+          "label_key": "tab_chats"
+        },
+        "badge": null,
+        "id": "Chats",
+        "label": {
+          "args": [],
+          "key": "tab_chats"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "map"
+          },
+          "resource": "tab_map",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Map)",
+          "label_key": "map"
+        },
+        "badge": null,
+        "id": "Map",
+        "label": {
+          "args": [],
+          "key": "map"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": true
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
+      }
+    ]
+  },
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_explore"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
+      }
+    },
+    "title": {
+      "args": [],
+      "key": "tab_explore"
+    }
+  },
+  "whereabouts": null
+}

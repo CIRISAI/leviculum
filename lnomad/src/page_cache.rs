@@ -13,6 +13,9 @@
 //! show. A reload always bypasses the cache and overwrites the entry; form
 //! submits (non-idempotent requests) are never cached by the caller.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::url::Target;
 use leviculum_micron::MicronDocument;
 

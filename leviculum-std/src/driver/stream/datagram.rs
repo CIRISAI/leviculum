@@ -49,10 +49,16 @@ impl LinkHandle {
         if self.closed {
             return Err(Error::NotRunning);
         }
-        let permit = self.action_dispatch_tx.try_reserve().map_err(|e| match e {
-            TrySendError::Full(()) => Error::from(leviculum_core::SendError::Busy),
-            TrySendError::Closed(()) => Error::NotRunning,
-        })?;
+        let permit = self
+            .action_dispatch_tx
+            .tx
+            .try_reserve()
+            .map_err(|e| match e {
+                TrySendError::Full(()) => Error::from(leviculum_core::SendError::Busy),
+                TrySendError::Closed(()) => Error::NotRunning,
+            })?;
+        // Commit and enqueue under the gate, as `dispatch_committed` does.
+        let _gate = self.action_dispatch_tx.lock_gate();
         let (sequence, output) = {
             let mut core = self.inner.lock_recover();
             core.send_unordered(&self.link_id, data)?

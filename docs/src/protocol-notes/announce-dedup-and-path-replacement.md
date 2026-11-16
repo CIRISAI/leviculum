@@ -259,10 +259,17 @@ compiled and tested on the pure function.
 
 ## 6. The measured same-emission arm: `path_choice = hops_and_loss`
 
-Since 2026-10-05 (Codeberg #230) the same-emission clause has a second,
-opt-in rule beside the default hop ranking (§5): `path_choice =
-hops_and_loss` (the `[reticulum]` key; `TransportConfig::path_choice`,
-`PathChoice` in `transport.rs`). Where §5's 1.5.2 `gravity` re-ranks
+Since 2026-10-05 (Codeberg #230) the same-emission clause has a second
+rule beside the hop ranking (§5): `path_choice = hops_and_loss` (the
+`[reticulum]` key; `TransportConfig::path_choice`, `PathChoice` in
+`transport.rs`). Since order 1380 it is the default on radio interfaces:
+the media-aware driver declares it per interface
+(`Transport::set_interface_path_choice`, from `InterfaceInfo::path_choice`
+in leviculum-std), RNode and BLE declare `hops_and_loss`, every other
+medium `hops`, and the `[reticulum]` key, when set, overrides every
+interface. A same-emission race is decided by the cost rule when either
+the installed path's interface or the copy's prices loss, and the penalty
+prices only a direct candidate on such an interface. Where §5's 1.5.2 `gravity` re-ranks
 equal-emission copies by an operator-CONFIGURED preference, this rule
 re-ranks them by a MEASURED one: the direct link is priced at its
 bidirectional ETX, estimated for free from the announce re-hear ratio —
@@ -281,9 +288,9 @@ losing more than ~29 % of announces. Three properties bound it:
   absence of a direct copy of it proves nothing.
 * **Degradation.** Below `DIRECT_EVIDENCE_MIN_KNOWN` known emissions —
   a fresh destination, or a mesh whose announce cadence is too sparse
-  to score — the rule decides exactly like `hops`. The default IS
-  `hops`; the knob is a deliberate opt-in and rnsd ignores the key in
-  a shared config.
+  to score — the rule decides exactly like `hops`. The default is
+  `hops` on every non-radio interface; rnsd ignores the key in a shared
+  config.
 * **Evidence.** The pinned replay `mvr_pathchoice_rule_table`
   (leviculum-core, node/) drives both knob settings through the real
   acceptance gate over the `pathchoice_loss*` room shape at five loss
@@ -293,3 +300,118 @@ losing more than ~29 % of announces. Three properties bound it:
   exactly, which pins the replay to the gate. The companion
   `mvr_pathchoice_direct_vs_route` holds the norelay control: with no
   competing route the penalty can never unroute the only path.
+
+## 7. A local client's own announce in the same second
+
+Since order 1488 the equal-or-fewer-hops arm (§3) takes one more copy:
+an announce from a local shared-instance client, its random blob unseen,
+whose emission second equals the newest one recorded
+(`reason="local_client_same_second"` on `PATH_ADD`, in `handle_announce`
+in `leviculum-core/src/transport.rs`). §3's rule refuses it, and since a
+refused announce is not rebroadcast, no peer ever hears it.
+
+The case is ordinary on a shared instance. An emission has one-second
+resolution, so a client that announces twice inside one second, or two
+short-lived clients of one identity back to back (two `loquax send` runs,
+the second with `--from`), reach the instance in the same second. The
+first client's hops-0 path stands until the instance has handled its IPC
+disconnect, and the second announce, with the new display name or a new
+ratchet, met the strict `>` and was dropped. The land gate on 058c8878
+showed it: Python heard the first name and never the second in 40 s.
+The test is `a_clients_second_announce_in_one_second_reaches_the_network`
+in `transport.rs`, beside its replay partner
+`a_clients_repeated_announce_is_not_forwarded_twice`.
+
+Only the holder of the destination's key signs a fresh blob, and a
+local client is on our side of the IPC hop, so the copy is news and not
+an echo. A seen blob still dies at the replay gate, and an announce from
+a network interface is untouched. Deviation rule: the wire is unchanged,
+a Python peer stores whatever valid announce it is sent
+(`Identity.validate_announce` runs before its path rule), and the change
+delivers the client's newest app data, which §3's rule would lose.
+
+## 8. An echo cancels only the announce it echoes
+
+The reference stops retransmitting an announce when it hears a
+neighbour pass it on (`Transport.py:1724`): a copy one hop further
+counts towards `LOCAL_REBROADCASTS_MAX`, and a copy two hops further,
+while `now < retransmit_timeout` (`:1736`), ends the entry at once.
+Both arms key on the destination hash alone.
+
+Since order 1617 `handle_announce` counts a copy for either arm only
+when its packet hash equals the one of the announce the entry holds,
+and the two-hop arm wants the retransmit still in the future, as the
+reference does; ours had asked only that one was pending. The case it
+closes: a local client announces A1, the instance sends it, the client
+disconnects (its path goes), and the next client of the same identity
+announces A2 with a new display name. A2's entry is due at once. In
+the same millisecond, before the scheduler ran, the Python peer's
+relay of A1 came back two hops on, matched the destination, and
+cancelled A2; the peer kept the old name
+(`lnmsg_send_reaches_a_python_lxmf_receiver`, 1611's dump). A copy of
+another emission says nothing about whether this one was passed on.
+
+The mvr is `leviculum-std/tests/mvr/an_older_emissions_echo_keeps_the_renamed_announce.rs`:
+the field case, the packet half alone on a relayed retransmit, the
+timing half alone, and the control that a copy of the same announce
+still cancels. The wire is unchanged; the deviation only keeps an
+announce on its way that nobody has forwarded yet.
+
+One difference stays, noted here because the control has to work
+around it: our replay gate runs before this check and the reference's
+after it (`:1772`), so an identical copy normally never reaches either
+arm here.
+
+## 9. Same emission against the installed count, and a dead next hop
+
+**The invariant.** A second copy of an emission we already hold wins on
+hop count only if it is shorter than the count we installed that
+emission at — the count every rebroadcast and path response of ours
+then told our neighbours. A neighbour that learned the emission through
+us offers it at that count plus at least one, so its copy can never be
+"fewer hops", however a link proof has moved our own count since.
+
+The reference has no hop count in the same-emission test at all
+(`Transport.py:1772` wants an unseen blob and a strictly newer emission;
+the only same-emission acceptance is the unresponsive one at
+`Transport.py:1822`), so its 1.5 link-proof rebalance cannot turn an
+echo into a better route. Ours has one (§5, `FewerHopsWins`), and until
+order 1672 it compared against the REBALANCED count. On miauhaus
+(2026-11-11) a proof at 6 hops moved a 3-hop path to 6
+(`PATH_REBALANCE from=3 to=6`), and the next answer, the same emission
+at 4 hops from another neighbour, was adopted as
+`same_emission_fewer_hops`; every link request after it died on that
+neighbour. Since 1672 `same_emission_hop_floor` in
+`leviculum-core/src/transport.rs` reads the installed count from the
+announce cache (the accepted copy, cached with its wire count) and both
+the replay gate and the acceptance arms compare against it; the refused
+copy is logged as `PATH_REFUSED reason=longer_than_installed`. What the
+deviation still allows is the case it was made for: a copy shorter than
+the installed count, the direct copy after a relay, which heals
+`conformance/link_failure_recovery`.
+
+**A dead next hop.** The reference marks a path unresponsive when a
+forwarded link request expires unproven only if the destination or the
+initiator was one hop away (`Transport.py:724` onward); for a request
+from a local client it only asks the path again (`Transport.py:715`).
+A daemon whose links come from its own clients (a mailbox host, a
+desktop running lnomad) therefore never left a relayed next hop that
+stopped delivering: every answer to the path request was the emission it
+already held, and the longer copies were refused while the path was not
+unresponsive. Since 1672 such an expiry marks the path unresponsive when
+it has a next hop (`PATH_UNRESPONSIVE`), and refuses that next hop's
+copies of the held emission until the destination announces anew
+(`PATH_REFUSED reason=next_hop_unresponsive`, the table leviculum#852's
+loop refusals live in). The unresponsive rule then takes another next
+hop's copy, more hops or not, and the dead hop's shorter copy cannot
+take the path back. A link toward the same destination proven after the
+expired one was set outranks the expiry and nothing is marked: on
+miauhaus the first of two requests expired 1.6 s after the second one's
+proof came back over the same next hop.
+
+The mvr is `leviculum-core/src/node/mvr_path_answer_through_us.rs`: the
+three-node loop (a neighbour that routes the destination through us
+hands our link request back), the heal after a rebalance, the five
+expiries of the field, and the later-proof race with its positive
+control. Wire and semantics are unchanged: a copy is accepted or not,
+a path entry is ours alone.

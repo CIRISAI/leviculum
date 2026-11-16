@@ -165,6 +165,70 @@ impl TableCaps {
     }
 }
 
+impl TableCaps {
+    /// A local client of a shared instance (order 1585): a node that
+    /// forwards nothing and learns the network through the instance beside
+    /// it, as loquax's mailbox, its hosted groups and lnpnd are on a host
+    /// that runs lnsd.
+    ///
+    /// Such a node needs the identities of the peers it talks to and a
+    /// path to each, not a copy of the instance's tables: on miauhaus three
+    /// processes on one 2 GB host each held 50 000 identities and 80 000
+    /// destinations, and a mailbox with three hosted groups holds four
+    /// client nodes. A peer evicted here is asked for again, and the
+    /// instance answers the path request from its own announce cache
+    /// (`Transport.py:1910-1930` in the reference, the client forward in
+    /// `transport.rs`), which brings the key back.
+    ///
+    /// | table | entries | modelled |
+    /// |---|---|---|
+    /// | `known_identities` | 2 048 | 3.4 MB |
+    /// | destination-keyed (4 tables) | 2 048 | 2.9 MB |
+    /// | path-keyed (4 tables) | 1 024 | 0.9 MB |
+    /// | `announce_table` | 256 | 0.2 MB |
+    /// | `reverse_table` | 1 024 | 0.2 MB |
+    /// | `link_table` | 1 024 | 0.4 MB |
+    /// | packet dedup | 10 000 | 1.0 MB |
+    ///
+    /// About 10 MB at the ceiling, where the desktop profile allows 339 MB.
+    pub const fn local_client() -> Self {
+        Self {
+            packet_hash_cap: COMPACT_PACKET_HASH_CAP,
+            identity_cap: 2_048,
+            path_cap: 1_024,
+            reverse_cap: 1_024,
+            link_cap: 1_024,
+            announce_cap: 256,
+            destination_cap: 2_048,
+            local_dest_cap: 256,
+            receipt_cap: MAX_RECEIPTS,
+        }
+    }
+
+    /// Each ceiling the smaller of the two: what a local client keeps when
+    /// the config it read asks for less than [`Self::local_client`].
+    pub const fn at_most(self, other: Self) -> Self {
+        const fn min(a: usize, b: usize) -> usize {
+            if a < b {
+                a
+            } else {
+                b
+            }
+        }
+        Self {
+            packet_hash_cap: min(self.packet_hash_cap, other.packet_hash_cap),
+            identity_cap: min(self.identity_cap, other.identity_cap),
+            path_cap: min(self.path_cap, other.path_cap),
+            reverse_cap: min(self.reverse_cap, other.reverse_cap),
+            link_cap: min(self.link_cap, other.link_cap),
+            announce_cap: min(self.announce_cap, other.announce_cap),
+            destination_cap: min(self.destination_cap, other.destination_cap),
+            local_dest_cap: min(self.local_dest_cap, other.local_dest_cap),
+            receipt_cap: min(self.receipt_cap, other.receipt_cap),
+        }
+    }
+}
+
 impl Default for TableCaps {
     fn default() -> Self {
         Self::desktop()
@@ -2437,6 +2501,26 @@ mod tests {
         assert!(
             s.get_announce_cache(&h3).is_none(),
             "no path, not local → removed"
+        );
+    }
+
+    #[test]
+    fn a_local_client_keeps_a_fraction_of_the_desktop_tables() {
+        let client = TableCaps::local_client();
+        let desktop = TableCaps::desktop();
+        assert!(client.identity_cap * 10 < desktop.identity_cap);
+        assert!(client.destination_cap * 10 < desktop.destination_cap);
+        assert!(client.path_cap * 10 < desktop.path_cap);
+        assert_eq!(desktop.at_most(client), client);
+        // A config asking for less than the client profile keeps its own.
+        let tiny = TableCaps {
+            identity_cap: 7,
+            ..TableCaps::compact()
+        };
+        assert_eq!(tiny.at_most(client).identity_cap, 7);
+        assert_eq!(
+            tiny.at_most(client).packet_hash_cap,
+            client.packet_hash_cap.min(tiny.packet_hash_cap)
         );
     }
 

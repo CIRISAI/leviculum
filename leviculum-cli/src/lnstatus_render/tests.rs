@@ -36,6 +36,7 @@ fn opts_from_json(o: &Value) -> StatusOptions {
         observer_clients: 1,
         // rnstatus has no `--origin`; the golden cases are its default render.
         origin: false,
+        src_tags: false,
     }
 }
 
@@ -408,6 +409,50 @@ fn tx_queue_dedup_renders_when_positive_and_stays_silent_at_zero() {
     let ifs = json["interfaces"].as_array().unwrap();
     assert_eq!(ifs[0]["tx_queue_dedup"], serde_json::json!(76));
     assert!(ifs[3].get("tx_queue_dedup").is_none());
+}
+
+#[test]
+fn tcp_server_admission_renders_once_it_refused_or_closed_something() {
+    // 1190: a TCP server serves `connections`, `silent`, `capped` and
+    // `silent_closed`. The line appears once the server has refused or closed
+    // a connection; a server nobody floods, and an rnsd entry without the
+    // keys, renders as rnstatus renders it.
+    let mut flooded = iface("TCPServerInterface[Public/0.0.0.0:4242]", 10_000_000, 0, 0);
+    flooded["connections"] = serde_json::json!(190);
+    flooded["silent"] = serde_json::json!(16);
+    flooded["capped"] = serde_json::json!(972);
+    flooded["silent_closed"] = serde_json::json!(40);
+    let mut quiet = iface("TCPServerInterface[Quiet/0.0.0.0:4243]", 10_000_000, 0, 0);
+    quiet["connections"] = serde_json::json!(3);
+    quiet["silent"] = serde_json::json!(1);
+    quiet["capped"] = serde_json::json!(0);
+    quiet["silent_closed"] = serde_json::json!(0);
+    let rnsd_shaped = iface("TCPServerInterface[Rnsd/0.0.0.0:4244]", 10_000_000, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [flooded, quiet, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("TCPServerInterface[").collect();
+    assert_eq!(blocks.len(), 4, "all three interfaces render:\n{text}");
+    assert!(
+        blocks[1].contains(
+            "    Admission : connections=190 silent=16 capped=972 silent_closed=40 since start\n"
+        ),
+        "a flooded server shows its counters:\n{text}"
+    );
+    assert!(
+        !blocks[2].contains("Admission"),
+        "an unflooded server stays silent:\n{text}"
+    );
+    assert!(
+        !blocks[3].contains("Admission"),
+        "rnsd's shape stays silent:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    assert_eq!(json["interfaces"][0]["capped"], serde_json::json!(972));
 }
 
 #[test]
@@ -923,6 +968,58 @@ fn origin_renders_where_lnsd_serves_it_and_nowhere_else() {
     let ifs = json["interfaces"].as_array().unwrap();
     assert_eq!(ifs[0]["origin"], serde_json::json!("default"));
     assert!(ifs[2].get("origin").is_none());
+}
+
+#[test]
+fn src_tag_renders_behind_its_flag_and_nowhere_else() {
+    // Order 1678: an accepted TCP connection is logged by its daily
+    // pseudonym, served as `src_tag`. Behind `--src-tags` a line under the
+    // name; without the flag the render is rnstatus's, byte for byte.
+    let mut client = iface(
+        "TCPInterface[Client on Srv/192.0.2.7:40000]",
+        10_000_000,
+        0,
+        0,
+    );
+    client["src_tag"] = serde_json::json!("ab12cd34");
+    let rnsd_shaped = iface(
+        "TCPInterface[Client on Srv/192.0.2.8:40001]",
+        10_000_000,
+        0,
+        0,
+    );
+    let stats = serde_json::json!({
+        "interfaces": [client.clone(), rnsd_shaped.clone()],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let without_key = serde_json::json!({
+        "interfaces": [iface("TCPInterface[Client on Srv/192.0.2.7:40000]", 10_000_000, 0, 0), rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let all = StatusOptions {
+        dispall: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        render_status(&stats, None, &all),
+        render_status(&without_key, None, &all),
+        "without --src-tags the served key renders nothing"
+    );
+    let tagged = StatusOptions {
+        dispall: true,
+        src_tags: true,
+        ..Default::default()
+    };
+    let text = render_status(&stats, None, &tagged);
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    assert!(
+        blocks[0].contains("192.0.2.7:40000]\n    Log tag   : src=ab12cd34\n"),
+        "the tag sits under the name it belongs to:\n{text}"
+    );
+    assert!(
+        !blocks[1].contains("Log tag"),
+        "a row without the key renders no line:\n{text}"
+    );
 }
 
 #[test]

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-use super::{InterfaceHandle, InterfaceId, ReticulumNode, TickOutput};
+use super::{InterfaceHandle, InterfaceId, ReticulumNode};
 use crate::error::Error;
 use crate::sync_ext::MutexRecover;
 
@@ -28,13 +28,13 @@ pub(crate) struct RunState {
     /// Commits outside the event loop (connect, send, close, announce)
     /// dispatch through here. Before the first start it is a channel whose
     /// receiver is already gone, so a call fails as not running.
-    pub(crate) action_dispatch_tx: mpsc::Sender<TickOutput>,
+    pub(crate) action_dispatch_tx: super::ActionTx,
     pub(crate) running: Option<Running>,
     pub(crate) traffic_counter: Option<TrafficCounter>,
 }
 
 impl RunState {
-    pub(crate) fn new(action_dispatch_tx: mpsc::Sender<TickOutput>) -> Self {
+    pub(crate) fn new(action_dispatch_tx: super::ActionTx) -> Self {
         RunState {
             shutdown_tx: None,
             runner_handle: None,
@@ -92,7 +92,7 @@ impl ReticulumNode {
     }
 
     /// The commit channel of the current run (see [`RunState`]).
-    pub(crate) fn action_dispatch_tx(&self) -> mpsc::Sender<TickOutput> {
+    pub(crate) fn action_dispatch_tx(&self) -> super::ActionTx {
         self.run.lock_recover().action_dispatch_tx.clone()
     }
 }

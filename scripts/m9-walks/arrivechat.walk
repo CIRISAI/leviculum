@@ -1,0 +1,31 @@
+# arrivechat.walk (order 1612): an arrival into the open chat, then Back;
+# and an arrival, Enter on it, then Back.
+#
+# Window 23's probe asked whether an arrival in an open chat deafens the
+# keys. It opened the list's first row, not "Bench" (`[OPEN]
+# peer=f18f4927 messages=0`), so its arrivals landed in another chat and
+# its Enter had no message to open; it passed on the broken image without
+# asking either question. This one opens "Bench" each time (`bench arrive`
+# selects it), so each arrival lands in the chat on the screen and the
+# second block's Enter stands on a message: on an image before 1612 the
+# second block's Back closes the unseen detail and the last wait fails.
+#
+#   just m9-walk <rig> scripts/m9-walks/arrivechat.walk <bench elf>
+allow key_ms 2000
+
+bench arrive
+key enter
+wait page=chat
+bench arrive
+key back
+wait page=chats
+
+bench arrive
+key enter
+wait page=chat
+bench arrive
+key enter
+key back
+wait page=chats
+dump end
+idle 6

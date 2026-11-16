@@ -186,8 +186,27 @@ pub fn sixel_indexed(
     height: u32,
     cells: (u16, u16),
 ) -> Option<Protocol> {
+    if in_tmux() {
+        return None;
+    }
+    sixel_indexed_direct(palette, indices, width, height, cells)
+}
+
+/// [`sixel_indexed`] for a terminal known to be reached directly: the
+/// encoding alone, which reads no environment.
+///
+/// A test calls this one. Whether it is inside tmux is the environment of
+/// whoever runs it, and a pre-push hook started from a tmux pane got `None`
+/// where every other run got a picture (1347).
+pub fn sixel_indexed_direct(
+    palette: &[[u8; 3]],
+    indices: &[u8],
+    width: u32,
+    height: u32,
+    cells: (u16, u16),
+) -> Option<Protocol> {
     let (w, h) = (width as usize, height as usize);
-    if w == 0 || h == 0 || indices.len() != w * h || palette.is_empty() || in_tmux() {
+    if w == 0 || h == 0 || indices.len() != w * h || palette.is_empty() {
         return None;
     }
     if indices.iter().any(|&i| usize::from(i) >= palette.len()) {
@@ -361,8 +380,10 @@ fn parse_stat(stat: &str) -> Option<(String, u32)> {
     Some((comm, ppid))
 }
 
-/// Inside tmux, by the rule `ratatui-image`'s picker applies.
-fn in_tmux() -> bool {
+/// Inside tmux, by the rule `ratatui-image`'s picker applies: what a
+/// program reads once at its start and hands on, so that what it draws
+/// does not depend on reading the environment again.
+pub fn in_tmux() -> bool {
     std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
         || std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "tmux")
 }
@@ -388,9 +409,10 @@ pub fn render(frame: &mut Frame, area: Rect, picture: &SlicedProtocol, x: i16, y
 mod tests {
     use super::*;
 
-    /// What a terminal reads back from [`sixel_indexed`] is the picture it
-    /// was given, pixel for pixel: a last band of fewer than six rows, a
-    /// colour only in one corner, runs long and short.
+    /// What a terminal reads back from [`sixel_indexed_direct`] is the
+    /// picture it was given, pixel for pixel: a last band of fewer than six
+    /// rows, a colour only in one corner, runs long and short. Through the
+    /// direct encoder, so the verdict is the same inside tmux and out.
     #[test]
     fn an_indexed_sixel_reads_back_exactly() {
         let palette = [[255, 255, 255], [0, 0, 0], [255, 0, 0], [0, 0, 255]];
@@ -406,7 +428,8 @@ mod tests {
                 }
             })
             .collect();
-        let Some(Protocol::Sixel(sixel)) = sixel_indexed(&palette, &indices, w, h, (3, 2)) else {
+        let Some(Protocol::Sixel(sixel)) = sixel_indexed_direct(&palette, &indices, w, h, (3, 2))
+        else {
             panic!("a sixel");
         };
         assert!(sixel
@@ -424,8 +447,8 @@ mod tests {
         }
         // An index past the palette, or a size that does not match, is no
         // picture rather than a wrong one.
-        assert!(sixel_indexed(&palette, &[4; 4], 2, 2, (1, 1)).is_none());
-        assert!(sixel_indexed(&palette, &[0; 3], 2, 2, (1, 1)).is_none());
+        assert!(sixel_indexed_direct(&palette, &[4; 4], 2, 2, (1, 1)).is_none());
+        assert!(sixel_indexed_direct(&palette, &[0; 3], 2, 2, (1, 1)).is_none());
     }
 
     /// Each go-between is seen from the variable or the ancestor it leaves,

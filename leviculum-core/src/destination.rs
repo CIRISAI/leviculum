@@ -865,6 +865,45 @@ impl Destination {
         Ok(count)
     }
 
+    /// Keep `keys`, private ratchet keys this destination's identity held
+    /// under another program, behind the ones it holds now, so a packet a
+    /// peer encrypted to any of them still decrypts. Keys already held are
+    /// skipped, the order of `keys` (newest first, as every format that
+    /// writes them has it) is kept, and the retained count is the cap: the
+    /// oldest go first, as they do on a rotation. Turns ratchets on when the
+    /// destination held none, as [`Self::load_ratchets_signed`] does.
+    /// Returns how many were added.
+    ///
+    /// The reference has no such call: a Python destination only ever
+    /// holds the ratchets it generated. An identity that moves from one
+    /// program to another takes its ratchets along, or every peer that
+    /// remembered one (for `RATCHET_EXPIRY`, 30 days,
+    /// `RNS/Identity.py:69`) encrypts to a key nobody holds.
+    pub fn retain_ratchet_keys(&mut self, keys: &[[u8; RATCHET_SIZE]]) -> usize {
+        let mut added = 0;
+        for key in keys {
+            if self.ratchets.len() >= self.retained_ratchet_count {
+                break;
+            }
+            if self.ratchets.iter().any(|r| r.private_key_bytes() == *key) {
+                continue;
+            }
+            self.ratchets.push(Ratchet::from_private_key_bytes(*key, 0));
+            added += 1;
+        }
+        if added > 0 {
+            self.ratchets_enabled = true;
+            self.ratchets_dirty = true;
+        }
+        added
+    }
+
+    /// The public key of the private ratchet key `private`, as an announce
+    /// carries it.
+    pub fn ratchet_public_key(private: &[u8; RATCHET_SIZE]) -> [u8; RATCHET_SIZE] {
+        Ratchet::from_private_key_bytes(*private, 0).public_key_bytes()
+    }
+
     /// Set the last ratchet rotation time.
     ///
     /// Used after loading persisted ratchets whose timestamps are from a
@@ -2544,6 +2583,62 @@ mod tests {
     }
 
     // Signed Ratchet Serialization Tests
+    #[test]
+    fn retained_keys_go_behind_the_current_ones_once_each_and_within_the_cap() {
+        let identity = Identity::generate(&mut OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["retain"],
+        )
+        .unwrap();
+        dest.enable_ratchets(&mut OsRng, TEST_TIME_MS).unwrap();
+        let current = dest.current_ratchet_public().unwrap();
+        dest.clear_ratchets_dirty();
+        let own = dest.ratchets[0].private_key_bytes();
+        let old = [[1u8; RATCHET_SIZE], [2u8; RATCHET_SIZE]];
+
+        assert_eq!(dest.retain_ratchet_keys(&[old[0], own, old[1], old[0]]), 2);
+        assert_eq!(dest.current_ratchet_public(), Some(current));
+        assert!(dest.ratchets_dirty());
+        let held: Vec<[u8; RATCHET_SIZE]> = dest
+            .ratchets
+            .iter()
+            .map(|r| r.private_key_bytes())
+            .collect();
+        assert_eq!(held, vec![own, old[0], old[1]]);
+        assert_eq!(
+            Destination::ratchet_public_key(&old[1]),
+            dest.ratchets[2].public_key_bytes()
+        );
+
+        // The cap holds: one more fits, the rest do not.
+        dest.set_retained_ratchets(4);
+        assert_eq!(
+            dest.retain_ratchet_keys(&[[3u8; RATCHET_SIZE], [4u8; RATCHET_SIZE]]),
+            1
+        );
+        assert_eq!(dest.ratchet_count(), 4);
+
+        // A destination that held none turns ratchets on.
+        let mut bare = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["retain"],
+        )
+        .unwrap();
+        assert_eq!(bare.retain_ratchet_keys(&old), 2);
+        assert!(bare.ratchets_enabled());
+        assert_eq!(
+            bare.current_ratchet_public(),
+            Some(Destination::ratchet_public_key(&old[0]))
+        );
+    }
+
     #[test]
     fn test_serialize_ratchets_signed_roundtrip() {
         let identity = Identity::generate(&mut OsRng);

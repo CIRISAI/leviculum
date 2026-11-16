@@ -43,7 +43,7 @@ non-behaviour.
 The rule: **a pin must contain an assertion that fails when the claim it
 pins is broken**, in the same test, on every run. The pattern is in the
 tree — `announce_signature_covers_reference_byte_order_on_the_wire`
-(`leviculum-core/src/destination.rs:2271`) verifies its signature, then
+(`leviculum-core/src/destination.rs:2310`) verifies its signature, then
 drops the destination hash from the front and asserts that verification
 now fails.
 
@@ -103,7 +103,7 @@ expression. It does not substitute literals and does not mutate consts —
 where this project's semantics live: `PATHFINDER_RETRIES`
 (`leviculum-core/src/constants.rs:157`). The #192 defect was
 `retries: 0` where `PATHFINDER_RETRIES` belonged, and the fixed site
-writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:12651`)
+writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:13159`)
 into a literal that spells every field out — so not even the
 field-deletion operator reaches it, and no operator substitutes one
 const for another.
@@ -695,7 +695,7 @@ because a refusal still leaves the citation red and a reader has to
 unpick it.
 
 Step 4 above, read from the other side, is the mechanism. The proof is
-`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3450`) — the
+`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3473`) — the
 mapped line's text *now* against the text the *cited number* held in
 the base. The premise of the whole map is therefore that every number
 in the corpus is one the base was right about, and a citation an
@@ -784,9 +784,9 @@ rewrites and run once.*
 
 Built 2026-09-27. The proximity test had lived inline in the checker,
 closed over the current file's lines; it is now `ident_resolves`
-(`leviculum-std/tests/doc_citations.rs:695`), a function over the lines
+(`leviculum-std/tests/doc_citations.rs:718`), a function over the lines
 it is handed, and `place_citation` asks it a second time against the
-base copy of the file (`leviculum-std/tests/doc_citations.rs:3662`). A
+base copy of the file (`leviculum-std/tests/doc_citations.rs:3685`). A
 map repair is emitted only where both halves hold: the map proves the
 move, *and* the base resolved the citation's own identifier at the
 citation's own number. The refusal above is the other branch.

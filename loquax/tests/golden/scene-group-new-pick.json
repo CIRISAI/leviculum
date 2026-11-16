@@ -1,0 +1,444 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Familie"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Familie"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "Group(Members { group: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]) })",
+          "label_key": "group_members"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "3d6fb6",
+            "fg": "ffffff",
+            "initials": "3",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Familie"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Lew"
+          },
+          "resource": "group_4",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Brot ist da"
+              },
+              "resource": "bubble_4",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), target: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), target: Some([3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81], keys: [4] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1800000120,
+            "body": "Brot ist da",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_4",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "0303030303030303030303030303030303030303030303030303030303030303",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Brot ist da",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "41414141414141414141414141414141",
+              "name": "Lew"
+            }
+          }
+        ],
+        "day": {
+          "at": 1800000120,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_4",
+        "named": true,
+        "ours": false,
+        "sender": {
+          "raw": "Lew"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Anna"
+          },
+          "resource": "group_5",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Danke!"
+              },
+              "resource": "bubble_5",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), target: [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]), target: Some([4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81], keys: [5] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1800000180,
+            "body": "Danke!",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_5",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "0404040404040404040404040404040404040404040404040404040404040404",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Danke!",
+            "updates": 0,
+            "voice": null,
+            "writer": {
+              "address": "42424242424242424242424242424242",
+              "name": "Anna"
+            }
+          }
+        ],
+        "day": null,
+        "id": "group_5",
+        "named": true,
+        "ours": false,
+        "sender": {
+          "raw": "Anna"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "51515151515151515151515151515151",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "new_group": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "group_pick_title"
+      },
+      "resource": "new_group",
+      "role": "sheet",
+      "selected": false
+    },
+    "close": {
+      "enabled": true,
+      "intent": "Group(Close)",
+      "label_key": "scene_close"
+    },
+    "create": {
+      "enabled": false,
+      "intent": "Group(Create)",
+      "label_key": "group_create"
+    },
+    "hint": {
+      "args": [],
+      "key": "group_name_hint"
+    },
+    "id": "new_group",
+    "name": "",
+    "next": {
+      "enabled": true,
+      "intent": "Group(Next)",
+      "label_key": "group_next"
+    },
+    "picked": {
+      "args": [
+        1
+      ],
+      "key": "group_picked"
+    },
+    "rows": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Lew"
+          },
+          "resource": "pick_41414141414141414141414141414141",
+          "role": "row",
+          "selected": false
+        },
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "L",
+          "ring": null
+        },
+        "id": "pick_41414141414141414141414141414141",
+        "name": "Lew",
+        "picked": false,
+        "toggle": {
+          "enabled": true,
+          "intent": "Group(Pick([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]))",
+          "label_key": "group_new"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Bob"
+          },
+          "resource": "pick_43434343434343434343434343434343",
+          "role": "row",
+          "selected": true
+        },
+        "avatar": {
+          "bg": "2f7a6e",
+          "fg": "ffffff",
+          "initials": "B",
+          "ring": null
+        },
+        "id": "pick_43434343434343434343434343434343",
+        "name": "Bob",
+        "picked": true,
+        "toggle": {
+          "enabled": true,
+          "intent": "Group(Pick([67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67]))",
+          "label_key": "group_new"
+        }
+      }
+    ],
+    "step": "Pick",
+    "title": {
+      "args": [],
+      "key": "group_pick_title"
+    },
+    "trust": {
+      "args": [
+        "…"
+      ],
+      "key": "group_trust_create"
+    }
+  },
+  "screen": {
+    "chat": "51515151515151515151515151515151"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Familie"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "Group(Members { group: Peer([81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]) })",
+        "label_key": "group_members"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "3",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Familie"
+    }
+  },
+  "whereabouts": null
+}

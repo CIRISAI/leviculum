@@ -1,0 +1,24 @@
+┌  Loquax────────────────┐┌● Familie───────────────────────────────────────────┐
+│▌Familie          08:55 ││                                                    │
+│▌you: Wer kommt mit?    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                              Brot ist da  08:50 ✓✓ │
+│                        ││                                                    │
+│                        ││                          ▌Wer kommt mit?  08:55 ✓  │
+│                        │├  to Familie──────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

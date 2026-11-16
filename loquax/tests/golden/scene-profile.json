@@ -1,0 +1,1667 @@
+{
+  "card": null,
+  "chat": null,
+  "chips": [],
+  "class": "Compact",
+  "list": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "list",
+      "role": "list",
+      "selected": false
+    },
+    "empty": {
+      "args": [],
+      "key": "no_conversations"
+    },
+    "id": "list",
+    "rows": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Jürgen 🚲, ok 👍"
+          },
+          "resource": "row_1d0abf792296d6027f9c456dda8a1f95",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023414,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "J🚲",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_1d0abf792296d6027f9c456dda8a1f95",
+        "kind": "text",
+        "last": "ok 👍",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010814,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), on: Off }",
+            "label_key": "unpin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Jürgen 🚲",
+        "ours": true,
+        "pinned": true,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 17, Grüße aus Köln, die Straße ist nass"
+          },
+          "resource": "row_1d387b13d4b4e8083e6081912e7bc2bf",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023519,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "P1",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_1d387b13d4b4e8083e6081912e7bc2bf",
+        "kind": "text",
+        "last": "Grüße aus Köln, die Straße ist nass",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010919,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([29, 56, 123, 19, 212, 180, 232, 8, 62, 96, 129, 145, 46, 123, 194, 191]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 17",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·cd32, ja"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_cd32a6028dd79aecc5710834dbdd0b14",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023512,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_cd32a6028dd79aecc5710834dbdd0b14",
+        "kind": "text",
+        "last": "ja",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010912,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([205, 50, 166, 2, 141, 215, 154, 236, 197, 113, 8, 52, 219, 221, 11, 20]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·cd32",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 15, zwei"
+          },
+          "resource": "row_3d1a434a80c6158d434299cc52a43a6f",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023505,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "P1",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_3d1a434a80c6158d434299cc52a43a6f",
+        "kind": "text",
+        "last": "zwei",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010905,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([61, 26, 67, 74, 128, 198, 21, 141, 67, 66, 153, 204, 82, 164, 58, 111]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 15",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·b305, 😀🐀🚲 drei Emoji am Stück"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_b305ba3b250d83ae0bc8eed4bf12ec14",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023498,
+        "avatar": {
+          "bg": "2f7a6e",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_b305ba3b250d83ae0bc8eed4bf12ec14",
+        "kind": "text",
+        "last": "😀🐀🚲 drei Emoji am Stück",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010898,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([179, 5, 186, 59, 37, 13, 131, 174, 11, 200, 238, 212, 191, 18, 236, 20]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·b305",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 13, 日本語のテキストも"
+          },
+          "resource": "row_0d1ec813c53c8935a914c1e49c0c087b",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023491,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "P1",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_0d1ec813c53c8935a914c1e49c0c087b",
+        "kind": "text",
+        "last": "日本語のテキストも",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010891,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([13, 30, 200, 19, 197, 60, 137, 53, 169, 20, 193, 228, 156, 12, 8, 123]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 13",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·0d7c, naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_0d7cc5d4c135bfce14c707595fc04ee9",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023484,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_0d7cc5d4c135bfce14c707595fc04ee9",
+        "kind": "text",
+        "last": "naïve façade, smörgåsbord, Ærøskøbing",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010884,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([13, 124, 197, 212, 193, 53, 191, 206, 20, 199, 7, 89, 95, 192, 78, 233]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·0d7c",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 11, Treffen wir uns um 18:00 am Bahnhof?"
+          },
+          "resource": "row_5df35dda59f6735edbaef1c04a443566",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023477,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "P1",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_5df35dda59f6735edbaef1c04a443566",
+        "kind": "text",
+        "last": "Treffen wir uns um 18:00 am Bahnhof?",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010877,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([93, 243, 93, 218, 89, 246, 115, 94, 219, 174, 241, 192, 74, 68, 53, 102]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 11",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·a246, ok 👍"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_a24608eadfea67f379a331ec448870b1",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023470,
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_a24608eadfea67f379a331ec448870b1",
+        "kind": "text",
+        "last": "ok 👍",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010870,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177]), on: Off }",
+            "label_key": "mark_read"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([162, 70, 8, 234, 223, 234, 103, 243, 121, 163, 49, 236, 68, 136, 112, 177]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·a246",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 3,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 9, Grüße aus Köln, die Straße ist nass"
+          },
+          "resource": "row_3b5ce3fe19fc0d2c600c001bc43eb641",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023463,
+        "avatar": {
+          "bg": "2f7a6e",
+          "fg": "ffffff",
+          "initials": "P9",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_3b5ce3fe19fc0d2c600c001bc43eb641",
+        "kind": "text",
+        "last": "Grüße aus Köln, die Straße ist nass",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010863,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([59, 92, 227, 254, 25, 252, 13, 44, 96, 12, 0, 27, 196, 62, 182, 65]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 9",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·3c01, ja"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_3c014aa73cd0da70443250b6a62e00e0",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023456,
+        "avatar": {
+          "bg": "7a5fb8",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_3c014aa73cd0da70443250b6a62e00e0",
+        "kind": "text",
+        "last": "ja",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010856,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([60, 1, 74, 167, 60, 208, 218, 112, 68, 50, 80, 182, 166, 46, 0, 224]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·3c01",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 7, zwei"
+          },
+          "resource": "row_0d947559ae21c2dc1367800833db8b85",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023449,
+        "avatar": {
+          "bg": "a2526a",
+          "fg": "ffffff",
+          "initials": "P7",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_0d947559ae21c2dc1367800833db8b85",
+        "kind": "text",
+        "last": "zwei",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010849,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([13, 148, 117, 89, 174, 33, 194, 220, 19, 103, 128, 8, 51, 219, 139, 133]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 7",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "join": [
+              {
+                "raw": "Unknown ·57b9, 😀🐀🚲 drei Emoji am Stück"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
+          },
+          "resource": "row_57b9131c2ef21373c6198c9c6993268f",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023442,
+        "avatar": {
+          "bg": "8a6420",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_57b9131c2ef21373c6198c9c6993268f",
+        "kind": "text",
+        "last": "😀🐀🚲 drei Emoji am Stück",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010842,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([87, 185, 19, 28, 46, 242, 19, 115, 198, 25, 140, 156, 105, 147, 38, 143]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Unknown ·57b9",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Peer 5, 日本語のテキストも"
+          },
+          "resource": "row_9bf4cd4129a4238d142dd20632d1604b",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023435,
+        "avatar": {
+          "bg": "2f7a6e",
+          "fg": "ffffff",
+          "initials": "P5",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_9bf4cd4129a4238d142dd20632d1604b",
+        "kind": "text",
+        "last": "日本語のテキストも",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010835,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([155, 244, 205, 65, 41, 164, 35, 141, 20, 45, 210, 6, 50, 209, 96, 75]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Peer 5",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Mum, naïve façade, smörgåsbord, Ærøskøbing"
+          },
+          "resource": "row_8f77e37e8a1c8904553a29095a6dcadd",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023428,
+        "avatar": {
+          "bg": "8a6420",
+          "fg": "ffffff",
+          "initials": "M",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_8f77e37e8a1c8904553a29095a6dcadd",
+        "kind": "text",
+        "last": "naïve façade, smörgåsbord, Ærøskøbing",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010828,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221]), secs: 0 }",
+            "label_key": "unmute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([143, 119, 227, 126, 138, 28, 137, 4, 85, 58, 41, 9, 90, 109, 202, 221]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": true,
+        "name": "Mum",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Zoë 💬 Ærø, Treffen wir uns um 18:00 am Bahnhof?"
+          },
+          "resource": "row_b66dfdac24d9f0a11ce815aee68adef6",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246] }",
+          "label_key": "scene_open"
+        },
+        "at": 1780023421,
+        "avatar": {
+          "bg": "5b6b2f",
+          "fg": "ffffff",
+          "initials": "ZÆ",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_b66dfdac24d9f0a11ce815aee68adef6",
+        "kind": "text",
+        "last": "Treffen wir uns um 18:00 am Bahnhof?",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1780010821,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([182, 109, 253, 172, 36, 217, 240, 161, 28, 232, 21, 174, 230, 138, 222, 246]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Zoë 💬 Ærø",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Nomadin Ünal, Grüße aus Köln, die Straße ist nass"
+          },
+          "resource": "row_bffba8cb35f47523ae1ec907077bd572",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114] }",
+          "label_key": "scene_open"
+        },
+        "at": 1748487407,
+        "avatar": {
+          "bg": "8a6420",
+          "fg": "ffffff",
+          "initials": "NÜ",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_bffba8cb35f47523ae1ec907077bd572",
+        "kind": "text",
+        "last": "Grüße aus Köln, die Straße ist nass",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1748474807,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([191, 251, 168, 203, 53, 244, 117, 35, 174, 30, 201, 7, 7, 123, 213, 114]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Nomadin Ünal",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Ratte Größe 🐀, ja"
+          },
+          "resource": "row_4a36d5c95d1b136a64a68848ba3bfc17",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23] }",
+          "label_key": "scene_open"
+        },
+        "at": 1748487400,
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "R🐀",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_4a36d5c95d1b136a64a68848ba3bfc17",
+        "kind": "text",
+        "last": "ja",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1748474800,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Ratte Größe 🐀",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      }
+    ]
+  },
+  "profile": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "profile_title"
+      },
+      "resource": "profile",
+      "role": "sheet",
+      "selected": false
+    },
+    "address": "e1976a807b318426ddb203cb8526af64",
+    "address_label": {
+      "args": [],
+      "key": "profile_address"
+    },
+    "avatar": {
+      "bg": "3d6fb6",
+      "fg": "ffffff",
+      "initials": "MS",
+      "ring": null
+    },
+    "back": {
+      "enabled": true,
+      "intent": "Back",
+      "label_key": "scene_back"
+    },
+    "caption": {
+      "args": [],
+      "key": "profile_qr_caption"
+    },
+    "code": "lxma://e1976a807b318426ddb203cb8526af64:a49eb492bf3c39ee123c3aa7c7a8da3fd51ac9ad058a69a25ee0f72ea1efd17619204c8c3ba85ba059cd18ac9017bd02a18da5d10c68fb779a34be43ef067791",
+    "devices": [
+      {
+        "args": [
+          "Pixel 8"
+        ],
+        "key": "profile_this_device"
+      },
+      {
+        "raw": "Laptop"
+      }
+    ],
+    "devices_label": {
+      "args": [],
+      "key": "profile_devices"
+    },
+    "fours": "e197 6a80 7b31 8426 ddb2 03cb 8526 af64",
+    "id": "profile",
+    "mailbox": {
+      "args": [
+        "Mia's computer"
+      ],
+      "key": "profile_mailbox_named"
+    },
+    "name": {
+      "raw": "Mia Sander"
+    },
+    "qr": {
+      "rows": [
+        "#######......##.....##.#.####.####.##.....#...#######",
+        "#.....#......##.#.###.....#..#....#.###..###..#.....#",
+        "#.###.#.#.#.#.....##...#.######.#..#..#.#..#..#.###.#",
+        "#.###.#.##....#.####.#.....#.###....#..#.##.#.#.###.#",
+        "#.###.#.##.####...###.#########.....#....##...#.###.#",
+        "#.....#.####..#..#......#...#..#.##.###...#...#.....#",
+        "#######.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#######",
+        "........#.###.##..#..#..#...###......#..#.#.#........",
+        "#.#####..#####.#...##...######.....##.##.####.#####..",
+        "..#..#.##..##.#..##..####..#####.#..#..##.#..#...#..#",
+        "#.###.##.##..#.#..####.#.##.......#..##..#...##...#..",
+        ".#.##..###......#.##....##.###.###....###.#.##.....#.",
+        "..##..###..##..####.##....#........###.....##..####.#",
+        "#.###..##.###......##.###..###.#...###.##.#..#...#.##",
+        "..#...###.##...##..###...##...#..####.##.#....###....",
+        ".#.#...#.#..#..#.#.#...##...###.#.....#.#.##.#.#...#.",
+        "..###.##.#####..#.#.##..###...##.#####.#..#.#.#.####.",
+        "##.##..###.####.....#.#..#..###.##.###....##.#.#.#..#",
+        "......##.##.##.##...##.#...#......#...##.#.#..#.#..#.",
+        "#.###..##.##..#..#......#..#..#.####.#.#####.#...#.#.",
+        ".#######..#..##..#.#.#..####.#.#.#..#....####.###.##.",
+        "##.#...#.#..##.#.#.##........#####.#...####....##..##",
+        ".#....#....##..#...###.###.#......#.####...#.##.###..",
+        "##.#...##....#.#..##.##.#.....#.#..#....#.##.#.....##",
+        "..#######.##.##..###.#.#########....#..#.##########..",
+        "#.#.#...#.#.#.....##..#.#...#.#.##.....#..###...#.###",
+        "...##.#.#.#..#.###..##..#.#.##.#..######.#..#.#.#....",
+        "##..#...#.#.#..#.#......#...#.####.#....#...#...##...",
+        "##..#####..##..#.##..#..#####....#..####.########.##.",
+        "#####...###...#....#..##.###.###...###....########.##",
+        ".#..###.#.#.#..#.....##.#...#...###.#.##.#..##....#..",
+        ".#.....#..#.###..#.#....##.#..####.....#####..#....#.",
+        ".#..####...#######..##.#...#.##...####....#.#.##.####",
+        "..#.....#..##.####.##.####.#..#..#.##..##.#...#.##..#",
+        ".#.#..##.#.#..###.#.#......####...######.#...#.###.#.",
+        "#.###...####.#.#...#...#.##...###..#...########.#....",
+        "##....##.#..#....#.......#........#.###..##.#....###.",
+        "...#....#.#.#####..#.####.#...####.#.#.##.#..#.##...#",
+        "###...###..#...#.###..#..#..##.#..#.#.#..#...#..####.",
+        "#...#.......#..#..#..##.####..###..#...##.###.#....##",
+        "#...#.##.#..##.######.#..#...##..#..###.....###..###.",
+        "..##...###......#..#.#.##.##.##.##...#.#.##....###.##",
+        "##.########...#####.#...#...#.....#.#.#....#....#.#..",
+        ".##.......##..#.###.##.###.#..####...#..#.#####.....#",
+        "...#..#....#...##...##..#######....#####.#..########.",
+        "........#.##...##.....#.#...###.##.###....###...#####",
+        "#######..#...##....###..#.#.#.....###.##.#.##.#.##...",
+        "#.....#.#.#.#.##.##.#..##...#####..#...######...##.##",
+        "#.###.#.####.#.##.####.######.#..##.###..#.######.#..",
+        "#.###.#.##....#.#..#.......##.####..#..#..####...#.##",
+        "#.###.#.####.##..####.##.###.#.#..########...####..##",
+        "#.....#..##.#..##...##.#...#.#.#####....#..##..##..#.",
+        "#######.####..#.##..#...##..#.......#.##.###.##.###.."
+      ],
+      "side": 53
+    },
+    "share": {
+      "enabled": true,
+      "intent": "ShareCode",
+      "label_key": "profile_share"
+    },
+    "state": {
+      "args": [
+        3,
+        10
+      ],
+      "key": "home_fetched"
+    },
+    "title": {
+      "args": [],
+      "key": "profile_title"
+    }
+  },
+  "screen": "chats",
+  "sheet": null,
+  "tabs": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "tabs",
+      "role": "tab_bar",
+      "selected": false
+    },
+    "active": "Chats",
+    "id": "tabs",
+    "items": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [
+              8
+            ],
+            "key": "tab_chats_unread"
+          },
+          "resource": "tab_chats",
+          "role": "tab",
+          "selected": true
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Chats)",
+          "label_key": "tab_chats"
+        },
+        "badge": 8,
+        "id": "Chats",
+        "label": {
+          "args": [],
+          "key": "tab_chats"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "map"
+          },
+          "resource": "tab_map",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Map)",
+          "label_key": "map"
+        },
+        "badge": null,
+        "id": "Map",
+        "label": {
+          "args": [],
+          "key": "map"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
+      }
+    ]
+  },
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "Search",
+        "label_key": "search"
+      },
+      {
+        "enabled": true,
+        "intent": "NewConversation",
+        "label_key": "scene_new_conversation"
+      }
+    ],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "MS",
+          "ring": null
+        },
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
+      }
+    },
+    "title": {
+      "args": [],
+      "key": "tab_chats"
+    }
+  },
+  "whereabouts": null
+}

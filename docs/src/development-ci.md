@@ -29,7 +29,7 @@ things are called "nightly", and each proves something different:
   `refs/nightly/green/*` ref for it. It flashes no board and radiates
   nothing.
 - **The published build** is the forge's `nightly.yml`, on its cron at
-  04:00 UTC (06:00 CEST) or fired early by the green ref (see [What fires
+  09:05 UTC (10:05 CET) or fired early by the green ref (see [What fires
   the publish](#what-fires-the-publish)). It proves that `just ci-gate`
   passes and that the .debs and the lnflash bundle build, and it publishes
   only a commit a green ref covers. It runs no corpus.
@@ -181,18 +181,26 @@ after `gate`, `build-amd64`, `build-arm64` and `build-lnflash`; a red
 step before them stops them, because a step's default `when:` is
 success-only. `publish` runs `scripts/publish-nightly.sh`, which asks
 `scripts/check-nightly-green.sh` first and refuses master HEAD when no
-green ref covers it. The cron is `0 4 * * *` UTC (06:00 CEST). The
-nightly's own ref is usually pushed later than that (the refs on the
-remote are stamped 04:14Z and 04:16Z on ordinary nights), so a
-clock-fired run reads yesterday's ref, which covers HEAD only when
-nothing landed since the night before. That is the refusal pipelines
-455 and 458 met. Since 2026-09-24 the reviewer host polls the forge
-every ten minutes and fires this cron through the Woodpecker API as
-soon as a new `refs/nightly/green/*` appears (`lev-nightly-publish-trigger`,
-reviewer-host tooling: it is not in this repo, and the API token stays on
-that host on purpose). That run is the one that normally publishes; the
-04:00 run is the fallback, and both on one day is harmless, because the
-release is rolling and `scripts/publish-nightly.sh` writes the same
+green ref covers it. The cron is `5 9 * * *` UTC (10:05 CET; 1513).
+The time is set by the forge, not by the nightly: Codeberg's Woodpecker
+server restarts every three hours on the full hour and cancels what is
+running, and a full run is about 75 minutes, so it starts five minutes
+after a three-hour mark (the note above the cron in `nightly.yml`, and
+`scripts/forge-cron-schedule.sh` to set it). The tier-2 nightly has no
+fixed end, so a clock-fired run sees the same night's ref only when that
+night finished before 09:05: the refs on the remote are stamped 05:07Z to
+07:15Z on such nights
+(`20261019T050710Z`, `20261029T071557Z`, `20261105T071415Z`). It covers
+HEAD only when nothing landed between that ref and 09:05, and a night that
+ends later reads the night before (`20261021T132124Z`,
+`20261103T193322Z`, `20261106T132853Z`), which is the refusal pipelines
+455 and 458 met under an earlier 04:00 cron. Since 2026-09-24 the reviewer
+host polls the forge every ten minutes and fires this cron through the
+Woodpecker API as soon as a new `refs/nightly/green/*` appears
+(`lev-nightly-publish-trigger`, reviewer-host tooling: it is not in this
+repo, and the API token stays on that host on purpose). That run is the one
+that normally publishes; the 09:05 run is the fallback, and both on one day
+is harmless, because the release is rolling and `scripts/publish-nightly.sh` writes the same
 `nightly` tag with its assets overwritten.
 
 The overwrite keeps one generation (#323): before its uploads a run
@@ -201,7 +209,7 @@ renames every asset it replaces to `<name>.previous.<ext>`
 `.previous` set that displaced, so a bad build that passed the gates still
 leaves the build before it downloadable. A failed run undoes its renames.
 A run whose commit the `nightly` tag already names (the trigger and the
-04:00 fallback on a day nothing landed) renames nothing and replaces the
+09:05 fallback on a day nothing landed) renames nothing and replaces the
 current set in place, so the second publish of one commit cannot push the
 fallback out.
 
@@ -222,7 +230,9 @@ the ref the night pushed a moment earlier. Then it runs the scripts the
 forge pipeline runs, in the same order: `deb-stamp.sh`, `build-deb.sh`
 for amd64 and arm64, `lnflash-bundle.sh` with the firmware built,
 `build-docs-tarball.sh`, `collect-nightly-debs.sh` into `dist/`, then
-`publish-site.sh`. It does **not** run `publish-nightly.sh` by default:
+`build-nightly-apk.sh`, which adds the Android APKs to `dist/` (1267; the
+forge has no step for it, its builders carry no Android SDK, so the APKs
+are on the site only), then `publish-site.sh`. It does **not** run `publish-nightly.sh` by default:
 the forge cron owns the forge release. `LEVICULUM_PUBLISH_FORGE=1` is
 the manual fallback for a morning the forge could not publish; it adds
 `publish-nightly.sh`, each of the two publishes then running whatever
@@ -406,11 +416,34 @@ the stack, ~13 KB of margin left for the whole call tree.
 that frame to 12 672 B. It does so only because the compiler builds the
 `Box::new` argument straight into the allocation, which Rust does not
 promise; the gate's limit is therefore held below the node box
-(`NODE_BOX_BYTES`, 31 752 B), so a build that stops eliding the copy puts
+(`NODE_BOX_BYTES`, 31 744 B), so a build that stops eliding the copy puts
 one whole `NodeCore` in a frame and fails here.
 
 The gate prefers `arm-none-eabi-objdump` and falls back to the rustup
 `llvm-tools` `llvm-objdump`; `install-ci.sh` installs the latter.
+
+## The package feature-set gate
+
+`just deb-features-check` (1593) compiles every package this host's
+architecture ships with exactly the target triple and feature set the
+packages are built with: `cargo check --release`, nothing linked or
+packaged. On amd64 that is the musl binaries with `loquax/tui`, Loquax
+on the gnu triple with `loquax/tui loquax/gui`, and lnsd and lnpnd with
+`heap-accounting`. The recipe runs `scripts/build-deb.sh --check`, the
+packaging script's own mode over the same argument arrays its build
+reads, so the check and the build cannot name different sets.
+
+It exists because Loquax with `tui` and `gui` together on the gnu triple
+did not compile on master from 902bc129 to cbbd870d: 1570 added a field
+to `GuiArgs` and not to the two initialisers that only that pair
+compiles, so no package could have been built, and `loquax-gui` (`gui`
+alone) and `loquax-tui` (`tui` alone) were both green.
+
+It is in `fast` and not in `guards`: 9.5 s after touching
+`leviculum-core`, 3 min 35 s cold (measured 2026-11-09), and two release
+feature sets of its own to build. Run it by hand before committing
+whenever a change touches a `cfg(feature` boundary, a CLI args struct or
+a feature list in a `Cargo.toml`.
 
 ## Manual operation
 

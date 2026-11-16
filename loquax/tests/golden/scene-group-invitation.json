@@ -1,0 +1,407 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Lew"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Lew"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "OpenMapAt { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]) }",
+          "label_key": "map"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "3d6fb6",
+            "fg": "ffffff",
+            "initials": "L",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Lew"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Lew"
+          },
+          "resource": "group_2",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Lew invited you to Familie: lxma://…"
+              },
+              "resource": "bubble_2",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), target: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), target: Some([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65], keys: [2] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1800000000,
+            "body": "Lew invited you to Familie: lxma://…",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_2",
+            "invite": {
+              "a11y": {
+                "enabled": true,
+                "label": {
+                  "args": [
+                    "Lew",
+                    "Familie"
+                  ],
+                  "key": "group_invited"
+                },
+                "resource": "join_51515151515151515151515151515151",
+                "role": "card",
+                "selected": false
+              },
+              "group": "51515151515151515151515151515151",
+              "id": "join_51515151515151515151515151515151",
+              "join": null,
+              "state": {
+                "args": [
+                  "Familie"
+                ],
+                "key": "group_joined_card"
+              },
+              "title": {
+                "args": [
+                  "Lew",
+                  "Familie"
+                ],
+                "key": "group_invited"
+              },
+              "trust": {
+                "args": [
+                  "Familie",
+                  "Lew"
+                ],
+                "key": "group_trust_join"
+              }
+            },
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "0101010101010101010101010101010101010101010101010101010101010101",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Lew invited you to Familie: lxma://…",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1800000000,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_2",
+        "ours": false,
+        "sender": {
+          "raw": "Lew"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Lew"
+          },
+          "resource": "group_7",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Lew invited you to Verein: lxma://…"
+              },
+              "resource": "bubble_7",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), target: [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]), target: Some([5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65], keys: [7] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1800000240,
+            "body": "Lew invited you to Verein: lxma://…",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_7",
+            "invite": {
+              "a11y": {
+                "enabled": true,
+                "label": {
+                  "args": [
+                    "Lew",
+                    "Verein"
+                  ],
+                  "key": "group_invited"
+                },
+                "resource": "join_52525252525252525252525252525252",
+                "role": "card",
+                "selected": false
+              },
+              "group": "52525252525252525252525252525252",
+              "id": "join_52525252525252525252525252525252",
+              "join": {
+                "enabled": true,
+                "intent": "Group(Join { group: Peer([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]) })",
+                "label_key": "group_join"
+              },
+              "state": null,
+              "title": {
+                "args": [
+                  "Lew",
+                  "Verein"
+                ],
+                "key": "group_invited"
+              },
+              "trust": {
+                "args": [
+                  "Verein",
+                  "Lew"
+                ],
+                "key": "group_trust_join"
+              }
+            },
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "0505050505050505050505050505050505050505050505050505050505050505",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Lew invited you to Verein: lxma://…",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_7",
+        "ours": false,
+        "sender": {
+          "raw": "Lew"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "41414141414141414141414141414141",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "41414141414141414141414141414141"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Lew"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "OpenMapAt { peer: Peer([65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]) }",
+        "label_key": "map"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "L",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Lew"
+    }
+  },
+  "whereabouts": null
+}

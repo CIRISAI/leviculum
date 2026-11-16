@@ -1,0 +1,18 @@
+# forget.walk (order 1562): the clean-up of a bench M9's store. Every
+# arrival out of the ring: the flagged ones in "Bench", and the ones order
+# 1540's image wrote into real chats before the flag (a zero signature,
+# words that start "bench arrival "), with the read marks of nothing else.
+# The summary log is erased and the store rebuilt from the ring; the
+# reader's own messages and marks stay. The walk opens no chat, so it runs
+# on whatever home the board is joined to: this is how Lew's own M9 is
+# cleaned after windows 11 to 15.
+#
+#   just m9-walk <rig> scripts/m9-walks/forget.walk <bench elf of 1562 or later>
+#
+# Read the VERDICT's forget step: flagged=, unflagged=, marks=, entries=.
+# Then the list's dump, for the eye: no "Bench", no "bench arrival" in any
+# chat's last line.
+wait page=chats
+bench forget
+wait page=chats
+dump after-forget

@@ -25,8 +25,15 @@ The tool implements the path-query verb of Python's **rnpath** -- query, wait, d
 **-w** *seconds*
 :   Timeout before giving up on the path request. Default 15 seconds, the reference stack's `PATH_REQUEST_TIMEOUT`. This argument governs the whole wait: nothing is added to it and no floor is applied, so a caller that asks for two seconds waits two seconds and one that asks for sixty waits sixty.
 
+**--no-start**
+:   Fail when no shared instance answers, as the tools did before the zero-config step 4, instead of starting **lnsd**(1) as a child. Without it, **lnpath** looks for a running shared instance (the abstract socket `@rns/`*instance*, then TCP loopback at the configured `shared_instance_port`, else 37428, for the instance `default` or a configured port) and, when none answers, starts `lnsd -c` *dir* on the same configuration directory and waits until it accepts. The daemon is **lnpath**'s child and goes when **lnpath** exits; its output goes to `lnsd.log` in the configuration directory. One line on standard error says which, `INSTANCE started=yes via=unix pid=`*pid* after a start, and with **-v** also `INSTANCE found=yes via=unix pid=none`. A configuration with `share_instance = No` starts nothing. The **lnsd** started is `$LEVICULUM_LNSD`, else the one beside **lnpath**, else the one on `PATH`.
+
 **-v**, **--verbose**
 :   Raise log verbosity. Diagnostics go to standard error; standard output carries only the verdict line.
+
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnpath** takes the first directory of the lookup order **rnsd** uses, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`); the order is what lets Python clients find the system daemon without flags. When **lnpath** cannot reach or authenticate to the daemon, it names the directory it took and why, the socket it dialled, and every other candidate directory that holds a `config`, with the **--config** that selects it.
 
 ## EXIT STATUS
 

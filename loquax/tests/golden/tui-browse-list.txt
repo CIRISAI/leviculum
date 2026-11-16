@@ -1,0 +1,24 @@
+lnomad · press : to enter a URL
+NomadNet pages                                                                 █
+                                                                               █
+Tap a node to open its pages, or type an address above.                        █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+    ┌ places ──────────────────────────────────────────────────────────────┐   █
+    │Bookmarks                                                             │   █
+    │  (none)                                                              │   █
+    │                                                                      │   █
+    │Pages heard                                                           │   █
+    │  Marcel's node  ·  seen 1 min ago  ·  reachable over 2 stations      │   █
+    │  Relay Süd  ·  seen 1 min ago  ·  directly reachable                 │   █
+    └──────────────────────────────────────────────────────────────────────┘   █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+Alt-← back │ Alt-→ forward │ R reload │ f hint │ / search │ ? help │ q quit

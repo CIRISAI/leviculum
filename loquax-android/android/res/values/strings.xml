@@ -1,64 +1,55 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Loquax</string>
+    <string name="app_name" translatable="false">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
-    <string name="code_label">The code your mailbox shows, from `loquax home admit` on the computer (with --server it brings the address along)</string>
-    <string name="code_hint">lqxh1…</string>
-    <string name="server_label">Your mailbox\'s address: host:port of its lnsd TCP server</string>
-    <string name="server_hint">192.168.1.20:4242</string>
+    <string name="code_label">The code your mailbox shows</string>
+    <!-- 1448, walk finding 4: placeholders that read as a request, never
+         as a value; the address field under Advanced. -->
+    <string name="code_hint">Paste the code here</string>
+    <string name="server_label">Where your mailbox is: the computer\'s address and port</string>
+    <string name="server_hint">for example 192.168.1.20:4242</string>
     <string name="join">Join</string>
-    <string name="refresh">Refresh</string>
     <string name="open">Open</string>
-    <string name="send">Send</string>
     <string name="address_hint">Address of a new conversation</string>
-    <string name="no_conversations">No conversations yet. Refresh in the menu checks your mailbox; the pencil starts one.</string>
-    <string name="compose_hint">Message</string>
     <string name="pulling">Checking your mailbox…</string>
-    <string name="pulled">%1$s new message(s).</string>
+    <string name="reconnecting">Reconnecting…</string>
+    <!-- 1283, walk finding 28: one and many, in each language's own words. -->
+    <plurals name="pulled">
+        <item quantity="one">%1$d new message.</item>
+        <item quantity="other">%1$d new messages.</item>
+    </plurals>
     <string name="pulled_nothing">No new messages.</string>
-    <string name="pull_failed">Pull failed: %1$s</string>
+    <string name="pull_failed">Checking for messages failed, trying again</string>
     <string name="stopped">Stopped.</string>
-    <string name="state_queued">queued</string>
-    <string name="state_sending">sending</string>
-    <string name="state_sent">sent</string>
-    <string name="state_delivered">delivered ✓</string>
-    <string name="state_failed">failed ✗</string>
     <string name="channel_session">Connection to your mailbox</string>
     <string name="channel_messages">New messages</string>
-    <string name="connecting">Connecting to %1$s</string>
-    <string name="connected">Connected to %1$s</string>
-    <string name="connected_unread">Connected to %1$s, %2$d unread</string>
-    <string name="not_connected">Not connected: %1$s</string>
+    <string name="connected">Connected to your mailbox</string>
+    <string name="not_connected">Not connected, trying again</string>
     <string name="stop">Stop</string>
     <string name="battery_title">Stay connected in the background?</string>
-    <string name="battery_text">Loquax keeps a connection to your mailbox so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave Loquax out of it; you can change this later in the system settings.</string>
-    <string name="battery_yes">Leave it out</string>
+    <string name="battery_text">Loquax keeps a connection to your mailbox so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. Allow leaves Loquax out of it; you can change this later in the system settings.</string>
+    <string name="battery_yes">Allow</string>
     <string name="battery_no">Not now</string>
-    <string name="map">Map</string>
-    <string name="map_fit">All</string>
-    <string name="map_load">Load area</string>
     <string name="map_loading">Loading the map of this area…</string>
-    <string name="map_theme">Light or dark map; a long press follows the phone</string>
-    <string name="map_follows_phone">The map follows the phone\'s light or dark setting again.</string>
-    <string name="map_no_pins">No positions yet. A contact\'s position report puts them on the map.</string>
+    <!-- 1200: the map's state chips, its people, the card and the people sheet (1447: never "friends" for who sends a position). -->
+    <string name="map_offline">Offline</string>
+    <string name="map_no_map">No map here yet</string>
+    <string name="friends">People on the map</string>
+    <string name="friends_search">Find a person</string>
+    <string name="friends_older">Older than a day</string>
+    <string name="friends_none">Nobody shares a position with you yet. When someone does, they appear here.</string>
+    <string name="friends_no_match">Nobody by that name.</string>
+    <string name="card_ago">%1$s ago</string>
     <string name="back">Back</string>
     <string name="menu">More</string>
     <string name="emoji">Emoji</string>
-    <string name="today">Today</string>
-    <string name="yesterday">Yesterday</string>
-    <string name="just_now">Now</string>
-    <string name="minutes_ago">%1$d min</string>
-    <string name="hours_ago">%1$d h</string>
-    <string name="days_ago">%1$d d</string>
-    <string name="list_hours">%1$dh</string>
-    <string name="position">Position</string>
-    <string name="reacted">reacted %1$s</string>
-    <string name="you_reacted">You reacted %1$s</string>
-    <string name="search">Search</string>
-    <string name="close_search">Close search</string>
+    <!-- 1184: a run of position reports, folded into one row. -->
+    <string name="position_run">%1$s · %2$d</string>
+    <string name="action_run">Show all %1$d positions</string>
+    <string name="run_title">%1$d positions</string>
+    <!-- 1209: whether a position is alive. -->
     <string name="new_conversation">New conversation</string>
-    <string name="address_label">The LXMF address to write to: 32 hex digits, as the other side\'s app shows it.</string>
     <string name="paste">Paste</string>
     <string name="stop_service">Stop the service</string>
     <string name="emoji_more">More emoji</string>
@@ -73,18 +64,11 @@
     <string name="emoji_objects">Objects</string>
     <string name="emoji_symbols">Symbols</string>
     <string name="emoji_flags">Flags</string>
-    <string name="action_reply">Reply</string>
-    <string name="action_forward">Forward</string>
-    <string name="action_copy">Copy</string>
-    <string name="action_select">Select</string>
-    <string name="action_info">Info</string>
     <string name="action_pin">Pin</string>
     <string name="action_unpin">Unpin</string>
-    <string name="action_delete">Delete</string>
     <string name="copied">Copied.</string>
     <string name="reply_to_ours">Replying to yourself</string>
     <string name="reply_to_theirs">Replying to %1$s</string>
-    <string name="quote_you">You</string>
     <string name="cancel_reply">Cancel the reply</string>
     <string name="forward_to">Forward to</string>
     <string name="forwarded">Forwarded to %1$s.</string>
@@ -95,17 +79,15 @@
     <string name="delete_one_home">Delete this message from every device of this mailbox?</string>
     <string name="delete_many_here">Delete %1$d messages from this device?</string>
     <string name="delete_many_home">Delete %1$d messages from every device of this mailbox?</string>
-    <string name="delete">Delete</string>
     <string name="keep">Keep</string>
     <string name="info">Message details</string>
-    <string name="pinned">Pinned</string>
     <string name="add_to_contacts">Add to contacts</string>
     <string name="open_contact">Open contact</string>
     <string name="contact_addresses">This contact\'s addresses</string>
     <string name="unlink">Unlink from contact</string>
     <string name="rename">Rename</string>
     <string name="rename_hint">Your name for them; empty clears it</string>
-    <string name="book_banner">Not in your contacts. Add?</string>
+    <string name="book_banner">Save to your phone\'s contacts?</string>
     <string name="book_add">Add</string>
     <string name="not_now">Not now</string>
     <string name="another_contact">Another contact…</string>
@@ -128,8 +110,6 @@
     <string name="matched_prefix">start of the first name</string>
     <!-- The contact screen, the settings and the list's long press (1146). -->
     <string name="contact_info">Contact info</string>
-    <string name="mute">Mute</string>
-    <string name="unmute">Unmute</string>
     <string name="muted_mark">Muted</string>
     <string name="mute_for">Mute notifications</string>
     <string name="mute_hour">1 hour</string>
@@ -146,12 +126,12 @@
     <string name="share">Share</string>
     <string name="share_text">Share as text</string>
     <string name="nickname">Nickname</string>
-    <string name="nickname_none">None; the name it announces</string>
+    <string name="nickname_none">None; the name they chose</string>
     <string name="sounds">Sounds and notifications</string>
     <string name="phone_contact">Phone contact details</string>
     <string name="phone_contact_none">Not linked to a contact</string>
     <string name="identity">Identity</string>
-    <string name="identity_why">Compare this address in person, or let the other phone scan the code. The address is a hash of the identity\'s public key: when they match, it is the same key.</string>
+    <string name="identity_why">Compare this address in person, or let the other phone scan the code. When both show the same, you write to the right person.</string>
     <string name="address_copied">Address copied</string>
     <string name="mark_verified">Mark as verified</string>
     <string name="clear_verified">Clear verification</string>
@@ -161,7 +141,7 @@
     <string name="last_to_them">Last message to them</string>
     <string name="never">none yet</string>
     <string name="path">Path</string>
-    <string name="path_home">held by your mailbox, which routes for this phone</string>
+    <string name="path_home">your mailbox finds the way for this phone</string>
     <string name="positions">Positions</string>
     <string name="block">Block</string>
     <string name="unblock">Unblock</string>
@@ -171,18 +151,10 @@
     <string name="delete_conversation_ask">Delete the conversation with %1$s?</string>
     <string name="delete_here">This device</string>
     <string name="delete_home">Every device of the mailbox</string>
-    <string name="settings">Settings</string>
     <string name="blocked_contacts">Blocked contacts</string>
     <string name="blocked_none">Nobody is blocked.</string>
-    <string name="archived">Archived</string>
     <string name="archived_count">Archived (%1$d)</string>
     <string name="archived_none">Nothing is archived.</string>
-    <string name="archive">Archive</string>
-    <string name="unarchive">Unarchive</string>
-    <string name="pin">Pin</string>
-    <string name="unpin">Unpin</string>
-    <string name="mark_unread">Mark as unread</string>
-    <string name="mark_read">Mark as read</string>
     <string name="pinned_mark">Pinned</string>
     <!-- The first start, the mailbox on the phone and its backup (1152;
          docs/drafts/loquax-onboarding-2026-10.md, section 2). -->
@@ -194,15 +166,19 @@
     <string name="where_computer">On a computer at home</string>
     <string name="where_computer_text">Messages arrive even when your phone is off. You need a computer or a Raspberry Pi that stays on.</string>
     <string name="where_later">You can move your mailbox later without losing anything.</string>
-    <string name="here_title">Your mailbox on this phone</string>
     <string name="here_background">Loquax keeps running in the background. It uses some battery.</string>
-    <string name="here_offline">When the phone is off or has no internet, messages wait in the network and arrive when you are back. The sender sees "delivered" only then.</string>
     <string name="here_backup">Your address lives on this phone. Save a backup, or a lost phone means a new address.</string>
-    <string name="use_this_phone">Use this phone</string>
     <string name="next">Continue</string>
     <string name="have_address">I already have a Loquax address</string>
     <string name="computer_title">Set up your mailbox on the computer</string>
-    <string name="computer_text">Install Loquax on the computer and run `loquax home admit --server` there. It shows a code. Scan it here, or paste it.</string>
+    <!-- The computer's page (1448, walk finding 15): three steps, the
+         link tappable, the command a block of its own that copies. -->
+    <string name="computer_install">1. Install Loquax on the computer:</string>
+    <string name="computer_install_link" translatable="false">https://leviculum.network/mailbox</string>
+    <string name="computer_run">2. Run this there:</string>
+    <string name="computer_command" translatable="false">loquax mailbox setup</string>
+    <string name="computer_code">3. A code appears there. Scan it here, or paste it.</string>
+    <string name="computer_command_copied">Command copied.</string>
     <string name="paste_code">Paste a code</string>
     <string name="phone_until_then">Use this phone until then</string>
     <string name="background_title">Let Loquax run in the background</string>
@@ -210,17 +186,17 @@
     <string name="setting_up">Setting up your mailbox…</string>
     <string name="setup_failed">Your mailbox did not start: %1$s</string>
     <string name="try_again">Try again</string>
+    <string name="join_code_servers_failed">The servers in this code did not answer. Check the code, or ask for a new one.</string>
     <string name="address_title">Your address</string>
     <string name="address_text">Show this to people who should write to you.</string>
     <string name="write_message">Write a message</string>
     <string name="name_for_others">Your name for others</string>
-    <string name="optional">optional</string>
     <string name="backup_address">Save a backup of your address</string>
     <string name="done">Done</string>
     <string name="restore_title">Your address from a backup</string>
     <string name="restore_text">Open the backup file, or type the code from the paper backup. Then enter its passphrase.</string>
     <string name="restore_file">Open the backup file</string>
-    <string name="restore_hint">lqxb1…</string>
+    <string name="restore_hint" translatable="false">lqxb1…</string>
     <string name="restore">Restore</string>
     <string name="restore_none">That is no Loquax backup. It starts with lqxb1.</string>
     <string name="passphrase">Passphrase</string>
@@ -236,16 +212,99 @@
     <string name="backup_file_head">Loquax backup of an address. Restore it at the first start with "I already have a Loquax address" and the passphrase.</string>
     <string name="backup_paper_head">Loquax: the backup of your address.\nRestore it at the first start with "I already have a Loquax address".\nYou need the passphrase too; keep it somewhere else.</string>
     <string name="print">Print</string>
-    <string name="mailbox">Mailbox</string>
     <string name="mailbox_here">Your mailbox is on this phone.</string>
     <string name="mailbox_away">Your mailbox is on another device; this phone reads it.</string>
-    <string name="advanced">Advanced</string>
-    <string name="propagation_node">Propagation Node</string>
-    <string name="propagation_node_text">While your mailbox is offline, mail for you waits at a Propagation Node in the network, which Loquax chooses by itself.</string>
     <string name="here_running">Your mailbox is running on this phone</string>
-    <string name="here_running_unread">Your mailbox is running on this phone, %1$d unread</string>
     <string name="scan_code">Scan the code</string>
     <string name="scan_backup">Scan the paper backup</string>
     <string name="scan_hint">Hold the code in front of the camera.</string>
     <string name="scan_no_camera">The camera cannot be used. Paste the code instead.</string>
+    <string name="scan_wrong_kind">That code is for something else. Scan the code this screen asks for.</string>
+    <!-- The main views and the settings (1199). -->
+    <string name="help">Help</string>
+    <string name="help_url">https://leviculum.network/help</string>
+    <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
+    <!-- 1345: the row that opens the connection notice's channel page. -->
+    <string name="connection_notice">Connection notice</string>
+    <string name="connection_notice_text">Minimise it or turn it off in Android\'s settings; Loquax stays connected.</string>
+    <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
+    <string name="settings_map_theme">Map</string>
+    <string name="map_theme_auto">Like the phone</string>
+    <string name="map_theme_light">Light</string>
+    <string name="map_theme_dark">Dark</string>
+    <string name="settings_app_theme_text">The app itself follows the phone\'s light or dark setting.</string>
+    <!-- Location and the Maps page (1201). -->
+    <string name="locate">Show where I am</string>
+    <string name="following">The map follows you</string>
+    <string name="location_why">To show where you are on the map. Loquax sends your position only when you share it.</string>
+    <string name="location_continue">Continue</string>
+    <string name="location_not_now">Not now</string>
+    <string name="location_off">Location is off</string>
+    <string name="location_finding">Finding your position…</string>
+    <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
+    <string name="share_position">Share my position</string>
+    <string name="share_with">Share your position with</string>
+    <string name="share_nobody">Start a chat first, then share your position in it.</string>
+    <string name="shared_to">Your position went to %1$s</string>
+    <string name="share_failed">Not sent: %1$s</string>
+    <string name="attach">Attach</string>
+    <string name="attach_position">My position</string>
+    <string name="map_fling">Map keeps moving</string>
+    <string name="map_fling_text">A swipe on the map lets it glide on and slow down after your finger lifts.</string>
+    <string name="maps_auto">Download maps automatically</string>
+    <string name="maps_auto_text">The map of the area you look at loads by itself and stays on the phone.</string>
+    <string name="maps_none">No maps on this phone yet.</string>
+    <string name="maps_region">Around %1$s</string>
+    <string name="maps_region_line">%1$s · %2$s · zoom %3$d to %4$d</string>
+    <string name="maps_delete">Delete</string>
+    <string name="maps_delete_ask">Delete this map? It loads again when you look there.</string>
+    <string name="privacy_shared">Positions you shared</string>
+    <string name="privacy_shared_none">You have not shared your position yet.</string>
+    <!-- The profile behind our avatar (1187). -->
+    <string name="profile_name_hint">Your name</string>
+    <string name="profile_name_saved">Name saved</string>
+    <string name="profile_share_picture">Share as picture</string>
+    <string name="profile_copy_address">Copy address</string>
+    <string name="profile_scan">Scan a contact\'s code</string>
+    <string name="profile_mailbox_change">Use another mailbox</string>
+    <!-- Linking a device to the mailbox on this phone (1264, finding 7). -->
+    <string name="profile_link_device">Link a device</string>
+    <string name="link_title">Link a device</string>
+    <string name="link_text">On your other device, install Loquax, choose \"Join an existing mailbox\" and scan this code.</string>
+    <string name="link_good_for">Good for %1$d hours, for one device.</string>
+    <string name="link_waiting">Waiting for the other device…</string>
+    <string name="link_linked">Device linked: %1$s</string>
+    <string name="link_over">This code ran out. Make a new one.</string>
+    <string name="link_share">Share the code</string>
+    <string name="join_existing">Join an existing mailbox</string>
+    <string name="join_existing_text">On the phone that holds your mailbox, tap your picture, then \"Link a device\". Scan the code it shows here, or paste it.</string>
+    <!-- Moving to a new phone (1281, walk finding 24). -->
+    <string name="profile_move_phone">Move to a new phone</string>
+    <string name="move_title">Move to a new phone</string>
+    <string name="move_text">On your new phone, install Loquax, choose \"Move from my old phone\" and scan this code. Your address, your contacts and your messages move over. After that, this phone sends nothing.</string>
+    <string name="move_waiting">Waiting for the new phone…</string>
+    <string name="move_moved">Moved to %1$s. This phone sends nothing now.</string>
+    <string name="move_from_old">Move from my old phone</string>
+    <string name="move_from_old_text">On your old phone, tap your picture, then \"Move to a new phone\". Scan the code it shows here, or paste it.</string>
+    <string name="move_go">Move</string>
+    <string name="moved_title">This phone has moved</string>
+    <string name="take_back">Use this phone again</string>
+    <string name="take_back_warning">Your mailbox runs on your new phone. If this phone uses it again too, both lose messages. Do this only if the new phone is gone.</string>
+    <string name="restore_live_title">This address is in use</string>
+    <string name="restore_anyway">Restore anyway</string>
+    <string name="profile_identity">Identity hash</string>
+    <string name="profile_home_node">Home node</string>
+    <string name="profile_rendezvous">Rendezvous (● connected)</string>
+    <string name="profile_pn_chosen">Chosen by your mailbox</string>
+    <string name="profile_version">App version</string>
+    <string name="add_contact">Add contact</string>
+    <string name="add_contact_name">What do you call this contact?</string>
+    <!-- 1448: the list while the engine has no path to the mailbox. -->
+    <string name="offline_bar">No connection. Messages go out as soon as you are online again.</string>
+    <!-- 1448: a new conversation's contact list without anyone in it. -->
+    <string name="people_none">No contacts yet. Add one with \"New contact\" above.</string>
+    <!-- The browser's buttons in words (1629, walk 3 new 7). -->
+    <string name="browse_places">Places</string>
+    <string name="browse_page_up">Page up</string>
+    <string name="browse_page_down">Page down</string>
 </resources>

@@ -9,9 +9,18 @@
   <!-- The one TCP connection to the home node, or, with the mailbox on
        the phone, to the entry servers and the screens' loopback one. -->
   <uses-permission a:name='android.permission.INTERNET'/>
+  <!-- Which network carries the traffic, so a change re-dials at once
+       (NetWatch, 1298). A normal permission, no question. -->
+  <uses-permission a:name='android.permission.ACCESS_NETWORK_STATE'/>
   <!-- The service that holds the session in the background (LoquaxService). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE'/>
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING'/>
+  <!-- The service that keeps the position coming while a share runs
+       (ShareService, 1273). -->
+  <uses-permission a:name='android.permission.FOREGROUND_SERVICE_LOCATION'/>
+  <!-- After a reboot the service starts again when the user had it
+       running (BootReceiver, 1345). A normal permission, no question. -->
+  <uses-permission a:name='android.permission.RECEIVE_BOOT_COMPLETED'/>
   <!-- Its notifications: a run time question from Android 13 on (Asks). -->
   <uses-permission a:name='android.permission.POST_NOTIFICATIONS'/>
   <!-- The battery optimisation exemption, asked once and never forced (Asks). -->
@@ -24,10 +33,43 @@
        frames go to the library's decoder and nowhere else. A phone
        without a camera pastes the code instead. -->
   <uses-permission a:name='android.permission.CAMERA'/>
+  <!-- Voice messages (1222): the compose bar's microphone, asked at its
+       first press; what it records goes to the library's encoder and
+       into the message, nowhere else. -->
+  <uses-permission a:name='android.permission.RECORD_AUDIO'/>
   <uses-feature a:name='android.hardware.camera.any' a:required='false'/>
+  <!-- The phone's own position (1201): asked at the first tap on the
+       map's crosshair or on "Share my position", never at start; read
+       while the map is in front and once for a share. It leaves the phone
+       only when the user shares it, to one chat. -->
+  <uses-permission a:name='android.permission.ACCESS_FINE_LOCATION'/>
+  <uses-permission a:name='android.permission.ACCESS_COARSE_LOCATION'/>
+  <uses-feature a:name='android.hardware.location' a:required='false'/>
 
-  <application a:label='@string/app_name'
-               a:icon='@android:drawable/sym_def_app_icon'
+  <!-- Navigate on a friend's card (1200) hands a geo: link to the phone's
+       navigation app; from Android 11 on the app sees whether one takes
+       it only when it says so here. -->
+  <queries>
+    <intent>
+      <action a:name='android.intent.action.VIEW'/>
+      <data a:scheme='geo'/>
+    </intent>
+    <!-- The compose bar's camera (1270) asks whether a camera app takes
+         the capture before it hands it over. -->
+    <intent>
+      <action a:name='android.media.action.IMAGE_CAPTURE'/>
+    </intent>
+  </queries>
+
+  <!-- The jackdaw (1289, 1336): an adaptive icon in mipmap-anydpi-v26 and
+       a PNG per density, written by scripts/render-icon.py. It is round
+       already, so the round icon is the same one. -->
+  <!-- LoquaxApp arms the guard against blocking library calls on the UI
+       thread in a debuggable build (1446, Engine.java). -->
+  <application a:name='network.leviculum.loquax.LoquaxApp'
+               a:label='@string/app_name'
+               a:icon='@mipmap/ic_launcher'
+               a:roundIcon='@mipmap/ic_launcher'
                a:theme='@style/Loquax'>
     <!-- Light or dark by the phone's setting (res/values-night). A change
          while a screen is open recreates it, as a rotation does; the
@@ -45,6 +87,15 @@
         <category a:name='android.intent.category.DEFAULT'/>
         <data a:mimeType='text/plain'/>
       </intent-filter>
+      <!-- A friend's code as a link (walk finding 12): lxma://<address>:<key>
+           tapped in another messenger opens "Add contact". A shared text
+           that carries one comes through SEND above. -->
+      <intent-filter>
+        <action a:name='android.intent.action.VIEW'/>
+        <category a:name='android.intent.category.DEFAULT'/>
+        <category a:name='android.intent.category.BROWSABLE'/>
+        <data a:scheme='lxma'/>
+      </intent-filter>
       <!-- A contact card's IM row of protocol LXMF: AOSP's contacts app
            sends SENDTO imto://lxmf/<address> (ContactsUtils.java:162-180);
            VIEW for a contacts app that views instead. -->
@@ -57,10 +108,11 @@
     </activity>
 
     <!-- The first start (1152): where the mailbox lives, the background
-         permission, the address. -->
+         permission, the address. Exported in the debug APK alone, where
+         the device walk opens its address page by `am start` (1263). -->
     <activity a:name='network.leviculum.loquax.WelcomeActivity'
               a:theme='@style/Loquax.List'
-              a:exported='false'/>
+              a:exported='{{WALK_EXPORTED}}'/>
 
     <activity a:name='network.leviculum.loquax.BackupActivity'
               a:theme='@style/Loquax.List'
@@ -83,11 +135,48 @@
               a:exported='false'
               a:windowSoftInputMode='adjustResize'/>
 
-    <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
+    <!-- The map from a chat (1199): the main views' layout as a sub view.
+         Exported in the debug APK alone, where the device walk opens it on
+         a place and a zoom by `am start` (1193); the release keeps it
+         private. -->
+    <activity a:name='network.leviculum.loquax.MapActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='{{WALK_EXPORTED}}'/>
+
+    <!-- A photo whole, from a chat's bubble (1220). -->
+    <activity a:name='network.leviculum.loquax.PhotoActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
 
     <activity a:name='network.leviculum.loquax.ContactActivity'
               a:theme='@style/Loquax.List'
               a:exported='false'/>
+
+    <!-- Our profile behind the list's avatar (1187). -->
+    <activity a:name='network.leviculum.loquax.ProfileActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <!-- The profile's QR code as a picture for the share sheet: one file,
+         read only, to the app the user picks (QrProvider). -->
+    <provider a:name='network.leviculum.loquax.QrProvider'
+              a:authorities='{{PACKAGE_NAME}}.qr'
+              a:exported='false'
+              a:grantUriPermissions='true'/>
+
+    <!-- Received files for the app that opens or shares them (1221): the
+         library's files/files/ tree, read only (FilesProvider). -->
+    <provider a:name='network.leviculum.loquax.FilesProvider'
+              a:authorities='{{PACKAGE_NAME}}.files'
+              a:exported='false'
+              a:grantUriPermissions='true'/>
+
+    <!-- The compose bar's camera (1270): the one file the camera app
+         writes its photo into (CaptureProvider). -->
+    <provider a:name='network.leviculum.loquax.CaptureProvider'
+              a:authorities='{{PACKAGE_NAME}}.capture'
+              a:exported='false'
+              a:grantUriPermissions='true'/>
 
     <activity a:name='network.leviculum.loquax.SettingsActivity'
               a:theme='@style/Loquax.List'
@@ -96,6 +185,19 @@
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'
              a:foregroundServiceType='remoteMessaging'/>
+
+    <!-- BOOT_COMPLETED comes from the system alone; exported so it reaches
+         the receiver, which acts on nothing but that action. -->
+    <receiver a:name='network.leviculum.loquax.BootReceiver'
+              a:exported='true'>
+      <intent-filter>
+        <action a:name='android.intent.action.BOOT_COMPLETED'/>
+      </intent-filter>
+    </receiver>
+
+    <service a:name='network.leviculum.loquax.ShareService'
+             a:exported='false'
+             a:foregroundServiceType='location'/>
 
   </application>
 </manifest>

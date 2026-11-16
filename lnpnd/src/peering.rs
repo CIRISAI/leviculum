@@ -25,14 +25,14 @@ use leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PEERING;
 use leviculum_lxmf::control::{ControlPeerStats, HOPS_UNKNOWN};
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, offer_budget_for_mdu, peering_key_material, response_action,
-    DeclineReason, DropReason, InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer,
+    answer_offer, offer_budget_for_mdu, peering_key_material, response_action, DeclineReason,
+    DropReason, InboundGate, OfferBuilder, OfferPlan, OfferResponse, Peer, PeerChange, PeerOffer,
     PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeerTraffic, PeeringConfig, ResponseAction,
     SyncPhase, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, ROTATION_INTERVAL_SECS, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
-use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::sync_round::{
     round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
 };
@@ -61,6 +61,7 @@ fn drop_reason_name(reason: DropReason) -> &'static str {
         DropReason::Unreachable => "unreachable",
         DropReason::NoAccess => "no_access",
         DropReason::Rotation => "rotation",
+        DropReason::Cap => "cap",
     }
 }
 
@@ -71,43 +72,144 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// One offer toward `peer` from its cursor, `offer_budget` bytes of encoded
+/// body at most: [`leviculum_lxmf::peering::build_offer`]'s plan, built over the store's ordered walk
+/// so it reads what the plan takes and stops (leviculum#478). The whole-store
+/// walk it replaced cost 170 ms a sync tick on the field node at 300 000
+/// messages, and the same again when the round's link came up.
+///
+/// `own_transfer_limit_bytes` is ours: a message above it is local only and
+/// never offered ([`PropagationNode::is_local_only`]); `u64::MAX` offers by
+/// the peer's limit alone.
 #[cfg(test)]
-thread_local! {
-    /// Per-message visits of the rotation's unhandled count: one per
-    /// collected sequence, sort comparison and binary-search probe (the
-    /// oracle: one per message and peer). Pins the work, not the clock.
-    static ROTATION_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+fn plan_offer<S: PropagationStore + ?Sized>(
+    peer: &Peer,
+    store: &S,
+    own_transfer_limit_bytes: u64,
+    offer_budget: usize,
+) -> Result<Option<OfferPlan>, StorageError> {
+    plan_offer_excluding(peer, store, own_transfer_limit_bytes, offer_budget, &|_| {
+        false
+    })
 }
 
-#[inline]
-fn count_rotation_visit() {
-    #[cfg(test)]
-    ROTATION_VISITS.with(|visits| visits.set(visits.get() + 1));
+/// [`plan_offer`], stepping past every entry `held_by_peer` names for good
+/// ([`OfferBuilder::skip_held_by_peer`]).
+fn plan_offer_excluding<S: PropagationStore + ?Sized>(
+    peer: &Peer,
+    store: &S,
+    own_transfer_limit_bytes: u64,
+    offer_budget: usize,
+    held_by_peer: &dyn Fn(&TransientId) -> bool,
+) -> Result<Option<OfferPlan>, StorageError> {
+    let mut builder =
+        OfferBuilder::new(peer, offer_budget).with_own_transfer_limit(own_transfer_limit_bytes);
+    store.for_each_above(peer.cursor, &mut |meta| {
+        if held_by_peer(&meta.transient_id) {
+            builder.skip_held_by_peer(meta)
+        } else {
+            builder.push(meta)
+        }
+    })?;
+    Ok(builder.finish())
 }
 
-/// Each peer's count of `sequences` strictly above its cursor, omitting
-/// peers at zero. `PropagationStore::for_each` promises no order (the
-/// memory store walks by transient id), so this sorts once and
-/// binary-searches each cursor.
-fn unhandled_above_cursors(
-    mut sequences: Vec<u64>,
-    cursors: &[([u8; 16], u64)],
-) -> HashMap<[u8; 16], u64> {
-    sequences.sort_unstable_by(|a, b| {
-        count_rotation_visit();
-        a.cmp(b)
-    });
-    cursors
-        .iter()
-        .filter_map(|(hash, cursor)| {
-            let at_or_below = sequences.partition_point(|sequence| {
-                count_rotation_visit();
-                sequence <= cursor
-            });
-            let above = (sequences.len() - at_or_below) as u64;
-            (above > 0).then_some((*hash, above))
-        })
-        .collect()
+/// The offer this node makes `peer`, the probe and the real one alike: by
+/// our own transfer limit, and without what came to us from `peer` itself
+/// ([`Origins::came_from`], LV-1003).
+fn plan_offer_toward<S: PropagationStore>(
+    peer: &Peer,
+    node: &PropagationNode<S>,
+    origins: &Origins,
+    offer_budget: usize,
+) -> Result<Option<OfferPlan>, StorageError> {
+    plan_offer_excluding(
+        peer,
+        node.store(),
+        node.transfer_limit_bytes(),
+        offer_budget,
+        &|id| origins.came_from(id, &peer.destination_hash),
+    )
+}
+
+/// Bytes of a transient id [`Origins`] keys by: the processed-id cache's
+/// prefix, exact for the reason `leviculum_lxmf::processed_ids` gives (a
+/// fresh id matches a held one with probability `n / 2^128`).
+const ORIGIN_KEY_LEN: usize = 16;
+
+/// Which peer's sync each stored message came from, so the offer toward
+/// that peer steps past it (LV-1003).
+///
+/// The reference keeps the same fact per message as `from_peer` and
+/// excludes it in `flush_peer_distribution_queue`
+/// (`reference/LXMF/LXMF/LXMRouter.py:2484`). Our one cursor per peer
+/// cannot say "this came from you", so without this the next offer to the
+/// sender listed every message it had just sent us, and a sender that had
+/// delivered and purged one since wanted it back: 1524's cell
+/// `lnpnd_delivered_not_wanted_back` measured the bodies crossing again.
+/// The wire is unchanged; a peer simply is not offered what it sent.
+///
+/// It lives here, not in the role: the board links the role, keeps no
+/// per-message state outside its record log, and a map there cost the
+/// rak4631 3.5 KiB of flash for code it never runs. Cost on a host: one
+/// entry per stored message that arrived by sync, a 16-byte id prefix, the
+/// 16-byte peer hash and the 8-byte receive time, 40 bytes plus the hash
+/// table's control byte and load factor, about 47 bytes a message. An
+/// entry goes when its message leaves the store ([`Self::forget`], from the
+/// role's departures and a failed deferred write) and, as a backstop for a
+/// removal neither reports, past the message expiry once the map outgrows
+/// the store ([`Self::prune_if_above`]). RAM only: after a
+/// restart a message is offered back once more, and the peer declines what
+/// it holds or has let go.
+#[derive(Default)]
+pub(crate) struct Origins {
+    by_id: HashMap<[u8; ORIGIN_KEY_LEN], ([u8; 16], u64)>,
+}
+
+impl Origins {
+    fn key(transient_id: &TransientId) -> [u8; ORIGIN_KEY_LEN] {
+        let mut key = [0u8; ORIGIN_KEY_LEN];
+        key.copy_from_slice(&transient_id[..ORIGIN_KEY_LEN]);
+        key
+    }
+
+    fn note(&mut self, transient_id: &TransientId, peer: &[u8; 16], now_secs: u64) {
+        self.by_id
+            .insert(Self::key(transient_id), (*peer, now_secs));
+    }
+
+    /// Whether `transient_id` was stored here from `peer`'s sync.
+    pub(crate) fn came_from(&self, transient_id: &TransientId, peer: &[u8; 16]) -> bool {
+        self.by_id
+            .get(&Self::key(transient_id))
+            .is_some_and(|(origin, _)| origin == peer)
+    }
+
+    /// The message left the store.
+    pub(crate) fn forget(&mut self, transient_id: &TransientId) {
+        self.by_id.remove(&Self::key(transient_id));
+    }
+
+    /// Drop entries older than `expiry_secs`, no message outlives that, but
+    /// only while the map holds more than `stored` entries: every removal
+    /// from the store reports a departure that [`Self::forget`]s its
+    /// origin, so only a removal that did not makes the map outgrow the
+    /// store, and the walk is paid only then, not on every sweep under the
+    /// core lock.
+    pub(crate) fn prune_if_above(&mut self, stored: usize, now_secs: u64, expiry_secs: u64) {
+        if self.by_id.len() <= stored {
+            return;
+        }
+        self.by_id
+            .retain(|_, (_, at)| now_secs.saturating_sub(*at) <= expiry_secs);
+    }
+
+    fn heap_bytes(&self) -> usize {
+        crate::census::hash_table_bytes(
+            self.by_id.capacity(),
+            std::mem::size_of::<[u8; ORIGIN_KEY_LEN]>() + std::mem::size_of::<([u8; 16], u64)>(),
+        )
+    }
 }
 
 /// One outbound sync round in flight.
@@ -156,9 +258,17 @@ pub(crate) struct InboundSync {
     duplicates: usize,
     bytes: u64,
     invalid: usize,
+    /// Messages the store could not hold even after eviction.
+    store_failed: usize,
 }
 
 impl InboundSync {
+    /// Heap bytes of the batch still held, for `PN_CENSUS sync_in=`.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.messages.capacity() * std::mem::size_of::<Vec<u8>>()
+            + self.messages.iter().map(Vec::capacity).sum::<usize>()
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         self.next >= self.messages.len()
     }
@@ -208,6 +318,8 @@ pub(crate) enum InboundSyncStart {
 pub(crate) struct PeeringRuntime {
     table: PeerTable,
     gate: InboundGate,
+    /// Which peer each synced message came from ([`Origins`], LV-1003).
+    origins: Origins,
     peer_store: Box<dyn PeerStore + Send>,
     our_identity: Identity,
     our_identity_hash: [u8; 16],
@@ -225,6 +337,12 @@ pub(crate) struct PeeringRuntime {
     /// certainly alive then, and may not be by the time the resource's
     /// [`SyncSender`] is taken (643).
     inbound_link_facts: HashMap<LinkId, (Option<Identity>, Option<u8>)>,
+    /// The store failed a message of an inbound sync, so every `/offer`
+    /// and every sync resource is declined until the engine has run its
+    /// maintenance sweep ([`Self::store_full`], [`Self::store_swept`]).
+    /// Declined, the sending peer keeps the messages for its next round;
+    /// accepted and dropped, it would have moved its cursor past them.
+    store_full: bool,
     outbound: Option<OutboundSync>,
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
@@ -259,29 +377,86 @@ pub(crate) struct PeeringRuntime {
     /// Construction has no core to send through; the first tick is the
     /// same pass that builds this runtime.
     static_paths_pending: Vec<[u8; 16]>,
-    events: std::sync::mpsc::Sender<EngineEvent>,
+    events: crate::census::EventSender,
+}
+
+/// The peering runtime's share of `PN_CENSUS`, in heap bytes
+/// ([`PeeringRuntime::heap_census`]).
+pub(crate) struct PeeringHeap {
+    /// The table, its traffic counters and names, the inbound throttle.
+    pub peers: usize,
+    /// The outbound round's offer plan.
+    pub sync_out: usize,
+    /// Per-link state: validated links, transfers, link facts.
+    pub links: usize,
+    /// The static peers whose path is still to be asked for.
+    pub config: usize,
+    /// The synced messages' origins ([`Origins`]).
+    pub origins: usize,
+    /// Origins held, and the buckets of their hash table.
+    pub origin_ids: usize,
+    pub origin_slots: usize,
 }
 
 impl PeeringRuntime {
+    /// What the runtime's tables hold (order 1515, [`crate::census`]).
+    pub(crate) fn heap_census(&self) -> PeeringHeap {
+        use crate::census::hash_table_bytes;
+        use std::mem::size_of;
+        let peers = self.table.heap_bytes()
+            + self.gate.heap_bytes()
+            + hash_table_bytes(
+                self.traffic.capacity(),
+                size_of::<[u8; 16]>() + size_of::<PeerTraffic>(),
+            )
+            + hash_table_bytes(
+                self.names.capacity(),
+                size_of::<[u8; 16]>() + size_of::<String>(),
+            )
+            + self.names.values().map(String::capacity).sum::<usize>();
+        let sync_out = self.outbound.as_ref().map_or(0, |round| {
+            round.plan.ids.capacity() * size_of::<leviculum_lxmf::TransientId>()
+        });
+        let links = hash_table_bytes(
+            self.validated_links.capacity(),
+            size_of::<LinkId>() + size_of::<[u8; 16]>(),
+        ) + hash_table_bytes(self.inbound_transfers.capacity(), size_of::<LinkId>())
+            + hash_table_bytes(
+                self.inbound_link_facts.capacity(),
+                size_of::<LinkId>() + size_of::<(Option<Identity>, Option<u8>)>(),
+            );
+        PeeringHeap {
+            peers,
+            sync_out,
+            links,
+            config: self.static_paths_pending.capacity() * size_of::<[u8; 16]>(),
+            origins: self.origins.heap_bytes(),
+            origin_ids: self.origins.by_id.len(),
+            origin_slots: self.origins.by_id.capacity(),
+        }
+    }
+
     pub(crate) fn new(
         config: PeeringConfig,
         peer_store: Box<dyn PeerStore + Send>,
         our_identity: Identity,
-        events: std::sync::mpsc::Sender<EngineEvent>,
+        events: impl Into<crate::census::EventSender>,
     ) -> Self {
+        let events = events.into();
         let our_identity_hash = *our_identity.hash();
         let mut table = PeerTable::new(config);
         let mut traffic = HashMap::new();
         // A record already unheard past the reference's 14 days is not
-        // restored; it is purged below, once the runtime owns the store.
-        let mut unreachable = Vec::new();
+        // restored, nor one past `max_peers` (`PeerTable::restore`); both
+        // are purged below, once the runtime owns the store.
+        let mut not_restored = Vec::new();
         match peer_store.load_all() {
             Ok(records) => {
                 for record in &records {
                     traffic.insert(record.destination_hash, record.traffic);
                 }
-                unreachable = table.restore(records, unix_secs());
-                for dropped in &unreachable {
+                not_restored = table.restore(records, unix_secs());
+                for (dropped, _) in &not_restored {
                     traffic.remove(dropped);
                 }
             }
@@ -299,9 +474,11 @@ impl PeeringRuntime {
             peer_store,
             our_identity,
             our_identity_hash,
+            origins: Origins::default(),
             validated_links: HashMap::new(),
             inbound_transfers: HashSet::new(),
             inbound_link_facts: HashMap::new(),
+            store_full: false,
             outbound: None,
             mining: None,
             last_synced: None,
@@ -317,9 +494,9 @@ impl PeeringRuntime {
             static_paths_pending,
             events,
         };
-        for dropped in &unreachable {
+        for (dropped, reason) in &not_restored {
             runtime.forget(dropped);
-            runtime.log_peer("drop", dropped, drop_reason_name(DropReason::Unreachable));
+            runtime.log_peer("drop", dropped, drop_reason_name(*reason));
         }
         for destination_hash in &activated {
             runtime.log_peer("add", destination_hash, "static");
@@ -355,22 +532,24 @@ impl PeeringRuntime {
 
     /// This node's equivalent of the reference's per-peer unhandled count:
     /// live store entries above the peer's cursor — what the next round
-    /// would look at. `None` when the peer is unknown.
+    /// would look at, local-only ones left out. `None` when the peer is
+    /// unknown. One prefix sum of the file store's counting index
+    /// ([`PropagationNode::unhandled_above`]), where it walked the store,
+    /// 4.7 ms a peer at 320 000 messages (order 1370).
     pub(crate) fn unhandled_toward<S: PropagationStore>(
         &self,
         node: &PropagationNode<S>,
         destination_hash: &[u8; 16],
     ) -> Option<usize> {
         let cursor = self.table.get(destination_hash)?.cursor;
-        let mut count = 0usize;
-        node.store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    count += 1;
-                }
-            })
-            .ok()?;
-        Some(count)
+        let counts = node.unhandled_above(&[cursor]).ok()?;
+        counts.first().map(|count| *count as usize)
+    }
+
+    /// The synced messages' origins, for the engine to drop the ones whose
+    /// message left the store.
+    pub(crate) fn origins_mut(&mut self) -> &mut Origins {
+        &mut self.origins
     }
 
     /// Reset one peer's cursor to 0: the bounded-full-re-offer path (§5's
@@ -452,34 +631,34 @@ impl PeeringRuntime {
         }
     }
 
-    /// [`Self::unhandled_toward`] for every peer: one pass over the store
-    /// collects the sequences, then [`unhandled_above_cursors`] counts each
-    /// peer's share in O(n log n + p log n) instead of a store walk per peer
-    /// (1011: 5 to 6 ms here at 20 000 messages and 20 peers, under the core
-    /// lock). Peers with nothing unhandled get no entry.
+    /// [`Self::unhandled_toward`] for every peer, one prefix sum each over
+    /// the file store's counting index (order 1370; 1011 had made it one
+    /// store walk and a sort, 8.8 ms at 320 000 messages, from a walk per
+    /// peer). Peers with nothing unhandled get no entry.
     fn unhandled_counts<S: PropagationStore>(
         &self,
         node: &PropagationNode<S>,
     ) -> HashMap<[u8; 16], u64> {
-        let cursors: Vec<([u8; 16], u64)> = self
+        let (hashes, cursors): (Vec<[u8; 16]>, Vec<u64>) = self
             .table
             .iter()
             .map(|peer| (peer.destination_hash, peer.cursor))
-            .collect();
-        let mut sequences: Vec<u64> = Vec::new();
-        let walked = node.store().for_each(&mut |meta| {
-            count_rotation_visit();
-            sequences.push(meta.sequence);
-        });
-        if let Err(error) = walked {
-            tracing::warn!("lnpnd: store walk for rotation failed: {error}");
+            .unzip();
+        match node.unhandled_above(&cursors) {
+            Ok(counts) => hashes
+                .into_iter()
+                .zip(counts)
+                .filter(|(_, count)| *count > 0)
+                .collect(),
+            Err(error) => {
+                tracing::warn!("lnpnd: store count for rotation failed: {error}");
+                HashMap::new()
+            }
         }
-        unhandled_above_cursors(sequences, &cursors)
     }
 
     /// The pre-1011 [`Self::unhandled_counts`], every peer's cursor tested
-    /// against every message: the equivalence oracle and the work pin's
-    /// positive control.
+    /// against every message: the equivalence oracle.
     #[cfg(test)]
     fn unhandled_counts_by_walk<S: PropagationStore>(
         &self,
@@ -493,8 +672,7 @@ impl PeeringRuntime {
         let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
         let walked = node.store().for_each(&mut |meta| {
             for (hash, cursor) in &cursors {
-                count_rotation_visit();
-                if meta.sequence > *cursor {
+                if meta.sequence > *cursor && !node.is_local_only(meta.size) {
                     *counts.entry(*hash).or_default() += 1;
                 }
             }
@@ -758,12 +936,18 @@ impl PeeringRuntime {
     /// Answer one `/offer` request
     /// (`offer_request`, `reference/LXMF/LXMF/LXMRouter.py:2266-2329`).
     /// Returns the encoded response body.
+    ///
+    /// `batch_in_progress`: a peer's sync batch has arrived and is not yet
+    /// all stored (the engine's queue, [`crate::engine`]), the state the
+    /// reference calls `validating_pn_stamps_from` and postpones every
+    /// non-static peer's offer for (`:2273-2278`).
     pub(crate) fn answer_offer_request<S: PropagationStore>(
         &mut self,
         core: &mut Core,
         node: &PropagationNode<S>,
         link_id: &LinkId,
         data: &[u8],
+        batch_in_progress: bool,
     ) -> Vec<u8> {
         let now = unix_secs();
         // Unidentified links get ERROR_NO_IDENTITY (:2267).
@@ -773,18 +957,36 @@ impl PeeringRuntime {
         let remote_identity_hash = *identity.hash();
         let remote_hash = Self::propagation_hash_of(&identity);
 
-        // The gates, in the reference's order (:2273-2295). Sequential
-        // stamp validation cannot be observed mid-flight here — this
-        // engine validates inside the same lock-held call that ingested
-        // the resource — so that gate never fires on this host.
+        // The gates, in the reference's order (:2273-2295). The first is
+        // sequential validation: the reference holds a peer's batch in
+        // `validating_pn_stamps_from` while it validates and stores it, and
+        // postpones every other non-static offer meanwhile. This engine
+        // grinds stamps on a worker and stores a batch a slice per hook
+        // (deliverable 5, order 1009), so a batch is in progress from its
+        // resource's completion until its last message is stored. Passing
+        // `false` here, as this did since the batch stopped being stored in
+        // one call, let 14 peers queue batches faster than the store took
+        // them: 6.8 MB of queued payload grew to 37 MB in seven minutes in
+        // the growth soak (LV-1000, order 1515).
         if let Err(error) = self.gate.admit(
             self.table.config(),
             &remote_hash,
             now,
-            false,
+            batch_in_progress,
             self.inbound_transfers.len(),
         ) {
             return OfferResponse::Error(error).encode();
+        }
+        // A store that just failed a sync message declines with the
+        // reference's postponement, `ERROR_THROTTLED`: the peer keeps its
+        // messages and comes back after `PN_STAMP_THROTTLE`
+        // (`offer_response`, `reference/LXMF/LXMF/LXMPeer.py:421-425`), the
+        // same answer the reference gives a node over its inbound-sync
+        // limit (`reference/LXMF/LXMF/LXMRouter.py:2280-2283`). An empty
+        // "want none" would tell it we hold them all.
+        if self.store_full {
+            crate::engine::log_reject("store_full", "offer");
+            return OfferResponse::Error(PeerError::Throttled).encode();
         }
 
         let Ok(offer) = PeerOffer::decode(data) else {
@@ -814,9 +1016,9 @@ impl PeeringRuntime {
         }
         self.validated_links.insert(*link_id, remote_hash);
 
-        let response = answer_offer(&offer.transient_ids, |id| {
-            node.store().contains(id).unwrap_or(false)
-        });
+        // Not only what the store holds: what this node processed and let
+        // go is not wanted back either (LV-1003, `PropagationNode::knows`).
+        let response = answer_offer(&offer.transient_ids, |id| node.knows(id, now));
         let wanted = match &response {
             OfferResponse::WantNone => 0,
             OfferResponse::WantAll => offer.transient_ids.len(),
@@ -855,6 +1057,19 @@ impl PeeringRuntime {
                 .static_peers
                 .contains(&Self::propagation_hash_of(identity))
         })
+    }
+
+    /// Whether the store failed a sync message since the last maintenance
+    /// sweep: the engine runs the sweep at its next tick, before any
+    /// further sync is taken, and `/offer`s and sync resources are
+    /// declined until it has.
+    pub(crate) fn store_full(&self) -> bool {
+        self.store_full
+    }
+
+    /// The engine's maintenance sweep ran; offers are answered again.
+    pub(crate) fn store_swept(&mut self) {
+        self.store_full = false;
     }
 
     /// Throttle an identified client whose upload resource carried an
@@ -1048,6 +1263,7 @@ impl PeeringRuntime {
             duplicates: 0,
             bytes: 0,
             invalid: 0,
+            store_failed: 0,
         })
     }
 
@@ -1117,6 +1333,7 @@ impl PeeringRuntime {
                     if duplicate {
                         job.duplicates += 1;
                     } else {
+                        self.origins.note(&transient_id, &remote_hash, now);
                         job.accepted += 1;
                         job.bytes += size as u64;
                         local.push((transient_id, destination_hash));
@@ -1131,13 +1348,24 @@ impl PeeringRuntime {
                     job.invalid += 1;
                 }
                 UploadOutcome::StoreFailed(error) => {
-                    // Eviction already ran inside accept; a message that
-                    // still does not fit is dropped — the protocol's
-                    // normal, unsignalled forgetting (§1 of the concept
-                    // paper). Complete messages only: the store append is
-                    // atomic at the verb boundary.
+                    // Not a space failure any more (LV-1001): the limits we
+                    // announce and enforce at the resource advertisement
+                    // are held to what the store can hold
+                    // (`PropagationNode::new`, `store_fit_kb`), so a peer
+                    // never offers a message the empty store could not
+                    // keep, and eviction makes room for any that fits. What
+                    // still lands here is the store's own failure, an I/O
+                    // error on append or on an eviction's purge. The
+                    // resource is concluded and the peer has moved its
+                    // cursor past this message, so it is lost here. What
+                    // can be saved is the next batch, so the node declines
+                    // until its maintenance sweep has run
+                    // (`Self::store_full`), and the round says what it
+                    // dropped (`PN_STORE_FULL` below).
                     tracing::debug!("lnpnd: sync message dropped, store: {error}");
                     crate::engine::log_reject("store_failed", "sync");
+                    job.store_failed += 1;
+                    self.store_full = true;
                 }
             }
         }
@@ -1149,6 +1377,14 @@ impl PeeringRuntime {
         // The round's accounting is per envelope, so it waits for the last
         // message of it — the counters above accumulate across the slices.
         let (accepted, bytes, invalid) = (job.accepted, job.bytes, job.invalid);
+        if job.store_failed > 0 {
+            tracing::warn!(
+                event = "PN_STORE_FULL",
+                peer = full_hex(&remote_hash),
+                offered = job.messages.len(),
+                dropped = job.store_failed,
+            );
+        }
         if self.table.get(&remote_hash).is_some() {
             let traffic = self.traffic_mut(&remote_hash);
             traffic.incoming += accepted as u64;
@@ -1467,17 +1703,14 @@ impl PeeringRuntime {
         // The offer, from the cursor (§5); low-value and oversize entries
         // are stepped past for good, exactly as the reference marks them
         // handled (`LXMPeer.py:340`, `:370-373`).
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        let cursor = peer.cursor;
-        if node
-            .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
-            .is_err()
-        {
+        //
+        // A probe, not the offer: no link yet, so no MDU to size against.
+        // It answers one question — is anything above the cursor
+        // offerable — and `on_link_established` builds the offer itself
+        // against the link that will carry it. An empty id list still
+        // carries the full skip scan, so dead entries step past here as
+        // before.
+        let Ok(probe) = plan_offer_toward(peer, node, &self.origins, OFFER_PROBE_BUDGET) else {
             // A store that cannot be walked now will most likely fail on
             // the next pass too: the peer is booked like an unreachable
             // one, so it climbs the backoff ladder instead of staying due.
@@ -1501,15 +1734,8 @@ impl PeeringRuntime {
                 });
             }
             return;
-        }
-        entries.sort_by_key(|meta| meta.sequence);
-        // A probe, not the offer: no link yet, so no MDU to size against.
-        // It answers one question — is anything above the cursor
-        // offerable — and `on_link_established` builds the offer itself
-        // against the link that will carry it. An empty id list still
-        // carries the full skip scan, so dead entries step past here as
-        // before.
-        let Some(plan) = build_offer(peer, &entries, OFFER_PROBE_BUDGET) else {
+        };
+        let Some(plan) = probe else {
             return;
         };
         if plan.ids.is_empty() {
@@ -1622,19 +1848,12 @@ impl PeeringRuntime {
             }
             RoundStep::Unchanged | RoundStep::Defer | RoundStep::Backoff(_) => return,
         };
-        let Some(cursor) = self.table.get(&peer_hash).map(|peer| peer.cursor) else {
+        let Some(peer) = self.table.get(&peer_hash) else {
             return;
         };
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        if node
-            .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
-            .is_err()
-        {
+        let cursor = peer.cursor;
+        let Ok(planned) = plan_offer_toward(peer, node, &self.origins, offer_budget_for_mdu(mdu))
+        else {
             if let RoundStep::End(end) =
                 round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
             {
@@ -1642,12 +1861,8 @@ impl PeeringRuntime {
                 out.merge(core.close_link(link_id));
             }
             return;
-        }
-        entries.sort_by_key(|meta| meta.sequence);
-        let Some(peer) = self.table.get(&peer_hash) else {
-            return;
         };
-        let plan = match build_offer(peer, &entries, offer_budget_for_mdu(mdu)) {
+        let plan = match planned {
             Some(plan) if !plan.ids.is_empty() => plan,
             // Everything above the cursor was drained or became
             // unofferable between scheduling and link-up: conclude so the
@@ -1842,6 +2057,7 @@ impl PeeringRuntime {
             // Cursor untouched: the whole plan is offered again after the
             // backoff, which is what "marks nothing handled until the
             // transfer concludes" means on our side.
+            self.defer_after_failed_transfer(&peer_hash);
             self.finish_round(&peer_hash, "transfer_failed", 0, 0);
             out.merge(core.close_link(link_id));
         }
@@ -1888,9 +2104,13 @@ impl PeeringRuntime {
         }
         let peer_hash = sync.peer;
         let concluded = sync.concluded;
+        let transferring = sync.sending.is_some();
         self.outbound = None;
         if let Some(peer) = self.table.get_mut(&peer_hash) {
             peer.state = SyncPhase::Idle;
+        }
+        if !concluded && transferring {
+            self.defer_after_failed_transfer(&peer_hash);
         }
         if !concluded {
             self.emit(EngineEvent::SyncDone {
@@ -1901,6 +2121,44 @@ impl PeeringRuntime {
                 result: "link_closed",
             });
         }
+    }
+
+    /// A round whose resource the link did not carry to the end holds the
+    /// peer for one backoff step, as the reference holds every round that
+    /// failed after its link came up (`reference/LXMF/LXMF/LXMPeer.py:321-322`,
+    /// the deferral `:330` and `:541` leave in place).
+    ///
+    /// `note_link_established` clears that deferral for the sake of a lost
+    /// `/offer` frame (leviculum-lxmf, the deviation measured 2026-09-17),
+    /// and that is right before the peer answered. After it answered and
+    /// the transfer then broke, the same plan comes back on the next pass:
+    /// on miauhaus 179 messages were offered about 690 times in two days,
+    /// each round ending `transferred 0 ... link_closed` (order 1586). The
+    /// offer phase keeps its quick retry; the transfer phase waits a step.
+    fn defer_after_failed_transfer(&mut self, peer_hash: &[u8; 16]) {
+        if let Some(peer) = self.table.get_mut(peer_hash) {
+            peer.book_sync_attempt(unix_secs());
+        }
+    }
+
+    /// Put a round in its transfer phase, as `on_link_established` does
+    /// once the resource is on the link: for tests of how it ends.
+    #[cfg(test)]
+    pub(crate) fn transferring_round_for_tests(&mut self, peer: [u8; 16], link_id: LinkId) {
+        self.outbound = Some(OutboundSync {
+            peer,
+            link_id,
+            plan: OfferPlan {
+                ids: Vec::new(),
+                cursor_target: 0,
+                skipped_oversize: 0,
+                skipped_low_value: 0,
+            },
+            request_id: None,
+            sending: Some((1, 1)),
+            deadline_ms: u64::MAX,
+            concluded: false,
+        });
     }
 
     /// Successful end of a round: cursor forward, persisted, reported.
@@ -1998,10 +2256,16 @@ impl PeeringRuntime {
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
+
     use leviculum_core::node::NodeCoreBuilder;
-    use leviculum_lxmf::peering::MAX_PEERS_DEFAULT;
+    use leviculum_lxmf::peering::{plan_sync_batch, WantedIds, MAX_PEERS_DEFAULT};
+    use leviculum_lxmf::propagation_store::StoredMessage;
     use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore};
     use leviculum_std::driver::{StdClock, StdStorage};
+    use leviculum_std::FilePropagationStore;
+
+    use crate::test_support::{next_random, NoFsync};
 
     /// A persisted peer as the file store would hand it back: heard just
     /// now, synced before, alive, offered 10 and took `outgoing`.
@@ -2109,14 +2373,6 @@ mod tests {
         assert!(!peers.contains(&[5; 16]) && !peers.contains(&[12; 16]));
     }
 
-    /// A deterministic xorshift64 for the randomised rotation tests.
-    fn next_random(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
-    }
-
     /// A runtime whose table holds one peer per cursor, as restored from a
     /// peer store.
     fn runtime_with_cursors(cursors: &[u64]) -> PeeringRuntime {
@@ -2163,12 +2419,6 @@ mod tests {
         PropagationNode::new(store, leviculum_lxmf::PropagationNodeConfig::default())
     }
 
-    fn rotation_visits<T>(work: impl FnOnce() -> T) -> (T, u64) {
-        ROTATION_VISITS.with(|visits| visits.set(0));
-        let result = work();
-        (result, ROTATION_VISITS.with(|visits| visits.get()))
-    }
-
     /// 1011: the sorted count gives the per-peer walk's answer for every
     /// input. 1000 random stores (gapped sequences, walked out of order)
     /// and tables (0 to 20 peers, cursors below, inside and above the
@@ -2193,29 +2443,766 @@ mod tests {
         }
     }
 
-    /// 1011: the rotation's unhandled count at the field's scale (20 000
-    /// stored messages, a full table of 20 peers) visits at most
-    /// n*ceil(log2 n) + p*ceil(log2 n) + n messages: the sort's
-    /// comparisons, the cursor searches and the one collecting pass. The
-    /// per-peer walk it replaced visits n*p, which the positive control
-    /// shows under the same counter.
+    /// Order 1370: over the production store the unhandled counts, one
+    /// peer's for `--status` and the whole table's for the rotation, walk
+    /// none of it, at 2 000 and 20 000 messages, and answer as the per-peer
+    /// walk does, local-only messages left out. Their cost is the counting
+    /// index's `O(log n)` a cursor, pinned by slot visits in
+    /// `leviculum-std` (`sequence_counts::a_count_visits_log_n_slots`).
+    /// The positive control hides the index: the same counts, one walk
+    /// each.
     #[test]
-    fn rotation_unhandled_count_visits_n_log_n_not_n_times_peers() {
-        let n: u64 = 20_000;
+    fn unhandled_counts_read_the_counting_index_not_the_store() {
         let p = MAX_PEERS_DEFAULT as u64;
-        let mut state = 0x2545_f491_4f6c_dd1d;
-        let node = node_with_messages(n as usize, 0, &mut state);
-        let cursors: Vec<u64> = (0..p).map(|k| k * n / p).collect();
+        for messages in [2_000usize, 20_000] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let mut store = file_store_with(dir.path(), messages);
+            // sizes up to 2 KB over a 1 KB transfer limit: about half are
+            // local only.
+            let config = leviculum_lxmf::PropagationNodeConfig {
+                transfer_limit_kb: 1,
+                ..leviculum_lxmf::PropagationNodeConfig::default()
+            };
+            let largest = PropagationNode::new(
+                leviculum_lxmf::MemoryPropagationStore::new(0),
+                config.clone(),
+            )
+            .largest_offered_size();
+            store.count_sizes_up_to(largest);
+            let newest = store.newest_sequence().expect("newest");
+            let cursors: Vec<u64> = (0..p).map(|k| k * newest / p).collect();
+            let runtime = runtime_with_cursors(&cursors);
+            let indexed = PropagationNode::new(Indexed::new(&store), config.clone());
+            let walked = PropagationNode::new(WalkOnly::new(&store), config.clone());
+
+            let oracle = runtime.unhandled_counts_by_walk(&walked);
+            walked.store().walks.set(0);
+            assert_eq!(runtime.unhandled_counts(&indexed), oracle);
+            for peer in runtime.peers() {
+                assert_eq!(
+                    runtime.unhandled_toward(&indexed, &peer),
+                    Some(oracle.get(&peer).copied().unwrap_or(0) as usize)
+                );
+            }
+            assert_eq!(
+                indexed.store().walks.get(),
+                0,
+                "{messages}: the count walked the store"
+            );
+            let local_only = indexed.unhandled_above(&[0]).expect("count")[0];
+            assert!(
+                (local_only as usize) < messages * 3 / 4 && (local_only as usize) > messages / 4,
+                "{messages}: {local_only} offerable, the limit cut nothing"
+            );
+
+            assert_eq!(runtime.unhandled_counts(&walked), oracle);
+            assert_eq!(walked.store().walks.get(), 1, "positive control: one walk");
+        }
+    }
+
+    /// The production store before leviculum#478: only the verbs the trait
+    /// requires, so `for_each_above`, `newest_sequence`, `meta` and `count`
+    /// take the trait's defaults and walk the whole store, as
+    /// `FilePropagationStore` did. Counts its walks.
+    struct WalkOnly<'a> {
+        store: &'a FilePropagationStore,
+        walks: Cell<usize>,
+    }
+
+    /// The production store as it is, its walks counted.
+    struct Indexed<'a> {
+        store: &'a FilePropagationStore,
+        walks: Cell<usize>,
+    }
+
+    impl<'a> WalkOnly<'a> {
+        fn new(store: &'a FilePropagationStore) -> Self {
+            Self {
+                store,
+                walks: Cell::new(0),
+            }
+        }
+    }
+
+    impl<'a> Indexed<'a> {
+        fn new(store: &'a FilePropagationStore) -> Self {
+            Self {
+                store,
+                walks: Cell::new(0),
+            }
+        }
+    }
+
+    impl PropagationStore for WalkOnly<'_> {
+        fn append(&mut self, _: &TransientId, _: u64, _: u8, _: &[u8]) -> Result<(), StorageError> {
+            Err(StorageError::Io)
+        }
+        fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+            self.walks.set(self.walks.get() + 1);
+            self.store.for_each(visit)
+        }
+        fn purge(&mut self, _: &TransientId) -> Result<bool, StorageError> {
+            Err(StorageError::Io)
+        }
+        fn free_space(&self) -> u64 {
+            self.store.free_space()
+        }
+        fn capacity(&self) -> u64 {
+            self.store.capacity()
+        }
+        fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.store.contains(transient_id)
+        }
+    }
+
+    impl PropagationStore for Indexed<'_> {
+        fn append(&mut self, _: &TransientId, _: u64, _: u8, _: &[u8]) -> Result<(), StorageError> {
+            Err(StorageError::Io)
+        }
+        fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+            self.walks.set(self.walks.get() + 1);
+            self.store.for_each(visit)
+        }
+        fn for_each_above(
+            &self,
+            cursor: u64,
+            visit: &mut dyn FnMut(&StoredMessage) -> std::ops::ControlFlow<()>,
+        ) -> Result<(), StorageError> {
+            self.store.for_each_above(cursor, visit)
+        }
+        fn meta(&self, transient_id: &TransientId) -> Result<Option<StoredMessage>, StorageError> {
+            self.store.meta(transient_id)
+        }
+        fn count(&self) -> Result<usize, StorageError> {
+            self.store.count()
+        }
+        fn newest_sequence(&self) -> Result<u64, StorageError> {
+            self.store.newest_sequence()
+        }
+        fn count_above_cursors(
+            &self,
+            cursors: &[u64],
+            largest_size: u64,
+        ) -> Result<Vec<u64>, StorageError> {
+            self.store.count_above_cursors(cursors, largest_size)
+        }
+        fn purge(&mut self, _: &TransientId) -> Result<bool, StorageError> {
+            Err(StorageError::Io)
+        }
+        fn free_space(&self) -> u64 {
+            self.store.free_space()
+        }
+        fn capacity(&self) -> u64 {
+            self.store.capacity()
+        }
+        fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.store.contains(transient_id)
+        }
+    }
+
+    /// A file store in `dir` holding at least `messages` entries with random
+    /// transient ids, stamp values 0 to 15 and sizes up to 2 KB, so offers
+    /// skip low-value and oversize entries; a reopen when it already does.
+    fn file_store_with(dir: &std::path::Path, messages: usize) -> FilePropagationStore {
+        let fsync: std::sync::Arc<dyn leviculum_std::durable::Fsync> = std::sync::Arc::new(NoFsync);
+        let mut store =
+            FilePropagationStore::open_with(dir, u64::MAX / 2, fsync).expect("a store directory");
+        let mut state = 0x2545_f491_4f6c_dd1d ^ store.len() as u64;
+        let min = leviculum_lxmf::propagation_store::MIN_BODY_LEN;
+        while store.len() < messages {
+            let mut transient_id = [0u8; 32];
+            for chunk in transient_id.chunks_mut(8) {
+                chunk.copy_from_slice(&next_random(&mut state).to_le_bytes());
+            }
+            let len = min + (next_random(&mut state) % 2048) as usize;
+            let value = (next_random(&mut state) % 16) as u8;
+            store
+                .append(&transient_id, 1_789_000_000, value, &vec![0x5a; len])
+                .expect("the store has room");
+        }
+        store
+    }
+
+    fn peer_with(cursor: u64, stamp_cost: u8, transfer_limit_kb: u64) -> PeeringRuntime {
+        let hash = [1; 16];
+        let mut persisted = record(hash, 9, unix_secs());
+        persisted.cursor = cursor;
+        persisted.stamp_cost = stamp_cost;
+        persisted.transfer_limit_kb = transfer_limit_kb;
+        let mut store = MemoryPeerStore::default();
+        store.save(&persisted).expect("memory store");
+        let (events_tx, _events) = std::sync::mpsc::channel();
+        PeeringRuntime::new(
+            PeeringConfig::default(),
+            Box::new(store),
+            leviculum_std::generate_identity(),
+            events_tx,
+        )
+    }
+
+    /// leviculum#478: an offer planned over the store's ordered walk is the
+    /// offer the whole-store walk planned, for cursors below, inside and
+    /// above the store, budgets from the probe to the largest MDU, and
+    /// peers that skip low-value and oversize entries; and so is the batch
+    /// a peer that wants all of it would get.
+    #[test]
+    fn an_offer_over_the_ordered_walk_is_the_whole_walk_offer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = file_store_with(dir.path(), 600);
+        let walked = WalkOnly::new(&store);
+        let newest = walked.newest_sequence().expect("walk");
+        assert_eq!(store.newest_sequence(), Ok(newest));
+        for cursor in [0, 1, newest / 3, newest / 2, newest - 1, newest, newest + 5] {
+            for (stamp_cost, transfer_limit_kb) in [(0, 256), (8, 256), (0, 1), (12, 1)] {
+                let runtime = peer_with(cursor, stamp_cost, transfer_limit_kb);
+                let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+                for budget in [
+                    OFFER_PROBE_BUDGET,
+                    offer_budget_for_mdu(431),
+                    offer_budget_for_mdu(8192),
+                ] {
+                    let case = format!("cursor {cursor} cost {stamp_cost} limit {transfer_limit_kb} budget {budget}");
+                    let planned = plan_offer(peer, &store, u64::MAX, budget).expect("indexed");
+                    assert_eq!(
+                        planned,
+                        plan_offer(peer, &walked, u64::MAX, budget).expect("walk"),
+                        "{case}"
+                    );
+                    if let Some(plan) = planned {
+                        let fits = |_: usize, _: usize, _: usize| true;
+                        assert_eq!(
+                            plan_sync_batch(&store, &plan, &WantedIds::All, fits),
+                            plan_sync_batch(&walked, &plan, &WantedIds::All, fits),
+                            "{case}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// LV-1001 (order 1520): a node whose store cannot hold a message never
+    /// lets a peer believe it took it. lnpnd with a 1 000-byte store
+    /// (`--store-limit-kb 1`, the cell `lnpnd_store_full_during_a_sync`)
+    /// and lnpnd's default limits: a sending peer plans its offer from the
+    /// limits our announce carries, and a 1 500-byte message, which no
+    /// eviction could ever make room for, is not in it; a peer still holding
+    /// an older, larger limit of ours is refused at the resource
+    /// advertisement, before its cursor moves. Before the fix the announce
+    /// said 256 KB, the plan carried the message, the resource was taken,
+    /// and the accept failed after the peer had moved on (`StoreFailed`).
+    /// Positive control: a 400-byte message is offered and stored.
+    #[test]
+    fn a_message_the_store_cannot_hold_is_never_taken_from_a_peer() {
+        use leviculum_lxmf::{
+            PropagationNodeAnnounce, PropagationNodeConfig, PropagationUpload, UploadOutcome,
+        };
+
+        let now = unix_secs();
+        let lnpnd_defaults = PropagationNodeConfig {
+            stamp_cost: 0,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 10_240,
+            ..PropagationNodeConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut receiver = PropagationNode::new(
+            FilePropagationStore::open(dir.path(), 1_000).expect("store"),
+            lnpnd_defaults.clone(),
+        );
+        let announce = PropagationNodeAnnounce::decode(&receiver.announce_app_data(now))
+            .expect("our own announce");
+
+        // The sending peer's store: one message too big for the receiver's
+        // whole store, one that fits.
+        let mut sender =
+            PropagationNode::new(MemoryPropagationStore::new(1_000_000), lnpnd_defaults);
+        let mut upload = |len: usize, seed: u8| {
+            let mut lxmf_data = vec![7u8; 16];
+            lxmf_data.resize(len, seed);
+            let envelope = PropagationUpload::single(1.0, lxmf_data, [0xee; 32]).encode();
+            match sender.handle_upload(&envelope, now, |_, _| Some(0)) {
+                UploadOutcome::Accepted { transient_id, .. } => (transient_id, envelope.len()),
+                other => panic!("{other:?}"),
+            }
+        };
+        let (big, big_envelope) = upload(1_500, 1);
+        let (small, _) = upload(400, 2);
+
+        // The peer plans from what we announced.
+        let mut runtime = peer_with(0, 0, announce.transfer_limit_kb);
+        runtime
+            .table
+            .get_mut(&[1; 16])
+            .expect("the peer")
+            .sync_limit_kb = announce.sync_limit_kb;
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let plan = plan_offer(
+            peer,
+            sender.store(),
+            sender.transfer_limit_bytes(),
+            offer_budget_for_mdu(8192),
+        )
+        .expect("store")
+        .expect("an offer");
+        assert_eq!(plan.ids, vec![small], "the oversize message is not offered");
+        assert_eq!(plan.skipped_oversize, 1, "it stays with the sender");
+
+        // A peer with a stale, larger limit is refused before transfer.
+        assert!(
+            !receiver.accepts_resource_of(big_envelope as u64),
+            "a {big_envelope}-byte sync of it is refused at the advertisement"
+        );
+
+        // Positive control: the message that fits is stored.
+        let body = sender
+            .store()
+            .read_body(&small)
+            .expect("read")
+            .expect("body");
+        assert!(receiver.accepts_resource_of(body.len() as u64 + 32));
+        match receiver.accept_stamped(&body, now, |_, _| Some(0)) {
+            UploadOutcome::Accepted {
+                duplicate: false, ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let _ = big;
+    }
+
+    /// Order 1295 (reversing 1294's refusal): a client upload above our
+    /// transfer limit is stored local only. Its recipient collects it from
+    /// this node, no offer to a peer carries it, even to a peer whose own
+    /// limit would take it, and it is owed to no peer. Positive control: a
+    /// 200 KB message beside it is offered and owed, and without our own
+    /// limit the 300 KB one would be offered too.
+    #[test]
+    fn a_local_only_upload_is_collected_here_and_offered_to_no_peer() {
+        use leviculum_lxmf::{
+            GetOutcome, MessageGetRequest, PropagationNodeConfig, PropagationUpload, TransferLimit,
+            UploadOutcome,
+        };
+
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(2_000_000),
+            // lnpnd's defaults, the reference's (`LXMRouter.py:55,59`).
+            PropagationNodeConfig {
+                stamp_cost: 0,
+                transfer_limit_kb: 256,
+                sync_limit_kb: 10240,
+                ..PropagationNodeConfig::default()
+            },
+        );
+        let recipient = [7u8; 16];
+        let mut upload = |len: usize, seed: u8| {
+            let mut lxmf_data = recipient.to_vec();
+            lxmf_data.resize(len, seed);
+            let envelope = PropagationUpload::single(1.0, lxmf_data, [0xee; 32]).encode();
+            assert!(
+                node.upload_body_len(&envelope)
+                    .is_some_and(|body| body < 1_000_000),
+                "inside the delivery limit"
+            );
+            match node.handle_upload(&envelope, unix_secs(), |_, _| Some(0)) {
+                UploadOutcome::Accepted {
+                    transient_id, size, ..
+                } => (transient_id, size),
+                other => panic!("{other:?}"),
+            }
+        };
+        let (big, big_size) = upload(300_000, 1);
+        let (small, small_size) = upload(200_000, 2);
+        assert!(node.is_local_only(big_size));
+        assert!(!node.is_local_only(small_size));
+
+        // Collected by its recipient from this node.
+        let fetch = MessageGetRequest {
+            wants: Some(vec![big]),
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+        };
+        match node.handle_get(&fetch.encode().expect("request"), &recipient, unix_secs()) {
+            Ok(GetOutcome::Fetch { plan, .. }) => assert_eq!(plan.served_ids(), vec![big]),
+            other => panic!("{other:?}"),
+        }
+
+        // Offered to no peer, not even one that takes a megabyte.
+        let runtime = peer_with(0, 0, 1000);
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let budget = offer_budget_for_mdu(8192);
+        let plan = plan_offer(peer, node.store(), node.transfer_limit_bytes(), budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(plan.ids, vec![small]);
+        assert_eq!(plan.skipped_oversize, 1, "skipped for good");
+        assert_eq!(
+            runtime.unhandled_toward(&node, &[1; 16]),
+            Some(1),
+            "owed: 200 KB only"
+        );
+
+        let unlimited = plan_offer(peer, node.store(), u64::MAX, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(unlimited.ids, vec![big, small], "positive control");
+    }
+
+    /// leviculum#478: what a sync tick, a sync link coming up and a peer's
+    /// answer ask of the production store walks none of it. The positive
+    /// control asks the same of the store as it was and counts the walks.
+    #[test]
+    fn a_sync_round_asks_the_store_without_walking_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = file_store_with(dir.path(), 300);
+        let runtime = peer_with(0, 0, 256);
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let round = |view: &dyn PropagationStore| {
+            view.newest_sequence().expect("newest");
+            plan_offer(peer, view, u64::MAX, OFFER_PROBE_BUDGET).expect("probe");
+            let plan = plan_offer(peer, view, u64::MAX, offer_budget_for_mdu(8192))
+                .expect("offer")
+                .expect("something to offer");
+            assert!(
+                plan.ids.len() > 1,
+                "a batch of {} proves nothing",
+                plan.ids.len()
+            );
+            plan_sync_batch(view, &plan, &WantedIds::All, |_, _, _| true).expect("batch");
+            plan.ids.len()
+        };
+
+        let indexed = Indexed::new(&store);
+        round(&indexed);
+        assert_eq!(indexed.walks.get(), 0, "the production store was walked");
+
+        let walked = WalkOnly::new(&store);
+        let offered = round(&walked);
+        assert_eq!(
+            walked.walks.get(),
+            3 + offered,
+            "positive control: newest, probe, offer and one walk per batched id"
+        );
+    }
+
+    fn median_and_max(mut micros: Vec<u128>) -> (u128, u128) {
+        micros.sort_unstable();
+        (micros[micros.len() / 2], micros[micros.len() - 1])
+    }
+
+    /// leviculum#478: what one outbound sync tick (newest sequence, then the
+    /// probe offer) and one sync link coming up (the offer at an MDU) cost
+    /// the core hook over a store of `LNPND_BENCH_STORED` messages (300 000,
+    /// miauhaus's count on 2026-10-31), the store as it was against the
+    /// store as it is, for a peer at cursor 0 and one halfway up. A
+    /// measurement: it asserts only that the two plan the same. The store
+    /// lives in `LNPND_BENCH_DIR` and is kept, so a second run only reopens
+    /// it:
+    ///
+    /// ```text
+    /// LNPND_BENCH_DIR=/home/lew/scratch/1171 \
+    ///   cargo test --release -p lnpnd sync_tick_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a store of hundreds of thousands of files"]
+    fn sync_tick_cost_over_a_field_sized_store() {
+        use std::time::Instant;
+
+        let dir = std::env::var("LNPND_BENCH_DIR").expect("LNPND_BENCH_DIR names the store");
+        let messages: usize = std::env::var("LNPND_BENCH_STORED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300_000);
+        let filled = Instant::now();
+        let store = file_store_with(std::path::Path::new(&dir), messages);
+        println!(
+            "BENCH_STORE dir={dir} messages={} open_ms={}",
+            store.len(),
+            filled.elapsed().as_millis()
+        );
+        let newest = store.newest_sequence().expect("newest");
+        let walked = WalkOnly::new(&store);
+        let round = |view: &dyn PropagationStore, peer: &Peer| {
+            let tick = Instant::now();
+            view.newest_sequence().expect("newest");
+            let probe = plan_offer(peer, view, u64::MAX, OFFER_PROBE_BUDGET).expect("probe");
+            let tick_us = tick.elapsed().as_micros();
+            let link = Instant::now();
+            let offer = plan_offer(peer, view, u64::MAX, offer_budget_for_mdu(431)).expect("offer");
+            let link_us = link.elapsed().as_micros();
+            let batch = Instant::now();
+            if let Some(plan) = &offer {
+                plan_sync_batch(view, plan, &WantedIds::All, |_, _, _| true).expect("batch");
+            }
+            (tick_us, link_us, batch.elapsed().as_micros(), probe, offer)
+        };
+        for cursor in [0, newest / 2] {
+            let runtime = peer_with(cursor, 0, 256);
+            let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+            for (name, view) in [
+                ("walk", &walked as &dyn PropagationStore),
+                ("indexed", &store),
+            ] {
+                let (mut ticks, mut links, mut batches) = (Vec::new(), Vec::new(), Vec::new());
+                for _ in 0..15 {
+                    let (tick, link, batch, probe, offer) = round(view, peer);
+                    let (_, _, _, walk_probe, walk_offer) = round(&walked, peer);
+                    assert_eq!((probe, offer), (walk_probe, walk_offer));
+                    ticks.push(tick);
+                    links.push(link);
+                    batches.push(batch);
+                }
+                let (tick_median, tick_max) = median_and_max(ticks);
+                let (link_median, link_max) = median_and_max(links);
+                let (batch_median, batch_max) = median_and_max(batches);
+                println!(
+                    "BENCH_SYNC store={name} messages={} cursor={cursor} tick_us_median={tick_median} \
+                     tick_us_max={tick_max} link_up_us_median={link_median} link_up_us_max={link_max} \
+                     batch_us_median={batch_median} batch_us_max={batch_max}",
+                    store.len(),
+                );
+            }
+        }
+    }
+
+    /// Order 1370, leviculum#478: what the per-peer unhandled count costs
+    /// the core hook over a store of `LNPND_BENCH_STORED` messages (320 000,
+    /// miauhaus's count on 2026-11-02): one peer's count, as `--status`
+    /// asks it for every peer of the table on every request, and the
+    /// rotation's count for the whole table of 20, cursors spread over the
+    /// store. A measurement: it asserts only that the two counts agree. The
+    /// store lives in `LNPND_BENCH_DIR` and is kept, so a second run only
+    /// reopens it:
+    ///
+    /// ```text
+    /// LNPND_BENCH_DIR=/home/lew/scratch/1370/store \
+    ///   cargo test --release -p lnpnd --lib unhandled_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a store of hundreds of thousands of files"]
+    fn unhandled_cost_over_a_field_sized_store() {
+        use std::time::Instant;
+
+        let dir = std::env::var("LNPND_BENCH_DIR").expect("LNPND_BENCH_DIR names the store");
+        let messages: usize = std::env::var("LNPND_BENCH_STORED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(320_000);
+        let filled = Instant::now();
+        let store = file_store_with(std::path::Path::new(&dir), messages);
+        println!(
+            "BENCH_STORE dir={dir} messages={} open_ms={}",
+            store.len(),
+            filled.elapsed().as_millis()
+        );
+        let newest = store.newest_sequence().expect("newest");
+        let p = MAX_PEERS_DEFAULT as u64;
+        let cursors: Vec<u64> = (0..p).map(|k| k * newest / p).collect();
         let runtime = runtime_with_cursors(&cursors);
+        let node = PropagationNode::new(store, leviculum_lxmf::PropagationNodeConfig::default());
+        let peers = runtime.peers();
 
-        let (sorted, visits) = rotation_visits(|| runtime.unhandled_counts(&node));
-        let (walked, walk_visits) = rotation_visits(|| runtime.unhandled_counts_by_walk(&node));
+        let (mut per_peer, mut status) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let request = Instant::now();
+            for peer in &peers {
+                let one = Instant::now();
+                runtime.unhandled_toward(&node, peer).expect("a known peer");
+                per_peer.push(one.elapsed().as_micros());
+            }
+            status.push(request.elapsed().as_micros());
+        }
+        let mut rotation = Vec::new();
+        for _ in 0..5 {
+            let pass = Instant::now();
+            let counts = runtime.unhandled_counts(&node);
+            rotation.push(pass.elapsed().as_micros());
+            for peer in &peers {
+                assert_eq!(
+                    counts.get(peer).copied().unwrap_or(0) as usize,
+                    runtime.unhandled_toward(&node, peer).expect("a known peer")
+                );
+            }
+        }
+        let (peer_median, peer_max) = median_and_max(per_peer);
+        let (status_median, status_max) = median_and_max(status);
+        let (rotation_median, rotation_max) = median_and_max(rotation);
+        println!(
+            "BENCH_UNHANDLED messages={} peers={p} per_peer_us_median={peer_median} \
+             per_peer_us_max={peer_max} status_us_median={status_median} \
+             status_us_max={status_max} rotation_us_median={rotation_median} \
+             rotation_us_max={rotation_max} count_index_bytes={}",
+            node.store().len(),
+            node.store().count_index_bytes(),
+        );
+    }
 
-        let log2_n = u64::from(n.next_power_of_two().trailing_zeros());
-        let bound = n * log2_n + p * log2_n + n;
-        eprintln!("ROTATION_VISITS n={n} p={p} sorted={visits} bound={bound} walk={walk_visits}");
-        assert_eq!(sorted, walked);
-        assert_eq!(walk_visits, n * p, "positive control: the walk visits n*p");
-        assert!(visits <= bound, "{visits} visits exceed {bound}");
+    /// LV-1003, finding 2: a message that reached this node by a peer's
+    /// sync is not offered back to that peer. Before, the one cursor per
+    /// peer listed it in the very next offer to its sender, which wanted it
+    /// back as soon as it had delivered and purged it (1524's cell
+    /// `lnpnd_delivered_not_wanted_back`). The offer still steps the cursor
+    /// past it. Positive control: another peer is offered all of it.
+    #[test]
+    fn a_message_synced_from_a_peer_is_not_offered_back_to_it() {
+        use leviculum_lxmf::constants::{LXMF_OVERHEAD, STAMP_SIZE};
+        use leviculum_lxmf::PropagationNodeConfig;
+
+        let stamped = |seed: u8| {
+            let mut message = vec![seed; LXMF_OVERHEAD + 40];
+            message.extend_from_slice(&[seed.wrapping_add(1); STAMP_SIZE]);
+            message
+        };
+        let id_of = |message: &[u8]| {
+            leviculum_core::crypto::full_hash(&message[..message.len() - STAMP_SIZE])
+        };
+        let now = unix_secs();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path()).expect("storage under a fresh temp dir"),
+        );
+        let mut runtime = peer_with(0, 0, 256);
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(64_000),
+            PropagationNodeConfig {
+                stamp_cost: 0,
+                always_compute_stamp_value: false,
+                ..PropagationNodeConfig::default()
+            },
+        );
+
+        // A client upload first, then the peer's two.
+        let upload = stamped(0x10);
+        match node.accept_stamped(&upload, now, |_, _| Some(0)) {
+            UploadOutcome::Accepted {
+                duplicate: false, ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let synced = vec![stamped(0x20), stamped(0x30)];
+        let mut job = InboundSync {
+            link_id: LinkId::new([0x42; 16]),
+            remote_hash: [1; 16],
+            now,
+            messages: synced.clone(),
+            next: 0,
+            accepted: 0,
+            duplicates: 0,
+            bytes: 0,
+            invalid: 0,
+            store_failed: 0,
+        };
+        let mut out = TickOutput::empty();
+        let stored = runtime.advance_sync_resource(
+            &mut core,
+            &mut node,
+            &mut job,
+            usize::MAX,
+            &mut |_, _| Some(0),
+            &mut out,
+        );
+        assert_eq!(
+            stored.len(),
+            2,
+            "the peer's two must be stored, or the test proves nothing"
+        );
+
+        let budget = offer_budget_for_mdu(8192);
+        let newest = node.store().newest_sequence().expect("newest");
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let plan = plan_offer_toward(peer, &node, &runtime.origins, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(
+            plan.ids,
+            vec![id_of(&upload)],
+            "only the client's message is offered to the peer the others came from"
+        );
+        assert_eq!(
+            plan.cursor_target, newest,
+            "the cursor steps past what the peer sent us"
+        );
+
+        let other = record([2; 16], 9, now).into_peer();
+        let plan = plan_offer_toward(&other, &node, &runtime.origins, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(
+            plan.ids,
+            vec![id_of(&upload), id_of(&synced[0]), id_of(&synced[1])],
+            "positive control: another peer is offered all three"
+        );
+    }
+
+    /// LV-1003: an origin goes with its message, from that peer only, and
+    /// the age backstop walks the map only once it outgrew the store.
+    #[test]
+    fn an_origin_is_kept_per_peer_and_dropped_with_its_message() {
+        let peer = [0x17; 16];
+        let mut origins = Origins::default();
+        origins.note(&[1; 32], &peer, 0);
+        origins.note(&[2; 32], &peer, 20 * 86_400);
+        assert!(origins.came_from(&[1; 32], &peer));
+        assert!(
+            !origins.came_from(&[1; 32], &[0x18; 16]),
+            "from that peer only"
+        );
+        assert!(!origins.came_from(&[3; 32], &peer), "never noted");
+
+        origins.forget(&[2; 32]);
+        assert!(!origins.came_from(&[2; 32], &peer), "left the store");
+
+        let expiry = 30 * 86_400;
+        origins.prune_if_above(1, 31 * 86_400, expiry);
+        assert!(
+            origins.came_from(&[1; 32], &peer),
+            "no walk while the map is no larger than the store"
+        );
+        origins.prune_if_above(0, 31 * 86_400, expiry);
+        assert!(
+            !origins.came_from(&[1; 32], &peer),
+            "past the expiry, once it outgrew the store"
+        );
+    }
+
+    /// Order 1586: a round whose link closed during the transfer, after
+    /// the peer had answered the offer, holds the peer for a backoff step
+    /// instead of offering the same plan again on the next pass; a round
+    /// whose link closed before the transfer keeps the quick retry.
+    #[test]
+    fn a_transfer_that_broke_holds_the_peer_for_a_step() {
+        use leviculum_lxmf::peering::SYNC_BACKOFF_STEP_SECS;
+        let mut runtime = runtime_with_cursors(&[0, 0]);
+        let (broke, offering) = ([1u8; 16], [2u8; 16]);
+        for hash in [broke, offering] {
+            let peer = runtime.table.get_mut(&hash).expect("restored peer");
+            peer.note_link_established();
+        }
+
+        runtime.transferring_round_for_tests(broke, LinkId::new([0x11; 16]));
+        runtime.on_link_closed(&LinkId::new([0x11; 16]));
+        let held = runtime.peer_for_tests(&broke).expect("still peered");
+        assert!(
+            held.next_sync_attempt >= unix_secs() + SYNC_BACKOFF_STEP_SECS - 1,
+            "next attempt {} now {}",
+            held.next_sync_attempt,
+            unix_secs()
+        );
+        assert!(
+            runtime.outbound.is_none(),
+            "the round leaves nothing behind"
+        );
+
+        runtime.transferring_round_for_tests(offering, LinkId::new([0x22; 16]));
+        if let Some(sync) = runtime.outbound.as_mut() {
+            sync.sending = None;
+        }
+        runtime.on_link_closed(&LinkId::new([0x22; 16]));
+        let quick = runtime.peer_for_tests(&offering).expect("still peered");
+        assert_eq!(
+            quick.next_sync_attempt, 0,
+            "the offer phase retries at once"
+        );
     }
 }

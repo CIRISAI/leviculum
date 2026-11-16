@@ -7,8 +7,10 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{Line, PrimitiveStyle};
 
-use crate::fill::{FillRule, FillStats, Filler, Scratch};
+use crate::coverage::Coverage;
+use crate::fill::{FillRule, FillStats, Filler, Scratch, SUBPIXEL};
 use crate::fixture::{Feature, Fixture, Kind};
 use crate::stroke::{stroke_pen, Pen};
 use crate::style::{line_width, Class, LineWidths, MapTheme, Profile, Style, CASING, LINE_WIDTHS};
@@ -62,6 +64,14 @@ pub struct RenderStats {
     pub stroke: FillStats,
     /// Casings, stroked under the lines ([`Look::casing`]).
     pub casing: FillStats,
+    /// Building footprints drawn ([`Pass::building`]), their fills
+    /// counted in `fill`.
+    pub buildings: u32,
+    /// Segments of the buildings' 1 px outlines drawn.
+    pub outline: u32,
+    /// Tiles whose footprints in view were over the map core's cap and
+    /// were drawn as blocks, filled without outlines.
+    pub blocks: u32,
     /// Features skipped because the work or edge storage was too small.
     pub overflows: u32,
     /// Most vertices one feature held.
@@ -236,7 +246,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<Self, D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         let mut stats = RenderStats::default();
@@ -263,6 +273,12 @@ impl<'s, 'a> Pass<'s, 'a> {
     /// The look this pass inks by.
     pub fn look(&self) -> Look {
         self.look
+    }
+
+    /// The view in sub-pixels, (left, top, right, bottom), right and
+    /// bottom exclusive.
+    pub fn view(&self) -> (i32, i32, i32, i32) {
+        self.view
     }
 
     /// Project `f` and test it against the view, counting it when
@@ -320,7 +336,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         // A class the look leaves out is skipped as one the profile does:
@@ -381,6 +397,129 @@ impl<'s, 'a> Pass<'s, 'a> {
         Ok(())
     }
 
+    /// Draw one building footprint placed at `at` (1192): `rings` its
+    /// rings in tile units, the outer one first, `bbox` the box they lie
+    /// in, inclusive (x0, y0, x1, y1). Culled by its box before a vertex is
+    /// projected; filled in [`Class::Building`]'s colour, then, with
+    /// `outline`, each ring drawn over it as a 1 px aliased line in the
+    /// table's [`crate::style::Palette::building_edge`]. The fill samples
+    /// pixel centres without antialiasing, so an aliased line matches it,
+    /// and costs about half a 1 px stroke through the filler (the study,
+    /// section 2). Nothing in the lines-only look.
+    #[allow(clippy::too_many_arguments)]
+    pub fn building<D, C, R, P>(
+        &mut self,
+        rings: R,
+        bbox: (i32, i32, i32, i32),
+        at: Placement,
+        outline: bool,
+        target: &mut D,
+        work: &mut Work<'_>,
+        clock: &mut C,
+    ) -> Result<(), D::Error>
+    where
+        D: Coverage<Color = Rgb565>,
+        C: Clock,
+        R: Iterator<Item = P>,
+        P: Iterator<Item = (i16, i16)>,
+    {
+        if self.look.mono.is_some() {
+            return Ok(());
+        }
+        let st = &mut self.stats;
+        st.features += 1;
+        let place = |x: i32, y: i32| {
+            Point::new(
+                project(x, at.shift) + at.origin.x,
+                project(y, at.shift) + at.origin.y,
+            )
+        };
+        let (lo, hi) = (place(bbox.0, bbox.1), place(bbox.2, bbox.3));
+        let (vl, vt, vr, vb) = self.view;
+        // A pixel of room for the outline.
+        let pad = SUBPIXEL;
+        let visible = hi.x + pad >= vl && lo.x - pad < vr && hi.y + pad >= vt && lo.y - pad < vb;
+        if !visible {
+            st.culled += 1;
+            let now = clock.now();
+            st.phases.project_clip += u64::from(now.wrapping_sub(self.prev));
+            self.prev = now;
+            return Ok(());
+        }
+        let (mut n, mut nr) = (0usize, 0usize);
+        let mut fits = true;
+        'rings: for ring in rings {
+            if nr >= work.ring_ends.len() {
+                fits = false;
+                break;
+            }
+            for (x, y) in ring {
+                let Some(slot) = work.points.get_mut(n) else {
+                    fits = false;
+                    break 'rings;
+                };
+                *slot = place(i32::from(x), i32::from(y));
+                n += 1;
+            }
+            work.ring_ends[nr] = n as u16;
+            nr += 1;
+        }
+        let now = clock.now();
+        st.phases.project_clip += u64::from(now.wrapping_sub(self.prev));
+        self.prev = now;
+        if !fits {
+            st.overflows += 1;
+            return Ok(());
+        }
+        st.vertices += n as u32;
+        st.max_feature_vertices = st.max_feature_vertices.max(n as u32);
+        let palette = self.look.theme.palette();
+        let filler = &mut self.filler;
+        let mut start = 0usize;
+        let mut ok = true;
+        for &end in &work.ring_ends[..nr] {
+            let end = usize::from(end);
+            if filler.ring(&work.points[start..end]).is_err() {
+                ok = false;
+                break;
+            }
+            start = end;
+        }
+        if !ok {
+            filler.clear();
+            st.overflows += 1;
+            return Ok(());
+        }
+        st.fill += filler.fill(target, palette.area(Class::Building), FillRule::NonZero)?;
+        st.buildings += 1;
+        if outline {
+            let ink = PrimitiveStyle::with_stroke(palette.building_edge, 1);
+            let pixel = |p: Point| Point::new(p.x.div_euclid(SUBPIXEL), p.y.div_euclid(SUBPIXEL));
+            let mut start = 0usize;
+            for &end in &work.ring_ends[..nr] {
+                let end = usize::from(end);
+                let ring = &work.points[start..end];
+                start = end;
+                let Some(&last) = ring.last() else {
+                    continue;
+                };
+                let mut from = pixel(last);
+                for &p in ring {
+                    let to = pixel(p);
+                    if to != from {
+                        Line::new(from, to).into_styled(ink).draw(target)?;
+                        st.outline += 1;
+                        from = to;
+                    }
+                }
+            }
+        }
+        let now = clock.now();
+        st.phases.fill += u64::from(now.wrapping_sub(self.prev));
+        self.prev = now;
+        Ok(())
+    }
+
     /// Draw the casing of the line `f` placed at `at`, where the look has
     /// casings and the line gets one: a major or secondary road, or any
     /// line on a bridge. A caller strokes every casing of a layer before
@@ -395,7 +534,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         let line = line_width(&self.look.widths, f.class);
@@ -450,7 +589,7 @@ pub fn render<D, C>(
     clock: &mut C,
 ) -> Result<RenderStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
     let mut pass = Pass::begin(target, scratch, Look::DEFAULT, clock)?;

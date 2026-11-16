@@ -74,9 +74,14 @@
 #
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
-# file only reacts to the `event: cron` trigger it produces. The cron is
-# configured as `0 4 * * *` (04:00 UTC daily). Its run publishes the
-# forge release (726). The reviewer host may also fire this same cron
+# file only reacts to the `event: cron` trigger it produces. The cron
+# ("Nightly Build") is `5 9 * * *` (09:05 UTC daily), set on the forge with
+# `scripts/forge-cron-schedule.sh` (1513). The rule for its time: start five
+# minutes after a three-hour mark, and the whole run must end before the
+# next one; the server restarts at 00, 03, 06, 09, 12, 15, 18 and 21 UTC
+# and cancels whatever is running (see the note above `gate`). A full run
+# is about 75 minutes, so 09:05 ends around 10:20, well before 12:00. Its
+# run publishes the forge release (726). The reviewer host may also fire this same cron
 # through the Woodpecker API once the night pushes its green ref, because
 # a clock-fired run can come before the signal exists; two runs on one day
 # overwrite the same rolling release (see "What fires the publish" in
@@ -200,6 +205,17 @@ steps:
   # 4 min), which is what proves a packaging commit still builds: the amd64
   # .debs, the docs tarball and the firmware bundle from the same scripts and
   # manifests the arm64 build uses.
+  #
+  # The canceller is now named (1513): pipelines 610 and 615 (push, killed
+  # 03:00:35 and 06:00:37 UTC) carry `rpc error: code = Unavailable desc =
+  # server is shutting down` on the gate step at HH:00:01, so Codeberg's
+  # Woodpecker server restarts every three hours on the full hour, 03 and 06
+  # included. Cron pipelines 613 and 616 (started 08:01, killed 09:00:33 and
+  # 09:00:32 in build-arm64, exit 0, `Canceled`, no OOM, no timeout) show
+  # what it did to the schedule: the cron was `0 8 * * *`, and gate (about
+  # 2070 s) plus build-amd64 (about 850 s) plus build-arm64 (about 990 s)
+  # crosses 09:00 every night. The last green arm64 run, 614, was started by
+  # hand at 13:30 and ended 14:44. Hence the 09:05 cron above.
   gate:
     image: rust:bookworm
     when:
@@ -213,7 +229,11 @@ steps:
       # python3: scripts/build-deb.sh renders the manual pages the .deb
       # manifests install from. It is stdlib-only by design, so the
       # interpreter is the whole dependency.
-      - apt-get update && apt-get install -y musl-tools python3
+      - apt-get update && apt-get install -y musl-tools python3 python3-pip python3-venv
+      # loquax's package links against glibc 2.31 through cargo zigbuild
+      # (1342), so amd64 needs zig as arm64 does.
+      - python3 -m venv /opt/zigvenv && /opt/zigvenv/bin/pip install cargo-zigbuild ziglang
+      - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb
       - rustup target add x86_64-unknown-linux-musl
       # Pin the build ID + per-package DEB versions once and persist
@@ -255,7 +275,7 @@ steps:
       - python3 -m venv /opt/zigvenv && /opt/zigvenv/bin/pip install cargo-zigbuild ziglang
       - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb
-      - rustup target add aarch64-unknown-linux-musl
+      - rustup target add aarch64-unknown-linux-musl aarch64-unknown-linux-gnu
       # No re-stamp here: build-amd64 already wrote .build-id and the
       # .deb-version-* files, and this step must reuse them verbatim so
       # the two architectures ship identical version strings. The script

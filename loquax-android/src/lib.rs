@@ -24,15 +24,28 @@
 
 #[cfg(target_os = "android")]
 pub mod bitmap;
+pub mod browser;
+pub mod explore;
+pub mod friends;
+pub mod heights;
 pub mod links;
+#[cfg(target_os = "android")]
+pub mod logcat;
 pub mod mailbox;
 pub mod map;
+pub mod offline;
 pub mod pull_line;
-pub mod scan;
+// The render walk's rules (1801), host only: `just render-walk`.
+#[cfg(not(target_os = "android"))]
+pub mod render_walk;
+pub mod rooms;
 pub mod schema;
+/// The scanner's decoder, the one the desktop reads a picture of a code
+/// with too (1341).
+pub use loquax::scan;
 pub mod session;
+pub mod viewer;
 
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,13 +53,21 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::jint;
 use jni::EnvUnowned;
 
+use loquax::ui::strings::Lang;
 use schema::{Done, Event, Started, VERSION};
 use session::Session;
 
 /// The process's session, once started.
 static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
 
-fn current() -> Option<Arc<Session>> {
+/// Held for a whole start (1496), so two starts never make two sessions,
+/// while [`SESSION`] is held only to look and to put the new one in. Before,
+/// `start` held `SESSION` over the whole `Session::start`, which joins and
+/// dials for up to its budget, and every `current()` waited: `Core.code`
+/// and `Core.zoom` on the UI thread froze through a start.
+static STARTING: Mutex<()> = Mutex::new(());
+
+pub(crate) fn current() -> Option<Arc<Session>> {
     SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -58,6 +79,9 @@ fn current() -> Option<Arc<Session>> {
 /// on every rotation, the session does not. One that ended by itself (its
 /// engine died) is stopped and replaced, never handed out again.
 pub fn start(request: &[u8]) -> Vec<u8> {
+    // The structured events to logcat, before the session emits any (1655).
+    #[cfg(target_os = "android")]
+    logcat::install();
     let started = match schema::decode::<schema::Start>(request) {
         Err(error) => Started {
             v: VERSION,
@@ -65,24 +89,39 @@ pub fn start(request: &[u8]) -> Vec<u8> {
             ..Started::default()
         },
         Ok(start) => {
-            let mut slot = SESSION
+            let _starting = STARTING
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(dead) = slot.take_if(|session| session.is_over()) {
+            let (dead, held) = {
+                let mut slot = SESSION
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let dead = slot.take_if(|session| session.is_over());
+                (dead, slot.clone())
+            };
+            if let Some(dead) = dead {
                 dead.stop();
             }
-            let running = match slot.as_ref() {
-                Some(session) => Ok(Arc::clone(session)),
+            #[cfg(test)]
+            std::thread::sleep(Duration::from_millis(
+                tests::START_PAUSE_MS.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+            let running = match held {
+                Some(session) => Ok(session),
                 None => Session::start(&start).map(Arc::new),
             };
             match running {
                 Ok(session) => {
-                    *slot = Some(Arc::clone(&session));
+                    *SESSION
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(Arc::clone(&session));
                     Started {
                         v: VERSION,
                         ok: true,
                         error: None,
                         need: None,
+                        details: None,
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
                         link: session.link(),
@@ -94,6 +133,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     ok: false,
                     error: Some(error.text),
                     need: error.need.map(str::to_string),
+                    details: error.details,
                     address: None,
                     server: None,
                     link: false,
@@ -120,10 +160,29 @@ pub fn command(request: &[u8]) -> Vec<u8> {
 
 /// One [`schema::Query`]; its answer, or a [`schema::Done`] with the error.
 pub fn query(request: &[u8]) -> Vec<u8> {
-    let answer = match (current(), schema::decode::<schema::Query>(request)) {
-        (None, _) => Err("not started".to_string()),
-        (_, Err(error)) => Err(error),
-        (Some(session), Ok(query)) => session.query(query),
+    let read = |text: &str, lang: Option<String>| {
+        session::read_code(
+            text,
+            Lang::of_tag(lang.as_deref().unwrap_or_default()),
+            |_| String::new(),
+        )
+        .map(|read| schema::encode(&read))
+    };
+    // The questions no session answers are answered before the slot is
+    // looked at (1496): the UI thread's `Core.code` and `Core.zoom` never
+    // wait for it.
+    let answer = match schema::decode::<schema::Query>(request) {
+        Ok(schema::Query::Code { text, lang }) => read(&text, lang),
+        // The photo viewer's zoom (1269): the state is the app's, no
+        // session is asked.
+        Ok(schema::Query::Zoom(ask)) => Ok(viewer::answer(&ask)),
+        Ok(query) => match (current(), query) {
+            // A code read before anything runs: the first start's scanner.
+            (None, schema::Query::Lxma { text, lang }) => read(&text, lang),
+            (None, _) => Err("not started".to_string()),
+            (Some(session), query) => session.query(query),
+        },
+        Err(error) => Err(error),
     };
     answer.unwrap_or_else(|error| schema::encode(&Done::failed(error)))
 }
@@ -211,6 +270,14 @@ pub fn simulate_engine_death() -> bool {
     }
 }
 
+/// This thread's waits for the session's lock: how many, and how many of
+/// the engine's events the pump folded while they waited (1610). For the
+/// facade test.
+#[doc(hidden)]
+pub fn lock_waits() -> (u64, u64) {
+    session::lock_waits()
+}
+
 /// Stop the session, if one runs.
 pub fn stop() {
     let session = SESSION
@@ -220,48 +287,6 @@ pub fn stop() {
     if let Some(session) = session {
         session.stop();
     }
-}
-
-/// What the app's first screen says about this device: the Loquax version,
-/// and whether `home` (the app's files directory, which is its loquax home)
-/// makes it a client of a home node, with the home node's LXMF address and
-/// the last archive entry pulled.
-pub fn describe(home: &Path) -> String {
-    let state = match loquax::home::client::load_client(home) {
-        Ok(None) => "This phone holds no mailbox and reads none.".to_string(),
-        Ok(Some(key)) => match loquax::home::lxmf_address(&key) {
-            Ok(address) if mailbox::is_here(home) => format!(
-                "The mailbox {} is on this phone, last entry pulled {}.",
-                loquax::address::to_hex(&address),
-                loquax::home::client::load_cursor(home)
-            ),
-            Ok(address) => format!(
-                "Reads the mailbox {}, last entry pulled {}.",
-                loquax::address::to_hex(&address),
-                loquax::home::client::load_cursor(home)
-            ),
-            Err(error) => error,
-        },
-        Err(error) => error,
-    };
-    format!("Loquax {}\n{state}", loquax::VERSION)
-}
-
-/// `static native String describe(String home)` of `Native`: [`describe`].
-/// A panic or a JNI failure becomes a Java `RuntimeException`.
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_network_leviculum_loquax_Native_describe<'caller>(
-    mut unowned: EnvUnowned<'caller>,
-    _class: JClass<'caller>,
-    home: JString<'caller>,
-) -> JString<'caller> {
-    unowned
-        .with_env(|env| -> Result<_, jni::errors::Error> {
-            let home = home.to_string();
-            JString::from_str(env, describe(Path::new(&home)))
-        })
-        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 /// The bytes of a Java `byte[]`, empty for `null`.
@@ -406,48 +431,61 @@ pub extern "system" fn Java_network_leviculum_loquax_Native_stop<'caller>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
-    use leviculum_core::Identity;
+    /// How long a start waits before it starts the session, for the test
+    /// below: a join that dials for its budget, made short.
+    pub(crate) static START_PAUSE_MS: AtomicU64 = AtomicU64::new(0);
 
+    /// A question during a long start answers at once (1496): the start
+    /// holds its own lock, never the slot's, so `current()` does not wait
+    /// for it. Before, `start` held the slot over the whole
+    /// `Session::start` and every question waited. The control: a second
+    /// start waits for the first and gets the same session.
     #[test]
-    fn a_fresh_home_is_no_client() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let text = describe(home.path());
-        assert!(text.starts_with(&format!("Loquax {}\n", loquax::VERSION)));
+    fn a_question_during_a_long_start_answers_at_once() {
+        const PAUSE_MS: u64 = 1_500;
+        let dir = tempfile::tempdir().expect("app dir");
+        std::fs::write(dir.path().join("config"), "rendezvous_dial = off\n").expect("config");
+        let start = schema::encode(&schema::Start {
+            dir: dir.path().display().to_string(),
+            here: true,
+            lang: Some("en".to_string()),
+            ..schema::Start::default()
+        });
+        START_PAUSE_MS.store(PAUSE_MS, Ordering::SeqCst);
+        let first = {
+            let start = start.clone();
+            std::thread::spawn(move || super::start(&start))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let second = {
+            let start = start.clone();
+            std::thread::spawn(move || super::start(&start))
+        };
+        let asked = Instant::now();
+        let code = query(&schema::encode(&schema::Query::Code {
+            text: "not a code".to_string(),
+            lang: None,
+        }));
+        let list = query(&schema::encode(&schema::Query::Conversations {
+            search: None,
+        }));
+        let took = asked.elapsed();
+        START_PAUSE_MS.store(0, Ordering::SeqCst);
+        let first: Started = schema::decode(&first.join().expect("first")).expect("decode");
+        let second: Started = schema::decode(&second.join().expect("second")).expect("decode");
+        stop();
+        println!("COUNTS phone.question_during_start ms={}", took.as_millis());
         assert!(
-            text.ends_with("This phone holds no mailbox and reads none."),
-            "{text}"
+            took < Duration::from_millis(PAUSE_MS / 3),
+            "the questions waited {took:?} for a start"
         );
-    }
-
-    #[test]
-    fn a_client_names_its_home_node_and_cursor() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let identity = Identity::generate(&mut rand_core::OsRng);
-        let key: [u8; 64] = identity.public_key_bytes();
-        loquax::home::client::save_client(home.path(), &key).expect("client");
-        loquax::home::client::save_cursor(home.path(), 42).expect("cursor");
-        let address = loquax::home::lxmf_address(&key).expect("address");
-        let text = describe(home.path());
-        assert!(
-            text.ends_with(&format!(
-                "Reads the mailbox {}, last entry pulled 42.",
-                loquax::address::to_hex(&address)
-            )),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn a_damaged_client_file_is_named() {
-        let home = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            home.path().join(loquax::home::client::CLIENT_FILE),
-            "not hex\n",
-        )
-        .expect("write");
-        let text = describe(home.path());
-        assert!(text.contains(loquax::home::client::CLIENT_FILE), "{text}");
-        assert!(text.contains("not a home identity's public key"), "{text}");
+        assert!(!code.is_empty());
+        let not_started: Done = schema::decode(&list).expect("decode");
+        assert_eq!(not_started.error.as_deref(), Some("not started"));
+        assert!(first.ok && second.ok, "{first:?} {second:?}");
+        assert_eq!(first.address, second.address, "one session, not two");
     }
 }

@@ -39,6 +39,11 @@ NRF_DIR="$ROOT/leviculum-nrf"
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$ROOT/scripts/nrf-rustflags.sh"
 HOST_TARGET="$(cargo_target_dir "$ROOT")"
 NRF_TARGET_DIR="$(cargo_target_dir "$NRF_DIR")"
 NRF_TARGET="$NRF_TARGET_DIR/thumbv7em-none-eabihf/release"
@@ -216,7 +221,7 @@ for record in "${BOARDS[@]}"; do
 
     if [ "${SKIP_FIRMWARE:-0}" != 1 ]; then
         say "building the $name firmware ($features)"
-        (cd "$NRF_DIR" && cargo build --release --bin "$bin" --features "$features")
+        (cd "$NRF_DIR" && nrf_cargo build --release --bin "$bin" --features "$features")
     fi
 
     ELF="$NRF_TARGET/$bin"
@@ -373,9 +378,19 @@ for record in "${BOARDS[@]}"; do
     [ -n "$stem" ] || continue
     wanted+=("lnflash-$BUNDLE_NAME/firmware/$name/${stem}_license-agreement.txt")
 done
+# A here-string and never `printf | grep -q`: bash's printf writes a line
+# buffer at a time, so under `pipefail` that pipeline is red whenever grep
+# matches and exits before printf has written the rest, printf dying of SIGPIPE
+# (141) with the name right there in the listing (#843). It reported a present
+# THIRD-PARTY-NOTICES missing once on a loaded host (1314: the pipe form 14 red
+# of 20000 checks under `stress-ng --cpu 40`). The listing goes with the
+# message, so a red names what it compared against.
 for want in "${wanted[@]}"; do
-    printf '%s\n' "$listing" | grep -qxF "$want" \
-        || { echo "bundle is missing $want" >&2; exit 1; }
+    grep -qxF -- "$want" <<<"$listing" || {
+        echo "bundle is missing $want; the tarball lists:" >&2
+        printf '%s\n' "$listing" | sed 's/^/  /' >&2
+        exit 1
+    }
 done
 # Not just present: both halves of the notice file have to be in it. A
 # truncated or half-generated file passes a name check and fails the obligation

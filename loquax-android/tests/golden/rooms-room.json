@@ -1,0 +1,109 @@
+{
+  "v": 1,
+  "enabled": true,
+  "open": true,
+  "title": "Räume",
+  "status": "",
+  "rows": [
+    {
+      "name": "#lab",
+      "unread": 0,
+      "selected": true,
+      "initials": "L",
+      "icon_fg": "ffffff",
+      "icon_bg": "3d6fb6",
+      "public": "öffentlich"
+    }
+  ],
+  "room": "#lab",
+  "initials": "L",
+  "icon_fg": "ffffff",
+  "icon_bg": "3d6fb6",
+  "subtitle": "marcel, du",
+  "people": [],
+  "people_shown": false,
+  "people_note": "Alle, die hereinkamen oder schrieben, während du hier warst.",
+  "menu": [
+    {
+      "label": "Wer hier ist",
+      "verb": "people",
+      "index": 1
+    },
+    {
+      "label": "Raum verlassen",
+      "verb": "leave",
+      "index": 0
+    }
+  ],
+  "live": "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.",
+  "lines": [
+    {
+      "who": "",
+      "text": "du bist da",
+      "kind": "joined",
+      "ours": true,
+      "bubble": false,
+      "named": false,
+      "initials": "",
+      "icon_fg": "",
+      "icon_bg": "",
+      "time": ""
+    },
+    {
+      "who": "",
+      "text": "marcel ist da",
+      "kind": "joined",
+      "ours": false,
+      "bubble": false,
+      "named": false,
+      "initials": "",
+      "icon_fg": "",
+      "icon_bg": "",
+      "time": ""
+    },
+    {
+      "who": "marcel",
+      "text": "Moin aus Kiel",
+      "kind": "msg",
+      "ours": false,
+      "bubble": true,
+      "named": true,
+      "initials": "M",
+      "icon_fg": "ffffff",
+      "icon_bg": "3d6fb6",
+      "time": "08:00"
+    },
+    {
+      "who": "du",
+      "text": "winkt",
+      "kind": "action",
+      "ours": true,
+      "bubble": true,
+      "named": false,
+      "initials": "",
+      "icon_fg": "",
+      "icon_bg": "",
+      "time": "08:00"
+    },
+    {
+      "who": "",
+      "text": "topic: the lab",
+      "kind": "hub",
+      "ours": false,
+      "bubble": false,
+      "named": false,
+      "initials": "",
+      "icon_fg": "",
+      "icon_bg": "",
+      "time": ""
+    }
+  ],
+  "input": "",
+  "placeholder": "Nachricht",
+  "empty": "",
+  "retry": "",
+  "listed_title": "",
+  "listed": [],
+  "listed_note": "",
+  "other": ""
+}

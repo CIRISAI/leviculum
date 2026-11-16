@@ -1,0 +1,24 @@
+┌● Loquax (verbindet)────┐┌  Lew ·1e1e  Zwei Kontakte heißen Lew───────────────┐
+│▌Lew ·1e1e              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ lew ·e1e1              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Anna                   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Lew ·1e1e────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

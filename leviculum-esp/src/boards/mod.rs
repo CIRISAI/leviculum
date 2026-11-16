@@ -32,6 +32,7 @@
 //! net share one binary.
 
 pub mod heltec_v4;
+pub mod thinknode_m9;
 
 /// Runtime board metadata consumed by the shared init code.
 ///

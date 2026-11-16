@@ -1,0 +1,24 @@
+Rooms
+┌  Rooms───────────┐┌  #lab · bob, you─────────────────────────────────────────┐
+│▌#lab 🌐  public   ││    A room is live: no mailbox keeps it, there are no     │
+│                  ││   receipts and no ticks, and what you missed is gone.    │
+│                  ││                    ── you came in ──                     │
+│                  ││                    ── bob came in ──                     │
+│                  ││                                                          │
+│                  ││ bob                                                      │
+│                  ││▌a line, twenty-five bytes  10:45                         │
+│                  ││▌bob waves  10:45                                         │
+│                  ││ ── room #lab: unregistered; mode=(none); topic=(none) ── │
+│                  ││                                                          │
+│                  ││                                         hello bob  10:45 │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+└──────────────────┘└──────────────────────────────────────────────────────────┘
+┌● ────────────────────────────────────────────────────────────────────────────┐
+│▏Message                                                                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Alt-p who is here │ Alt-l leave room │ Esc back

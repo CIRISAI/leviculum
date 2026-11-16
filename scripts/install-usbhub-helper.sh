@@ -83,7 +83,7 @@ for entry in "${EXPECTED_DEVICES[@]}"; do
     vid=${rest%%:*}
     rest=${rest#*:}
     pid=${rest%%:*}
-    if echo "$LSUSB_OUT" | grep -q "$vid:$pid"; then
+    if grep -q "$vid:$pid" <<<"$LSUSB_OUT"; then
         echo "  ok: $key ($vid:$pid)"
     else
         echo "  MISSING: $key ($vid:$pid) not in lsusb (device unplugged?)"

@@ -1,0 +1,650 @@
+# The public rooms' hubs Loquax offers (1577, 1599, #232), compiled in
+# (`loquax::ui::hubs`). A hub ships when it answered: an announce or a
+# path, a link, and a WELCOME to a HELLO, published or not (Lew,
+# 2026-11-09); `source` says where it was found, a publication or "heard
+# on the mesh <date>". Nothing ships unmeasured. Measured with
+# `loquax/examples/rrc_hubs_probe.rs` over the shipped entry servers
+# (leviculum.network:4242 and the Sauerland testnet, 38.242.217.238:4242).
+# `just rrc-hubs-check` measures again and diffs against this file, so a
+# stale hash is a finding, not a surprise. No hub is connected to on its
+# own: this is the list the settings offer.
+#
+# Keys of a [[hub]]: name (what the settings show; never the protocol's
+# name), hash (its `rrc.hub` destination), rooms (what the hub's own
+# welcome named), published_rooms (what the source names), source (where
+# the hash was published, or the day it was heard on the mesh), measured
+# (the day it answered), hops (at its first hearing, or by its path when it
+# was never heard; the file is in this order, closest first). A name is
+# empty when neither the announce nor the WELCOME gave one but "hub": the
+# settings call it "Unnamed hub" with its hops.
+#
+# This list only seeds a fresh install: Loquax discovers hubs from their
+# announces (1599), and the list is what it offers before it heard any.
+# An [[unreached]] entry was published and did not answer on the day
+# named; it is not offered, and the check tries it again.
+
+[[hub]]
+name = "RNS Moscow"
+hash = "42a97b1b07147b898f78a610dfbba587"
+rooms = []
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "Cascadia"
+hash = "fcf451c9dd57fb262f30bf60ba9aa562"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "Chatsurfer"
+hash = "0de5818cbe93fedab3ce82d02750aa9c"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "CTRS"
+hash = "741da32223fa46db2f284ca9c20496b1"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "Minuteman"
+hash = "68dda18a26508d81b53fb94407882121"
+rooms = ["#lobby"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "RMAP.WORLD Hub"
+hash = "6ffeb457f58d8bd2041b3585caa9cc1e"
+rooms = ["#test"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "Save Europe"
+hash = "ceadff8d8ee0e319ec2b9b456b650c10"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "SoCal Public"
+hash = "4f07b6e366835a159519cc854a57c9f7"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "UTN Oregon"
+hash = "472c760aa181f889902959e9d6de5ac7"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 3
+
+[[hub]]
+name = "HADARC"
+hash = "e7fd7f9efd6608ca4ade879d18646eed"
+rooms = []
+published_rooms = ["general"]
+source = "https://vk2ma.github.io/HowTos"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = ""
+hash = "dd9313aea154b9deb63f95c091336249"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Chicago Offline"
+hash = "215f9cc1867ea027cdddfe459bce3033"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Cornwall UK"
+hash = "fd043546ca6ff4580f64db5f6d56c4a3"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Defunct Hub"
+hash = "a3369c931776ae4509ddffba5f5a1918"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Gothenburg SE (Swe)"
+hash = "54f16391aa3dd341450d12f5a322a5c2"
+rooms = ["#lobby"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "meshage.me Chat Hub"
+hash = "0d4c8a03e20f7c8a5dad0328e61acdf0"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Pi4"
+hash = "247a5627add233bef1f95ef84b83506e"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "Reticulum Community VIE"
+hash = "bb750bf4e4de05daf72f75d1773e6037"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "villa"
+hash = "c930a4f169417151b02d85fcfb6c837c"
+rooms = ["#villa"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 4
+
+[[hub]]
+name = "RNS Community"
+hash = "28c7c1a68c735693aa8e6b8193ed44b2"
+rooms = ["general"]
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Radio Oxford"
+hash = "5da9b708e8afda9e3f27715cf2140cee"
+rooms = []
+published_rooms = ["#radioxford"]
+source = "https://oxmesh.org/reticulum.html"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = ""
+hash = "32d9b1805a29781723da4b0b5ff2d4c8"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Cyberdelia Chat Hub"
+hash = "a1831cc6af532b65057ec4d8f93236bd"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Estonia"
+hash = "1b9a875716fc92042eabb07a2f87cfa3"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Hub 42"
+hash = "53e3ae1c2450799bee4483fde0edba1a"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Meshchat neXt"
+hash = "ef933cd2c155bbef703fdf59100598a8"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "MeshChatX"
+hash = "59ef133098538e17c1e17c6673d28c87"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "RCC-Hub Rottbitze"
+hash = "38ca57f161d0cfeadbb5be2cc586fca4"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "RootAccessChatHub"
+hash = "e78ba2ad4d455b8ae18919b3a3178ac6"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "Whatcom County Mesh Chat"
+hash = "4e66bb79ed83cc8f2c93d204804ed1b3"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 5
+
+[[hub]]
+name = "ShadowLink"
+hash = "c3fd74541dafc8b7077bc8a25a2c2302"
+rooms = []
+published_rooms = ["teskeslab"]
+source = "https://lucasteske.dev"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = ""
+hash = "6e0185211261d44972ac01db8e113009"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = "FOXDPI"
+hash = "0921dbd38ee3b530e0a2cb577027241c"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = "library-socialism"
+hash = "56690ed86078b8d57bf13187689d64dc"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = "Lipetsk Region"
+hash = "d027d787f52690b49f816859f3e13732"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = "Secret Society of Questionable Decisions"
+hash = "d16092e7652cf80a985720989d1aeb39"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = "ValleiRug.nl Hub"
+hash = "6f4fdb14fbb99c6895c74893f122ab8e"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 6
+
+[[hub]]
+name = ""
+hash = "be3af5a9e0032ec4a594c6ce06038f70"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 7
+
+[[hub]]
+name = "Fenian Central"
+hash = "d60db458ba047b85bd143173d4c33ae9"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 7
+
+[[hub]]
+name = "Hispagatos HQ"
+hash = "8d83c9001040d0cda43296caf920ea8f"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 7
+
+[[hub]]
+name = "SnakePitTest"
+hash = "268f377e005690f810770baaf5150edc"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 7
+
+[[hub]]
+name = "SPB RNS"
+hash = "ead77c9b385a0a1505ed15c75a949577"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 7
+
+[[hub]]
+name = "3moelf"
+hash = "7cfc227e2b395668a6f94acceadcf528"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "Batumi hub"
+hash = "dc5118c5312bac857dd047eb6ff99c4f"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "Hollywood Chat"
+hash = "bf7469d2c2e17427bf1569aaba7a7b9e"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "jonto-hub"
+hash = "194d9357954bd5584efb755d22f138eb"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "mtenk-rns relay"
+hash = "dc6b1e5b81dae39b4e461fd3f232a72d"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "The Chili Line"
+hash = "b7c5db395ccf6ca56326deb5f3706878"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "ValleyMesh Hub"
+hash = "df572983ecf58d3de671213e476f4051"
+rooms = ["#lobby"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 8
+
+[[hub]]
+name = "Le Salon FR"
+hash = "ba7065c8bfe43e5bb3f7a79de70af056"
+rooms = ["#general", "#radio"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 9
+
+[[hub]]
+name = "Rettui Hub"
+hash = "7e1e788b170433017ca9aad4b81ab048"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 9
+
+[[hub]]
+name = "Colorado Mesh"
+hash = "d765e919676aa0340412a1afae006553"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 10
+
+[[hub]]
+name = "NovasRedes Hub 1"
+hash = "060a6187b290bce3a8ba3df196a46007"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 10
+
+[[hub]]
+name = "NM-RNS Chat Relay"
+hash = "e55699b4e89b60331848ca824321f9b0"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 11
+
+[[hub]]
+name = "Три топора"
+hash = "dd74d7d0af1c932311bba27ffea16fac"
+rooms = ["#tri-topora"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 11
+
+[[hub]]
+name = "MBUG HUB"
+hash = "a394106e37b6b15025c50df630f56d58"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 12
+
+[[hub]]
+name = "Permanet Chat"
+hash = "082f8e4293d19281108a5d4faa52dcbe"
+rooms = ["lobby"]
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 12
+
+[[hub]]
+name = "Casual Collapse Club"
+hash = "5cb5c0542c714ed83df5a26f4729988c"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 14
+
+[[hub]]
+name = "VLADIMIR"
+hash = "ba5744bf61b9191ec3d9705c475c3234"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 14
+
+[[hub]]
+name = "EuskalReticulum"
+hash = "14d0b712d769a243e700209f6c6f5af4"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 16
+
+[[hub]]
+name = "Banana Boat"
+hash = "7a37b0aa55524ec4ffc9b1e5245002f1"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 18
+
+[[hub]]
+name = "Berenklauw"
+hash = "4663fa0e41071ac6245eee6519b40a31"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 20
+
+[[hub]]
+name = "meshpi"
+hash = "5866cdf28c19ff7dd7a670a57412401d"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 20
+
+[[hub]]
+name = "Lanaudiere"
+hash = "fca7fe6ddb42d6bab15b23646511ab56"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 23
+
+[[hub]]
+name = "PalouseMesh"
+hash = "d3f50137c81adccd7c60b58997acc9c0"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 26
+
+[[hub]]
+name = "viennahub"
+hash = "f5f4d4a572a66c2ae9ef9e0a6152772a"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 30
+
+[[hub]]
+name = "AlcoholicsAnonymousChat"
+hash = "b56058cea5ec0da0f848edc5945ce40d"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 35
+
+[[hub]]
+name = "QAF - Home Hub"
+hash = "516bfb291ca165f2f37b648d4df484de"
+rooms = []
+published_rooms = []
+source = "heard on the mesh 2026-11-09"
+measured = "2026-11-09"
+hops = 35
+
+[[unreached]]
+name = "MichMesh"
+hash = "1303a636cf76ffffcf359761f0867e37"
+published_rooms = ["#lobby"]
+source = "https://michme.sh/docs/Reticulum/Services/"
+not_reached = "2026-11-09"
+
+[[unreached]]
+name = "Amber Hubs on NomadNet"
+hash = "085b5d6ade4a19687ff9f62e8d6f257e"
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+not_reached = "2026-11-09"

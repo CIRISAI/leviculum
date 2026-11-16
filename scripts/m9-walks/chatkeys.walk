@@ -1,0 +1,30 @@
+# chatkeys.walk (order 1612): Enter inside an open chat, then Back.
+#
+# Window 23's hang walk lost one Back frame on the line (1613) and its next
+# Enter came inside the open chat, where the shared key table's Enter opens
+# the message under the cursor (1076): a detail view the M9 does not draw,
+# which its [PAGE] line called `chat`. Every Back after it closed that
+# unseen view and every Enter opened it again, five minutes on one chat
+# with every key read. Since 1612 the M9 closes such a state at once and
+# says it (`[UI] notice="unshown=detail closed"`), so one Back leaves.
+#
+# The window 23 probe of the same name opened the list's first row, a chat
+# with no message (`[OPEN] peer=f18f4927 messages=0`), where Enter has
+# nothing to open; it passed on the broken image. This one opens "Bench"
+# after an arrival, so the cursor stands on a message. On an image before
+# 1612 it fails at the last wait; from 1612 on it passes.
+#
+#   just m9-walk <rig> scripts/m9-walks/chatkeys.walk <bench elf>
+allow key_ms 2000
+
+bench arrive
+key enter
+wait page=chat
+dump in-chat
+key enter
+expect log "unshown=detail"
+dump after-enter-in-chat
+key back
+wait page=chats
+dump after-back
+idle 6

@@ -327,9 +327,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "EMB_INSERT_FAIL",
         required_keys: &["cap", "len_after_evict", "map"],
     },
+    // The transport identity. Its site also writes `node=` for periculum's
+    // fmt-log readers; the event log skips a site's `node`, so the hash
+    // rides here as `identity` (1294).
     EventSchema {
         name: "IDENTITY",
-        required_keys: &["node"],
+        required_keys: &["identity"],
     },
     EventSchema {
         name: "PATH_LOOKUP",
@@ -479,6 +482,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_HELD",
         required_keys: &["dst", "hops", "iface", "held"],
     },
+    // Announces the ingress burst limiter held through one peer link,
+    // dropped because that link died before their release (Codeberg #480,
+    // `NodeCore::handle_interface_peer_lost`). Released, each would install
+    // a path through the dead link. One line per loss that dropped any;
+    // `n` is how many, `reason` is `peer_lost`.
+    EventSchema {
+        name: "ANN_HELD_DROPPED",
+        required_keys: &["peer", "iface", "reason", "n"],
+    },
     // An announce the per-interface cap queue held past its life
     // (`QUEUED_ANNOUNCE_LIFE_MS`, 24 h) and dropped at release instead of
     // keying, as Python prunes its announce queue by `QUEUED_ANNOUNCE_LIFE`.
@@ -487,6 +499,30 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "ANN_QUEUE_STALE",
         required_keys: &["dst", "hops", "iface", "age_ms"],
+    },
+    // An own announce held back on a fresh interface so a Python peer's
+    // ingress control learns every destination (order 1320). `release_ms`
+    // is the core clock at which the interface takes its next one.
+    EventSchema {
+        name: "ANN_PACED",
+        required_keys: &["dst", "iface", "release_ms"],
+    },
+    // A pending announce rebroadcast cancelled because a copy of the SAME
+    // announce (packet hash `ph`, the entry's) was heard further on (order
+    // 1617): `reason` is `passed_on` (hops + 1, the local-rebroadcast limit
+    // reached) or `forwarded` (hops + 2 while the retransmit was still in
+    // the future). `hops` is the copy's, `iface` where it was heard.
+    EventSchema {
+        name: "ANN_REBROADCAST_CANCELLED",
+        required_keys: &["dst", "ph", "hops", "iface", "reason"],
+    },
+    // A received announce that found a targeted path response still in its
+    // grace (1262): the response stays, carrying this newer emission, and
+    // the announce's rebroadcast waits in the held slot until the response
+    // fired. `iface_out` is the requester's interface.
+    EventSchema {
+        name: "ANN_HELD_FOR_RESPONSE",
+        required_keys: &["dst", "iface_out"],
     },
     // An operator emptying the announce-cap queues (`rnpath -D`, the
     // `drop: announce_queues` RPC verb), one line per interface that held
@@ -529,6 +565,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESPONSE_TX",
         required_keys: &["len", "link", "request_id"],
     },
+    // OTA stage 1 (#235): a `/dfu` request on the management destination,
+    // decided. `from` is the link's identity hash or `none`; `reason` is
+    // `accepted`, `not-listed` or `no-identity`. The boards print the same
+    // key set as their `MGMT_DFU` line (leviculum_log_line::MgmtDfuBody).
+    EventSchema {
+        name: "MGMT_DFU",
+        required_keys: &["accepted", "from", "reason"],
+    },
     // OBS-2: periodic per-reason drop summary at the PATH_TABLE cadence (~10s).
     // Surfaces the always-on drop counters (including the high-volume overheard
     // path) without per-packet flooding.
@@ -564,6 +608,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "channel_decrypt_fail",
             "resource_full",
             "resource_compressed",
+            // +ciris (leviculum#102): an unordered link datagram shed at a
+            // full interface queue.
+            "datagram_shed",
             "total",
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.
@@ -775,10 +822,67 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // is `cap` (the table holds `max_peers`), `source` (this source holds
     // `max_peers_per_source`) or `rate` (this source registered a peer
     // inside `peer_admission_interval`). Rate-limited to
-    // one line per 10 s; `suppressed` counts the refusals in between.
+    // one line per 10 s; `suppressed` counts the refusals in between. `src`
+    // is the source's daily pseudonym (`peer_tag`, order 1678), the address
+    // only under `[logging] log_addresses = full`.
     EventSchema {
         name: "AUTO_PEER_REFUSED",
         required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
+    },
+    // TCP server admission (1190, `interfaces/tcp_admission.rs`). The accept
+    // loop paused after a failed accept: one line per 10 s, `errors` counts
+    // the failures since the last one, `fds` is `used/limit`.
+    EventSchema {
+        name: "TCP_ACCEPT_BACKOFF",
+        required_keys: &["iface", "errors", "fds", "error"],
+    },
+    // A new connection from a source (IPv4 address or IPv6 /64) that holds
+    // `max_connections_per_source` was closed right after accept; once per
+    // source per minute. `source` here and in the two events below is the
+    // source's daily pseudonym (`peer_tag`, order 1678), the address only
+    // under `[logging] log_addresses = full`.
+    EventSchema {
+        name: "TCP_SOURCE_CAPPED",
+        required_keys: &["iface", "source", "held"],
+    },
+    // The server holds `max_connections` and no silent connection could make
+    // room; once per minute.
+    EventSchema {
+        name: "TCP_TOTAL_CAPPED",
+        required_keys: &["iface", "source", "held"],
+    },
+    // An I2P peer's tunnel read nothing for longer than the stale threshold
+    // (20 s, the reference's `I2P_PROBE_AFTER*2`, I2PInterface.py:681): the
+    // mark rnstatus shows as `Tunnel Unresponsive`. `idle_ms` is the silence
+    // when it was noticed. The teardown still waits for the 110 s read
+    // timeout, so this is the early sign, not an action (1588).
+    EventSchema {
+        name: "I2P_TUNNEL_STALE",
+        required_keys: &["iface", "idle_ms"],
+    },
+    // The same tunnel read a byte again; `stale_ms` is how long it was stale.
+    EventSchema {
+        name: "I2P_TUNNEL_ACTIVE",
+        required_keys: &["iface", "stale_ms"],
+    },
+    // A connection that delivered no valid frame was closed: `reason` is
+    // `timeout` (the silent timeout in force) or `evicted` (room for a
+    // newcomer at the total cap). One line per 10 s; `suppressed` counts the
+    // closes in between.
+    EventSchema {
+        name: "TCP_SILENT_CLOSED",
+        required_keys: &["iface", "source", "after_s", "reason", "suppressed"],
+    },
+    // `[logging] log_addresses = full` is in force: from here on the log
+    // names peers by address, not by pseudonym (order 1678). Once, at start.
+    EventSchema {
+        name: "LOG_ADDRESSES_FULL",
+        required_keys: &["log_addresses"],
+    },
+    // The descriptor limit a TCP server found and raised, once per process.
+    EventSchema {
+        name: "FD_LIMIT",
+        required_keys: &["soft", "hard", "raised_from"],
     },
     // `loquax`, the LXMF messenger. The program was called lnmsg until #232
     // renamed it; its events keep the `LNMSG_` prefix until a later order
@@ -813,17 +917,95 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LNMSG_DONE",
         required_keys: &["id", "outcome", "code"],
     },
+    // Loquax's rendezvous (1196, `loquax/src/home/rendezvous.rs`): one
+    // line per change of the entry that carries a phone's or a mailbox's
+    // traffic, and the phone's path request for its mailbox on every up.
+    EventSchema {
+        name: "HOME_ABOUT",
+        required_keys: &["host", "version", "ours", "started", "devices"],
+    },
+    EventSchema {
+        name: "HOME_RENDEZVOUS",
+        required_keys: &["host", "port", "state", "entry"],
+    },
+    EventSchema {
+        name: "HOME_PATH_REQUEST",
+        required_keys: &["dst", "via"],
+    },
+    // A network change a rendezvous rotation evaluated (1298): the kind the
+    // platform said, whether it was another network, and what the rotation
+    // did (pause, redial, ask).
+    EventSchema {
+        name: "HOME_NETWORK",
+        required_keys: &["kind", "changed", "action", "entry"],
+    },
+    // The home's own record (1305, H6 of the N-home study,
+    // `docs/drafts/mailbox-for-friends-study-2026-11.md` section 6): a
+    // message archived, its proof released, an archive exchange with another
+    // home of the identity, an announce of the identity. Emitters in
+    // `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_ACCEPT",
+        required_keys: &["msg", "from", "via", "home"],
+    },
+    EventSchema {
+        name: "HOME_PROVE",
+        required_keys: &["msg", "home"],
+    },
+    EventSchema {
+        name: "HOME_SYNC",
+        required_keys: &["peer_home", "pulled", "pushed", "ratchets"],
+    },
+    EventSchema {
+        name: "HOME_ANNOUNCE",
+        required_keys: &["home", "iface", "kind"],
+    },
+    // A mailbox refused a device's request (1677): every ask of a device
+    // that is not paired, and a join whose token is unknown or expired.
+    // Emitter in `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_REFUSE",
+        required_keys: &["device", "ask", "reason"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],
     },
     EventSchema {
         name: "LNMSG_PN",
-        required_keys: &["node", "source", "cost"],
+        required_keys: &["pn", "source", "cost"],
     },
     EventSchema {
         name: "LNMSG_FETCHED",
         required_keys: &["id", "src", "bytes", "dup"],
+    },
+    EventSchema {
+        name: "ROOMS_LINK",
+        required_keys: &["hub", "state"],
+    },
+    EventSchema {
+        name: "ROOMS_WELCOME",
+        required_keys: &["hub", "version"],
+    },
+    EventSchema {
+        name: "ROOMS_LIST",
+        required_keys: &["hub", "rooms", "via", "answered", "why"],
+    },
+    EventSchema {
+        name: "ROOMS_JOIN",
+        required_keys: &["room", "ok"],
+    },
+    EventSchema {
+        name: "ROOMS_SUGGEST",
+        required_keys: &["hub", "why", "fits"],
+    },
+    EventSchema {
+        name: "BROWSE_FETCH",
+        required_keys: &["dest", "path", "state", "why"],
+    },
+    EventSchema {
+        name: "EXPLORE_OPEN",
+        required_keys: &["ask", "reason", "since_ms"],
     },
     EventSchema {
         name: "LNMSG_SYNC_DONE",
@@ -832,6 +1014,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "LNMSG_STORE_FAILED",
         required_keys: &["detail"],
+    },
+    // A packet to loquax's own delivery destination that no ratchet it
+    // holds and not the identity key opened (1185): `dst` the destination,
+    // `len` the encrypted payload, `ratchets` how many it holds, `count`
+    // how many since the start. Lost, and not proven.
+    EventSchema {
+        name: "LXMF_RX_UNDECRYPTABLE",
+        required_keys: &["dst", "len", "ratchets", "count"],
     },
     // lnpnd propagation-node events (Codeberg #384 part 1), one line per
     // accepted upload, per `/get`, per eviction. `tid` is the first 16 hex
@@ -848,6 +1038,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PN_EVICT",
         required_keys: &["tid", "bytes", "age_s", "reason"],
+    },
+    // Why a message left the store, per id, with the full transient id a
+    // sender's `/lev/status` query names it by (order 1394): `reason` is
+    // collected, evicted, expired or delivered.
+    EventSchema {
+        name: "PN_DEPART",
+        required_keys: &["id", "reason"],
+    },
+    // One `/lev/status` request: `result` is answered, refused or
+    // throttled; `ids` how many it asked for when answered.
+    EventSchema {
+        name: "PN_STATUS",
+        required_keys: &["ids", "result"],
     },
     // Peering events (Codeberg #384 part 2): one line per peer-table
     // change, per `/offer` round (either direction), per concluded or
@@ -872,6 +1075,85 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PN_REJECT",
         required_keys: &["reason", "via"],
+    },
+    // lnpnd: the role's heap census, one byte estimate per table, every
+    // ten minutes and on SIGUSR1 (order 1515, LV-1000), and the `dup`
+    // column's parts in ids against their bound (order 1558).
+    EventSchema {
+        name: "PN_CENSUS",
+        required_keys: &[
+            "occasion",
+            "peers",
+            "store_index",
+            "store_writer",
+            "sync_out",
+            "sync_in",
+            "dup",
+            "links",
+            "mailbox",
+            "config",
+            "eventbuf",
+            "tables",
+            "rss_kb",
+            "stored",
+            "processed_ids",
+            "departed_ids",
+            "origin_ids",
+            "dup_cap_ids",
+            "origin_slots",
+            "transport",
+            "transport_entries",
+            "transport_unbounded",
+            "transport_over",
+        ],
+    },
+    // lnpnd: its node's transport tables beside the census, each as
+    // `name:entries/ceiling` (order 1586): a local client keeps a client's
+    // tables, and the line names the one that grows.
+    EventSchema {
+        name: "PN_TRANSPORT",
+        required_keys: &[
+            "occasion",
+            "bytes",
+            "entries",
+            "unbounded",
+            "over",
+            "tables",
+        ],
+    },
+    // loquax-mailbox: one heap census of the mailbox's own tables, every
+    // ten minutes and on SIGUSR1 (order 1585), as PN_CENSUS is lnpnd's.
+    EventSchema {
+        name: "MAILBOX_CENSUS",
+        required_keys: &[
+            "occasion",
+            "outbox",
+            "group_outbox",
+            "sender",
+            "relations",
+            "asker",
+            "wakes",
+            "costs",
+            "pn_asks",
+            "router",
+            "engine",
+            "tables",
+            "rss_kb",
+            "nodes",
+        ],
+    },
+    // lnpnd: the message store's limit at start, and whether it is the
+    // default bounded by the host's RAM or the config's (order 1548).
+    EventSchema {
+        name: "PN_STORE_LIMIT",
+        required_keys: &["bytes", "source", "ram_mb", "index_mb"],
+    },
+    // lnpnd: an inbound sync batch had messages the store could not hold
+    // even after eviction; `offered` is the batch, `dropped` what was lost.
+    // The node declines offers until its next maintenance sweep (1294).
+    EventSchema {
+        name: "PN_STORE_FULL",
+        required_keys: &["peer", "offered", "dropped"],
     },
     EventSchema {
         name: "PN_MAILBOX",
@@ -966,6 +1248,25 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PATH_LOOP_DROP",
         required_keys: &["dst", "next_hop", "iface", "path_hops", "pkt_hops"],
+    },
+    // Order 1672: a copy of an emission we hold, refused as a route.
+    // `reason` is `longer_than_installed` (its hops beat the rebalanced
+    // `path_hops` but not `installed_hops`, the count we installed and
+    // advertised the emission at: a neighbour that learned it through us
+    // offers exactly such a copy), `proven_loop` (leviculum#852) or
+    // `next_hop_unresponsive` (a link request died on that next hop).
+    // `next_hop` is the copy's transport id, empty for a direct copy;
+    // `iface` an interface name.
+    EventSchema {
+        name: "PATH_REFUSED",
+        required_keys: &["dst", "next_hop", "iface", "hops", "path_hops", "reason"],
+    },
+    // Order 1672: a link request forwarded toward `dst` expired unproven;
+    // the path is marked unresponsive and `next_hop`'s copies of the
+    // emission it holds are refused until the destination announces anew.
+    EventSchema {
+        name: "PATH_UNRESPONSIVE",
+        required_keys: &["dst", "next_hop", "iface", "path_hops"],
     },
     // Remaining `leviculum-core` transport events.
     EventSchema {
@@ -1139,16 +1440,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_PART_DROP",
         required_keys: &["reason", "link", "state"],
     },
-    // The receive window's per-round sample. NOTE: this site emits its own
-    // `t` field, and the layer appends the relative timestamp as `t=` too,
-    // so the line carries two. A line's own stamp is its LAST `t=` (the rule
-    // `merge_event_logs` already applies), so the parsers agree -- but the
-    // round's elapsed milliseconds are shadowed and only the second `t` is
-    // readable. Declared as emitted; renaming the field is a wire change for
-    // whoever greps these lines.
+    // The receive window's per-round sample; `took_ms` is the round's
+    // elapsed milliseconds. It was `t` until 1294, beside the layer's own
+    // `t=` stamp, so a first-match parser read the round time as the
+    // line's timestamp (miauhaus, `round=1 t=161 ... t=314207`). No site
+    // may write `t` again (`no_event_site_writes_a_layer_key`).
     EventSchema {
         name: "RESOURCE_RW",
-        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "t"],
+        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "took_ms"],
     },
     // `leviculum-std` driver. ANNOUNCE_TX/ANNOUNCE_WITHHELD are the
     // peer-up announce burst (distinct from the transport's ANN_TX, which
@@ -1191,7 +1490,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["key", "value", "rnsd"],
     },
     // Which configuration lnsd runs (`lnsd.rs`, #471): the file at `path`,
-    // or the built-in default because there is none. Once at startup.
+    // or the built-in default because there is none, and whether lnsd wrote
+    // that default to `path` on this start (`written=yes|no|failed`, open
+    // question 1). Once at startup.
     EventSchema {
         name: "CONFIG",
         required_keys: &["source", "path"],
@@ -1209,6 +1510,45 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "AUTO_LAYER",
         required_keys: &["state", "reason", "lan", "servers", "bluetooth", "serial"],
+    },
+    // The servers medium's choice (`auto_servers.rs`, #471 step 3): which
+    // list entry slot `slot` dials (`chosen`, `host:port`), why
+    // (`persisted`, `drawn`, `pinned`, `failover`, or `empty` with
+    // `chosen=none` for a list of none), and the entry a fail-over left
+    // (`from`, else `none`). Once per slot at startup, again per fail-over.
+    EventSchema {
+        name: "AUTO_SERVER",
+        required_keys: &["slot", "chosen", "reason", "from"],
+    },
+    // The Bluetooth medium's verdict (`auto_bluetooth.rs`, #471 step 6):
+    // the adapter BlueZ named (`none` else), why (`present`, `no_adapter`,
+    // `powered_off`, `configured`, `not_built`), whether a section was
+    // attached and its name. Once, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_BLUETOOTH",
+        required_keys: &["adapter", "reason", "attached", "section"],
+    },
+    // The serial medium's verdict on one by-id entry (`auto_serial.rs`,
+    // #471 step 5): the board an LNode names (`none` else), the by-id name
+    // (`port`), `kind` (`lnode`, `rnode`, `bootloader`, `other`), why
+    // (`name`, `detect`, `debug_port`, `bootloader`, `not_candidate`,
+    // `held`, `talking`, `no_answer`, `configured`, `no_access`,
+    // `open_failed`, `not_built`), whether a section was attached and its
+    // name, and who holds the port (`pid:comm`, `unknown`, `none` when not
+    // `held`; 1567). Once per entry, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_SERIAL",
+        required_keys: &[
+            "board", "port", "kind", "reason", "attached", "section", "holder",
+        ],
+    },
+    // A client tool's attach (`instance.rs`, `find_or_start`, #471 step 4):
+    // `found=yes` when a shared instance answered, `started=yes` with the
+    // child lnsd's pid when none did and the tool started one, and the
+    // channel (`via=unix|tcp`). Once per tool start.
+    EventSchema {
+        name: "INSTANCE",
+        required_keys: &["via", "pid"],
     },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
@@ -1677,7 +2017,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5763`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:6040`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the
@@ -2050,6 +2390,30 @@ pub fn install_global_subscriber_to_file(default_filter: &str, path: &std::path:
     }
 }
 
+/// The function [`install_line_subscriber`] hands each line to.
+static LINE_HOOK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// The structured lines of the targets starting with `target_prefix`,
+/// each handed to `hook` as it is rendered (1655, walk 9, 48): the phone
+/// has no terminal and no `LEVICULUM_EVENT_LOG`, so its events went
+/// nowhere, and a walk could not read `ROOMS_LINK` or `ROOMS_LIST`. The
+/// phone's hook writes each to logcat. Installs the global subscriber
+/// with the event layer alone, filtered to those targets so another
+/// crate's events cost no rendering; whether it did (a second call, or
+/// another subscriber first, keeps what is there).
+pub fn install_line_subscriber(target_prefix: &'static str, hook: fn(&str)) -> bool {
+    if LINE_HOOK.set(hook).is_err() {
+        return false;
+    }
+    let targets = tracing_subscriber::filter::filter_fn(move |meta: &Metadata<'_>| {
+        meta.target().starts_with(target_prefix)
+    });
+    Registry::default()
+        .with(layer().with_filter(targets))
+        .try_init()
+        .is_ok()
+}
+
 /// The layer registered into the global subscriber chain.  Driven by
 /// the active-handles list above.
 pub struct EventLogLayer {
@@ -2208,6 +2572,12 @@ impl EventLogLayer {
                 sink.write(t_ms, v);
             }
             sink.write(t_ms, line);
+        }
+        if let Some(hook) = LINE_HOOK.get() {
+            for v in &field_violation_lines {
+                hook(v);
+            }
+            hook(line);
         }
     }
 }

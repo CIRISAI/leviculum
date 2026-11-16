@@ -71,16 +71,21 @@ pub mod announce;
 pub mod attachments;
 pub mod constants;
 pub mod control;
+pub mod lev;
+pub mod lev_position;
+pub mod lev_status;
 pub mod message;
 pub mod msgpack;
 pub mod node;
 pub mod paper;
 pub mod peering;
+pub mod processed_ids;
 pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
 pub mod propagation_store;
 pub mod reaction;
+pub mod relay;
 pub mod reply;
 pub mod router;
 pub mod stamp;
@@ -96,9 +101,10 @@ pub use control::{
     encode_control_ack, encode_control_error, ControlNodeStats, ControlPeerStats, ControlResponse,
     CONTROL_ASPECTS, HOPS_UNKNOWN, STATS_GET_PATH, SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
 };
+pub use lev_status::{DepartureReason, MessageStatus, LEV_STATUS_PATH};
 pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{
-    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection,
+    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundProof, InboundRejection,
     IncomingResourceTransfer, LxmfNode, LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent,
     LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend, SubmissionId,
 };
@@ -122,9 +128,10 @@ pub use propagation_client::{
     PROPAGATION_ASPECT,
 };
 pub use propagation_node::{
-    Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PreparedFetch,
-    PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS,
-    PN_META_NAME,
+    dup_caps, Departure, DupCounts, Eviction, EvictionReason, FetchPlan, FetchSource, GetError,
+    GetOutcome, PreparedFetch, PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome,
+    DUP_IDS_FLOOR, DUP_IDS_PER_STORED, MAX_EXPIRED_PER_TICK, MESSAGE_EXPIRY_SECS, PN_META_NAME,
+    STOCK_PEER_MIN_STAMP_VALUE,
 };
 pub use propagation_store::{
     ConfirmedPurge, MemoryPropagationStore, PropagationBodyStore, PropagationStore, StoredMessage,

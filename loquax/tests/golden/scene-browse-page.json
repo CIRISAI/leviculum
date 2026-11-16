@@ -1,0 +1,449 @@
+{
+  "browse": {
+    "address": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "browser_address"
+        },
+        "resource": "address",
+        "role": "text_field",
+        "selected": false
+      },
+      "activate": {
+        "enabled": true,
+        "intent": "Activate(Address)",
+        "label_key": "browser_edit"
+      },
+      "cursor": null,
+      "editing": false,
+      "go": {
+        "enabled": true,
+        "intent": "Go { url: None }",
+        "label_key": "browser_go"
+      },
+      "hint": {
+        "args": [],
+        "key": "browser_address_hint"
+      },
+      "id": "address",
+      "value": "Marcel's node"
+    },
+    "help": false,
+    "names": null,
+    "page": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Marcel's node"
+        },
+        "resource": "page",
+        "role": "page",
+        "selected": false
+      },
+      "first": 0,
+      "focus": null,
+      "id": "page",
+      "lines": [
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": "#bbbbbb",
+              "bold": false,
+              "fg": "#222222",
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "Sample Page                                         "
+          }
+        ],
+        [],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "This is a plain paragraph that should wrap when the"
+          }
+        ],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "render width is narrow enough to force a hard break"
+          }
+        ],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "across several lines of output."
+          }
+        ],
+        [],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "Links:"
+          }
+        ],
+        [
+          {
+            "field": null,
+            "link": 1,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": "#00afff",
+              "italic": false,
+              "reverse": false,
+              "underline": true
+            },
+            "text": "• Alpha"
+          }
+        ],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "  "
+          },
+          {
+            "field": null,
+            "link": 2,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": "#00afff",
+              "italic": false,
+              "reverse": false,
+              "underline": true
+            },
+            "text": "• Beta"
+          }
+        ],
+        [],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "────────────────────────────────────────────────────"
+          }
+        ],
+        [],
+        [],
+        [],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": "#999999",
+              "bold": false,
+              "fg": "#111111",
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "  Second Section                                    "
+          }
+        ],
+        [],
+        [
+          {
+            "field": null,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "  Name: "
+          },
+          {
+            "field": 1,
+            "link": null,
+            "matched": null,
+            "style": {
+              "bg": null,
+              "bold": false,
+              "fg": null,
+              "italic": false,
+              "reverse": false,
+              "underline": false
+            },
+            "text": "                        "
+          }
+        ],
+        []
+      ],
+      "total": 18
+    },
+    "places": null,
+    "state": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [
+              2
+            ],
+            "key": "browser_hops"
+          },
+          "resource": "chip_hops",
+          "role": "chip",
+          "selected": false
+        },
+        "id": "chip_hops",
+        "text": {
+          "args": [
+            2
+          ],
+          "key": "browser_hops"
+        }
+      }
+    ],
+    "status": null,
+    "toast": null,
+    "top_bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Marcel's node"
+        },
+        "resource": "top_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": false,
+          "intent": "Forward",
+          "label_key": "browser_forward"
+        },
+        {
+          "enabled": true,
+          "intent": "Reload",
+          "label_key": "browser_reload"
+        },
+        {
+          "enabled": true,
+          "intent": "Bookmark { on: true }",
+          "label_key": "browser_bookmark"
+        },
+        {
+          "enabled": true,
+          "intent": "Identify { on: true }",
+          "label_key": "browser_identify"
+        }
+      ],
+      "id": "top_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "Back",
+            "label_key": "browser_back"
+          },
+          "avatar": {
+            "site": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+          }
+        }
+      },
+      "title": {
+        "raw": "Marcel's node"
+      }
+    }
+  },
+  "card": null,
+  "chat": null,
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": "browse",
+  "sheet": null,
+  "tabs": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "tab_chats"
+      },
+      "resource": "tabs",
+      "role": "tab_bar",
+      "selected": false
+    },
+    "active": "Explore",
+    "id": "tabs",
+    "items": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_chats"
+          },
+          "resource": "tab_chats",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Chats)",
+          "label_key": "tab_chats"
+        },
+        "badge": null,
+        "id": "Chats",
+        "label": {
+          "args": [],
+          "key": "tab_chats"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "map"
+          },
+          "resource": "tab_map",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Map)",
+          "label_key": "map"
+        },
+        "badge": null,
+        "id": "Map",
+        "label": {
+          "args": [],
+          "key": "map"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": true
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
+      }
+    ]
+  },
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Marcel's node"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "?",
+          "ring": null
+        },
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
+      }
+    },
+    "title": {
+      "raw": "Marcel's node"
+    }
+  },
+  "whereabouts": null
+}

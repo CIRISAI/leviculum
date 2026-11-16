@@ -9,10 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::sync_ext::MutexRecover;
 
-use tokio::sync::mpsc;
-
 use leviculum_core::link::LinkId;
-use leviculum_core::transport::TickOutput;
 use leviculum_core::SendError;
 
 use super::StdNodeCore;
@@ -50,7 +47,7 @@ pub struct LinkHandle {
     /// Shared handle to the core node
     inner: Arc<Mutex<StdNodeCore>>,
     /// Channel for dispatching actions to the event loop
-    action_dispatch_tx: mpsc::Sender<TickOutput>,
+    action_dispatch_tx: super::ActionTx,
     /// Whether the handle is closed
     closed: bool,
 }
@@ -60,7 +57,7 @@ impl LinkHandle {
     pub(crate) fn new(
         link_id: LinkId,
         inner: Arc<Mutex<StdNodeCore>>,
-        action_dispatch_tx: mpsc::Sender<TickOutput>,
+        action_dispatch_tx: super::ActionTx,
     ) -> Self {
         Self {
             link_id,
@@ -154,6 +151,8 @@ impl LinkHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviculum_core::transport::TickOutput;
+    use tokio::sync::mpsc;
 
     use super::super::ReticulumNodeBuilder;
 
@@ -162,7 +161,7 @@ mod tests {
     // out from under the node.
     fn make_node_and_inner() -> (
         Arc<Mutex<StdNodeCore>>,
-        mpsc::Sender<TickOutput>,
+        super::super::ActionTx,
         mpsc::Receiver<TickOutput>,
         tempfile::TempDir,
     ) {
@@ -173,7 +172,7 @@ mod tests {
             .expect("build_sync");
         let inner = node.inner();
         let (tx, rx) = mpsc::channel(16);
-        (inner, tx, rx, td)
+        (inner, super::super::ActionTx::detached(tx), rx, td)
     }
 
     #[tokio::test]
@@ -247,7 +246,11 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TickOutput>(1);
         tx.try_send(TickOutput::empty()).expect("fill the one slot");
 
-        let mut handle = LinkHandle::new(link_id, Arc::clone(&inner), tx);
+        let mut handle = LinkHandle::new(
+            link_id,
+            Arc::clone(&inner),
+            super::super::ActionTx::detached(tx),
+        );
         let task = tokio::spawn(async move { handle.close().await });
         // Let the task run until it parks on the full channel.
         for _ in 0..10 {
@@ -283,7 +286,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<TickOutput>(1);
         drop(rx);
 
-        let handle = LinkHandle::new(link_id, inner, tx);
+        let handle = LinkHandle::new(link_id, inner, super::super::ActionTx::detached(tx));
 
         // Send fails because there's no link, so dispatch channel
         // closure is not reached, but Send(NoLink) is returned first

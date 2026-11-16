@@ -79,11 +79,11 @@ impl Latitude {
                     "S" => Hemisphere::South,
                     _ => return Err("Latitude hemisphere field has wrong format!"),
                 };
-                let degrees = lat[..2]
+                let degrees = crate::common::field(lat, ..2)
                     .parse::<u8>()
                     .map_err(|_| "Wrong latitude field format")?;
-                let min_sec =
-                    crate::fixed::f64_from_str(&lat[2..]).ok_or("Wrong latitude field format")?;
+                let min_sec = crate::fixed::f64_from_str(crate::common::field(lat, 2..))
+                    .ok_or("Wrong latitude field format")?;
                 let minutes = min_sec as u8;
                 let seconds = ((min_sec - minutes as f64) * 60f64) as f32;
                 Ok(Some(Latitude {
@@ -184,11 +184,11 @@ impl Longitude {
                     "W" => Hemisphere::West,
                     _ => return Err("Longitude hemisphere field has wrong format!"),
                 };
-                let degrees = lon[..3]
+                let degrees = crate::common::field(lon, ..3)
                     .parse::<u8>()
                     .map_err(|_| "Wrong longitude field format")?;
-                let min_sec =
-                    crate::fixed::f64_from_str(&lon[3..]).ok_or("Wrong longitude field format")?;
+                let min_sec = crate::fixed::f64_from_str(crate::common::field(lon, 3..))
+                    .ok_or("Wrong longitude field format")?;
                 let minutes = min_sec as u8;
                 let seconds = ((min_sec - minutes as f64) * 60f64) as f32;
                 Ok(Some(Longitude {

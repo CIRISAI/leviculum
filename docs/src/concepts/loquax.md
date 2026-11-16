@@ -30,9 +30,19 @@ daemon" has to re-derive the argument from nothing.
 - [Conversation storage](loquax-storage.md) — SQLite, the schema, retention.
 - [The mailbox and who you talk to](loquax-mailbox.md) — propagation-node
   policy, trust, contacts and names.
+- [Reaching the mailbox from anywhere](loquax-reachability.md): the
+  ladder of ways from the same machine to the relayed rendezvous, the
+  race that keeps the most direct one, and the slices (widened
+  2026-11-04, Lew).
+- [Read receipts](loquax-read-receipts.md) and
+  [receipts for propagated post](loquax-propagation-receipts.md): the
+  `lev` namespace, what a message's ticks claim and who confirms them.
 - [The map](loquax-map.md): telemetry positions in the conversation and
   on a map, the renderer shared by the terminal, the GUI and the M9, and
   the slices (decided 2026-10-27, Lew).
+- [Tracks on the map](loquax-tracks.md): each peer's current movement
+  as lines, everything older collapsed into places, and the time window
+  (decided 2026-11-03, Lew).
 
 ## 1. What the program is
 
@@ -60,15 +70,14 @@ stamp-validation scheduling, and the two client modules Loquax is built on
 keep hosting out in their own headers
 (`leviculum-lxmf/src/router/propagation_runtime.rs:3-5`,
 `leviculum-lxmf/src/propagation_client.rs:5-8`). Hosting is a separate
-program and a separate argument — and it now exists: the channel design record
-([Public channels over LXMF](public-channels.md)) reopens hosting,
-because the channel retrieval side only works on nodes we run.
+program and a separate argument, and it now exists as `lnpnd`
+([An LXMF propagation node on a board](propagation-node-on-a-board.md)).
 
 ### The name
 
-The house convention is one `ln*` counterpart per reference tool
-([Client tools](client-tools.md), "A counterpart for every reference
-tool"), and the existing family is `lnsd`, `lnstatus`, `lncp`, `lnomad`.
+The house tools carry an `ln*` name, and a counterpart of a reference
+tool exists when a user or a test needs one; the existing family is `lnsd`,
+`lnstatus`, `lncp`, `lnomad`.
 There is no single reference tool to be a counterpart of: LXMF messaging in
 the reference world lives inside NomadNet and Sideband, not in a standalone
 utility.
@@ -105,7 +114,7 @@ This runs on machines from a Raspberry Pi upward, which sets a few hard
 numbers.
 
 **Memory.** The whole model plus the visible window, not the whole history.
-`lnomad`'s eager full-page layout (`lnomad/src/app/model.rs:690-714`) is
+`lnomad`'s eager full-page layout (`lnomad/src/app/model.rs:780-804`) is
 acceptable for a page and not for a conversation. Attachments in a
 byte-budgeted cache, not a count-budgeted one
 (`lnomad/src/image_cache.rs:11-14`).

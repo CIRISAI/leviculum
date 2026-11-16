@@ -1,0 +1,103 @@
+[package]
+name = "loquax-m9"
+# Versioned on its own, like loquax, whose frontend on the ThinkNode M9
+# this is.
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Loquax on the ThinkNode M9: the scene drawn in cells through mousefood, and the key table"
+# A library for the M9 firmware and its host goldens, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Slice one of docs/src/concepts/handheld-messenger.md, "The M9 frontend:
+# the plan, measured": the scene renderer as a crate the firmware and the
+# host both build. `no_std` plus `alloc` always; `just m9-render-no-std`
+# checks it for thumbv7em-none-eabihf and the M9's xtensa-esp32s3-none-elf.
+[features]
+default = []
+# No `framebuffer` (mousefood's own 153,600 B heap frame) since 1532: the
+# renderer makes mousefood's backend for each draw, in the size the draw is
+# set in, and a frame of mousefood's own would start blank on every one.
+# The cells draw straight into the caller's `DrawTarget`, the panel's frame.
+# The M9 on the host (1530): `loquax-m9-sim`, the board's screens, scene,
+# renderer and page and key logic over a memory flash, headless (`--keys`,
+# `--dump`, `--text`). `std` for the bin only; the library stays `no_std`
+# (`just m9-render-no-std` builds it without features). `loquax/history`
+# for the 1489 fixture (`loquax/tests/support/real_store.rs`), which
+# `--store real` writes into the board's store.
+sim = [
+    "loquax/history",
+    "dep:leviculum-core",
+    "dep:leviculum-log-line",
+    "dep:png",
+]
+# The sim's window (1530): the panel at 2x or 3x, the host's keys as the
+# M9's. winit opens X11 and Wayland with dlopen, which a musl-static
+# binary cannot, so it builds for the host's own triple, as `loquax gui`
+# does (`just m9-sim`); headless needs only `sim`.
+sim-window = ["sim", "dep:winit", "dep:softbuffer"]
+
+[[bin]]
+name = "loquax-m9-sim"
+path = "src/bin/loquax-m9-sim/main.rs"
+required-features = ["sim"]
+
+[dependencies]
+# The messenger core: the scene, its catalogue, the key table and the
+# intents. Without `std` it is `no_std` plus `alloc` (`just
+# loquax-core-no-std`).
+# `mapnames` (1565): the phone's label pass, its rule, masks, halos and
+# paint, without the cosmic-text typesetter, which needs `std`.
+loquax = { path = "../loquax", default-features = false, features = ["mapnames"] }
+# Styled lines, colour tokens, the delivery glyph table and the key events.
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The styled-line bridge to ratatui, without the terminal.
+leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", default-features = false }
+# ratatui without a backend: mousefood is the backend. The 2026-10-25
+# decision (docs/src/concepts/gui-toolkit.md, "Decision").
+ratatui = { version = "0.30.2", default-features = false }
+# `fonts` are the Unicode atlases (umlauts, Greek, Cyrillic, the box
+# runs); the M9 sets its cells in the 10x20, 32 x 12 on the 320 x 240
+# panel (src/font.rs, 1428). Not `framebuffer`, above.
+mousefood = { version = "0.5.3", default-features = false, features = ["fonts"] }
+embedded-graphics = "0.8"
+# The map (slice seven, 1375): the model's view drawn by the map core's
+# filler straight into the panel, `no_std` both (`just map-core-no-std`).
+leviculum-map = { path = "../leviculum-map" }
+leviculum-mapfill = { path = "../leviculum-mapfill" }
+# The map's names in Fira Sans (1565, `src/glyphs.rs`): ab_glyph's outline
+# reader and rasteriser, `no_std` with `libm`. cosmic-text, the phone's
+# shaper, needs `std`. The release image grew by 482,368 B with 1565
+# (3,378,848 to 3,861,216): the face's 440,984 B and 41,384 B of code,
+# ab_glyph, the name pass, the casings and the buildings together.
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
+libm = "0.2"
+# The position a fixture's GNSS fix and its friends' shares are read in.
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
+# The sim's (1530): the 1489 fixture's messages signed as the home packs
+# them, the board's log line shape (the firmware's own crate, as
+# leviculum-esp reaches it), the PNG dumps, the window.
+leviculum-core = { path = "../leviculum-core", optional = true }
+leviculum-log-line = { path = "../leviculum-nrf/log-line", optional = true }
+png = { version = "0.18", optional = true }
+winit = { version = "0.30", optional = true, default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4", optional = true, default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+
+[dev-dependencies]
+# The goldens draw the ugly store's model (loquax/tests/support/ugly_store.rs).
+loquax = { path = "../loquax", features = ["history"] }
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
+leviculum-std = { path = "../leviculum-std" }
+# 1415: tests/home.rs makes identities and LXMF messages of its own.
+leviculum-core = { path = "../leviculum-core" }
+rand_core = { workspace = true, features = ["getrandom"] }
+tempfile = "3"
+png = "0.18"
+# 1630: tests/oplog.rs drains a forget into the board's send ring model.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }

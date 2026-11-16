@@ -75,6 +75,7 @@ pub mod media;
 pub mod postmortem;
 pub mod record_store;
 pub mod seams;
+pub mod thread_watch;
 pub mod time_floor;
 
 #[cfg(test)]

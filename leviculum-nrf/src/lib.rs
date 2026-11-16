@@ -89,6 +89,10 @@ pub mod name;
 /// engine, over the record-log adapters of `leviculum-pn-store`.
 #[cfg(feature = "softdevice")]
 pub mod pn;
+pub mod position;
+// The 8 s off and the boot-time factory reset (order 1511).
+#[cfg(feature = "softdevice")]
+pub mod power;
 pub mod qspi;
 // The LoRa transceiver driver this build links, behind one set of names
 // for `lora`. Documented inside, where its links resolve.
@@ -98,6 +102,9 @@ pub mod radio_store;
 /// region `memory.x` reserves behind the image. Nothing is stored in it yet —
 /// the module carries the mount and the bench instrument that exercises it.
 pub mod record_store;
+/// The board's `/dfu` verb (OTA stage 1, #235): enter BLE DFU on an
+/// allow-listed command from the mesh.
+pub mod remote_dfu;
 pub mod remote_status;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's
@@ -499,6 +506,7 @@ pub fn log_stack(tag: &str) {
 pub async fn stack_watermark_task() {
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+        leviculum_firmware::thread_watch::beat_now();
         log_stack("tick");
     }
 }
@@ -562,11 +570,17 @@ pub fn set_panic_led(port: u8, pin: u8, active_low: bool) {
 /// `dirty` is part of the stamp, not decoration: two images built from the
 /// same commit with different working trees are different images, and a rig
 /// that confirmed only the sha would call them the same one (Codeberg #343).
+///
+/// `version` is the crate's, the number scripts/bump-touched.py moves at
+/// every landing that touched this firmware (1226). It comes last, so every
+/// reader that matches `git_sha=<sha> dirty=<bool>` reads it unchanged.
 pub const FW_BUILD_STAMP: &str = concat!(
     "git_sha=",
     env!("LEVICULUM_GIT_SHA"),
     " dirty=",
-    env!("LEVICULUM_GIT_DIRTY")
+    env!("LEVICULUM_GIT_DIRTY"),
+    " version=",
+    env!("CARGO_PKG_VERSION")
 );
 
 static HARDFAULT_LED_ARMED: AtomicBool = AtomicBool::new(false);
@@ -642,6 +656,10 @@ pub fn log_boot_diagnostics(
     log_panic_count();
     leviculum_firmware::boot_trace::log_prev(boot);
     log_reset_reason(boot.reset_reason);
+    // `WAKE reason=` and, on a boot that found the button held,
+    // `FACTORY_RESET done=` (order 1511).
+    #[cfg(feature = "softdevice")]
+    power::log_banner(boot.reset_reason);
     boot_count::log_banner(boot_count);
     log_irq_priorities();
     // Shared boot/query formatter: the same block is retrievable at any

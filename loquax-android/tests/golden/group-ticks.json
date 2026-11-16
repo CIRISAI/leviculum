@@ -1,0 +1,180 @@
+{
+  "info_one_tick": [
+    {
+      "label": "An",
+      "value": "Familie"
+    },
+    {
+      "label": "Gesendet",
+      "value": "Heute · 08:55"
+    },
+    {
+      "label": "Status",
+      "value": "Angekommen"
+    },
+    {
+      "label": "Gruppe",
+      "value": "Bei 2 von 2 angekommen"
+    },
+    {
+      "label": "Gelesen",
+      "value": "Von 0 von 2 gelesen"
+    },
+    {
+      "label": "Anna",
+      "value": "Auf dem Gerät · Heute · 08:51"
+    },
+    {
+      "label": "Ben",
+      "value": "Angekommen · Heute · 08:50"
+    },
+    {
+      "label": "Größe",
+      "value": "0,1 KB"
+    }
+  ],
+  "info_two_ticks": [
+    {
+      "label": "An",
+      "value": "Familie"
+    },
+    {
+      "label": "Gesendet",
+      "value": "Heute · 08:50"
+    },
+    {
+      "label": "Status",
+      "value": "Auf den Geräten"
+    },
+    {
+      "label": "Gruppe",
+      "value": "Bei 2 von 2 angekommen"
+    },
+    {
+      "label": "Gelesen",
+      "value": "Von 0 von 2 gelesen"
+    },
+    {
+      "label": "Anna",
+      "value": "Auf dem Gerät · Heute · 08:51"
+    },
+    {
+      "label": "Ben",
+      "value": "Auf dem Gerät · Heute · 08:52"
+    },
+    {
+      "label": "Größe",
+      "value": "0,1 KB"
+    }
+  ],
+  "rows": [
+    {
+      "accuracy": null,
+      "at": 1799999400,
+      "body": "Brot ist da",
+      "cadence_s": 0,
+      "chips": [],
+      "day": "Heute",
+      "files": [],
+      "fix_at": null,
+      "id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "invite_group": "",
+      "invite_join": false,
+      "invite_state": "",
+      "invite_title": "",
+      "invite_trust": "",
+      "joins_after": false,
+      "joins_before": false,
+      "key": 1,
+      "lat_e6": null,
+      "late": "",
+      "live": "",
+      "liveness": "",
+      "lon_e6": null,
+      "meta": true,
+      "newest": false,
+      "note": false,
+      "ours": true,
+      "photo": "",
+      "photo_bytes": 0,
+      "photo_h": 0,
+      "photo_w": 0,
+      "photo_words": "",
+      "place": null,
+      "position_words": "",
+      "progress_percent": 0,
+      "progress_words": "",
+      "quote": null,
+      "quote_ours": null,
+      "quote_to": null,
+      "read_at": 0,
+      "since": 0,
+      "stale_at": null,
+      "state": "delivered",
+      "state_words": "Auf den Geräten",
+      "updates": 0,
+      "voice_duration": "",
+      "voice_levels": [],
+      "voice_mode": 0,
+      "voice_ms": 0,
+      "voice_playable": false,
+      "voice_playing": false,
+      "voice_words": "",
+      "writer": ""
+    },
+    {
+      "accuracy": null,
+      "at": 1799999700,
+      "body": "Wer kommt mit?",
+      "cadence_s": 0,
+      "chips": [],
+      "day": "",
+      "files": [],
+      "fix_at": null,
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "invite_group": "",
+      "invite_join": false,
+      "invite_state": "",
+      "invite_title": "",
+      "invite_trust": "",
+      "joins_after": false,
+      "joins_before": false,
+      "key": 2,
+      "lat_e6": null,
+      "late": "",
+      "live": "",
+      "liveness": "",
+      "lon_e6": null,
+      "meta": true,
+      "newest": true,
+      "note": false,
+      "ours": true,
+      "photo": "",
+      "photo_bytes": 0,
+      "photo_h": 0,
+      "photo_w": 0,
+      "photo_words": "",
+      "place": null,
+      "position_words": "",
+      "progress_percent": 0,
+      "progress_words": "",
+      "quote": null,
+      "quote_ours": null,
+      "quote_to": null,
+      "read_at": 0,
+      "since": 0,
+      "stale_at": null,
+      "state": "arrived",
+      "state_words": "Angekommen",
+      "updates": 0,
+      "voice_duration": "",
+      "voice_levels": [],
+      "voice_mode": 0,
+      "voice_ms": 0,
+      "voice_playable": false,
+      "voice_playing": false,
+      "voice_words": "",
+      "writer": ""
+    }
+  ]
+}

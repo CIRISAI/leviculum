@@ -51,12 +51,17 @@ STUBS="$WORK/stubs"
 mkdir -p "$STUBS"
 cat >"$STUBS/cargo" <<'EOF'
 #!/usr/bin/env bash
-# metadata: where the fixture's target directory is. build: a placeholder
-# where cargo would have written the artefact.
+# metadata: where the fixture's target directory and workspace root are,
+# and no packages, so nrf-rustflags.sh's per-dependency remaps (order 1620)
+# come out empty.
+# build: a placeholder where cargo would have written the artefact, and a
+# line saying which firmware rustflags it was handed.
 case "$1" in
-metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
+metadata) printf '{"target_directory":"%s","workspace_root":"%s","packages":[]}\n' "$FIXTURE_TARGET" "$PWD" ;;
 build)
     echo "$*" >>"$FIXTURE_TARGET/cargo-builds.log"
+    [ "${3:-}" = lnflash ] ||
+        echo "$4 ${CARGO_TARGET_THUMBV7EM_NONE_EABIHF_RUSTFLAGS:-}" >>"$FIXTURE_TARGET/cargo-rustflags.log"
     if [ "${3:-}" = lnflash ]; then
         out="$FIXTURE_TARGET/x86_64-unknown-linux-musl/release/lnflash"
         mkdir -p "$(dirname "$out")"
@@ -86,16 +91,27 @@ cp "${@: -2:1}" "${@: -1}"
 EOF
 chmod +x "$STUBS"/*
 
+# Where the firmware build sees the fixture tree: the fixed path of
+# scripts/nrf-rustflags.sh when this host has unprivileged user namespaces,
+# else the tree itself (BUILT_AT is set per case in setup).
+if unshare --user --map-root-user --mount true 2>/dev/null; then
+    CANON_BUILD=/mnt/leviculum
+else
+    CANON_BUILD=""
+fi
+
 # --- The fixture tree -------------------------------------------------------
 VERSION="0.10.0-dev"
 
 setup() { # <case>
     TREE="$WORK/$1/tree"
+    BUILT_AT="${CANON_BUILD:-$TREE}"
     FIXTURE_TARGET="$WORK/$1/cargo-target"
     mkdir -p "$TREE/scripts" "$TREE/leviculum-nrf/tools" "$TREE/lnflash/payload" \
         "$FIXTURE_TARGET/thumbv7em-none-eabihf/release"
     cp "$BUNDLE_SH" "$TREE/scripts/lnflash-bundle.sh"
     cp "$REPO/scripts/cargo-target-dir.sh" "$TREE/scripts/"
+    cp "$REPO/scripts/nrf-rustflags.sh" "$TREE/scripts/"
     printf '[workspace.package]\nversion = "%s"\n' "$VERSION" >"$TREE/Cargo.toml"
     printf '/target/\n/.deb-version-*\n' >"$TREE/.gitignore"
     echo "fixture bin2uf2 source" >"$TREE/leviculum-nrf/tools/bin2uf2.rs"
@@ -139,6 +155,10 @@ dumpout() { echo "  --- script output ---"; sed 's/^/    /' "$TREE/../out"; }
 assert_stamped() { # <stamp> [<suffix>]
     local stamp="$1" suffix="${2:-}" tarball listing unpack name image
     local bundle="$stamp$suffix"
+    # Cleared first: a case whose bundle never got this far must not have the
+    # previous case's manifest asserted in its name (and with none set at all,
+    # `set -u` ended the whole test before the script output was dumped).
+    MANIFEST="$TREE/../no-manifest"
     tarball="$TREE/target/lnflash/lnflash-$bundle.tar.gz"
     [ "$(rc)" = 0 ] || { fail "the bundle script exited $(rc)"; return; }
     # 1. The tarball, and the one directory inside it that `cd lnflash-*`
@@ -185,6 +205,13 @@ assert_build_features() { # <extra, comma-prefixed or empty>
         grep -qxF -- "build --release --bin $bin --features $features$1" \
             "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null ||
             fail "the $name firmware was not built with --features $features$1: $(cat "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null)"
+        # The shipped images carry no host path: the tree is remapped to /src
+        # (scripts/nrf-rustflags.sh, order 1368), and where this host allows a
+        # user namespace the tree the build saw is the fixed path, not the
+        # fixture's own (order 1460), so a clone builds the same bytes.
+        grep -F -- "$bin --remap-path-prefix=" "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null |
+            grep -qF -- "=$BUILT_AT=/src" ||
+            fail "the $name firmware was not built with the path remap of $BUILT_AT: $(cat "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null)"
     done
 }
 

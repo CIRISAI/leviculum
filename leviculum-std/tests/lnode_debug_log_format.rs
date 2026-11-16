@@ -1556,7 +1556,6 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
     let none = |tag: &str| format!(r#"log_fmt_critical("{tag} ", format_args!("none"))"#);
     for (bin, tags) in [
         ("bin/solarnode.rs", &["[DISP]"][..]),
-        ("bin/rak4631.rs", &["[DISP]", "[BTN]"][..]),
         ("bin/t1000e.rs", &["[DISP]"][..]),
     ] {
         let src = nrf_source(bin);
@@ -1582,7 +1581,12 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
             "leviculum-nrf/src/{bin} no longer spawns the button task (#459)"
         );
     }
-    for bin in ["bin/t1000e.rs", "bin/t114.rs", "bin/solarnode.rs"] {
+    for bin in [
+        "bin/t1000e.rs",
+        "bin/rak4631.rs",
+        "bin/t114.rs",
+        "bin/solarnode.rs",
+    ] {
         assert!(
             !nrf_source(bin).contains(&none("[BTN]")),
             "{bin} declares `[BTN] none` although it spawns the button task"
@@ -1592,18 +1596,15 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         nrf_source("button.rs").contains("BUTTON_DEBOUNCE_MS"),
         "button.rs no longer names the shared debounce constant in its init line"
     );
-    // On the RAK4631 the absence is the bare-module build: the Pocket image
-    // (`display` feature) prints the driver's result instead.
-    let rak = nrf_source("bin/rak4631.rs");
-    let at = rak
-        .find(&none("[DISP]"))
-        .unwrap_or_else(|| panic!("bin/rak4631.rs declares no `[DISP] none`"));
+    // The RAK4631 declares no absence: its bare-module build, the one that
+    // printed `[DISP] none` and `[BTN] none`, was retired (D5, Lew
+    // 2026-10-28), and the Pocket image prints the SSD1306 driver's result
+    // and the button task's init line. A `[DISP] none` back in its binary
+    // would be the Pocket image claiming it has no display.
     assert!(
-        rak[..at]
-            .rfind("#[cfg(not(feature = \"display\"))]")
-            .is_some_and(|cfg| rak[..at].rfind("#[cfg(feature = \"display\")]") < Some(cfg)),
-        "bin/rak4631.rs declares `[DISP] none` outside the bare-module cfg, so the \
-         Pocket image would claim it has no display"
+        !nrf_source("bin/rak4631.rs").contains(&none("[DISP]")),
+        "bin/rak4631.rs declares `[DISP] none`; the Pocket image has a display \
+         and the bare-module build is retired (D5)"
     );
 }
 

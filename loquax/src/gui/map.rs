@@ -5,7 +5,19 @@
 //! (1144); what is the window's own is its font measuring a label
 //! ([`measure`]), as iced sets the label on the canvas.
 
-pub use loquax::screenmap::{area, hit, setup, Placed, DRAG, LABEL, LINE, MARKER};
+pub use loquax::screenmap::{
+    area, battery_at, hit, pin_hue, Placed, BATTERY, DRAG, LABEL, LINE, MARKER, OWN_DOT,
+};
+
+/// What the model's map functions are told in the window
+/// ([`loquax::screenmap::setup`]), with the radar's zooms (1386): deeper
+/// than the outline reaches where no region is, so the radar is there to
+/// zoom into.
+pub fn setup(painter: &loquax::picture::Painter) -> loquax::ui::map::MapSetup {
+    let mut setup = loquax::screenmap::setup(painter);
+    setup.zooms = loquax::ui::radar::zooms(setup.zooms);
+    setup
+}
 
 /// The width of `text` at `size` pixels as the window sets it: iced's own
 /// paragraph over its font system, with nothing drawn, so it works without
@@ -25,6 +37,31 @@ pub fn measure(text: &str, size: f32) -> u32 {
         wrapping: text::Wrapping::None,
     });
     paragraph.min_bounds().width.ceil() as u32
+}
+
+/// `words` cut to `width` pixels at `size` as the window sets them
+/// (1430): whole when they fit, else the longest start that fits with an
+/// ellipsis after it, and the ellipsis alone where not even one letter
+/// does. Measured with [`measure`], so the cut is where the box ends.
+pub fn fit(words: &str, size: f32, width: f32) -> String {
+    let fits = |s: &str| measure(s, size) as f32 <= width;
+    if fits(words) {
+        return words.to_string();
+    }
+    // The char boundaries a cut may fall on; the longest that fits.
+    let ends: Vec<usize> = words.char_indices().map(|(i, _)| i).skip(1).collect();
+    let (mut lo, mut hi) = (0usize, ends.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        match fits(&format!("{}…", words[..ends[mid - 1]].trim_end())) {
+            true => lo = mid,
+            false => hi = mid - 1,
+        }
+    }
+    match lo {
+        0 => "…".to_string(),
+        n => format!("{}…", words[..ends[n - 1]].trim_end()),
+    }
 }
 
 #[cfg(test)]
@@ -61,6 +98,10 @@ pub(super) mod tests {
             label: label.to_string(),
             age: Some("5m".to_string()),
             stale: peer == 3,
+            nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         }
     }
 
@@ -83,8 +124,12 @@ pub(super) mod tests {
             selected,
             zooms: (0, 20),
             draw_pins: false,
+            tracks: &[],
+            radar: None,
             measure: Some(measure),
+            now_ms: None,
             scaled_while_moving: false,
+            time_zones: None,
         })
     }
 
@@ -155,17 +200,25 @@ pub(super) mod tests {
 
     /// The window shows one world at most (1131): a window of 1280 x 800
     /// asked for z0 is held at z3, the world 2048 pixels wide, and no
-    /// column of its picture repeats. The view as asked, the control,
-    /// repeats every 256.
+    /// column of its picture repeats. Since 1710 the view as asked is a
+    /// blended world view too, which holds the whole world once by
+    /// construction: the Mercator tiling of 256-pixel worlds that stood
+    /// here as the control cannot appear at any zoom.
+    ///
+    /// The names are off: since 1683 the world outline brings its own
+    /// names, and those are placed per copy of the world, so a copy with
+    /// several cities in it does not repeat the one beside it. What must
+    /// not repeat is the picture under them.
     #[test]
     fn the_window_never_shows_the_world_twice() {
         let mut frames = Frames::new(Maps::new(None));
+        frames.set_names_off(true);
         let setup = setup(frames.painter());
         let size = (1280u32, 800u32);
         let centre = project(LatLon::from_degrees(30.0, 10.0));
         let asked = ExactView::new(centre, 0, size.0, size.1);
         let control = rest(&mut frames, asked, &[], None, 1.0);
-        assert_eq!(period(&control.rgba, 1280), Some(256), "the control");
+        assert_ne!(period(&control.rgba, 1280), Some(256), "the control");
         let floor = zoom_floor(area(size), &setup);
         let view = hold(asked, floor, setup.zooms.1);
         assert_eq!(view.zoom_milli(), 3 * MILLI);
@@ -198,14 +251,16 @@ pub(super) mod tests {
     /// Florence fixture at z16 with one pin, the parks and the streets the
     /// zoom shows, each name with its halo, none under the pin's name; the
     /// frame the same on a second one and pixel for pixel the golden. A
-    /// frame drawn while the view moves, before any at rest, carries none.
+    /// frame drawn while the view zooms in to z16 from a rest at z15
+    /// places its names as the frame at rest at z16 does (1225), the same
+    /// names. The control: a zooming frame over a region with no labels,
+    /// Pisa outside the fixture, sets none.
     #[test]
     fn the_map_names_are_set_into_the_picture() {
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         let view = ExactView::new(at, 16 * MILLI, 480, 320);
         let pins = [pin(1, "alice", 43.7752, 11.2640)];
-        let mut plain_frames = florence();
-        let plain = plain_frames.frame(&Ask {
+        let moving = |view| Ask {
             view,
             margin: (0, 0),
             moving: true,
@@ -215,10 +270,17 @@ pub(super) mod tests {
             selected: None,
             zooms: (0, 20),
             draw_pins: false,
+            tracks: &[],
+            radar: None,
             measure: Some(measure),
+            now_ms: None,
             scaled_while_moving: false,
-        });
-        assert!(plain_frames.names().is_empty());
+            time_zones: None,
+        };
+        let mut ground = florence();
+        ground.set_names_off(true);
+        let plain = rest(&mut ground, view, &pins, None, 1.0);
+        assert!(ground.names().is_empty());
         let mut frames = florence();
         let named = rest(&mut frames, view, &pins, None, 1.0);
         let names = frames.names();
@@ -237,6 +299,28 @@ pub(super) mod tests {
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         same_as("gui-names-florence-z16.png", &rgb, 480, 320);
+        // Zooming in: at rest at z15, then a moving frame at z16.
+        let mut zooming = florence();
+        rest(
+            &mut zooming,
+            ExactView::new(at, 15 * MILLI, 480, 320),
+            &pins,
+            None,
+            1.0,
+        );
+        let at_15 = zooming.names();
+        assert_ne!(at_15, names, "z15 and z16 show other names");
+        zooming.frame(&moving(view));
+        assert_eq!(
+            zooming.names(),
+            names,
+            "the zooming frame's are the rest frame's"
+        );
+        // The control: no labels where the view zooms, no names.
+        let pisa = project(LatLon::from_degrees(43.7228, 10.4017));
+        let mut empty = florence();
+        empty.frame(&moving(ExactView::new(pisa, 16 * MILLI, 480, 320)));
+        assert!(empty.names().is_empty(), "{:?}", empty.names());
     }
 
     /// Hold `rgb` to the PNG golden `name` under `loquax/tests/golden`,
@@ -290,5 +374,483 @@ pub(super) mod tests {
         let short = measure("bob", LABEL);
         let long = measure("bob · 5m and a long name", LABEL);
         assert!(long > short, "{short} {long}");
+    }
+
+    /// The window draws the buildings from z16 (1192): over the Florence
+    /// cut with its building sections, its frames at rest at z16 and z17,
+    /// light and dark, in the window's finish ([`Style::SCREEN`], the one
+    /// the phone asks for too) are their goldens pixel for pixel; the
+    /// names it places are the ones and in the places a frame without
+    /// buildings places, and a tenth of the frame is footprint.
+    #[test]
+    fn the_window_draws_the_buildings_and_they_move_no_name() {
+        use leviculum_mapfill::frame::rgb888;
+        use leviculum_mapfill::style::{Class, MapTheme};
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/buildings");
+        let at = project(LatLon::from_degrees(43.7752, 11.2660));
+        for zoom in [16u32, 17] {
+            for (theme, t) in [(MapTheme::Light, "light"), (MapTheme::Dark, "dark")] {
+                let shot = |style: Style| {
+                    let mut frames = Frames::new(Maps::new(Some(dir.clone())));
+                    let shot = frames.frame(&Ask {
+                        view: ExactView::new(at, zoom * MILLI, 480, 320),
+                        margin: (0, 0),
+                        moving: false,
+                        style: style.in_theme(theme),
+                        scale: 1.0,
+                        pins: &[],
+                        selected: None,
+                        zooms: (0, 20),
+                        draw_pins: false,
+                        tracks: &[],
+                        radar: None,
+                        measure: Some(measure),
+                        now_ms: None,
+                        scaled_while_moving: false,
+                        time_zones: None,
+                    });
+                    (shot, frames.drawn_names())
+                };
+                let (with, names) = shot(Style::SCREEN);
+                let (without, names_without) = shot(Style::PC);
+                assert!(!names.is_empty(), "z{zoom} {t}");
+                assert_eq!(names, names_without, "z{zoom} {t}: a building moved a name");
+                let fill = rgb888(theme.palette().area(Class::Building));
+                let footprints = with
+                    .rgba
+                    .chunks(4)
+                    .zip(without.rgba.chunks(4))
+                    .filter(|(a, b)| a != b && a[..3] == fill)
+                    .count();
+                assert!(footprints * 10 > 480 * 320, "z{zoom} {t}: {footprints}");
+                let rgb: Vec<u8> = with
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                same_as(&format!("gui-buildings-{t}-z{zoom}.png"), &rgb, 480, 320);
+            }
+        }
+    }
+
+    /// The world view of 1683, where no region covers the view: central
+    /// Europe at z2 and z6, the outline's lakes, rivers, ice, borders and
+    /// dashed disputed lines with the world's own names on them — a
+    /// country's, a sea's, and at z6 the names the places carry — set by
+    /// the map's one placement rule. The window's picture and the
+    /// phone's (2.75 pixels a logical one, its names at that size), each
+    /// as its golden; and the controls that the names are the world's
+    /// and that a name no table carries never appears.
+    #[test]
+    fn the_world_view_names_its_countries_and_seas_at_z2_and_z6() {
+        use leviculum_map::labels::LabelKind;
+        let dir = tempfile::tempdir().expect("tmp");
+        let at = project(LatLon::from_degrees(50.0, 10.0));
+        for zoom in [2u32, 6] {
+            for (scale, who) in [(1.0f32, "window"), (2.75, "phone")] {
+                let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+                let shot = frames.frame(&Ask {
+                    view: ExactView::new(at, zoom * MILLI, 480, 320),
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN,
+                    scale,
+                    pins: &[],
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: false,
+                    tracks: &[],
+                    radar: None,
+                    measure: Some(measure),
+                    now_ms: None,
+                    scaled_while_moving: false,
+                    time_zones: None,
+                });
+                let names = frames.drawn_names();
+                println!("z{zoom} {who}: {names:?}");
+                // A country's name is served before every other kind
+                // (1712), so the country under the view's centre is set at
+                // every zoom and on both letter sizes.
+                assert!(
+                    names.iter().any(|n| n.text == "Deutschland"),
+                    "z{zoom} {who}: no Deutschland in {names:?}"
+                );
+                // The countries come at their label zoom (1712): at z2 the
+                // small ones the 1683 golden showed are not there, and
+                // Paris, which stood on France's label then, gives way to
+                // the countries now. Frankreich and Spanien are not
+                // asserted: at z2 their label points lie 18 pixels under
+                // Deutschland's and Italien's, inside a name's 23-pixel box.
+                if zoom == 2 && scale == 1.0 {
+                    for small in ["Malta", "Barbados", "Kap Verde", "Paris"] {
+                        assert!(
+                            names.iter().all(|n| n.text != small),
+                            "z2 {who}: {small} in {names:?}"
+                        );
+                    }
+                    assert!(names.iter().any(|n| n.text == "Italien"), "{names:?}");
+                }
+                // Beyond the countries the table brings the waters and
+                // the ranges, served after the countries and the places.
+                // Only the window at z2 has room for one: the phone's z2
+                // sets four countries and nothing else (its letters are
+                // 2.75 times the size in the same 480 by 320), and the z6
+                // view over central Germany holds no sea, and the Alps'
+                // label lies south of it.
+                if zoom == 2 && scale == 1.0 {
+                    assert!(
+                        names
+                            .iter()
+                            .any(|n| matches!(n.kind, LabelKind::Sea | LabelKind::Range)),
+                        "z{zoom} {who}: no sea or range in {names:?}"
+                    );
+                }
+                if zoom == 6 {
+                    assert!(
+                        names.iter().any(|n| n.kind.is_place()),
+                        "z{zoom} {who}: no place's name in {names:?}"
+                    );
+                }
+                assert!(
+                    names.iter().all(|n| !n.text.contains('\u{fffd}')),
+                    "z{zoom} {who}: a name that did not read: {names:?}"
+                );
+                let rgb: Vec<u8> = shot
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                same_as(&format!("gui-world-{who}-z{zoom}.png"), &rgb, 480, 320);
+            }
+        }
+        // The control: a view past the outline's deepest zoom has no world
+        // names, and neither has one a region fills.
+        let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+        frames.frame(&Ask {
+            view: ExactView::new(at, 12 * MILLI, 480, 320),
+            margin: (0, 0),
+            moving: false,
+            style: Style::SCREEN,
+            scale: 1.0,
+            pins: &[],
+            selected: None,
+            zooms: (0, 20),
+            draw_pins: false,
+            tracks: &[],
+            radar: None,
+            measure: Some(measure),
+            now_ms: None,
+            scaled_while_moving: false,
+            time_zones: None,
+        });
+        assert!(
+            frames.drawn_names().is_empty(),
+            "z12 has the world's names: {:?}",
+            frames.drawn_names()
+        );
+    }
+
+    /// The disputed lines over Kashmir at z5 (1733): the window's world
+    /// view, where no region lies, strokes Natural Earth's disputed
+    /// boundary lines in their own ink, a crimson apart from the borders'
+    /// mauve ([`leviculum_map::outline::disputed`]), and dashed: the
+    /// pixels in that ink fall into many separate pieces, where a line
+    /// drawn whole would be one or two. Pinned as the golden
+    /// `gui-world-window-kashmir-z5.png`. The control: no pixel of the
+    /// picture is in the disputed ink where the view lies over the
+    /// Atlantic, which has no disputed line.
+    #[test]
+    fn the_world_view_dashes_the_disputed_lines_over_kashmir_at_z5() {
+        use leviculum_mapfill::frame::rgb888;
+        let dir = tempfile::tempdir().expect("tmp");
+        let shot_at = |lat: f64, lon: f64| {
+            let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+            frames
+                .frame(&Ask {
+                    view: ExactView::new(
+                        project(LatLon::from_degrees(lat, lon)),
+                        5 * MILLI,
+                        480,
+                        320,
+                    ),
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN,
+                    scale: 1.0,
+                    pins: &[],
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: false,
+                    tracks: &[],
+                    radar: None,
+                    measure: Some(measure),
+                    now_ms: None,
+                    scaled_while_moving: false,
+                    time_zones: None,
+                })
+                .rgba
+        };
+        let theme = Style::SCREEN.theme;
+        let ink = rgb888(leviculum_map::outline::disputed(theme));
+        assert_ne!(ink, rgb888(theme.palette().border), "the ink is its own");
+        let (w, h) = (480usize, 320usize);
+        let inked = |rgba: &[u8]| -> Vec<bool> { rgba.chunks(4).map(|p| p[..3] == ink).collect() };
+        let rgba = shot_at(34.5, 76.0);
+        let on = inked(&rgba);
+        let pixels = on.iter().filter(|&&b| b).count();
+        assert!(pixels > 100, "{pixels} pixels in the disputed ink");
+        // The pieces, 8-connected.
+        let mut seen = vec![false; w * h];
+        let mut pieces = 0;
+        for start in 0..w * h {
+            if !on[start] || seen[start] {
+                continue;
+            }
+            pieces += 1;
+            let mut stack = vec![start];
+            seen[start] = true;
+            while let Some(i) = stack.pop() {
+                let (x, y) = ((i % w) as i64, (i / w) as i64);
+                for (dx, dy) in [
+                    (-1, -1),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if !(0..w as i64).contains(&nx) || !(0..h as i64).contains(&ny) {
+                        continue;
+                    }
+                    let j = ny as usize * w + nx as usize;
+                    if on[j] && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+        assert!(
+            pieces >= 20,
+            "{pieces} pieces of {pixels} pixels: not dashed"
+        );
+        let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        same_as("gui-world-window-kashmir-z5.png", &rgb, 480, 320);
+        let sea = shot_at(30.0, -40.0);
+        assert_eq!(
+            inked(&sea).iter().filter(|&&b| b).count(),
+            0,
+            "ink over the Atlantic"
+        );
+    }
+
+    /// The six track scenes (1385) through the window's own frames over
+    /// the Florence fixture, 480 x 320, the pins drawn in: each the
+    /// golden `gui-tracks-<name>.png`, the park also in the dark table.
+    /// With `LOQUAX_TRACK_PNG_DIR` set, every picture is written there
+    /// as well, for a look.
+    #[test]
+    fn the_track_scenes_are_the_goldens() {
+        use leviculum_mapfill::style::MapTheme;
+        use loquax::ui::tracks::{scenes, tracks, TrackWindow};
+        let out = std::env::var_os("LOQUAX_TRACK_PNG_DIR").map(PathBuf::from);
+        let mut frames = florence();
+        for scene in scenes::all() {
+            let themes: &[(MapTheme, &str)] = match scene.name {
+                "park" => &[(MapTheme::Light, ""), (MapTheme::Dark, "-dark")],
+                _ => &[(MapTheme::Light, "")],
+            };
+            let fitted = scenes::view_of(&scene, 480, 320, 28);
+            let view = ExactView::new(fitted.centre, u32::from(fitted.zoom()) * MILLI, 480, 320);
+            let unit = libm::exp2(24.0 - f64::from(fitted.zoom()));
+            let drawn = tracks(
+                &scenes::input(&scene),
+                TrackWindow::Episode,
+                &scene.now,
+                unit,
+                1.0,
+                loquax::ui::strings::Lang::En,
+            );
+            let pins = scenes::pins(&scene);
+            for (theme, suffix) in themes {
+                let shot = frames.frame(&Ask {
+                    view,
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN.in_theme(*theme),
+                    scale: 1.0,
+                    pins: &pins,
+                    tracks: &drawn,
+                    radar: None,
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: true,
+                    measure: None,
+                    now_ms: None,
+                    scaled_while_moving: false,
+                    time_zones: None,
+                });
+                let rgb: Vec<u8> = shot
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                let name = format!("gui-tracks-{}{suffix}.png", scene.name);
+                if let Some(dir) = &out {
+                    std::fs::create_dir_all(dir).expect("png dir");
+                    let mut bytes = Vec::new();
+                    let mut e = png::Encoder::new(&mut bytes, 480, 320);
+                    e.set_color(png::ColorType::Rgb);
+                    e.set_depth(png::BitDepth::Eight);
+                    let mut writer = e.write_header().expect("header");
+                    writer.write_image_data(&rgb).expect("data");
+                    writer.finish().expect("finish");
+                    std::fs::write(dir.join(&name), bytes).expect("write png");
+                }
+                same_as(&name, &rgb, 480, 320);
+            }
+        }
+    }
+
+    /// 1386's five scenes through the window's own frames over the
+    /// Florence fixture, 480 x 320, the pins drawn in, each the golden
+    /// `gui-tracks-<name>.png`: the radar where no region touches the view
+    /// (decided by [`loquax::ui::radar::shows`] over the fixture's
+    /// regions, as the window decides), the way back in grey, the late
+    /// stretch dashed, the low battery beside Kai's marker, and "fit all"
+    /// at the view its fit gives. `LOQUAX_TRACK_PNG_DIR` writes them there
+    /// too.
+    #[test]
+    fn the_marks_scenes_are_the_goldens() {
+        use loquax::ui::radar;
+        use loquax::ui::tracks::{scenes, tracks, TrackWindow};
+        let out = std::env::var_os("LOQUAX_TRACK_PNG_DIR").map(PathBuf::from);
+        let mut frames = florence();
+        let setup = setup(frames.painter());
+        let (w, h) = (480u32, 320u32);
+        for scene in scenes::marks() {
+            let fitted = match scene.name {
+                "fit-all" => {
+                    let (centre, zoom) = fit(&scenes::fitted_pins(&scene), area((w, h)), &setup);
+                    leviculum_map::viewport::Viewport::new(centre, zoom, w, h)
+                }
+                _ => scenes::view_of(&scene, w, h, 28),
+            };
+            let view = ExactView::new(fitted.centre, u32::from(fitted.zoom()) * MILLI, w, h);
+            let unit = libm::exp2(24.0 - f64::from(fitted.zoom()));
+            let drawn = tracks(
+                &scenes::input(&scene),
+                TrackWindow::Episode,
+                &scene.now,
+                unit,
+                1.0,
+                loquax::ui::strings::Lang::En,
+            );
+            let mut pins = scenes::pins(&scene);
+            let shown = match radar::shows(&fitted, &setup.regions) {
+                true => radar::radar(
+                    &pins,
+                    view.unit(),
+                    view.size(),
+                    loquax::ui::strings::Lang::En,
+                ),
+                false => None,
+            };
+            assert_eq!(shown.is_some(), scene.name == "radar", "{}", scene.name);
+            if let Some(r) = &shown {
+                radar::label(&mut pins, r);
+            }
+            let shot = frames.frame(&Ask {
+                view,
+                margin: (0, 0),
+                moving: false,
+                style: Style::SCREEN,
+                scale: 1.0,
+                pins: &pins,
+                tracks: &drawn,
+                radar: shown.as_ref(),
+                selected: None,
+                zooms: (0, 20),
+                draw_pins: true,
+                measure: None,
+                now_ms: None,
+                scaled_while_moving: false,
+                time_zones: None,
+            });
+            let rgb: Vec<u8> = shot
+                .rgba
+                .chunks(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let name = format!("gui-tracks-{}.png", scene.name);
+            if let Some(dir) = &out {
+                std::fs::create_dir_all(dir).expect("png dir");
+                let mut bytes = Vec::new();
+                let mut e = png::Encoder::new(&mut bytes, w, h);
+                e.set_color(png::ColorType::Rgb);
+                e.set_depth(png::BitDepth::Eight);
+                let mut writer = e.write_header().expect("header");
+                writer.write_image_data(&rgb).expect("data");
+                writer.finish().expect("finish");
+                std::fs::write(dir.join(&name), bytes).expect("write png");
+            }
+            same_as(&name, &rgb, w, h);
+        }
+    }
+
+    /// With `LOQUAX_BUILDINGS_REGION` set to a region file with building
+    /// sections: the phone's frame (1080 x 2400 at a density of 2.75) over
+    /// Frankfurt at z16 and z17, light and dark, places the same names in
+    /// the same places with buildings as without. A check for the reviewer
+    /// over a region too large to commit: `LOQUAX_BUILDINGS_REGION=
+    /// frankfurt.lmr cargo test -p loquax --features gui --bins
+    /// buildings_move_no_frankfurt_name -- --nocapture`. Without it, the
+    /// test returns at once.
+    #[test]
+    fn buildings_move_no_frankfurt_name() {
+        use leviculum_mapfill::style::MapTheme;
+        let Some(path) = std::env::var_os("LOQUAX_BUILDINGS_REGION") else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("maps dir");
+        let linked = std::fs::canonicalize(PathBuf::from(path)).expect("region");
+        std::os::unix::fs::symlink(&linked, dir.path().join("region.lmr")).expect("link");
+        let at = project(LatLon::from_degrees(50.1109, 8.6821));
+        for zoom in [16u32, 17] {
+            for theme in [MapTheme::Light, MapTheme::Dark] {
+                let names = |style: Style| {
+                    let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+                    let shot = frames.frame(&Ask {
+                        view: ExactView::new(at, zoom * MILLI, 1080, 2400),
+                        margin: (0, 0),
+                        moving: false,
+                        style: style.in_theme(theme),
+                        scale: 2.75,
+                        pins: &[],
+                        selected: None,
+                        zooms: (0, 20),
+                        draw_pins: false,
+                        tracks: &[],
+                        radar: None,
+                        measure: Some(measure),
+                        now_ms: None,
+                        scaled_while_moving: false,
+                        time_zones: None,
+                    });
+                    (frames.drawn_names(), shot.rgba)
+                };
+                let (with, drawn) = names(Style::SCREEN);
+                let (without, bare) = names(Style::PC);
+                // The control: the buildings were drawn.
+                assert!(drawn != bare, "z{zoom} {theme:?}: no building drawn");
+                println!("BUILDINGS names z{zoom} {theme:?}: {} placed", with.len());
+                assert!(!with.is_empty(), "z{zoom} {theme:?}");
+                assert_eq!(with, without, "z{zoom} {theme:?}: a building moved a name");
+            }
+        }
     }
 }

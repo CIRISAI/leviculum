@@ -140,23 +140,33 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
 
         let mut save = FlashSave::new();
         let written = loop {
+            let asked = embassy_time::Instant::now();
+            let mut flash = flash.lock().await;
+            let lock_ms = asked.elapsed().as_millis();
             let result = async {
-                let mut flash = flash.lock().await;
-                flash.erase(page, page + 4096).await?;
-                flash.write(page, &encoded.0).await
+                use crate::flash::timed;
+                timed("erase", flash.erase(page, page + 4096)).await?;
+                timed("w-radio", flash.write(page, &encoded.0)).await
             }
             .await;
-            match save.after_attempt(result.is_ok()) {
+            drop(flash);
+            let fault = result.err();
+            match save.after_attempt(fault.is_none()) {
                 SaveStep::Written => break true,
                 SaveStep::Failed {
                     attempt,
                     wait_ms,
                     gave_up,
                 } => {
-                    crate::log::log_fmt(
-                        "[RADIO] ",
-                        format_args!("persist write failed, attempt {}/{}", attempt, SAVE_RETRIES),
-                    );
+                    if let Some(fault) = fault {
+                        crate::flash::log_step_fault(
+                            "[RADIO] ",
+                            attempt,
+                            SAVE_RETRIES,
+                            fault,
+                            lock_ms,
+                        );
+                    }
                     embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
                     if gave_up {
                         break false;
@@ -173,7 +183,9 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                     cfg.frequency_hz, cfg.bandwidth_hz, cfg.sf, cfg.cr, cfg.tx_power_dbm
                 ),
             );
-            RADIO_PERSIST.finish(ticket, Persisted::Durable);
+            if RADIO_PERSIST.finish(ticket, Persisted::Durable) {
+                crate::log::log_fmt("[RADIO] ", format_args!("persist landed radio-config"));
+            }
         } else {
             crate::log::log_fmt("[RADIO] ", format_args!("persist gave up after retries"));
             RADIO_PERSIST.finish(ticket, Persisted::Lost);

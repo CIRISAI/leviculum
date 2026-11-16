@@ -255,6 +255,10 @@ pub(crate) struct SerialInterfaceConfig {
     /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
     /// (see [`super::test_drop_direct_ingress_frame`]).
     pub test_drop_direct_ingress: bool,
+    /// The board shares one UART under XON/XOFF ([`super::serial_mux`]);
+    /// `None` detects it from the board's capability report
+    /// ([`detect_serial_mux`]).
+    pub serial_mux: Option<bool>,
 }
 
 /// Spawn a serial interface with automatic reconnection.
@@ -318,6 +322,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Serial,
             ingress_control: None,
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -1094,7 +1099,20 @@ async fn serial_reconnect_task(
             .flow_control(tokio_serial::FlowControl::None);
 
         match tokio_serial::SerialStream::open(&builder) {
-            Ok(mut port) => {
+            Ok(port) => {
+                // Every byte this interface writes or reads goes through
+                // here, so a single-UART board's flow contract holds for
+                // the bring-up, the queries and the data alike.
+                // Off until `serial_mux::bring_up` below has settled it.
+                let mut port = super::serial_mux::SerialMuxPort::new(port, false);
+                // Subscribed before the port is said to be online, and held
+                // through the bring-up below: a request made after that line
+                // is about this board, and the io task serves it once it
+                // runs. Subscribed later, inside the io task, a request in
+                // the two seconds of bring-up, or in the microseconds
+                // between the attach query and the subscription, met no
+                // receiver and was dropped (1769).
+                let firmware_requests = firmware_request_channel().subscribe();
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 counters.set_online(true);
@@ -1103,6 +1121,25 @@ async fn serial_reconnect_task(
                 if is_reconnect {
                     if let Some(ref notify) = config.reconnect_notify {
                         let _ = notify.try_send(id);
+                    }
+                }
+
+                // Before any other frame: the radio config below may carry
+                // a 0x13, and only the board can say whether that byte
+                // would mute it.
+                let heard = super::serial_mux::bring_up(&mut port, config.serial_mux, &name).await;
+                // A peer's packets heard during the wait are traffic like
+                // any other.
+                let ingress = Ingress {
+                    name: &name,
+                    incoming_tx: &incoming_tx,
+                    counters: &counters,
+                    drop_direct_ingress: config.test_drop_direct_ingress,
+                };
+                for data in heard {
+                    if !ingress.deliver(data).await {
+                        tracing::debug!("Serial interface {}: event loop shut down", name);
+                        return;
                     }
                 }
 
@@ -1152,13 +1189,14 @@ async fn serial_reconnect_task(
                 // A write failure leaves the io task to find the port dead.
                 ask_duty_hold_state(&mut port, &name).await;
 
-                outgoing_rx = serial_io_task(
+                outgoing_rx = serial_io_task_subscribed(
                     name.clone(),
                     port,
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
                     config.test_drop_direct_ingress,
+                    firmware_requests,
                 )
                 .await;
                 counters.set_online(false);
@@ -1204,8 +1242,9 @@ const MEDIA_QUERY_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The profile is the one media frame the board answers only after a flash
 /// write: the firmware applies it, then waits for the store task to settle
 /// the page (`crate::telemetry::confirm`) for up to `PERSIST_CONFIRM_WITHIN`,
-/// 2500 ms (`leviculum-nrf/src/telemetry.rs:415`), before it writes either
-/// the report or [`leviculum_core::envelope::REFUSE_PERSIST`]. A 2 s window
+/// 2500 ms (`leviculum-nrf/src/telemetry.rs:430`), before it writes either
+/// the report, [`leviculum_core::envelope::REFUSE_PERSIST_PENDING`] (still
+/// writing) or [`leviculum_core::envelope::REFUSE_PERSIST`] (gave up). A 2 s window
 /// called a board whose save was merely slow unanswered although it had
 /// taken the profile (470). The firmware sized its bound to land inside
 /// lnflash's window, so the host waits that window and both clients read the
@@ -1540,7 +1579,9 @@ where
                     );
                     answer = Some(MediaAnswer::NoAnswer);
                 }
-                Seen::Refused(envelope::REFUSE_PERSIST)
+                // Pending (order 1626) is the same sentence for this
+                // caller: applied now, not yet promised to survive a reset.
+                Seen::Refused(envelope::REFUSE_PERSIST | envelope::REFUSE_PERSIST_PENDING)
                     if asked_type == envelope::TYPE_MEDIA_PROFILE =>
                 {
                     tracing::warn!(
@@ -1577,8 +1618,9 @@ enum MediaPersist {
     /// The board answered with its report, which it writes only once the
     /// record is on the page.
     Durable,
-    /// The board answered [`leviculum_core::envelope::REFUSE_PERSIST`]: it
-    /// runs the profile now, and a reset may bring back the previous one.
+    /// The board answered [`leviculum_core::envelope::REFUSE_PERSIST`] or
+    /// [`leviculum_core::envelope::REFUSE_PERSIST_PENDING`]: it runs the
+    /// profile now, and a reset may bring back the previous one.
     Unconfirmed,
 }
 
@@ -1811,6 +1853,11 @@ fn log_serial_tx_drop(name: &str, pkt: &OutgoingPacket, reason: &str) {
 }
 
 /// Returns `outgoing_rx` on port loss for reconnect reuse.
+///
+/// Subscribes to the firmware requests itself, on entry; the reconnect
+/// loop uses [`serial_io_task_subscribed`] instead, because it has to be
+/// listening before the bring-up, not after it.
+#[cfg(test)]
 async fn serial_io_task<S>(
     name: String,
     port: S,
@@ -1822,6 +1869,32 @@ async fn serial_io_task<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    serial_io_task_subscribed(
+        name,
+        port,
+        incoming_tx,
+        outgoing_rx,
+        counters,
+        drop_direct_ingress,
+        firmware_request_channel().subscribe(),
+    )
+    .await
+}
+
+/// [`serial_io_task`] with the firmware-request receiver the caller took
+/// when the port opened, so nothing asked between then and now is lost.
+async fn serial_io_task_subscribed<S>(
+    name: String,
+    port: S,
+    incoming_tx: mpsc::Sender<IncomingPacket>,
+    outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+    counters: Arc<InterfaceCounters>,
+    drop_direct_ingress: bool,
+    firmware_requests: tokio::sync::broadcast::Receiver<FirmwareRequest>,
+) -> mpsc::Receiver<OutgoingPacket>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let outgoing_rx = serial_io_loop(
         name.clone(),
         port,
@@ -1829,6 +1902,7 @@ where
         outgoing_rx,
         Arc::clone(&counters),
         drop_direct_ingress,
+        firmware_requests,
     )
     .await;
     // Every way out of the loop is the interface going down.
@@ -1844,6 +1918,7 @@ async fn serial_io_loop<S>(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     drop_direct_ingress: bool,
+    mut firmware_requests: tokio::sync::broadcast::Receiver<FirmwareRequest>,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1853,11 +1928,10 @@ where
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
-    // Subscribed here rather than at spawn: a request made while the
-    // port was down was not made about the board that just came back,
-    // and acting on it would reboot (or announce from) a board nobody
-    // asked about.
-    let mut firmware_requests = firmware_request_channel().subscribe();
+    // The receiver was taken when the port opened, not at spawn: a request
+    // made while the port was down was not made about the board that just
+    // came back, and acting on it would reboot (or announce from) a board
+    // nobody asked about.
     // Borrowed once for the whole task: the read path and the media
     // verbs' wait hand frames on through the same one.
     let ingress = Ingress {
@@ -2236,7 +2310,7 @@ mod tests {
     /// `SerialInterface` block naming one builds, spawns, and puts a value on
     /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
     /// legacy contract for a config the driver cannot take is silence
-    /// (`leviculum-nrf/src/usb.rs:811-831`), so the board stays on the PHY it
+    /// (`leviculum-nrf/src/usb.rs:891-911`), so the board stays on the PHY it
     /// already had while the host's airtime bucket goes on pricing every
     /// frame at the bandwidth it asked for.
     #[test]
@@ -2606,6 +2680,9 @@ mod tests {
             reconnect_notify: None,
             radio_config: radio,
             test_drop_direct_ingress: false,
+            // Pinned off: these tests drive their own fake boards, which
+            // would read a capability query they never asked for.
+            serial_mux: Some(false),
         }
     }
 

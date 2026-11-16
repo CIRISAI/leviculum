@@ -421,6 +421,11 @@ every few frames, so the GPU buys it throughput, not beauty.
 
 ## 6b. Hillshading for off-road use
 
+**Superseded in scope (2026-11-11):** the elevation decisions, two tiers,
+the sources and the pyramid served in pieces, are section 3 of [the
+expedition map](../src/concepts/loquax-expedition-map.md); the algorithm
+and the port below stay its basis.
+
 **The algorithm** (Lew's, `generator/hillshade_generator.cpp`, summary in
 `notes-mwm-hillshade.md` A.1): four lights at 247.5, 292.5, 337.5 and
 22.5 degrees, 45 degrees up, weighted by aspect after Mark (1992); three
@@ -667,9 +672,13 @@ day together and take the map from `00-today-frankfurt-z15-1280.png` to
 5. Serve LMR regions from maps.lew-palm.de as the default `map_source`,
    cut there from a Protomaps planet build?
 6. Pois: which classes at all (the measurement shows 168,433 pois in
-   Frankfurt's z15 alone)? Proposal: none until a poi slice, then a short
-   list (station, hospital, pharmacy, shelter, peak, water point) thinned
-   at the cut.
+   Frankfurt's z15 alone)? **Decided 2026-11-11 (Lew): all of them go into
+   the data; only the display thins by zoom and rank.** The short list
+   proposed here (station, hospital, pharmacy, shelter, peak, water point)
+   is rejected; [the expedition map](../src/concepts/loquax-expedition-map.md),
+   section 4.
+   6b. Shading (section 6b, and question 4's source): see the expedition
+   map, section 3.
 7. Street names bent along curves (CoMaps' per-glyph layout), or straight
    labels on straight runs as the samples show?
 

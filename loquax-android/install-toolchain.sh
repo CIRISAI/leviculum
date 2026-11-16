@@ -11,7 +11,7 @@
 #
 # The rest comes from Debian and rustup:
 #   sudo apt install default-jdk-headless unzip
-#   rustup target add aarch64-linux-android armv7-linux-androideabi
+#   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 #
 # Usage: loquax-android/install-toolchain.sh [SDK]   (default /usr/lib/android-sdk)
 # Writes SDK with sudo when it is not writable. About 2.3 GB, of which the

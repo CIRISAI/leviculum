@@ -340,13 +340,20 @@ pub fn confirm_identity<'m>(
     asked_for: Option<&str>,
     ui: &mut dyn Ui,
 ) -> Result<Confirmed<'m>, Error> {
-    confirm_identity_after(catalogue, manifest, info, port, asked_for, &[], ui)
+    confirm_identity_after(catalogue, manifest, info, port, asked_for, &[], None, ui)
 }
 
 /// [`confirm_identity`] for a board whose level question may already have
 /// been answered before the touch ([`level_before_touch`]): `answered`
 /// names the boards a yes was typed for, and the bootloader naming one of
 /// them is not asked again. One it names otherwise is asked as usual.
+///
+/// `running` is the board a leviculum image named before the touch
+/// ([`running_ours`]). It settles a shared Board-ID only when the
+/// bootloader's identity already points at that very board, so it never
+/// decides what a board is, only which of the models behind one bootloader
+/// it is.
+#[allow(clippy::too_many_arguments)]
 fn confirm_identity_after<'m>(
     catalogue: &'m Catalogue,
     manifest: &'m Manifest,
@@ -354,12 +361,18 @@ fn confirm_identity_after<'m>(
     port: &str,
     asked_for: Option<&str>,
     answered: &[String],
+    running: Option<&str>,
     ui: &mut dyn Ui,
 ) -> Result<Confirmed<'m>, Error> {
     let confirmed = resolve_identity(catalogue, manifest, info, port, asked_for)?;
     let name = confirmed.name();
     let identify = &confirmed.flashing().identify;
-    if identify.board_id_shared && asked_for.is_none() {
+    if identify.board_id_shared && asked_for.is_none() && running == Some(name) {
+        ui.say(&format!(
+            "{port}: Board-ID {:?} is shared, and this board was running our {name} image,              which was written to it as a {name}: no question.",
+            identify.info_uf2_board_id
+        ));
+    } else if identify.board_id_shared && asked_for.is_none() {
         let models = &identify.board_id_models;
         let ours = models.first().map(String::as_str).unwrap_or(name);
         let answer = ui.ask(&format!(
@@ -494,9 +507,27 @@ pub fn confirm_named<'m>(
     answered: &[String],
     ui: &mut dyn Ui,
 ) -> Result<Option<Confirmed<'m>>, Error> {
+    confirm_named_running(catalogue, manifest, info, port, named, answered, None, ui)
+}
+
+/// [`confirm_named`] with the board a running leviculum image named before
+/// the touch ([`running_ours`]).
+#[allow(clippy::too_many_arguments)]
+fn confirm_named_running<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    info: &InfoUf2,
+    port: &str,
+    named: &[String],
+    answered: &[String],
+    running: Option<&str>,
+    ui: &mut dyn Ui,
+) -> Result<Option<Confirmed<'m>>, Error> {
     if named.is_empty() {
-        return confirm_identity_after(catalogue, manifest, info, port, None, answered, ui)
-            .map(Some);
+        return confirm_identity_after(
+            catalogue, manifest, info, port, None, answered, running, ui,
+        )
+        .map(Some);
     }
     // An ID that is missing or unknown falls through to confirm_identity,
     // which names the problem; only a board we can name can be skipped.
@@ -516,9 +547,8 @@ pub fn confirm_named<'m>(
             ));
             Ok(None)
         }
-        found => {
-            confirm_identity_after(catalogue, manifest, info, port, found, answered, ui).map(Some)
-        }
+        found => confirm_identity_after(catalogue, manifest, info, port, found, answered, None, ui)
+            .map(Some),
     }
 }
 
@@ -834,16 +864,23 @@ pub struct Options {
     /// How long to spend establishing which build the board is running
     /// once it has come back ([`verify::FRESH_BANNER_BUDGET`]).
     pub banner_budget: Duration,
-    /// What to do about the radio configuration once the board is up: ask,
-    /// send what the flags already decided, or leave it alone.
+    /// What to do about the radio configuration once the board is up:
+    /// estimate it (the default, [`RadioPlan::Estimate`]), ask, send what the
+    /// flags already decided, or leave it alone.
     pub radio: RadioPlan,
     /// What to do about the telemetry target once the board is up (#236).
-    /// The default is to ask, and the default answer to that is no.
+    /// The flash run's default is to send nothing, the answer "no" to the
+    /// question `--ask` puts.
     pub telemetry: TelemetryPlan,
     /// What to do about the remote-management allow-list once the board is
-    /// up (#235). The default is to ask, and the default answer to that is
-    /// no — an unattended board must come up serving nobody.
+    /// up (#235). The flash run's default is to send nothing, which is the
+    /// answer "no" to the question `--ask` puts: an unattended board must
+    /// come up serving nobody.
     pub management: crate::mgmt::MgmtPlan,
+    /// `--ask`: put every question the zero-config run decides on its own
+    /// (#476) — the overwrite, the radio menu, telemetry and remote
+    /// management. Off by default: starting lnflash flashes what it finds.
+    pub ask: bool,
 }
 
 impl Default for Options {
@@ -854,8 +891,9 @@ impl Default for Options {
             appear_within: entry::BOOTLOADER_APPEARS_WITHIN,
             banner_budget: verify::FRESH_BANNER_BUDGET,
             radio: RadioPlan::default(),
-            telemetry: TelemetryPlan::default(),
-            management: crate::mgmt::MgmtPlan::default(),
+            telemetry: TelemetryPlan::Skip,
+            management: crate::mgmt::MgmtPlan::Skip,
+            ask: false,
         }
     }
 }
@@ -1048,6 +1086,9 @@ fn run_with(
     }
 
     let candidates = find_candidates(catalogue, sysfs)?;
+    for stranger in strangers(sysfs, &candidates)? {
+        ui.say(&describe_stranger(&stranger));
+    }
     if candidates.is_empty() {
         ui.say("No board lnflash knows is attached.");
         // The flashable ones, not every entry: this is a flashing session,
@@ -1083,6 +1124,31 @@ fn run_with(
     Ok(each_candidate(&candidates, ui, |ui, candidate| {
         resolve(catalogue, manifest, sysfs, ui, opts, drives, candidate)
     }))
+}
+
+/// The serial devices on the bus that no catalogue entry claims: an ESP32
+/// RNode, a ThinkNode M9, a GPS mouse, anything with a tty and a USB ID
+/// lnflash does not know. Each gets one line and nothing else (#476): a run
+/// that passed over them in silence would look exactly like one that never
+/// saw them, and the person looking at a board on the desk deserves to know
+/// which of the two happened. Hubs and every other device without a tty are
+/// not strangers worth a line.
+fn strangers(sysfs: &Sysfs, candidates: &[Candidate]) -> io::Result<Vec<Device>> {
+    Ok(sysfs
+        .devices()?
+        .into_iter()
+        .filter(|device| !candidates.iter().any(|c| c.device.name == device.name))
+        .filter(|device| device.interfaces.iter().any(|i| i.tty.is_some()))
+        .collect())
+}
+
+fn describe_stranger(device: &Device) -> String {
+    format!(
+        "  {} [{}] {}: not a board lnflash flashes; left alone, nothing was sent to it.",
+        device.name,
+        device.id,
+        device.product.as_deref().unwrap_or("unnamed device")
+    )
 }
 
 /// What a run did to every board on the bus.
@@ -1328,7 +1394,37 @@ fn open_interface(
             tty.display()
         )));
     }
+    let holders = sysfs.holders(expected_rdev);
+    if !holders.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            held_port(tty, &holders, consequence),
+        ));
+    }
     Ok((fd, expected))
+}
+
+/// The sentence for a port another program holds (#476). lnsd is named on
+/// its own because its serial medium opens the transport port of every
+/// LNode it finds (`leviculum-std/src/auto_serial.rs`), so a board flashed
+/// on a host running lnsd is held again the moment it comes back.
+fn held_port(tty: &Path, holders: &[crate::usb::Holder], consequence: &str) -> String {
+    let who = holders
+        .iter()
+        .map(|h| format!("{} (pid {})", h.name, h.pid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remedy = if holders.iter().any(|h| h.name == "lnsd") {
+        "stop lnsd or let it go of this board (its serial medium opens every LNode's \
+         transport port), then run lnflash again"
+    } else {
+        "close it, then run lnflash again"
+    };
+    format!(
+        "{} is held by {who}: two programs on one port each get half of the answers, so \
+         {consequence}. To use it, {remedy}",
+        tty.display()
+    )
 }
 
 /// The `--set-time` session (#238, #166 item 2): no flash, no bootloader
@@ -1776,6 +1872,67 @@ pub fn set_pn_config(
     Ok(all_took_it)
 }
 
+/// The `--share-position` session (order 1301): set whom every running
+/// LNode shares its position with, then exit. No flashing.
+///
+/// Persisted, like the costs, and applied at once: the board writes the
+/// record, acks, and its next position announce follows the setting. The
+/// board's `[POSITION] share=` line on the debug port says what it now
+/// runs, which for `default` depends on whether it reports as a tracker.
+pub fn set_position_share(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    setting: u8,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --share-position talks to flashed boards; a board in its bootloader has no config page owner.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty).and_then(|fd| {
+            crate::envelope::probed(&fd, leviculum_core::envelope::TYPE_POSITION_SHARE, |fd| {
+                crate::envelope::send_position_share(fd, setting)
+            })
+        }) {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: persisted and in force. The [POSITION] share= line on the debug port (if00) says whom the board now shares with."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the setting: {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer, so assume nothing was persisted."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so nothing was sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware does not announce a position. Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
 /// The operator-list session (audit 2026-10-12 D4, D18): send each list
 /// the command line named to every running LNode, then exit. No flashing.
 /// Each frame replaces its list whole; the board acks once the list is in
@@ -1917,7 +2074,11 @@ pub fn set_tx_power(
             Ok(TxPowerOutcome::Answered(reply)) => {
                 all_took_it &= reply.took_it();
                 match reply {
-                    SessionReply::Acked => unreachable!("acked is reported as Applied"),
+                    // `send_tx_power_to` reports an ack as `Applied`, with
+                    // the power it read; one arriving here is still an ack.
+                    SessionReply::Acked => ui.say(&format!(
+                        "{port}: the board acknowledged the radio configuration."
+                    )),
                     SessionReply::Refused(reason) => ui.say(&format!(
                         "{port}: the board refused the radio configuration — {}.",
                         crate::envelope::reason_str(reason)
@@ -2455,19 +2616,52 @@ fn report_name(
 /// The list is decided once and goes to every board found, like the
 /// telemetry target: a two-board bench is not two access-control
 /// decisions.
+///
+/// `only` narrows the session to the one board that owns that serial port
+/// (any of its CDC interfaces, by path or by a `/dev/serial/by-id` link):
+/// the other boards on the bus are not opened and get no frame. Without it
+/// the session talks to every running board, which is the right default
+/// for setting a list on a fresh batch and the wrong one on a bench where
+/// one board's list is the thing under test (the T114 kept a cell's
+/// identity on 2026-11-10 and the only way to read or clear just that
+/// board was a hand-written envelope script).
 pub fn set_mgmt(
     catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     allowed: Option<&[crate::mgmt::IdentityHash]>,
+    only: Option<&Path>,
 ) -> Result<bool, Error> {
-    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    let mut reachable = reachable_boards(catalogue, sysfs, ui)?;
     if reachable.is_empty() {
         ui.say(
             "No running LNode on the bus. --management-identity talks to flashed boards; a board \
              in its bootloader has no allow-list to configure.",
         );
         return Ok(false);
+    }
+    if let Some(port) = only {
+        let tty_name = port_tty_name(port);
+        let listed = reachable
+            .boards
+            .iter()
+            .map(|b| format!("  {} ({})", b.port, b.tty.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        reachable.boards.retain(|b| {
+            tty_name
+                .as_deref()
+                .is_some_and(|t| device_owns_tty(&b.device, t))
+        });
+        // The boards left out on purpose are not this session's failures.
+        reachable.unreachable = 0;
+        if reachable.boards.is_empty() {
+            ui.say(&format!(
+                "{}: no running LNode owns this port, so nothing was sent. Running are:\n{listed}",
+                port.display()
+            ));
+            return Ok(false);
+        }
     }
     let mut all_took_it = reachable.unreachable == 0;
     for board in &reachable.boards {
@@ -2501,6 +2695,27 @@ pub fn set_mgmt(
     Ok(all_took_it)
 }
 
+/// The kernel's name for the tty a port path names (`ttyACM3`), through
+/// any `/dev/serial/by-id` link. A path that does not resolve (a board
+/// unplugged since) is taken by its own file name, so it can still match a
+/// captured tree and otherwise matches nothing.
+fn port_tty_name(port: &Path) -> Option<String> {
+    let resolved = std::fs::canonicalize(port).unwrap_or_else(|_| port.to_path_buf());
+    resolved
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// True when one of this device's interfaces is bound to the tty `name`.
+/// Every CDC of the board counts, so the debug port (if00) a person
+/// usually has in hand selects the same board as its transport (if02).
+fn device_owns_tty(device: &Device, name: &str) -> bool {
+    device
+        .interfaces
+        .iter()
+        .any(|i| i.tty.as_deref() == Some(name))
+}
+
 /// Say what the board reported about who may read it.
 ///
 /// Every refusal is named rather than folded into "failed": the difference
@@ -2531,6 +2746,15 @@ fn report_mgmt(
                  identities, and nothing was stored. Nothing was truncated either: the list on \
                  the board is the one it had.",
                 leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES
+            ));
+        }
+        Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_PERSIST_PENDING =>
+        {
+            return ui.say(&format!(
+                "{port}: the board runs the allow-list and is still writing it to flash. Wait \
+                 for `persist landed` on if00, or ask again (an unchanged page answers at once), \
+                 before you reset it."
             ));
         }
         Err(SessionReply::Refused(reason))
@@ -2743,15 +2967,60 @@ fn report_telemetry(
 struct BeforeTouch<'a> {
     boards: &'a [String],
     answered: &'a [String],
+    /// The board a leviculum image named while it ran ([`running_ours`]).
+    running: Option<&'a str>,
 }
 
 impl<'a> BeforeTouch<'a> {
     /// A board found in its bootloader, or a dry run: no question was put.
-    fn nothing_asked(boards: &'a [String]) -> Self {
+    fn nothing_asked(boards: &'a [String], running: Option<&'a str>) -> Self {
         Self {
             boards,
             answered: &[],
+            running,
         }
+    }
+}
+
+/// The USB manufacturer string our firmware sets on every board
+/// (`usb_manufacturer` in `leviculum-nrf/src/boards/`).
+pub const LEVICULUM_MANUFACTURER: &str = "leviculum";
+
+/// The USB vendor ID our firmware's application IDs live under (pid.codes,
+/// `candidate_usb` in `lnflash/catalogue.toml`). Another vendor's ID is that
+/// vendor's firmware whatever its strings say.
+pub const LEVICULUM_VID: u16 = 0x1209;
+
+/// The board a running leviculum image names, before anything is touched
+/// (#476): our manufacturer string on one of our own USB IDs
+/// ([`LEVICULUM_VID`]) that exactly one catalogue entry lists. That image was written there by lnflash after the
+/// bootloader's identity was settled, by `--board` or by the person at the
+/// shared-Board-ID question, so a re-flash need not ask again.
+///
+/// Evidence of which model, never of what to write: the bootloader still
+/// has to publish that board's own Board-ID ([`confirm_identity_after`]),
+/// and a board in its bootloader, or one running anything else, names
+/// nothing here.
+fn running_ours(catalogue: &Catalogue, candidate: &Candidate) -> Option<String> {
+    if candidate.in_bootloader
+        || candidate.device.id.vid != LEVICULUM_VID
+        || candidate.device.manufacturer.as_deref() != Some(LEVICULUM_MANUFACTURER)
+    {
+        return None;
+    }
+    let claimants: Vec<&String> = catalogue
+        .board
+        .iter()
+        .filter(|(name, board)| {
+            board
+                .candidate_ids(name)
+                .is_ok_and(|ids| ids.contains(&candidate.device.id))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    match claimants.as_slice() {
+        [only] => Some(only.to_string()),
+        _ => None,
     }
 }
 
@@ -2768,13 +3037,14 @@ fn inspect<'m>(
     info: &InfoUf2,
     installed: impl FnOnce(&InfoUf2) -> Installed,
 ) -> Result<Option<(Confirmed<'m>, Plan)>, Error> {
-    let Some(confirmed) = confirm_named(
+    let Some(confirmed) = confirm_named_running(
         catalogue,
         manifest,
         info,
         port,
         before.boards,
         before.answered,
+        before.running,
         ui,
     )?
     else {
@@ -2954,7 +3224,7 @@ fn dry_walk(
                 catalogue,
                 manifest,
                 &mut dry,
-                BeforeTouch::nothing_asked(&opts.boards),
+                BeforeTouch::nothing_asked(&opts.boards, None),
                 port,
                 &info,
                 |_| installed,
@@ -3257,6 +3527,7 @@ fn resolve(
             .map_err(|err| touched_at_level(err, candidate));
     }
 
+    let running = running_ours(catalogue, candidate);
     let bootloader = if candidate.in_bootloader {
         candidate.device.clone()
     } else {
@@ -3275,6 +3546,7 @@ fn resolve(
         BeforeTouch {
             boards: &opts.boards,
             answered: &answered,
+            running: running.as_deref(),
         },
         &port,
         &info,
@@ -3289,12 +3561,7 @@ fn resolve(
         remedy_image,
         app_image,
     } = plan;
-    if !ui.confirm(&format!(
-        "\n{port}: overwrite the firmware on this {}?",
-        confirmed.name()
-    ))? {
-        return Err(Error::Cancelled);
-    }
+    confirm_overwrite(ui, opts, &port, confirmed.name())?;
 
     let mut outcome = Outcome {
         port: port.clone(),
@@ -3343,6 +3610,29 @@ fn resolve(
     outcome.application_written = Some(written);
 
     after_write(sysfs, ui, opts, &bootloader, &confirmed, outcome)
+}
+
+/// The overwrite question, put only under `--ask` (#476). Starting lnflash
+/// is the decision to flash what it finds: the boards were listed before
+/// anything was touched, a board this run is not for was left alone by
+/// `--board`, and `--dry-run` is the preview. A question every person
+/// answers yes to teaches them to answer without reading, which is the one
+/// habit a question about somebody's device must not breed.
+fn confirm_overwrite(
+    ui: &mut dyn Ui,
+    opts: &Options,
+    port: &str,
+    board: &str,
+) -> Result<(), Error> {
+    if !opts.ask {
+        return Ok(());
+    }
+    if !ui.confirm(&format!(
+        "\n{port}: overwrite the firmware on this {board}?"
+    ))? {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
 }
 
 /// Everything after the application went on, whichever transport took it
@@ -3460,6 +3750,7 @@ fn resolve_dfu(
         BeforeTouch {
             boards: &opts.boards,
             answered,
+            running: None,
         },
         &port,
         &bootloader,
@@ -3468,12 +3759,7 @@ fn resolve_dfu(
     else {
         return left_in_bootloader(candidate);
     };
-    if !ui.confirm(&format!(
-        "\n{port}: overwrite the firmware on this {}?",
-        confirmed.name()
-    ))? {
-        return Err(Error::Cancelled);
-    }
+    confirm_overwrite(ui, opts, &port, confirmed.name())?;
 
     let (mut fd, _) = open_interface(
         sysfs,
@@ -3609,7 +3895,7 @@ fn dry_walk_dfu(
                 catalogue,
                 manifest,
                 &mut dry,
-                BeforeTouch::nothing_asked(&opts.boards),
+                BeforeTouch::nothing_asked(&opts.boards, None),
                 port,
                 &bootloader,
                 &tty,
@@ -3753,6 +4039,9 @@ fn set_radio(
     app: &Device,
     port: &str,
 ) -> Result<Option<RadioOutcome>, Error> {
+    if let RadioPlan::Estimate(estimate) = &opts.radio {
+        return set_estimated_radio(sysfs, ui, opts, app, port, estimate);
+    }
     let Some(choice) = resolve_radio_choice(ui, opts)? else {
         return Ok(None);
     };
@@ -3789,6 +4078,17 @@ fn set_radio(
             radio::ConfigTaken::No
         }
     };
+    report_radio_taken(ui, port, &settings, taken);
+    Ok(Some(RadioOutcome { settings, taken }))
+}
+
+/// What the board did with the radio settings it was sent, in words.
+fn report_radio_taken(
+    ui: &mut dyn Ui,
+    port: &str,
+    settings: &RadioSettings,
+    taken: radio::ConfigTaken,
+) {
     match taken {
         radio::ConfigTaken::Running => ui.say(&format!(
             "{port}: radio settings written and persisted: {}",
@@ -3812,7 +4112,127 @@ fn set_radio(
              host that binds the board."
         )),
     }
-    Ok(Some(RadioOutcome { settings, taken }))
+}
+
+/// Whether a profile the board reports is on the PHY of `settings`: the
+/// four values that decide who hears it. Power and the airtime locks are
+/// not part of being on a channel.
+fn same_phy(running: &leviculum_core::rnode::RadioConfigWire, settings: &RadioSettings) -> bool {
+    running.frequency_hz == settings.frequency_hz
+        && running.bandwidth_hz == settings.bandwidth_hz
+        && running.sf == settings.sf
+        && running.cr == settings.cr
+}
+
+/// The zero-config radio step (#476): nothing asked, one rule.
+///
+/// 1. The board runs a profile other than the shipped one: somebody stored
+///    it, the store survived the flash, and it is kept.
+/// 2. It runs the shipped profile, or the estimate already: the estimate is
+///    sent when it differs, and nothing when it does not.
+/// 3. Which profile it runs cannot be read: nothing is sent, because a
+///    config frame carries every field and inventing the ones not read is
+///    how a stored profile is lost.
+///
+/// The estimate is [`crate::region::estimate`] over the host's place.
+fn set_estimated_radio(
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    app: &Device,
+    port: &str,
+    estimate: &crate::region::Estimate,
+) -> Result<Option<RadioOutcome>, Error> {
+    let Some(tty) =
+        entry::wait_for_interface_tty(sysfs, app, radio::TRANSPORT_INTERFACE, opts.appear_within)?
+    else {
+        ui.say(&format!(
+            "{port}: the firmware is on the board, but its transport port (if{:02}) never \
+             appeared, so its radio settings were neither read nor sent. It runs what it had \
+             stored, the shipped eu868 profile on a board that never had any.",
+            radio::TRANSPORT_INTERFACE
+        ));
+        return Ok(None);
+    };
+    let fd = match open_transport(sysfs, app, &tty) {
+        Ok(fd) => fd,
+        Err(err) => {
+            ui.say(&format!(
+                "{port}: the transport port could not be used ({err}), so the radio settings \
+                 were neither read nor sent."
+            ));
+            return Ok(None);
+        }
+    };
+    let shipped = radio::EU868_PRESET.settings;
+    let wanted = estimate.preset.settings;
+    match crate::envelope::query_radio_config(&fd) {
+        Ok(crate::envelope::RadioQueryAnswer::Reported(running))
+            if !same_phy(&running, &shipped) =>
+        {
+            ui.say(&format!(
+                "{port}: the board runs stored radio settings, not the shipped profile \
+                 (freq={} bw={} sf={} cr=4/{}): kept. --radio-preset or --radio-* change them.",
+                running.frequency_hz, running.bandwidth_hz, running.sf, running.cr
+            ));
+            Ok(None)
+        }
+        Ok(crate::envelope::RadioQueryAnswer::Reported(running)) if same_phy(&running, &wanted) => {
+            ui.say(&format!(
+                "{port}: radio on {} already ({}), nothing to send.",
+                estimate.preset.name, estimate.why
+            ));
+            Ok(None)
+        }
+        Ok(crate::envelope::RadioQueryAnswer::Reported(_)) => {
+            ui.say(&format!(
+                "{port}: radio set to {} from the {}: {}",
+                estimate.preset.name,
+                estimate.why,
+                wanted.describe()
+            ));
+            if let Some(caveat) = estimate.preset.caveat {
+                ui.say(caveat);
+            }
+            let taken = radio::send_configured(&fd, &wanted).unwrap_or_else(|err| {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                radio::ConfigTaken::No
+            });
+            report_radio_taken(ui, port, &wanted, taken);
+            Ok(Some(RadioOutcome {
+                settings: wanted,
+                taken,
+            }))
+        }
+        Ok(other) => {
+            use crate::envelope::{reason_str, RadioQueryAnswer};
+            let why = match other {
+                RadioQueryAnswer::NoRunningRadio(reason) => {
+                    format!("no radio runs on this boot: {}", reason_str(reason))
+                }
+                RadioQueryAnswer::QueryRefused(reason) => {
+                    format!("the board refused the radio query: {}", reason_str(reason))
+                }
+                RadioQueryAnswer::Silent | RadioQueryAnswer::Reported(_) => {
+                    "the board did not answer the radio query".to_string()
+                }
+            };
+            ui.say(&format!(
+                "{port}: which radio profile the board runs could not be read ({why}), so \
+                 nothing was sent and it keeps what it had stored. --radio-preset sets one."
+            ));
+            Ok(None)
+        }
+        Err(err) => {
+            ui.say(&format!(
+                "{port}: the radio profile could not be read ({err}), so nothing was sent and \
+                 it keeps what it had stored."
+            ));
+            Ok(None)
+        }
+    }
 }
 
 /// Turn the plan into a choice, and say what the chosen preset obliges the
@@ -3821,6 +4241,9 @@ fn set_radio(
 fn resolve_radio_choice(ui: &mut dyn Ui, opts: &Options) -> Result<Option<RadioChoice>, Error> {
     let choice = match &opts.radio {
         RadioPlan::Skip => return Ok(None),
+        // `set_radio` takes the estimate before it gets here; a caller that
+        // did not still gets the estimated preset, never a question.
+        RadioPlan::Estimate(estimate) => RadioChoice::Preset(estimate.preset),
         RadioPlan::Fixed(choice) => choice.clone(),
         RadioPlan::Ask => ask_for_radio(ui)?,
     };
@@ -3834,7 +4257,7 @@ fn resolve_radio_choice(ui: &mut dyn Ui, opts: &Options) -> Result<Option<RadioC
 
 /// The eu868 preset, which is what "the default radio settings" means.
 fn default_preset() -> &'static radio::PresetDef {
-    radio::preset("eu868").expect("the shipped table carries eu868")
+    radio::EU868_PRESET
 }
 
 /// The prompts. The default answer to every one of them is the eu868 value,
@@ -4251,6 +4674,55 @@ mod tests {
 
     fn catalogue() -> Catalogue {
         Catalogue::builtin().unwrap()
+    }
+
+    fn lnode_with(ttys: &[(u8, &str)]) -> Device {
+        Device {
+            name: "3-2.4".into(),
+            id: UsbId::new(0x1209, 0x0001),
+            serial: Some("DEC9947DAD9D2869".into()),
+            manufacturer: None,
+            product: None,
+            interfaces: ttys
+                .iter()
+                .map(|(number, tty)| crate::usb::Interface {
+                    number: *number,
+                    class: 2,
+                    tty: Some((*tty).to_string()),
+                    block: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// `--port` with the management flags selects the board by any of its
+    /// CDC ttys: the debug port a person has in hand and the transport the
+    /// frame goes out on name the same board, and a neighbour's tty names
+    /// none of them.
+    #[test]
+    fn a_management_port_selects_the_board_by_any_of_its_ttys() {
+        let board = lnode_with(&[(0, "ttyACM3"), (2, "ttyACM4")]);
+        assert!(device_owns_tty(&board, "ttyACM3"));
+        assert!(device_owns_tty(&board, "ttyACM4"));
+        assert!(!device_owns_tty(&board, "ttyACM5"));
+        assert!(!device_owns_tty(&lnode_with(&[]), "ttyACM3"));
+    }
+
+    /// A by-id link resolves to the tty it points at; a path that no longer
+    /// exists is read by its own file name rather than refused, so the
+    /// session can still say "no running LNode owns this port".
+    #[test]
+    fn a_management_port_path_resolves_through_its_link() {
+        let dir = TempDir::new().unwrap();
+        let tty = dir.path().join("ttyACM7");
+        fs::write(&tty, b"").unwrap();
+        let link = dir.path().join("usb-leviculum_T114_DEC9947-if02");
+        std::os::unix::fs::symlink(&tty, &link).unwrap();
+        assert_eq!(port_tty_name(&link).as_deref(), Some("ttyACM7"));
+        assert_eq!(
+            port_tty_name(Path::new("/nonexistent/ttyACM9")).as_deref(),
+            Some("ttyACM9")
+        );
     }
 
     /// The reporter-less refusal is rendered as its own sentence, not as
@@ -5582,7 +6054,10 @@ convert = "hex-to-uf2"
     #[test]
     fn the_us915_caveat_is_said_when_the_menu_picks_it() {
         let mut ui = crate::ui::testing::Fake::typing(&["n", "2"]);
-        let opts = Options::default(); // RadioPlan::Ask
+        let opts = Options {
+            radio: RadioPlan::Ask,
+            ..Options::default()
+        };
         let choice = resolve_radio_choice(&mut ui, &opts).unwrap().unwrap();
         assert_eq!(choice, RadioChoice::Preset(radio::preset("us915").unwrap()));
         assert!(
@@ -5902,16 +6377,21 @@ convert = "hex-to-uf2"
     }
 
     #[test]
-    fn the_flash_flow_asks_about_telemetry_by_default_and_the_answer_is_no() {
+    fn the_flash_flow_asks_nothing_about_telemetry_or_management_and_sends_nothing() {
+        // #476: the zero-config flash takes the question's default answer,
+        // no, without putting it; `--ask` puts it again.
         let opts = Options::default();
-        assert_eq!(
-            opts.telemetry,
-            TelemetryPlan::Ask {
-                profile: leviculum_core::envelope::TELEMETRY_PROFILE_STATION
-            }
-        );
-        let mut ui = crate::ui::testing::Fake::agreeing();
+        assert_eq!(opts.telemetry, TelemetryPlan::Skip);
+        assert_eq!(opts.management, crate::mgmt::MgmtPlan::Skip);
+        assert!(!opts.ask);
+        let mut ui = crate::ui::testing::Fake::typing(&["yes"]);
         assert_eq!(telemetry::resolve(&mut ui, &opts.telemetry).unwrap(), None);
+        assert_eq!(
+            crate::mgmt::resolve(&mut ui, &opts.management).unwrap(),
+            None
+        );
+        assert!(ui.said.is_empty(), "{}", ui.transcript());
+        assert_eq!(ui.typed, ["yes"], "nothing was asked");
     }
 
     /// The dry run's drive reads with the uid decided by the test, not by
@@ -6929,5 +7409,513 @@ convert = "hex-to-uf2"
             .unwrap()
             .is_empty());
         assert!(ui.said.is_empty(), "{}", ui.transcript());
+    }
+
+    // -----------------------------------------------------------------
+    // #476: the zero-config flash, one test per path of the audit table
+    // in docs/src/concepts/lnode-flashing.md
+    // -----------------------------------------------------------------
+
+    /// What a person running plain `lnflash` gets: every default, with the
+    /// waits short enough for a test.
+    fn zero_config_opts() -> Options {
+        Options {
+            appear_within: Duration::from_secs(2),
+            banner_budget: Duration::from_millis(300),
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn zero_config_flashes_a_running_lnode_without_a_question() {
+        // A refusing person: any question put would stop the flash.
+        let bench = running_t1000e();
+        let mut ui = Fake::refusing();
+        let bus = run_on(&bench, &mut ui, &zero_config_opts());
+        let said = ui.transcript();
+        assert!(ui.questions.is_empty(), "asked: {:?}\n{said}", ui.questions);
+        assert!(bench.touched(), "{said}");
+        assert!(bus.refused.is_empty() && bus.skipped.is_empty(), "{said}");
+        assert_eq!(bus.outcomes[0].board, "t1000e");
+        assert_eq!(
+            bench.board.lock().unwrap().ended,
+            Some(Ended::Activated),
+            "{said}"
+        );
+        assert!(said.contains("1-1: sent the application"), "{said}");
+    }
+
+    #[test]
+    fn zero_config_flashes_a_board_found_in_its_bootloader_without_a_question() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
+        let mut ui = Fake::refusing();
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &zero_config_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert!(ui.questions.is_empty(), "asked: {:?}\n{said}", ui.questions);
+        assert!(bus.refused.is_empty(), "{said}");
+        assert_eq!(bus.outcomes[0].board, "t1000e");
+        assert_eq!(
+            bench.board.lock().unwrap().ended,
+            Some(Ended::Activated),
+            "{said}"
+        );
+        // Back without a transport port: the radio step says what it could
+        // not do instead of asking or guessing.
+        assert!(
+            said.contains("its radio settings were neither read nor sent"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn ask_brings_the_overwrite_question_back_and_a_no_writes_nothing() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
+        let mut ui = Fake::refusing();
+        let opts = Options {
+            ask: true,
+            ..zero_config_opts()
+        };
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &opts,
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        assert_eq!(
+            ui.questions,
+            ["\n1-1: overwrite the firmware on this t1000e?"]
+        );
+        assert_eq!(bus.refused, ["1-1"]);
+        assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
+    }
+
+    /// A bus with what lnflash must leave alone: a ThinkNode M9 (an ESP32-S3
+    /// behind a CH340K, `1a86:7522`, one tty) and a hub (no tty at all).
+    fn stranger_bus(root: &Path) {
+        let m9 = root.join("1-2");
+        sysfs_file(&m9, "idVendor", "1a86");
+        sysfs_file(&m9, "idProduct", "7522");
+        sysfs_file(&m9, "product", "USB Serial");
+        sysfs_file(&root.join("1-2:1.0"), "bInterfaceNumber", "00");
+        sysfs_file(&root.join("1-2:1.0"), "bInterfaceClass", "ff");
+        // The usb-serial layout, one level below the interface.
+        fs::create_dir_all(root.join("1-2:1.0/ttyUSB0/tty/ttyUSB0")).unwrap();
+        let hub = root.join("usb1");
+        sysfs_file(&hub, "idVendor", "1d6b");
+        sysfs_file(&hub, "idProduct", "0002");
+        sysfs_file(&hub, "product", "xHCI Host Controller");
+        sysfs_file(&root.join("usb1:1.0"), "bInterfaceNumber", "00");
+        sysfs_file(&root.join("usb1:1.0"), "bInterfaceClass", "09");
+    }
+
+    #[test]
+    fn a_stranger_is_left_alone_with_one_line() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let sys = TempDir::new().unwrap();
+        stranger_bus(sys.path());
+        let mut ui = Fake::refusing();
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &Sysfs::with_dev(sys.path(), "/nonexistent-dev"),
+            &mut ui,
+            &zero_config_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        let line = "  1-2 [1a86:7522] USB Serial: not a board lnflash flashes; left alone, \
+                    nothing was sent to it.";
+        assert_eq!(said.matches(line).count(), 1, "{said}");
+        assert!(!said.contains("usb1"), "a hub is not a stranger: {said}");
+        assert!(
+            said.contains("No board lnflash knows is attached."),
+            "{said}"
+        );
+        assert!(bus.is_empty(), "{bus:?}");
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+
+        // Beside a board lnflash does flash, the stranger still gets its
+        // line and the board still gets flashed.
+        let bench = running_t1000e();
+        stranger_bus(bench.sys.path());
+        let mut ui = Fake::refusing();
+        let bus = run_on(&bench, &mut ui, &zero_config_opts());
+        let said = ui.transcript();
+        assert_eq!(said.matches(line).count(), 1, "{said}");
+        assert_eq!(bus.outcomes[0].board, "t1000e", "{said}");
+    }
+
+    /// A fake `/proc` in which `pid`, named `name`, has `node` open.
+    fn proc_holding(pid: u32, name: &str, node: &Path) -> TempDir {
+        let proc = TempDir::new().unwrap();
+        let fd = proc.path().join(pid.to_string()).join("fd");
+        fs::create_dir_all(&fd).unwrap();
+        symlink(node, fd.join("7")).unwrap();
+        fs::write(
+            proc.path().join(pid.to_string()).join("comm"),
+            format!("{name}\n"),
+        )
+        .unwrap();
+        proc
+    }
+
+    #[test]
+    fn a_port_lnsd_holds_is_refused_with_the_holder_named() {
+        // lnsd's serial medium opens every LNode's transport port, under
+        // TIOCEXCL, which root's open walks through. The open must not be
+        // taken as the port being free.
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM2", &pty.slave_path)]);
+        let proc = proc_holding(4242, "lnsd", &pty.slave_path);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path())
+            .with_proc(proc.path());
+        let t114 = sysfs
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+        let err = open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ResourceBusy);
+        let text = err.to_string();
+        for needle in [
+            "is held by lnsd (pid 4242)",
+            "nothing was sent",
+            "stop lnsd or let it go of this board",
+        ] {
+            assert!(text.contains(needle), "{needle:?} missing from: {text}");
+        }
+
+        // The flash flow's radio step on that board says it, rather than
+        // reporting a silent board or failing without a word.
+        let mut ui = Fake::refusing();
+        let outcome = set_radio(&sysfs, &mut ui, &zero_config_opts(), &t114, "3-2.3.1").unwrap();
+        assert_eq!(outcome, None);
+        let said = ui.transcript();
+        assert!(said.contains("held by lnsd (pid 4242)"), "{said}");
+        assert!(said.contains("neither read nor sent"), "{said}");
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+
+        // Positive control: the same port with nobody else on it opens.
+        let free = TempDir::new().unwrap();
+        let sysfs = sysfs.with_proc(free.path());
+        open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap();
+    }
+
+    #[test]
+    fn another_program_on_the_port_is_named_without_blaming_lnsd() {
+        let holders = [crate::usb::Holder {
+            pid: 77,
+            name: "minicom".into(),
+        }];
+        let text = held_port(Path::new("/dev/ttyACM2"), &holders, "nothing was read");
+        assert!(text.contains("held by minicom (pid 77)"), "{text}");
+        assert!(text.contains("close it, then run lnflash again"), "{text}");
+        assert!(!text.contains("lnsd"), "{text}");
+    }
+
+    #[test]
+    fn a_board_that_comes_back_naming_another_build_fails_the_flash() {
+        // The verify step: the write went through, the board came back,
+        // and its banner names a build that is not the one written.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), true);
+        let boot = crate::sys::testpty::Pty::open();
+        let debug = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[
+            ("ttyACM9", &boot.slave_path),
+            ("ttyACM7", &debug.slave_path),
+        ]);
+        let (board, _heard) = serve_bootloader(boot, Bootloader::new(S140_7_3_0), sys.path());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (halt, root, watched) = (stop.clone(), sys.path().to_path_buf(), board.clone());
+        let speaker = std::thread::spawn(move || {
+            // Once the image is activated the application binds its debug
+            // port, and repeats the banner of a build nobody wrote.
+            while watched.lock().unwrap().ended != Some(Ended::Activated) {
+                if halt.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let iface = root.join("1-1:1.0");
+            sysfs_file(&iface, "bInterfaceNumber", "00");
+            sysfs_file(&iface, "bInterfaceClass", "02");
+            fs::create_dir_all(iface.join("tty/ttyACM7")).unwrap();
+            while !halt.load(Ordering::SeqCst) {
+                debug.write_raw(b"[FW_BUILD] git_sha=aaaaaaaa dirty=false\r\n");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut ui = Fake::refusing();
+        let opts = Options {
+            banner_budget: Duration::from_secs(1),
+            radio: RadioPlan::Skip,
+            ..zero_config_opts()
+        };
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &Sysfs::with_dev(sys.path(), dev.path()),
+            &mut ui,
+            &opts,
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        stop.store(true, Ordering::SeqCst);
+        speaker.join().unwrap();
+        let said = ui.transcript();
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+        assert_eq!(
+            bus.outcomes[0].confirmation(),
+            Confirmation::Failed,
+            "{said}"
+        );
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED, "{said}");
+        assert!(
+            said.contains("the board reports git_sha=aaaaaaaa, not bb7c4f64"),
+            "{said}"
+        );
+        assert!(said.contains("The write did not take."), "{said}");
+    }
+
+    fn leviculum_running(id: crate::usb::UsbId, manufacturer: Option<&str>) -> Candidate {
+        Candidate {
+            device: crate::usb::Device {
+                name: "3-2.3.1".into(),
+                id,
+                serial: None,
+                manufacturer: manufacturer.map(str::to_string),
+                product: Some("T114".into()),
+                interfaces: Vec::new(),
+            },
+            in_bootloader: false,
+            hint: "t114".into(),
+        }
+    }
+
+    #[test]
+    fn only_our_running_image_on_our_id_names_the_board() {
+        let catalogue = catalogue();
+        let ours = crate::usb::UsbId::new(0x1209, 0x0001);
+        let heltec_stock = crate::usb::UsbId::new(0x239a, 0x8071);
+        assert_eq!(
+            running_ours(&catalogue, &leviculum_running(ours, Some("leviculum"))).as_deref(),
+            Some("t114")
+        );
+        // Heltec's stock ID, or our ID under somebody else's strings, or a
+        // board already in its bootloader: nothing is named.
+        assert_eq!(
+            running_ours(
+                &catalogue,
+                &leviculum_running(heltec_stock, Some("leviculum"))
+            ),
+            None
+        );
+        assert_eq!(
+            running_ours(&catalogue, &leviculum_running(ours, Some("pid.codes"))),
+            None
+        );
+        assert_eq!(
+            running_ours(&catalogue, &leviculum_running(ours, None)),
+            None
+        );
+        let mut in_bootloader = leviculum_running(ours, Some("leviculum"));
+        in_bootloader.in_bootloader = true;
+        assert_eq!(running_ours(&catalogue, &in_bootloader), None);
+    }
+
+    #[test]
+    fn a_shared_board_id_is_settled_by_our_running_image_and_asked_otherwise() {
+        let (_dir, catalogue, manifest) = bundle();
+        let info = infouf2::parse(T114_INFO);
+        // Re-flash of a T114 that ran our T114 image: no question.
+        let mut ui = Fake::refusing();
+        let confirmed = confirm_identity_after(
+            &catalogue,
+            &manifest,
+            &info,
+            "3-2.4",
+            None,
+            &[],
+            Some("t114"),
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(confirmed.name(), "t114");
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+        assert!(
+            ui.transcript().contains("no question"),
+            "{}",
+            ui.transcript()
+        );
+
+        // A board found in its bootloader, or running stock firmware: the
+        // one question the zero-config run still puts.
+        let mut ui = Fake::refusing();
+        let err = confirm_identity_after(
+            &catalogue,
+            &manifest,
+            &info,
+            "3-2.4",
+            None,
+            &[],
+            None,
+            &mut ui,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AmbiguousBoardId { .. }), "{err:?}");
+        assert_eq!(ui.questions.len(), 1, "{:?}", ui.questions);
+
+        // A running image naming another board settles nothing.
+        let mut ui = Fake::refusing();
+        assert!(confirm_identity_after(
+            &catalogue,
+            &manifest,
+            &info,
+            "3-2.4",
+            None,
+            &[],
+            Some("rak4631"),
+            &mut ui,
+        )
+        .is_err());
+        assert_eq!(ui.questions.len(), 1);
+    }
+
+    // The radio step's rule (#476): keep what the board stored, send the
+    // estimate over the shipped profile, send nothing that is already there.
+
+    /// The fixture T114 at 3-2.3.1 with its transport port a pty, answered
+    /// by `stub`.
+    fn radio_board(
+        stub: impl FnOnce(&crate::sys::testpty::Pty),
+    ) -> (TempDir, Sysfs, Device, crate::sys::testpty::Pty) {
+        let pty = crate::sys::testpty::Pty::open();
+        stub(&pty);
+        let dev = dev_tree(&[("ttyACM2", &pty.slave_path)]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        let t114 = sysfs
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+        (dev, sysfs, t114, pty)
+    }
+
+    /// A board that reports `running` to the radio query and acks a config.
+    fn reporting_stub(
+        pty: &crate::sys::testpty::Pty,
+        seen: crate::envelope::testing::Seen,
+        running: RadioSettings,
+    ) {
+        use crate::envelope::testing::FIRMWARE_ACCEPTS;
+        use leviculum_core::envelope::{
+            classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
+            ControlAction, TYPE_RADIO_CONFIG,
+        };
+        crate::sys::testpty::spawn_stub(pty, move |frame| {
+            seen.lock().unwrap().push(frame.to_vec());
+            match classify_control_frame(frame, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::RadioQuery => Some(encode_radio_report(&running.to_wire())),
+                ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
+                _ => None,
+            }
+        });
+    }
+
+    fn estimated(name: &str, why: &str) -> Options {
+        Options {
+            radio: RadioPlan::Estimate(crate::region::Estimate {
+                preset: radio::preset(name).unwrap(),
+                why: why.into(),
+            }),
+            ..zero_config_opts()
+        }
+    }
+
+    #[test]
+    fn the_estimate_keeps_settings_the_board_already_stored() {
+        let seen = crate::envelope::testing::seen();
+        let (_dev, sysfs, t114, _pty) =
+            radio_board(|pty| crate::envelope::testing::envelope_firmware_stub(pty, seen.clone()));
+        let mut ui = Fake::refusing();
+        let opts = estimated("us915", "time zone America/New_York (US)");
+        assert_eq!(
+            set_radio(&sysfs, &mut ui, &opts, &t114, "3-2.3.1").unwrap(),
+            None
+        );
+        let said = ui.transcript();
+        assert!(
+            said.contains("runs stored radio settings, not the shipped profile"),
+            "{said}"
+        );
+        assert!(
+            said.contains("freq=867500000 bw=250000 sf=9 cr=4/6): kept"),
+            "{said}"
+        );
+        assert_eq!(crate::envelope::testing::radio_config_frame(&seen), None);
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+    }
+
+    #[test]
+    fn the_estimate_goes_to_a_board_on_the_shipped_profile() {
+        let seen = crate::envelope::testing::seen();
+        let (_dev, sysfs, t114, _pty) =
+            radio_board(|pty| reporting_stub(pty, seen.clone(), radio::EU868));
+        let mut ui = Fake::refusing();
+        let opts = estimated("us915", "time zone America/New_York (US)");
+        let outcome = set_radio(&sysfs, &mut ui, &opts, &t114, "3-2.3.1")
+            .unwrap()
+            .unwrap();
+        let us915 = radio::preset("us915").unwrap().settings;
+        assert_eq!(outcome.settings, us915);
+        assert_eq!(outcome.taken, radio::ConfigTaken::Running);
+        let sent = crate::envelope::testing::radio_config_frame(&seen).unwrap();
+        assert_eq!(sent.frequency_hz, 914_875_000);
+        let said = ui.transcript();
+        assert!(
+            said.contains("radio set to us915 from the time zone America/New_York (US)"),
+            "{said}"
+        );
+        assert!(said.contains("15.247(a)(2)"), "the FCC note: {said}");
+        assert!(ui.questions.is_empty(), "{:?}", ui.questions);
+    }
+
+    #[test]
+    fn a_board_already_on_the_estimate_is_sent_nothing() {
+        let seen = crate::envelope::testing::seen();
+        let (_dev, sysfs, t114, _pty) =
+            radio_board(|pty| reporting_stub(pty, seen.clone(), radio::EU868));
+        let mut ui = Fake::refusing();
+        let opts = estimated("eu868", "time zone Europe/Berlin (DE)");
+        assert_eq!(
+            set_radio(&sysfs, &mut ui, &opts, &t114, "3-2.3.1").unwrap(),
+            None
+        );
+        let said = ui.transcript();
+        assert!(
+            said.contains("radio on eu868 already (time zone Europe/Berlin (DE)), nothing to send"),
+            "{said}"
+        );
+        assert_eq!(crate::envelope::testing::radio_config_frame(&seen), None);
     }
 }

@@ -13,10 +13,19 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub mod auto_bluetooth;
 pub mod auto_layer;
+pub mod auto_serial;
+pub mod auto_servers;
 pub(crate) mod autoconnect;
+/// What every daemon's own census shares: RSS, hash-table spines, one
+/// dump for a process holding several nodes (order 1585).
+pub mod census;
 pub(crate) mod clock;
 pub mod config;
+/// Which config directory a client tool took, why, and which other
+/// candidates hold a config: the voice of a connect or auth failure.
+pub mod config_dir;
 pub(crate) mod counter64;
 /// Reaching a running daemon's shared-instance RPC from a client tool: the
 /// instance name and authkey a config directory implies.
@@ -51,22 +60,29 @@ pub mod fuzz;
 /// not install it as the global allocator.
 pub mod heap_accounting;
 pub(crate) mod ini_config;
+pub mod instance;
 pub mod interfaces;
 pub(crate) mod known_destinations;
 pub mod local_time;
 pub(crate) mod packet_hashlist;
+pub mod peer_tag;
 /// The process's own memory view for the SIGUSR1 census: allocator totals,
 /// the anonymous-mapping histogram and the gap arithmetic (Codeberg #437).
 pub mod proc_memory;
 pub mod process;
+pub mod remote_dfu;
 pub mod remote_status;
 pub mod resolver;
 pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;
+pub(crate) mod sequence_counts;
 pub mod socket_hook;
 pub(crate) mod storage;
+/// One daemon per storage directory: the `flock` lnsd holds on it.
+pub mod storage_lock;
 pub(crate) mod sync_ext;
+pub mod table_budget;
 pub mod test_support;
 pub mod user;
 
@@ -97,12 +113,13 @@ pub use driver::{
 pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
 pub use file_peer_store::FilePeerStore;
-pub use file_propagation_store::FilePropagationStore;
+pub use file_propagation_store::{FilePropagationStore, StoreHeapCensus};
+pub use file_ratchet_store::dest_ratchet_keys_path;
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
 /// Used by `lnstest diag` to query a running `lnsd`/`rnsd`.
 pub use rpc::{
-    rpc_drop_path, rpc_query, rpc_query_hash_param, rpc_query_transport_tables,
+    rpc_authenticates, rpc_drop_path, rpc_query, rpc_query_hash_param, rpc_query_transport_tables,
     TRANSPORT_TABLE_NAMES,
 };
 /// Writers for private key material: owner-only from creation (L-0039).

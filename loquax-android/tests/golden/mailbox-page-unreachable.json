@@ -1,0 +1,107 @@
+{
+  "v": 1,
+  "title": "Postfach",
+  "groups": [
+    {
+      "title": "Welches Postfach",
+      "lines": [
+        {
+          "label": "Name",
+          "value": "noch nicht gehört",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Adresse",
+          "value": "5a3e910c7742d81b6f03a4e258c92d80",
+          "copy": "5a3e910c7742d81b6f03a4e258c92d80",
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Das ist auch deine Adresse: Postfach und du sind eine Identität.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
+          "label": "Version",
+          "value": "älter als dieses Gerät",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Dein Postfach läuft mit einer älteren Version. Aktualisiere es dort, damit Entdecken und diese Seite vollständig sind.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        }
+      ]
+    },
+    {
+      "title": "Verbindung",
+      "lines": [
+        {
+          "label": "Dieses Gerät nicht verbunden seit 2 Std.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Letzter Kontakt",
+          "value": "vor 2 Std.",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Verbindung zu leviculum.network, ungeschirmt (das Handy hört das ganze Netz, kostet Akku und Daten)",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": false
+        }
+      ]
+    },
+    {
+      "title": "Geräte dieses Postfachs",
+      "lines": [
+        {
+          "label": "Fairphone",
+          "value": "dieses Gerät",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Dein Postfach nennt seine Geräte noch nicht: dafür braucht es dort eine neuere Version.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
+          "label": "Ein Gerät wird am Postfach selbst hinzugefügt oder entfernt.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
+          "label": "Meinen Code zeigen",
+          "value": null,
+          "copy": null,
+          "action": "profile",
+          "note": false
+        }
+      ]
+    }
+  ],
+  "copy_label": "Kopieren",
+  "copied": "Die Adresse des Postfachs ist in der Zwischenablage"
+}

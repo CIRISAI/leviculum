@@ -13,8 +13,13 @@
 //! and the drawing live in [`crate::tui`]; what this module owns is the
 //! arithmetic and the decisions, so they can be tested without a terminal.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+
 #[cfg(feature = "tui")]
 pub use leviculum_ui_ratatui::images::{choose_backend, Backend};
+
+use crate::app::strings::{with, Lang, StrId, Text};
 
 /// The file extensions treated as inline images, lowercase.
 ///
@@ -67,9 +72,17 @@ pub fn max_rows(backend: Backend, viewport: usize) -> u16 {
     let room = viewport.saturating_sub(2).max(1);
     let bounded = match backend {
         Backend::Halfblocks => room.saturating_mul(HALFBLOCK_VIEWPORT_MULTIPLE),
-        _ => return MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16),
+        _ => return picture_rows(viewport),
     };
     bounded.min(u16::MAX as usize) as u16
+}
+
+/// The row ceiling for a picture drawn in pixels, a graphics protocol's or
+/// a window's: [`MAX_IMAGE_ROWS`], and never more than the viewport less
+/// two, so one photograph does not take over the page.
+pub fn picture_rows(viewport: usize) -> u16 {
+    let room = viewport.saturating_sub(2).max(1);
+    MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16)
 }
 
 /// The name a `/file/` request path points at, or `None` when the path is not
@@ -139,6 +152,7 @@ pub struct Probe {
 ///
 /// Cheap enough to run on arrival, and it is what lets a failure still say
 /// something useful about what the file was.
+#[cfg(feature = "std")]
 pub fn probe(bytes: &[u8]) -> Option<Probe> {
     let reader = ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -163,6 +177,7 @@ pub fn probe(bytes: &[u8]) -> Option<Probe> {
 /// The bytes come from somebody else's node, so this must never panic and
 /// never trust a declared size: `image` is asked for a plain decode and any
 /// failure becomes a message the reader sees in the text box.
+#[cfg(feature = "std")]
 pub fn decode(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
     ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -201,8 +216,10 @@ pub fn fit_cells(px: (u32, u32), cell_px: (u16, u16), max_cols: u16, max_rows: u
     let by_height = (rows_limit as f64) / (natural_rows as f64);
     let scale = by_width.min(by_height).min(1.0);
 
-    let cols = ((natural_cols as f64) * scale).floor().max(1.0) as u16;
-    let rows = ((natural_rows as f64) * scale).floor().max(1.0) as u16;
+    // The cast truncates, which for these non-negative products is the floor
+    // (`f64::floor` is std's, not core's).
+    let cols = (((natural_cols as f64) * scale) as u16).max(1);
+    let rows = (((natural_rows as f64) * scale) as u16).max(1);
     (cols.min(max_cols), rows.min(max_rows))
 }
 
@@ -272,15 +289,23 @@ pub fn human_bytes(len: usize) -> String {
 /// see the picture still learns what it is, how big it is and that the link
 /// under it will save or open it.
 pub fn status_line(name: &str, state: &SlotState) -> String {
+    status_text(name, state).resolve(Lang::En)
+}
+
+/// [`status_line`] in the catalogue's words. The picture's own facts (its
+/// format, size and bytes) and a failure's reason are not words of the
+/// catalogue and stay as they are.
+pub fn status_text(name: &str, state: &SlotState) -> Text {
     match state {
-        SlotState::Queued => format!("[{name}: queued]"),
-        SlotState::Loading => format!("[{name}: loading...]"),
-        SlotState::Ready { probe, .. } => describe(name, Some(probe)),
-        SlotState::Text { probe, reason } => {
-            format!("[{} - {reason}]", describe_inner(name, probe.as_ref()))
-        }
-        SlotState::TooMany => format!("[{name}: not fetched]"),
-        SlotState::Failed(reason) => format!("[{name}: {reason}]"),
+        SlotState::Queued => with(StrId::ImageQueued, name),
+        SlotState::Loading => with(StrId::ImageLoading, name),
+        SlotState::Ready { probe, .. } => Text::Raw(describe(name, Some(probe))),
+        SlotState::Text { probe, reason } => Text::Raw(format!(
+            "[{} - {reason}]",
+            describe_inner(name, probe.as_ref())
+        )),
+        SlotState::TooMany => with(StrId::ImageNotFetched, name),
+        SlotState::Failed(reason) => Text::Raw(format!("[{name}: {reason}]")),
     }
 }
 

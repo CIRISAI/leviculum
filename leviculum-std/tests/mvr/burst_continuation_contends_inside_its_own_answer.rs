@@ -85,14 +85,15 @@
 //! answer window, which opens at the end of our airtime and closes after a
 //! draw we cannot see. `the_hold_narrows_the_census_without_closing_it`
 //! below measures what is left: 42.2 % of triples, against 68.6 % before
-//! the hold and 17.8 % under the wider `compute_spacing_ms`. The mvr for the hold itself is
-//! `one_frame_in_the_modem_at_a_time`.
+//! the hold and 17.8 % under the wider reverted spacing. The mvr for the
+//! hold itself is `one_frame_in_the_modem_at_a_time`.
 //!
 //! No fix was attempted here, and the numbers below say why one could not be
-//! picked from a desk: the airtime-aware spacing that already exists and has
-//! no caller (`rnode::compute_spacing_ms`, wired in c2eba153 and reverted in
-//! 12f99a02) narrows the census from 68.6 % to 17.8 % but does not close it,
-//! and the shortest spacing that closes it outright is 971 ms — paid on every
+//! picked from a desk: the airtime-aware spacing that existed without a
+//! caller (core's `compute_spacing_ms`, wired in c2eba153, reverted in
+//! 12f99a02 and removed in 1638; modelled below as [`reverted_spacing_ms`])
+//! narrows the census from 68.6 % to 17.8 % but does not close it, and the
+//! shortest spacing that closes it outright is 971 ms — paid on every
 //! burst continuation, against a probe interval of 1500 ms. Which of those
 //! the link wants is a rig measurement against the reference, not a sentence.
 //!
@@ -100,8 +101,8 @@
 
 use leviculum_channel_access::{jitter_slot_ms, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS};
 use leviculum_core::rnode::{
-    airtime_ms_with_preamble, compute_bitrate, compute_spacing_ms, derive_preamble_symbols,
-    CSMA_DIFS_MS, CSMA_MAX_CW_MS, MIN_SPACING_MS,
+    airtime_ms_with_preamble, compute_bitrate, derive_preamble_symbols, MIN_SPACING_MS,
+    PACING_MARGIN_MS,
 };
 
 /// The `[radio]` block of `hardware/bench_single_pair_fast.toml`.
@@ -155,17 +156,33 @@ fn python_first_hop_timeout_ms() -> u64 {
     500 * 8 * 1000 / bitrate + 6_000
 }
 
-/// How many contention slots the RNode firmware's own window holds
-/// (`CSMA_MAX_CW_MS` at the jitter slot width, 15 here — the cell logged
-/// `cw_min=0 cw_max=14`).
-fn modem_cw_slots() -> u64 {
-    CSMA_MAX_CW_MS / jitter_slot_ms(BW, SF, CR)
+/// The RNode firmware's DIFS at this PHY: two slots with SIFS 0, the same
+/// derivation the board's own jitter uses (`JITTER_DIFS_SLOTS`), 48 ms here.
+/// Bound to the slot rather than written as 48: core's `CSMA_DIFS_MS` was
+/// that number as a constant, right only up to SF8, and was removed in 1638.
+fn modem_difs_ms() -> u64 {
+    JITTER_DIFS_SLOTS * jitter_slot_ms(BW, SF, CR)
+}
+
+/// How many equally likely contention draws the RNode firmware's window
+/// holds: the boot window's `random(0, 15)` (`RNode_Firmware/Config.h:126-127`,
+/// `RNode_Firmware.ino:1626`) draws 0 to 14 slots, upper bound excluded.
+/// The cell logged `cw_min=0 cw_max=14`.
+const MODEM_CW_DRAWS: u64 = 15;
+
+/// The airtime-aware spacing c2eba153 wired in and 12f99a02 reverted (core's
+/// `compute_spacing_ms`, removed in 1638 for want of a caller): airtime, DIFS,
+/// the whole contention window priced at [`MODEM_CW_DRAWS`] slots, and a flat
+/// [`PACING_MARGIN_MS`]. Kept here as the comparison this census was built on.
+fn reverted_spacing_ms(bytes: u32) -> u64 {
+    let window = MODEM_CW_DRAWS * jitter_slot_ms(BW, SF, CR);
+    (air(bytes) + modem_difs_ms() + window + PACING_MARGIN_MS).max(MIN_SPACING_MS)
 }
 
 /// When our own second frame reaches the air, relative to the end of the
 /// first frame's airtime, for modem contention slot `k`.
 fn second_frame_air(queued_at: u64, k: u64) -> (u64, u64) {
-    let start = queued_at + CSMA_DIFS_MS + k * jitter_slot_ms(BW, SF, CR);
+    let start = queued_at + modem_difs_ms() + k * jitter_slot_ms(BW, SF, CR);
     (start, start + air(ANNOUNCE_BYTES))
 }
 
@@ -182,7 +199,7 @@ fn census(overhead_ms: u64, queued_at: u64) -> (u64, u64) {
     let mut total = 0;
     let mut contending = 0;
     for j in 0..JITTER_CW_SLOTS as u64 {
-        for k in 0..modem_cw_slots() {
+        for k in 0..MODEM_CW_DRAWS {
             total += 1;
             if overlaps(proof_air(overhead_ms, j), second_frame_air(queued_at, k)) {
                 contending += 1;
@@ -203,7 +220,7 @@ fn the_burst_spacing_is_shorter_than_the_frame_it_is_meant_to_follow() {
     // second frame 50 ms after writing the first, and the first cannot have
     // left the air by then under ANY modem draw — the shortest path to the
     // end of its airtime is DIFS plus zero contention slots plus the frame.
-    let earliest_air_end = CSMA_DIFS_MS + air(PROBE_BYTES);
+    let earliest_air_end = modem_difs_ms() + air(PROBE_BYTES);
     assert_eq!(earliest_air_end, 189);
     assert!(
         MIN_SPACING_MS < earliest_air_end,
@@ -219,7 +236,7 @@ fn the_burst_spacing_is_shorter_than_the_frame_it_is_meant_to_follow() {
     // answer it.
     assert_eq!(
         second_frame_air(0, 0).0,
-        CSMA_DIFS_MS,
+        modem_difs_ms(),
         "queued before the air cleared, so DIFS runs from the air clearing"
     );
 }
@@ -276,7 +293,7 @@ fn the_census_does_not_hinge_on_that_16_ms() {
 ///
 /// The hold is `airtime + DIFS + longest draw`, all three at the running
 /// PHY (`interfaces/rnode.rs::tx_hold`). It is shorter than
-/// `compute_spacing_ms` by that function's flat 100 ms margin and longer by
+/// [`reverted_spacing_ms`] by that function's flat 100 ms margin and longer by
 /// nothing, so the census it leaves is the honest bound on what the hold
 /// buys against #374 — as opposed to what it buys against #36, which is the
 /// whole of it: with the hold running, the modem's queue never holds two
@@ -291,14 +308,14 @@ fn the_hold_narrows_the_census_without_closing_it() {
     let hold = air(PROBE_BYTES) + JITTER_DIFS_SLOTS * slot + (JITTER_CW_SLOTS as u64 - 1) * slot;
     assert_eq!(hold, 501);
     assert!(
-        hold < compute_spacing_ms(PROBE_BYTES, BW, SF, CR, preamble()),
+        hold < reverted_spacing_ms(PROBE_BYTES),
         "the hold is the same shape without the flat margin"
     );
 
     let mut total = 0;
     let mut contending = 0;
-    for m in 0..modem_cw_slots() {
-        let first_frame_air_end = CSMA_DIFS_MS + m * slot + air(PROBE_BYTES);
+    for m in 0..MODEM_CW_DRAWS {
+        let first_frame_air_end = modem_difs_ms() + m * slot + air(PROBE_BYTES);
         let queued_at = hold.saturating_sub(first_frame_air_end);
         let (sub_total, sub_contending) = census(FAR_END_OVERHEAD_MS, queued_at);
         total += sub_total;
@@ -313,7 +330,7 @@ fn the_hold_narrows_the_census_without_closing_it() {
         (total, contending),
         (3150, 1328),
         "42.2 % of triples still contend — MORE than the 17.8 % the wider \
-         `compute_spacing_ms` leaves, because the hold is 148 ms shorter. \
+         reverted spacing leaves, because the hold is 148 ms shorter. \
          The hold is priced to empty the modem's queue, not to clear the far \
          end's answer window, and what it leaves is what the rig series \
          measures: our second frame still draws against the answer to our \
@@ -323,11 +340,15 @@ fn the_hold_narrows_the_census_without_closing_it() {
 
 #[test]
 fn airtime_aware_spacing_narrows_the_census_without_closing_it() {
-    let spacing = compute_spacing_ms(PROBE_BYTES, BW, SF, CR, preamble());
+    let spacing = reverted_spacing_ms(PROBE_BYTES);
     assert_eq!(
-        spacing,
-        air(PROBE_BYTES) + CSMA_DIFS_MS + CSMA_MAX_CW_MS + 100,
-        "airtime + DIFS + the whole contention window + margin"
+        (
+            air(PROBE_BYTES),
+            modem_difs_ms(),
+            MODEM_CW_DRAWS * jitter_slot_ms(BW, SF, CR)
+        ),
+        (141, 48, 360),
+        "airtime + DIFS + the whole contention window, then the margin"
     );
     assert_eq!(spacing, 649);
 
@@ -338,8 +359,8 @@ fn airtime_aware_spacing_narrows_the_census_without_closing_it() {
     let slot = jitter_slot_ms(BW, SF, CR);
     let mut total = 0;
     let mut contending = 0;
-    for m in 0..modem_cw_slots() {
-        let first_frame_air_end = CSMA_DIFS_MS + m * slot + air(PROBE_BYTES);
+    for m in 0..MODEM_CW_DRAWS {
+        let first_frame_air_end = modem_difs_ms() + m * slot + air(PROBE_BYTES);
         let queued_at = spacing.saturating_sub(first_frame_air_end);
         let (sub_total, sub_contending) = census(FAR_END_OVERHEAD_MS, queued_at);
         total += sub_total;
@@ -356,8 +377,8 @@ fn airtime_aware_spacing_narrows_the_census_without_closing_it() {
     // because the answer is the worst case over three draws at once.
     let closes = (0u64..3_000)
         .find(|&s| {
-            (0..modem_cw_slots()).all(|m| {
-                let air_end = CSMA_DIFS_MS + m * slot + air(PROBE_BYTES);
+            (0..MODEM_CW_DRAWS).all(|m| {
+                let air_end = modem_difs_ms() + m * slot + air(PROBE_BYTES);
                 census(FAR_END_OVERHEAD_MS, s.saturating_sub(air_end)).1 == 0
             })
         })

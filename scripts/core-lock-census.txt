@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 89
+TOTAL 94
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -59,11 +59,14 @@ driver::ReticulumNode::known_remote_ratchet
 driver::ReticulumNode::link_census
 driver::ReticulumNode::link_count_check
 driver::ReticulumNode::link_destination
+driver::ReticulumNode::link_establishment_timeout_ms
 driver::ReticulumNode::link_is_established
+driver::ReticulumNode::link_keepalive
 driver::ReticulumNode::link_lifecycle
 driver::ReticulumNode::link_list
 driver::ReticulumNode::link_mdu
 driver::ReticulumNode::link_negotiated_mtu
+driver::ReticulumNode::link_outgoing_resource_progress
 driver::ReticulumNode::link_stats
 driver::ReticulumNode::next_hop_link_profile
 driver::ReticulumNode::now_ms
@@ -82,17 +85,19 @@ driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
 driver::ReticulumNode::retire_direct_link
 driver::ReticulumNode::send_file_response
+driver::ReticulumNode::send_link_packet
 driver::ReticulumNode::send_proof
 driver::ReticulumNode::send_request
 driver::ReticulumNode::send_request_awaited
 driver::ReticulumNode::send_resource
 driver::ReticulumNode::send_resource_awaited
 driver::ReticulumNode::send_response
-driver::ReticulumNode::send_response_resource
+driver::ReticulumNode::send_response_resource_with
 driver::ReticulumNode::send_single_packet
 driver::ReticulumNode::set_announce_control
 driver::ReticulumNode::set_direct_link_retry
 driver::ReticulumNode::set_interface_announce_cap
+driver::ReticulumNode::set_link_keepalive
 driver::ReticulumNode::set_resource_strategy
 driver::ReticulumNode::start_shared
 driver::ReticulumNode::transport_stats

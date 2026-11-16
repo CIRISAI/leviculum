@@ -98,6 +98,17 @@ struct Args {
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
+
+    /// Open the browser in a window instead of the terminal. `--theme auto`
+    /// follows the desktop's light or dark there, `light` and `dark` force a
+    /// theme.
+    #[arg(long, conflicts_with = "print")]
+    gui: bool,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child, which goes when the browser does (zero-config, #471).
+    #[arg(long)]
+    no_start: bool,
 }
 
 /// The `--images` choice.
@@ -171,8 +182,12 @@ async fn main() -> ExitCode {
     // Print-once mode: also chosen automatically when stdout is not a tty, so a
     // piped/redirected invocation never blocks on the UI. It also decides what a
     // missing URL means: the start screen on a terminal, an error otherwise.
-    let interactive =
-        !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let interactive = args.gui
+        || (!args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+    if args.gui && !cfg!(feature = "gui") {
+        eprintln!("lnomad: this build has no window; build it with --features gui");
+        return ExitCode::from(2);
+    }
 
     let mode = match resolve_args(args.url.as_deref(), interactive) {
         Ok(mode) => mode,
@@ -218,6 +233,24 @@ async fn main() -> ExitCode {
         .config
         .clone()
         .unwrap_or_else(Config::default_config_dir);
+    // Find the shared instance, or start lnsd as our child (#471 step 4).
+    // Held for the browser's life: a daemon it started goes with it.
+    let instance_name = {
+        let config = leviculum_std::daemon_rpc::load_config(&config_dir);
+        leviculum_std::daemon_rpc::resolve_instance_name(args.instance.as_deref(), config.as_ref())
+    };
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::Started,
+    ) {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("lnomad: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let connect = match &args.instance {
         Some(name) => Session::connect_to(name, config_dir.join("storage")).await,
         None => Session::connect(&config_dir).await,
@@ -233,6 +266,23 @@ async fn main() -> ExitCode {
     // A /file/ target downloads to disk (never rendered, never a TUI session):
     // fetch the raw bytes, save them, print the save line.
     let downloading = target.as_ref().is_some_and(|t| t.is_file);
+
+    #[cfg(feature = "gui")]
+    if args.gui && !downloading {
+        // The window owns the session as the TUI does, below.
+        // `auto` is the desktop's light or dark, not a terminal's.
+        let theme = match args.theme {
+            ThemeArg::Auto => None,
+            chosen => Some(lnomad::resolve_theme(None, chosen.into())),
+        };
+        return match lnomad::gui::run_gui(session, target, opts, theme).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("lnomad: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if interactive && !downloading {
         // The TUI owns the session and drives navigation: it does the initial

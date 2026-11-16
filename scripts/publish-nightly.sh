@@ -158,7 +158,7 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-arm64.ta
 
 \`sudo apt install ./lnpnd-nightly-amd64.deb\` installs \`lnpnd\` as a systemd service that is enabled but not started: put the node's identity at \`/etc/lnpnd/identity\` first, or accept a fresh one, then \`sudo systemctl start lnpnd\`.
 
-**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, \`loquax tui\` for people):
+**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, plain \`loquax\` for people):
 
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.deb
@@ -473,7 +473,7 @@ fi
 # Which commit the current assets were built from: the tag, which this script
 # moves only after a complete swap, so it names the build the release holds
 # even after a failed run. When it is the commit about to be published, the
-# current set is the same code again (the triggered publish and the 04:00
+# current set is the same code again (the triggered publish and the 09:05
 # fallback cron both fire on a day nothing landed), and renaming it would
 # replace the one fallback a bad build leaves with a copy of that bad build.
 # Then the current set is replaced in place and `.previous` stays. An
@@ -585,7 +585,7 @@ if [ "$release_assets_json" != "[]" ]; then
     leftover=""
     while read -r asset_id; do
         [ -n "$asset_id" ] || continue
-        if printf '%s\n' "$remaining_ids" | grep -qx "$asset_id"; then
+        if grep -qx "$asset_id" <<<"$remaining_ids"; then
             leftover="$leftover $asset_id"
         fi
     done <<< "$stale_asset_ids"

@@ -25,6 +25,10 @@
 //! node at all and is rejected — by the reference exactly as here. See
 //! `reference_rejects_the_same_urls_we_do` for the measured comparison.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 /// The default path when a URL names only a destination or an empty path,
 /// matching `Browser.DEFAULT_PATH`.
 pub const DEFAULT_PATH: &str = "/page/index.mu";
@@ -32,6 +36,8 @@ pub const DEFAULT_PATH: &str = "/page/index.mu";
 /// Length in hex characters of a Reticulum truncated destination hash
 /// (`RNS.Reticulum.TRUNCATED_HASHLENGTH // 8 * 2` = 16 bytes = 32 chars).
 pub use leviculum_ui::link::TRUNCATED_HASH_HEX_LEN;
+
+use crate::render::RenderedLink;
 
 /// A parsed page request target: where to link, what to ask for, and the query
 /// fields to carry.
@@ -131,6 +137,76 @@ pub fn parse_url(input: &str, current_dest: Option<[u8; 16]>) -> Result<Target, 
     })
 }
 
+/// The scheme of the `nururl:` form a typed address may take.
+pub const NURURL_SCHEME: &str = "nururl:";
+
+/// A parsed `nururl:` address: the page target and the query keys that were
+/// not carried, so the address field can say what it dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NurUrl {
+    /// The page to open.
+    pub target: Target,
+    /// Query entries that were not `nn.`-prefixed fields (the hint among
+    /// them), in URL order. Only parsed and named, never acted on.
+    pub ignored: Vec<String>,
+}
+
+/// Whether `input` is written in the `nururl:` form (scheme case folded).
+pub fn is_nururl(input: &str) -> bool {
+    input
+        .get(..NURURL_SCHEME.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(NURURL_SCHEME))
+}
+
+/// Parse `nururl:<hash32>[/path][?query]` into a [`Target`].
+///
+/// The hash is the full 32-hex destination; the path, when present, starts
+/// with `/` and an absent or bare `/` one is [`DEFAULT_PATH`]. Query entries
+/// are split on `&`; an `nn.<k>=<v>` entry becomes the field `var_<k>` with
+/// value `<v>`, the same `var_` request variable a NomadNet backtick field
+/// becomes. Any other entry (the hint is one) is not carried: it is returned
+/// in [`NurUrl::ignored`] so the caller can say so. Only the address is
+/// parsed here; nothing is resolved and no gateway is asked.
+pub fn parse_nururl(input: &str) -> Result<NurUrl, UrlError> {
+    if !is_nururl(input) {
+        return Err(UrlError::Malformed);
+    }
+    let rest = &input[NURURL_SCHEME.len()..];
+    let (address, query) = match rest.split_once('?') {
+        Some((address, query)) => (address, Some(query)),
+        None => (rest, None),
+    };
+    let hex = address
+        .get(..TRUNCATED_HASH_HEX_LEN)
+        .ok_or(UrlError::Malformed)?;
+    let dest_hash = parse_dest_hash(hex)?;
+    let path = match &address[TRUNCATED_HASH_HEX_LEN..] {
+        "" | "/" => DEFAULT_PATH.to_string(),
+        path if path.starts_with('/') => path.to_string(),
+        _ => return Err(UrlError::Malformed),
+    };
+    let mut fields = Vec::new();
+    let mut ignored = Vec::new();
+    for entry in query.unwrap_or("").split('&').filter(|e| !e.is_empty()) {
+        match entry.split_once('=') {
+            Some((key, value)) if key.len() > 3 && key.starts_with("nn.") => {
+                fields.push((format!("var_{}", &key[3..]), value.to_string()));
+            }
+            _ => ignored.push(entry.to_string()),
+        }
+    }
+    let is_file = path.starts_with("/file/");
+    Ok(NurUrl {
+        target: Target {
+            dest_hash,
+            path,
+            fields,
+            is_file,
+        },
+        ignored,
+    })
+}
+
 /// How a followed link is handled, shared with loquax's links in message
 /// bodies: in `leviculum-ui`, where both programs read it.
 pub use leviculum_ui::link::{classify_link, LinkKind};
@@ -187,6 +263,47 @@ fn hex_nibble(c: u8) -> Result<u8, UrlError> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(UrlError::Malformed),
     }
+}
+
+/// Split a `#anchor` suffix off a link target, returning the base target and the
+/// anchor name (if any, and non-empty).
+fn split_anchor(target: &str) -> (&str, Option<String>) {
+    match target.split_once('#') {
+        Some((base, anchor)) if !anchor.is_empty() => (base, Some(anchor.to_string())),
+        _ => (target, None),
+    }
+}
+
+/// The preset (`key=value`) field components of a link, reconstructed into the
+/// backtick blob [`parse_url`] understands. Valueless components are form-field
+/// placeholders (interactive input, a v1 stub) and are dropped here.
+fn preset_field_blob(link: &RenderedLink) -> String {
+    link.fields
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Resolve a followed link into a fetch [`Target`] and any `#anchor`.
+///
+/// The link target is resolved against `current_dest` (for `:/page/x.mu`
+/// same-destination links) and its preset fields are carried through
+/// [`parse_url`], keeping URL grammar in one place.
+pub fn resolve_link(
+    link: &RenderedLink,
+    current_dest: Option<[u8; 16]>,
+) -> Result<(Target, Option<String>), UrlError> {
+    let (base, anchor) = split_anchor(&link.target);
+    let blob = preset_field_blob(link);
+    let url = if blob.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}`{blob}")
+    };
+    let target = parse_url(&url, current_dest)?;
+    Ok((target, anchor))
 }
 
 #[cfg(test)]
@@ -371,6 +488,76 @@ mod tests {
                 "{raw} with no open page is rejected by the reference"
             );
         }
+    }
+
+    #[test]
+    fn nururl_parse_table() {
+        // Valid forms and what they resolve to.
+        // (address, path, carried fields, ignored entries)
+        type Row = (
+            String,
+            &'static str,
+            Vec<(&'static str, &'static str)>,
+            Vec<&'static str>,
+        );
+        let valid: [Row; 6] = [
+            (format!("nururl:{HASH_HEX}"), DEFAULT_PATH, vec![], vec![]),
+            (format!("nururl:{HASH_HEX}/"), DEFAULT_PATH, vec![], vec![]),
+            (
+                format!("NURURL:{}/page/about.mu", HASH_HEX.to_uppercase()),
+                "/page/about.mu",
+                vec![],
+                vec![],
+            ),
+            (
+                format!("nururl:{HASH_HEX}/page/x.mu?nn.a=1&nn.b=two"),
+                "/page/x.mu",
+                vec![("var_a", "1"), ("var_b", "two")],
+                vec![],
+            ),
+            (
+                format!("nururl:{HASH_HEX}/page/x.mu?hint=marcel&nn.q=solar"),
+                "/page/x.mu",
+                vec![("var_q", "solar")],
+                vec!["hint=marcel"],
+            ),
+            (
+                format!("nururl:{HASH_HEX}?nn.=x&plain&nn.k="),
+                DEFAULT_PATH,
+                vec![("var_k", "")],
+                vec!["nn.=x", "plain"],
+            ),
+        ];
+        for (raw, path, fields, ignored) in valid {
+            let parsed = parse_nururl(&raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(parsed.target.dest_hash, HASH_BYTES, "{raw}");
+            assert_eq!(parsed.target.path, path, "{raw}");
+            let want: Vec<(String, String)> = fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(parsed.target.fields, want, "{raw}");
+            assert_eq!(parsed.ignored, ignored, "{raw}");
+            assert!(!parsed.target.is_file, "{raw}");
+        }
+        let file = parse_nururl(&format!("nururl:{HASH_HEX}/file/a.pdf")).unwrap();
+        assert!(file.target.is_file);
+
+        // Invalid forms.
+        for raw in [
+            "nururl:".to_string(),
+            "nururl:0123456789abcdef".to_string(),
+            "nururl:z123456789abcdef0123456789abcdef".to_string(),
+            format!("nururl:{HASH_HEX}page/x.mu"),
+            format!("nururl:{HASH_HEX}:/page/x.mu"),
+            format!("nururl://{HASH_HEX}"),
+            HASH_HEX.to_string(),
+            "nururl:é123456789abcdef0123456789abcdef".to_string(),
+        ] {
+            assert_eq!(parse_nururl(&raw), Err(UrlError::Malformed), "{raw}");
+        }
+        assert!(is_nururl("NurUrl:x"));
+        assert!(!is_nururl("nur"));
     }
 
     #[test]

@@ -51,6 +51,18 @@ async fn read_kiss_frames<R: AsyncReadExt + Unpin>(
     frames
 }
 
+/// A control-socket path short enough for `sun_path` (about 108 bytes):
+/// the system temp directory, or `/tmp` when `TMPDIR` is so deep that a
+/// bound socket there would be refused with "path must be shorter than
+/// SUN_LEN" (a CI pass directory is such a TMPDIR).
+fn short_sock(name: String) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(&name);
+    match p.as_os_str().len() < 90 {
+        true => p,
+        false => std::path::PathBuf::from("/tmp").join(name),
+    }
+}
+
 /// Helper: send a control command and read the response line
 async fn control_cmd(sock_path: &std::path::Path, cmd: &str) -> String {
     let stream = tokio::net::UnixStream::connect(sock_path).await.unwrap();
@@ -216,7 +228,7 @@ async fn test_clear_all() {
 #[tokio::test]
 async fn test_control_socket() {
     let engine = Arc::new(Mutex::new(RuleEngine::new()));
-    let sock_path = std::env::temp_dir().join(format!("proxy-test-{}.sock", std::process::id()));
+    let sock_path = short_sock(format!("proxy-test-{}.sock", std::process::id()));
 
     // Spawn control socket
     let engine_clone = Arc::clone(&engine);
@@ -363,8 +375,7 @@ async fn test_command_filter() {
 #[tokio::test]
 async fn test_control_socket_full_options() {
     let engine = Arc::new(Mutex::new(RuleEngine::new()));
-    let sock_path =
-        std::env::temp_dir().join(format!("proxy-test-opts-{}.sock", std::process::id()));
+    let sock_path = short_sock(format!("proxy-test-opts-{}.sock", std::process::id()));
 
     let engine_clone = Arc::clone(&engine);
     let sock = sock_path.clone();
@@ -458,8 +469,7 @@ async fn test_drop_5_forward_10() {
 #[tokio::test]
 async fn test_control_socket_rate_mode() {
     let engine = Arc::new(Mutex::new(RuleEngine::new()));
-    let sock_path =
-        std::env::temp_dir().join(format!("proxy-test-rate-{}.sock", std::process::id()));
+    let sock_path = short_sock(format!("proxy-test-rate-{}.sock", std::process::id()));
 
     let engine_clone = Arc::clone(&engine);
     let sock = sock_path.clone();
@@ -550,8 +560,7 @@ async fn test_rate_mode_end_to_end_reproducible() {
 #[tokio::test]
 async fn test_control_socket_max_size() {
     let engine = Arc::new(Mutex::new(RuleEngine::new()));
-    let sock_path =
-        std::env::temp_dir().join(format!("proxy-test-maxsz-{}.sock", std::process::id()));
+    let sock_path = short_sock(format!("proxy-test-maxsz-{}.sock", std::process::id()));
 
     let engine_clone = Arc::clone(&engine);
     let sock = sock_path.clone();

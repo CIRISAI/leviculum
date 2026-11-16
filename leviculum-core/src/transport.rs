@@ -60,6 +60,7 @@ use crate::destination::{Destination, DestinationHash, DestinationType};
 use crate::hex_fmt::HexShort;
 use crate::identity::Identity;
 use crate::ifac::IfacConfig;
+use crate::iface_map::{IfaceMap, IfaceSet};
 use crate::link::Link;
 use crate::packet::{
     build_proof_packet, packet_hash, HeaderType, Packet, PacketContext, PacketData, PacketError,
@@ -165,6 +166,11 @@ const MAX_LOOP_REFUSALS: usize = 8;
 /// to us, so `next_hop` routes `dest_hash` through this node. The entry was
 /// dropped; this keeps `next_hop`'s answers carrying the same emission
 /// (`random_blob`) from reinstalling it.
+///
+/// Order 1672 puts a second kind of refusal in the same table: a next hop
+/// a link request died on ([`RefusalCause::NextHopUnresponsive`]). Both
+/// say the same thing about one emission — this neighbour's copy of it is
+/// not a route — and both end when the destination announces anew.
 #[derive(Debug, Clone, Copy)]
 struct LoopRefusal {
     dest_hash: [u8; TRUNCATED_HASHBYTES],
@@ -174,6 +180,30 @@ struct LoopRefusal {
     /// entry's own expiry, so the refusal never outlives the route it
     /// refused.
     expires_ms: u64,
+    cause: RefusalCause,
+}
+
+/// Why a [`LoopRefusal`] refuses its next hop's copies of one emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalCause {
+    /// A packet we relayed came back from the next hop addressed to us
+    /// (leviculum#852).
+    ProvenLoop,
+    /// A link request we forwarded to the next hop expired unproven, and
+    /// no later request over the same destination was proven (order 1672).
+    /// Without it, the unresponsive rule moves the path to another next
+    /// hop and the same emission's shorter copy from the dead one moves it
+    /// straight back.
+    NextHopUnresponsive,
+}
+
+impl RefusalCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            RefusalCause::ProvenLoop => "proven_loop",
+            RefusalCause::NextHopUnresponsive => "next_hop_unresponsive",
+        }
+    }
 }
 
 /// The heap side of [`Transport`]'s loop refusals; see its field.
@@ -407,8 +437,35 @@ pub(crate) const DIRECT_EVIDENCE_MIN_KNOWN: u16 = 4;
 /// table evicts the entry with the oldest accounted emission. Sizing: key
 /// 16 B + value 16 B per entry plus BTree node overhead is ≤ ~64 B/entry,
 /// so the whole table is ≤ ~4 KiB — stated against the boards' heap pins
-/// (`SERVE_MARGIN_BYTES`), though a board only pays it with the knob ON.
+/// (`SERVE_MARGIN_BYTES`), though a node only pays it while some interface
+/// prices loss, and a board declares none today.
 pub(crate) const DIRECT_EVIDENCE_CAP: usize = 64;
+
+/// The loss-aware path choice's state on one transport (Codeberg #230),
+/// boxed in [`Transport`] so a node that prices no link carries a pointer.
+#[derive(Debug, Default)]
+struct LossPricing {
+    /// Interfaces whose medium declared [`PathChoice::HopsAndLoss`] (order
+    /// 1380): the radio interfaces, where a direct link can be marginal.
+    /// Written by the media-aware driver at registration through
+    /// [`Transport::set_interface_path_choice`]; transport only stores the
+    /// answer and never asks what medium an interface is.
+    /// [`TransportConfig::path_choice`], when `Some`, overrides it.
+    interfaces: IfaceSet,
+    /// Direct-link announce re-hear evidence per destination, fed only
+    /// while some interface prices loss. Capped at [`DIRECT_EVIDENCE_CAP`]
+    /// entries; a full table evicts the entry whose accounted emission is
+    /// oldest. In-memory only, like the path table: evidence describes
+    /// current radio conditions and is worth nothing across a restart.
+    ///
+    /// Keyed by destination hash, not by neighbour identity: at this layer
+    /// a direct announce names only its destination, so two destinations on
+    /// one physical neighbour are scored separately (correct, merely
+    /// duplicated), and direct copies of one destination over two
+    /// interfaces share a window (a documented v1 simplification — the
+    /// evidence rooms are single-radio).
+    evidence: BTreeMap<[u8; TRUNCATED_HASHBYTES], DirectLinkEvidence>,
+}
 
 /// Announce re-hear accounting for ONE destination's direct link
 /// (Codeberg #230).
@@ -489,7 +546,7 @@ impl core::fmt::Display for InterfaceId {
 
 /// Display helper: shows registered name or falls back to "iface:{id}"
 pub(crate) struct IfaceName<'a> {
-    names: &'a BTreeMap<usize, String>,
+    names: &'a IfaceMap<String>,
     id: usize,
 }
 
@@ -512,7 +569,7 @@ impl core::fmt::Display for IfaceName<'_> {
 /// [`IfaceName`] for an optional interface index: renders the literal
 /// `None` when absent (same convention as PATH_TABLE_ENTRY's next_hop).
 pub(crate) struct IfaceNameOpt<'a> {
-    names: &'a BTreeMap<usize, String>,
+    names: &'a IfaceMap<String>,
     id: Option<usize>,
 }
 
@@ -1019,10 +1076,13 @@ pub(crate) struct QueuedAnnounce {
 /// replacement.md §5); (3) the measured improvement is
 /// `mvr_pathchoice_rule_table`'s pinned verdict — at ≥ 50 % direct-link
 /// loss the evidence rule delivers more and flaps less than hop count,
-/// and at 0 % loss the two are identical.
+/// and at 0 % loss the two are identical — and the emulated A/B of
+/// 2026-10-06 (8 of 8 probes against 5 of 8 at 50 % loss, Codeberg #230),
+/// on which the evidence rule became the radio interfaces' default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathChoice {
-    /// Today's rule and the default: fewer hops wins
+    /// Python's rule and the default on every interface whose medium
+    /// declares nothing (TCP, UDP, I2P, local IPC, serial): fewer hops wins
     /// (`SameEmissionRule::FewerHopsWins`, the live `SAME_EMISSION_RULE`,
     /// #231). Nothing the transport has
     /// learned about a link enters the choice.
@@ -1035,8 +1095,9 @@ pub enum PathChoice {
     /// (`1/r² > 2` at `r < 0.71`). Evidence needs
     /// `DIRECT_EVIDENCE_MIN_KNOWN` announce emissions to warm up; until
     /// then, and whenever announces are too sparse to score, the rule
-    /// behaves exactly like [`PathChoice::Hops`]. Default-off until a rig
-    /// series says otherwise (#230).
+    /// behaves exactly like [`PathChoice::Hops`]. The medium default on
+    /// radio interfaces (#230, order 1380): the media-aware driver declares
+    /// it per interface ([`Transport::set_interface_path_choice`]).
     HopsAndLoss,
 }
 
@@ -1117,10 +1178,14 @@ pub struct TransportConfig {
     /// effect, so a node may be flipped either way mid-mesh.
     pub path_entries_dump: bool,
     /// Route-choice rule for competing copies of one announce emission
-    /// (Codeberg #230). See [`PathChoice`]. Default [`PathChoice::Hops`];
-    /// with the default the transport also keeps no evidence table, so the
-    /// knob costs nothing when off.
-    pub path_choice: PathChoice,
+    /// (Codeberg #230), as an operator OVERRIDE: `Some` applies to every
+    /// interface whatever its medium declared, `None` (the default) leaves
+    /// each interface on the rule its medium declared through
+    /// [`Transport::set_interface_path_choice`], and an interface that
+    /// declared nothing on [`PathChoice::Hops`]. See [`PathChoice`]. While
+    /// no interface resolves to [`PathChoice::HopsAndLoss`] the transport
+    /// keeps no evidence table, so the rule costs nothing where it is off.
+    pub path_choice: Option<PathChoice>,
     /// Interval between a node's management announces (the probe and
     /// remote-management destinations), in milliseconds. Default
     /// [`MGMT_ANNOUNCE_INTERVAL_MS`], Python's two hours. A test room
@@ -1197,9 +1262,9 @@ impl Default for TransportConfig {
             // The per-entry dump is a debugging aid, not a running cost; the
             // count and the insertion history stay on without it.
             path_entries_dump: false,
-            // Hop count is Python's rule and stays the default until a rig
-            // series on the pathchoice corpus says otherwise (#230).
-            path_choice: PathChoice::default(),
+            // No override: each interface keeps the rule its medium declared,
+            // hop count where it declared none (#230, order 1380).
+            path_choice: None,
             mgmt_announce_interval_ms: MGMT_ANNOUNCE_INTERVAL_MS,
             max_held_announces: MAX_HELD_ANNOUNCES,
             default_announce_rate: AnnounceRateConfig::default(),
@@ -2146,22 +2211,22 @@ pub enum DropReason {
     /// does on a Python node.
     LinkIfaceMismatch,
     /// A packet for one of our own links that is not Active yet (or any
-    /// more): link DATA, a request or a channel packet on a link still in
-    /// its handshake. Until 860 the link layer dropped it at trace level and
-    /// a board printed nothing (858 §Q6: a phone's 483 B transfer packet and
-    /// a 99 B packet on 2026-10-19, 17:48 CEST, left no line on the board
-    /// that terminated the link).
+    /// more), other than an RTT, keepalive or close, that does not establish
+    /// it: on a responder link in its handshake one that does not decrypt
+    /// under the link keys, on any other non-Active link any such packet.
+    /// Until 860 these were trace-level drops a board never printed (858
+    /// §Q6: a phone's 483 B and 99 B packets on 2026-10-19, 17:48 CEST, left
+    /// no line on the board that terminated the link); until 1624 a resource
+    /// advertisement, hashmap update, response or identify still was silent.
     ///
-    /// The reference does NOT refuse all of these, which is what makes the
-    /// line worth having: a responder registers its link as active before
-    /// the RTT arrives (`reference/Reticulum/RNS/Link.py:216`,
-    /// `reference/Reticulum/RNS/Transport.py:2447-2452`), and `Link.receive`
-    /// decrypts and delivers plain link data and channel data with no status
-    /// check (`reference/Reticulum/RNS/Link.py:988-1000`, `:1168-1176`). Only
-    /// a request waits for ACTIVE (`reference/Reticulum/RNS/Link.py:853-854`).
-    /// So a rising count of this reason on a link a Python peer opened names
-    /// packets a Python terminus would have taken; 860 only names them, and
-    /// whether to take them is a decision of its own.
+    /// A packet that DOES decrypt on a responder link in its handshake
+    /// establishes the link instead, as only the initiator holds the keys,
+    /// and is taken (1624: a lost RTT stranded the link until the responder's
+    /// establishment timeout). The reference takes such packets with no
+    /// status gate (`reference/Reticulum/RNS/Link.py:974`, RESOURCE_ADV at
+    /// `:1068`) but leaves HANDSHAKE only on the RTT (`:541`), so its watchdog
+    /// still closes the link at the establishment timeout (`:773-777`); we
+    /// keep it.
     LinkNotActive,
     /// Link DATA (a plain packet or a request) for an Active link of ours
     /// that did not decrypt under the link key: corruption, or a peer that
@@ -2172,9 +2237,9 @@ pub enum DropReason {
     /// An RTT packet a responder link could not take: the link is not in
     /// its handshake (already established, a retry or duplicate), we are
     /// the link's initiator, or it did not decrypt or parse. The responder
-    /// link stays in its handshake if the RTT never validates, and every
-    /// later packet on it is a [`DropReason::LinkNotActive`]; this is the
-    /// line that names the start of that chain (858 §Q6). The reference
+    /// link stays in its handshake until a packet of the initiator decrypts
+    /// on it (1624), each packet before that a [`DropReason::LinkNotActive`];
+    /// this line names the start of that chain (858 §Q6). The reference
     /// runs an RTT on an already active responder link through again
     /// (`reference/Reticulum/RNS/Link.py:1059-1061`, no state check), where
     /// we refuse it; the link is up either way, so that refusal loses
@@ -3179,7 +3244,7 @@ pub enum TransportError {
     NoPath,
     /// Target interface is pacing, retry no earlier than `ready_at_ms`.
     /// Mirrors `ChannelError::PacingDelay` / `SendError::PacingDelay` so
-    /// async callers (see `driver/stream.rs:119`) can `sleep_until` to
+    /// async callers (see `driver/stream.rs:116`) can `sleep_until` to
     /// the exact ready time instead of polling.
     PacingDelay { ready_at_ms: u64 },
     /// Packet parsing error
@@ -3280,11 +3345,11 @@ pub struct Transport<C: Clock, S: Storage> {
     // announce_rate_table: migrated to Storage trait
     /// Per-interface announce bandwidth caps (Python Interface.py:25-28)
     /// Keyed by interface index. Only present for interfaces with bitrate > 0.
-    interface_announce_caps: BTreeMap<usize, InterfaceAnnounceCap>,
+    interface_announce_caps: IfaceMap<InterfaceAnnounceCap>,
 
     /// Human-readable interface names for log messages.
     /// Populated by the driver at registration time, removed on interface down.
-    interface_names: BTreeMap<usize, String>,
+    interface_names: IfaceMap<String>,
 
     /// Indexes torn down and not registered again (981). An interface-up
     /// notification is driver state that crosses a channel, so it can land
@@ -3300,7 +3365,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// for a table that is empty there always. The box is exactly that
     /// 24-B-to-8-B trade, not an extra indirection worth removing.
     #[allow(clippy::box_collection)]
-    torn_down_interfaces: Option<Box<BTreeSet<usize>>>,
+    torn_down_interfaces: Option<Box<IfaceSet>>,
 
     /// Interfaces whose driver currently reports `is_online() == false`
     /// (Codeberg #365). A missing entry means online — the default, so a
@@ -3313,7 +3378,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// our runtime media switch turns a carrier off without detaching
     /// the interface, so the equivalent statement lives at the path
     /// lookup.
-    offline_interfaces: BTreeSet<usize>,
+    offline_interfaces: IfaceSet,
 
     /// Interfaces whose own TX gate currently holds frames for regulatory
     /// airtime budget (leviculum#493, decided on #433). Mirrored the same
@@ -3329,7 +3394,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// held frames), and Python's per-interface announce admission is the
     /// precedent — an interface over its cap relays no announce
     /// (Transport.py:1252-1294).
-    duty_hold_ifaces: BTreeSet<usize>,
+    duty_hold_ifaces: IfaceSet,
 
     /// Live direct-peer count per interface, mirrored by the driver the
     /// same way as [`Self::set_interface_online`] (Codeberg #365). A
@@ -3341,7 +3406,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// ([`Self::reoriginate_toward_peer_links`]) to decide which
     /// interfaces are worth asking on behalf of a request we cannot
     /// answer.
-    interface_peer_counts: BTreeMap<usize, usize>,
+    interface_peer_counts: IfaceMap<usize>,
 
     /// Interfaces whose driver declared they can serve every link but one
     /// ([`Self::set_interface_link_sparing`], leviculum#854), one bit per
@@ -3419,10 +3484,10 @@ pub struct Transport<C: Clock, S: Storage> {
     /// missing entry means `InterfaceMode::Full` (the default). Set from config
     /// by the driver at registration; drives the per-mode announce-propagation
     /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
-    interface_modes: BTreeMap<usize, InterfaceMode>,
+    interface_modes: IfaceMap<InterfaceMode>,
     /// Declared per-interface transit policy (leviculum#51); absent = true.
-    interface_transit: BTreeMap<usize, bool>,
-    interface_kinds: BTreeMap<usize, InterfaceKind>,
+    interface_transit: IfaceMap<bool>,
+    interface_kinds: IfaceMap<InterfaceKind>,
 
     /// Per-interface ingress-control enable flag (Codeberg #8; Python
     /// `Interface.ingress_control`, Reticulum.py:768-769, Interface.py:112).
@@ -3434,7 +3499,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// overridden per interface from config. Transport carries no interface-type
     /// awareness: it only reads this flag to decide whether the announce/path-
     /// request burst limiter runs for a given interface.
-    interface_ingress_control: BTreeMap<usize, bool>,
+    interface_ingress_control: IfaceMap<bool>,
 
     /// Per-interface egress-control enable flag (Codeberg #172; Python
     /// `Interface.egress_control`, Reticulum.py:770-771/911, Interface.py:86-87).
@@ -3443,11 +3508,11 @@ pub struct Transport<C: Clock, S: Storage> {
     /// interfaces an operator switched on are stored. Read by
     /// [`Transport::should_egress_limit_pr`] to decide whether a re-originated
     /// path request may leave over this interface.
-    interface_egress_control: BTreeMap<usize, bool>,
+    interface_egress_control: IfaceMap<bool>,
 
     /// Hardware MTU per interface (for link MTU negotiation).
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
-    interface_hw_mtus: BTreeMap<usize, u32>,
+    interface_hw_mtus: IfaceMap<u32>,
 
     /// What each interface says about the medium it drives: the on-air
     /// bitrate it derived from its own settings, and the ceiling of the
@@ -3460,7 +3525,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// applied to measurement rather than to scheduling. Distinct from
     /// `interface_announce_caps`, whose bitrate comes from the `bitrate`
     /// config key and drives announce bandwidth capping.
-    interface_link_profiles: BTreeMap<usize, LinkProfile>,
+    interface_link_profiles: IfaceMap<LinkProfile>,
 
     /// A shared instance client's record of its daemon's `first_hop_timeout`
     /// answers: destination → (whole first hop timeout in ms, expiry in
@@ -3470,26 +3535,20 @@ pub struct Transport<C: Clock, S: Storage> {
     /// write. Empty on a node without a daemon (leviculum#485).
     shared_instance_first_hop_answers: BTreeMap<[u8; TRUNCATED_HASHBYTES], (u64, u64)>,
 
-    /// Direct-link announce re-hear evidence per destination (Codeberg
-    /// #230), populated ONLY under [`PathChoice::HopsAndLoss`] — with the
-    /// default knob this map stays empty and costs nothing. Capped at
-    /// [`DIRECT_EVIDENCE_CAP`] entries; a full table evicts the entry whose
-    /// accounted emission is oldest. In-memory only, like the path table:
-    /// evidence describes current radio conditions and is worth nothing
-    /// across a restart.
-    ///
-    /// Keyed by destination hash, not by neighbour identity: at this layer
-    /// a direct announce names only its destination, so two destinations on
-    /// one physical neighbour are scored separately (correct, merely
-    /// duplicated), and direct copies of one destination over two
-    /// interfaces share a window (a documented v1 simplification — the
-    /// evidence rooms are single-radio).
-    direct_link_evidence: BTreeMap<[u8; TRUNCATED_HASHBYTES], DirectLinkEvidence>,
+    /// The state of the loss-aware path choice (Codeberg #230): which
+    /// interfaces declared it and the evidence it prices with. `None` while
+    /// no interface prices loss, which is every board today. Boxed and
+    /// allocated on first use, for the reason [`Self::loop_refusals`] is:
+    /// the board's node box had 8 B of slack, and the evidence map inline
+    /// cost every board 12 B of it for a table that is empty there. The box
+    /// is that 12-B-to-4-B trade, which is what made room for the
+    /// per-interface declaration (order 1380) without costing a link.
+    loss_pricing: Option<Box<LossPricing>>,
 
     /// Set of interface indices that are local IPC clients (shared instance).
     /// Used for: announce forwarding, transport override, path request routing.
     /// Removal path: removed in handle_interface_down via set_local_client(id, false).
-    local_client_interfaces: BTreeSet<usize>,
+    local_client_interfaces: IfaceSet,
 
     /// The interface (if any) over which this node reaches a shared instance it
     /// is a CLIENT of. Mirrors Python's `interface_to_shared_instance` predicate
@@ -3501,30 +3560,36 @@ pub struct Transport<C: Clock, S: Storage> {
 
     /// Per-interface incoming announce timestamps for frequency computation (Python ia_freq_deque).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_incoming_announce_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_incoming_announce_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface outgoing announce timestamps for frequency computation (Python oa_freq_deque).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_outgoing_announce_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_outgoing_announce_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface incoming path-request timestamps for frequency computation
     /// (Python ip_freq_deque, Interface.py:135). Mirrors the incoming-announce
     /// deque above (Codeberg #67 Stage 2a).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_incoming_pr_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_incoming_pr_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface outgoing path-request timestamps for frequency computation
     /// (Python op_freq_deque, Interface.py:136). Mirrors the outgoing-announce
     /// deque above (Codeberg #67 Stage 2a).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_outgoing_pr_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_outgoing_pr_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface ingress-control burst state (Codeberg #87). Entry created
     /// at interface registration (`set_interface_name`) so the new-interface
     /// window is measured from registration, and lazily on first ingest for
     /// interfaces that never registered a name (e.g. in tests).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
+    interface_ingress_burst: IfaceMap<IngressBurstState>,
+    /// Own-announce pacing while an interface is fresh (order 1320,
+    /// `fresh_announce_pacing`), created in `set_interface_name`. Boxed like
+    /// `torn_down_interfaces`: the board's node box has 8 B of slack, a vec
+    /// is 12 B. Sorted by id. Removed in handle_interface_down via remove_announce_freq_tracking().
+    #[allow(clippy::box_collection)]
+    fresh_announce_pacers: Option<Box<fresh_announce_pacing::Pacers>>,
 
     /// Per-interface held-announce queue (Codeberg #87; Python
     /// `Interface.held_announces`, Interface.py:131). Keyed by destination hash
@@ -3533,7 +3598,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// [`MAX_HELD_ANNOUNCES`] per interface. Drained by `process_held_announces`
     /// on the poll cadence; entries fed back into the normal inbound path.
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_held_announces: BTreeMap<usize, BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
+    interface_held_announces: IfaceMap<BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
 
     /// Announce-table entries temporarily displaced by a scheduled path
     /// response (Codeberg #170; Python `Transport.held_announces`,
@@ -3563,14 +3628,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `announce_rate_*` key; absent entries resolve identically to an
     /// all-`None` config. Read by `interface_stats` to emit the real values.
     /// Removal path: removed in handle_interface_down via remove_announce_rate_config().
-    interface_announce_rate_configs: BTreeMap<usize, AnnounceRateConfig>,
+    interface_announce_rate_configs: IfaceMap<AnnounceRateConfig>,
 
     /// Per-interface "earliest ready" wall-clock ms pushed by the driver
     /// after each `dispatch_output` tick. Driver computes this via
     /// `Interface::next_slot_ms(MTU, now)` on each handle and mirrors the
     /// answer here so Transport can consult it without holding interface
     /// trait objects (Transport stays sans-I/O).
-    interface_next_slot_ms: BTreeMap<usize, u64>,
+    interface_next_slot_ms: IfaceMap<u64>,
 
     /// Per-interface per-frame turnaround in milliseconds, mirrored from
     /// `Interface::frame_turnaround_ms()` the same way, and for the same
@@ -3578,7 +3643,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// handles, asks each one, and pushes the answer here, so Transport
     /// learns a carrier fact without holding a trait object and stays
     /// sans-I/O. Absent ⇒ zero, the trait default.
-    interface_turnaround_ms: BTreeMap<usize, u64>,
+    interface_turnaround_ms: IfaceMap<u64>,
 
     /// Per-interface worst-case cost of ONE acquisition of the carrier, for a
     /// full-size frame, mirrored from `Interface::acquisition_max_ms()` the
@@ -3588,7 +3653,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// A second number beside the turnaround because it is paid a different
     /// number of times: the turnaround once per frame, the acquisition once
     /// per burst, by the frame that takes the channel.
-    interface_acquisition_ms: BTreeMap<usize, u64>,
+    interface_acquisition_ms: IfaceMap<u64>,
 
     /// Per-interface worst-case airtime in milliseconds for a single
     /// MTU-sized transmit. Driver pushes one entry per LoRa-Serial
@@ -3596,7 +3661,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// interfaces are absent from the map. Read by
     /// `announce_jitter_max_ms` to size the announce-retry jitter
     /// window proportional to the slowest registered link.
-    interface_max_airtime_ms: BTreeMap<usize, u64>,
+    interface_max_airtime_ms: IfaceMap<u64>,
 
     /// Per-interface IFAC (Interface Access Code) configurations.
     /// Keyed by interface index. Only present for interfaces with networkname/passphrase configured.
@@ -3627,7 +3692,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `interface.tunnel_id`, Transport.py:2346). Present only while an
     /// interface currently carries an established tunnel; cleared when the
     /// interface goes down (the tunnel entry itself persists for restore).
-    interface_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+    interface_tunnel_ids: IfaceMap<[u8; TUNNEL_ID_LEN]>,
 
     /// Monotonic timestamp of the last tunnel-table cull (ms). Throttles the
     /// expiry sweep to one pass per minute (`TUNNEL_CULL_INTERVAL_MS`).
@@ -3640,14 +3705,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// is the peer-opaque `interface_hash` field of the synthesize payload
     /// (Python `interface.get_hash()`, Transport.py:2286); it need only be
     /// stable across the interface's reconnects so the derived tunnel id is too.
-    tunnel_interface_hashes: BTreeMap<usize, [u8; SYNTH_IFHASH_LEN]>,
+    tunnel_interface_hashes: IfaceMap<[u8; SYNTH_IFHASH_LEN]>,
 
     /// The tunnel id WE last advertised as initiator on each interface (Python
     /// computes but does not persist this; we keep it for observability and for
     /// tests to assert the initiator derived the same id a responder will).
     /// This is distinct from `interface_tunnel_ids`, which holds tunnel ids of
     /// *peers* whose paths we restore.
-    own_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+    own_tunnel_ids: IfaceMap<[u8; TUNNEL_ID_LEN]>,
 
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
@@ -3692,50 +3757,51 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
             // announce_rate_table: migrated to Storage
-            interface_announce_caps: BTreeMap::new(),
-            interface_names: BTreeMap::new(),
+            interface_announce_caps: IfaceMap::new(),
+            interface_names: IfaceMap::new(),
             torn_down_interfaces: None,
-            offline_interfaces: BTreeSet::new(),
-            duty_hold_ifaces: BTreeSet::new(),
-            interface_peer_counts: BTreeMap::new(),
+            offline_interfaces: IfaceSet::new(),
+            duty_hold_ifaces: IfaceSet::new(),
+            interface_peer_counts: IfaceMap::new(),
             link_sparing_ifaces: 0,
             peer_link_reoriginations: BTreeSet::new(),
             discovery_request_peers: BTreeMap::new(),
             discovery_extra_requesters: BTreeSet::new(),
             ingress_peer: None,
             loop_refusals: None,
-            interface_modes: BTreeMap::new(),
-            interface_transit: BTreeMap::new(),
-            interface_kinds: BTreeMap::new(),
-            interface_ingress_control: BTreeMap::new(),
-            interface_egress_control: BTreeMap::new(),
-            interface_hw_mtus: BTreeMap::new(),
-            interface_link_profiles: BTreeMap::new(),
+            interface_modes: IfaceMap::new(),
+            interface_transit: IfaceMap::new(),
+            interface_kinds: IfaceMap::new(),
+            interface_ingress_control: IfaceMap::new(),
+            interface_egress_control: IfaceMap::new(),
+            interface_hw_mtus: IfaceMap::new(),
+            interface_link_profiles: IfaceMap::new(),
             shared_instance_first_hop_answers: BTreeMap::new(),
-            direct_link_evidence: BTreeMap::new(),
-            local_client_interfaces: BTreeSet::new(),
+            loss_pricing: None,
+            local_client_interfaces: IfaceSet::new(),
             shared_instance_interface: None,
-            interface_incoming_announce_times: BTreeMap::new(),
-            interface_outgoing_announce_times: BTreeMap::new(),
-            interface_incoming_pr_times: BTreeMap::new(),
-            interface_outgoing_pr_times: BTreeMap::new(),
-            interface_ingress_burst: BTreeMap::new(),
-            interface_held_announces: BTreeMap::new(),
+            interface_incoming_announce_times: IfaceMap::new(),
+            interface_outgoing_announce_times: IfaceMap::new(),
+            interface_incoming_pr_times: IfaceMap::new(),
+            interface_outgoing_pr_times: IfaceMap::new(),
+            interface_ingress_burst: IfaceMap::new(),
+            fresh_announce_pacers: None,
+            interface_held_announces: IfaceMap::new(),
             held_announce_entries: BTreeMap::new(),
             pending_local_path_requests: BTreeMap::new(),
-            interface_announce_rate_configs: BTreeMap::new(),
-            interface_next_slot_ms: BTreeMap::new(),
-            interface_turnaround_ms: BTreeMap::new(),
-            interface_acquisition_ms: BTreeMap::new(),
-            interface_max_airtime_ms: BTreeMap::new(),
+            interface_announce_rate_configs: IfaceMap::new(),
+            interface_next_slot_ms: IfaceMap::new(),
+            interface_turnaround_ms: IfaceMap::new(),
+            interface_acquisition_ms: IfaceMap::new(),
+            interface_max_airtime_ms: IfaceMap::new(),
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
             blackhole_last_checked_ms: 0,
             tunnels: BTreeMap::new(),
-            interface_tunnel_ids: BTreeMap::new(),
+            interface_tunnel_ids: IfaceMap::new(),
             tunnels_last_culled_ms: 0,
-            tunnel_interface_hashes: BTreeMap::new(),
-            own_tunnel_ids: BTreeMap::new(),
+            tunnel_interface_hashes: IfaceMap::new(),
+            own_tunnel_ids: IfaceMap::new(),
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -3859,7 +3925,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Mark a path as unresponsive
     ///
     /// Only succeeds if the destination exists in the path table.
-    /// Called when an unvalidated link expires for a 1-hop destination/initiator.
+    /// Called when an unvalidated link expires for a 1-hop destination/initiator,
+    /// and (order 1672) for a local client's link over a relayed path.
     pub fn mark_path_unresponsive(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         if self.storage.has_path(dest_hash) {
             self.storage
@@ -3906,73 +3973,193 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Account one broadcast announce copy toward the destination's
-    /// direct-link evidence (Codeberg #230). A no-op under
-    /// [`PathChoice::Hops`], so the default pays neither the map nor the
-    /// bookkeeping. Callers exclude path responses and local-client copies —
-    /// see [`DirectLinkEvidence`] for why only flooded copies are evidence.
+    /// direct-link evidence (Codeberg #230). A no-op while no interface
+    /// resolves to [`PathChoice::HopsAndLoss`], so a node that prices no
+    /// link pays neither the map nor the bookkeeping. Callers exclude path
+    /// responses and local-client copies — see [`DirectLinkEvidence`] for
+    /// why only flooded copies are evidence — and count a copy as direct
+    /// only on an interface that prices its direct link, so the window
+    /// measures the medium the penalty is applied to.
     fn note_direct_link_evidence(
         &mut self,
         dest_hash: [u8; TRUNCATED_HASHBYTES],
         emission: u64,
         direct: bool,
     ) {
-        if self.config.path_choice != PathChoice::HopsAndLoss {
+        if !self.keeps_direct_link_evidence() {
             return;
         }
-        if let Some(evidence) = self.direct_link_evidence.get_mut(&dest_hash) {
+        let table = &mut self.loss_pricing.get_or_insert_with(Box::default).evidence;
+        if let Some(evidence) = table.get_mut(&dest_hash) {
             evidence.note(emission, direct);
             return;
         }
-        if self.direct_link_evidence.len() >= DIRECT_EVIDENCE_CAP {
+        if table.len() >= DIRECT_EVIDENCE_CAP {
             // Evict the destination whose accounting is stalest: it is the
             // one whose window is most likely describing dead air.
-            if let Some(oldest) = self
-                .direct_link_evidence
+            if let Some(oldest) = table
                 .iter()
                 .min_by_key(|(_, e)| e.last_emission)
                 .map(|(k, _)| *k)
             {
-                self.direct_link_evidence.remove(&oldest);
+                table.remove(&oldest);
             }
         }
-        self.direct_link_evidence
-            .insert(dest_hash, DirectLinkEvidence::new(emission, direct));
+        table.insert(dest_hash, DirectLinkEvidence::new(emission, direct));
     }
 
     /// Under [`PathChoice::HopsAndLoss`]: would this same-emission copy
-    /// replace the installed path on cost (Codeberg #230)? `false` under
-    /// [`PathChoice::Hops`], and `false` on a cost tie, so a retry of the
-    /// installed route never flaps the entry.
+    /// replace the installed path on cost (Codeberg #230)? `false` when
+    /// neither the installed path's interface nor the copy's prices loss,
+    /// and `false` on a cost tie, so a retry of the installed route never
+    /// flaps the entry. The evidence prices a candidate only when it is the
+    /// direct link on an interface that prices loss: a direct TCP neighbour
+    /// keeps its plain hop cost beside a lossy radio one.
     ///
     /// Used by BOTH deciders a same-emission copy meets — the random-blob
     /// replay gate (which would otherwise drop a worse-hops copy before the
     /// acceptance arms ever price it) and the acceptance arms themselves —
     /// so a copy passes the gate exactly when it will be accepted.
+    ///
+    /// `existing_hops` prices the installed route: the caller passes
+    /// [`Self::same_emission_hop_floor`], so a rebalanced count cannot make
+    /// a copy that came back through a neighbour look cheaper (order 1672).
     fn same_emission_cost_swap(
         &self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         existing: &PathEntry,
+        existing_hops: u8,
         incoming_hops: u8,
         incoming_direct: bool,
+        incoming_iface: usize,
     ) -> bool {
-        if self.config.path_choice != PathChoice::HopsAndLoss {
+        if self.same_emission_path_choice(existing.interface_index, incoming_iface)
+            != PathChoice::HopsAndLoss
+        {
             return false;
         }
         let evidence = self
-            .direct_link_evidence
-            .get(dest_hash)
+            .loss_pricing
+            .as_ref()
+            .and_then(|l| l.evidence.get(dest_hash))
             .and_then(|e| e.ratio());
-        let candidate = |hops: u8, direct: bool| RouteCost {
+        let candidate = |hops: u8, direct: bool, iface: usize| RouteCost {
             // The re-hear penalty prices exactly the one-hop direct link
-            // the evidence measured; hops 0 (a local client) keeps its
-            // unbeatable plain cost.
-            direct_evidence: if direct && hops == 1 { evidence } else { None },
+            // the evidence measured, on a medium that prices loss; hops 0
+            // (a local client) keeps its unbeatable plain cost.
+            direct_evidence: if direct && hops == 1 && self.prices_link_loss(iface) {
+                evidence
+            } else {
+                None
+            },
             hops,
         };
         lower_route_cost(
-            &candidate(incoming_hops, incoming_direct),
-            &candidate(existing.hops, existing.next_hop.is_none()),
+            &candidate(incoming_hops, incoming_direct, incoming_iface),
+            &candidate(
+                existing_hops,
+                existing.next_hop.is_none(),
+                existing.interface_index,
+            ),
         )
+    }
+
+    /// The rule a same-emission race between a path installed on
+    /// `existing_iface` and a copy arriving on `incoming_iface` is decided
+    /// by (Codeberg #230): [`PathChoice::HopsAndLoss`] when either side
+    /// prices loss, so a marginal radio link can lose to a clean route on
+    /// any medium and a clean route can win against it, and
+    /// [`PathChoice::Hops`] otherwise. With no priced candidate the cost
+    /// comparison degenerates to plain hop counts, so the two rules only
+    /// differ where a radio link is in the race.
+    fn same_emission_path_choice(
+        &self,
+        existing_iface: usize,
+        incoming_iface: usize,
+    ) -> PathChoice {
+        if self.prices_link_loss(existing_iface) || self.prices_link_loss(incoming_iface) {
+            PathChoice::HopsAndLoss
+        } else {
+            PathChoice::Hops
+        }
+    }
+
+    /// Whether interface `id` prices its direct link by announce re-hear
+    /// evidence: the operator override when one is set, otherwise what the
+    /// interface's medium declared.
+    fn prices_link_loss(&self, id: usize) -> bool {
+        self.interface_path_choice(id) == PathChoice::HopsAndLoss
+    }
+
+    /// Whether any interface prices loss, which is when the evidence table
+    /// is worth keeping at all.
+    fn keeps_direct_link_evidence(&self) -> bool {
+        match self.config.path_choice {
+            Some(choice) => choice == PathChoice::HopsAndLoss,
+            None => self
+                .loss_pricing
+                .as_ref()
+                .is_some_and(|l| !l.interfaces.is_empty()),
+        }
+    }
+
+    // Public: Interface Path-Choice API (Codeberg #230, order 1380)
+    /// Record the route rule interface `id`'s medium declared (called by the
+    /// media-aware driver at registration): [`PathChoice::HopsAndLoss`] for
+    /// a radio interface, where a direct link can be marginal, and
+    /// [`PathChoice::Hops`] for every other. The transport stores the answer
+    /// and never asks what the medium is; an operator override in
+    /// [`TransportConfig::path_choice`] still wins over it.
+    pub fn set_interface_path_choice(&mut self, id: usize, choice: PathChoice) {
+        match choice {
+            PathChoice::HopsAndLoss => {
+                self.loss_pricing
+                    .get_or_insert_with(Box::default)
+                    .interfaces
+                    .insert(id);
+            }
+            PathChoice::Hops => self.remove_interface_path_choice(id),
+        }
+    }
+
+    /// Forget interface `id`'s declared rule (called during interface
+    /// teardown). With the last declaring interface gone and no override
+    /// set, the box and its evidence go too: nothing would read it, and it
+    /// describes radio conditions on a link that is gone.
+    pub fn remove_interface_path_choice(&mut self, id: usize) {
+        let unread = self.config.path_choice != Some(PathChoice::HopsAndLoss);
+        if let Some(pricing) = self.loss_pricing.as_mut() {
+            pricing.interfaces.remove(&id);
+            if pricing.interfaces.is_empty() && unread {
+                self.loss_pricing = None;
+            }
+        }
+    }
+
+    /// Whether the direct-link evidence table is empty (test seam).
+    #[cfg(test)]
+    pub(crate) fn direct_link_evidence_is_empty(&self) -> bool {
+        self.loss_pricing
+            .as_ref()
+            .is_none_or(|l| l.evidence.is_empty())
+    }
+
+    /// The route rule interface `id` runs under: the operator override when
+    /// set, otherwise what its medium declared, [`PathChoice::Hops`] when it
+    /// declared nothing.
+    pub fn interface_path_choice(&self, id: usize) -> PathChoice {
+        if let Some(choice) = self.config.path_choice {
+            return choice;
+        }
+        if self
+            .loss_pricing
+            .as_ref()
+            .is_some_and(|l| l.interfaces.contains(&id))
+        {
+            PathChoice::HopsAndLoss
+        } else {
+            PathChoice::Hops
+        }
     }
 
     /// Force-expire a path entry
@@ -4533,6 +4720,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Same rationale as is_link_request_for_us and is_cache_request.
         let is_lrproof_for_us = packet.context == PacketContext::Lrproof
             && self.local_destinations.contains(&packet.destination_hash);
+        // An exempt copy that was seen before passes the gate, and the
+        // hand-off to the node layer reads this when nobody holds its link
+        // (order 1376, `handle_data`).
+        let exempt_copy_seen = packet.flags.packet_type == PacketType::Data
+            && is_dedup_exempt_context
+            && self.storage.has_packet_hash(&full_packet_hash);
         if !is_single_announce
             && !is_local_link_relay
             && !is_local_client_link_request
@@ -4556,15 +4749,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // the #66 note in leviculum-std event_log.rs), but lives on the
             // journey target and carries `ph` so a collector stitching
             // per-packet journeys sees where a duplicate copy died.
-            crate::tracing::debug!(
-                target: PKT_EVENT_TARGET,
-                event = "DEDUP_DROP",
-                ph = %HexShort(&full_packet_hash[..PKT_PH_BYTES]),
-                dst = %HexShort(&packet.destination_hash),
-                iface = %self.iface_name(interface_index),
-                r#type = ?packet.flags.packet_type,
-                context = ?packet.context,
-            );
+            self.dedup_drop_event(&full_packet_hash, &packet, interface_index);
             // Codeberg #346, board half: a duplicate somebody addressed to US
             // for relay is the one dedup case a capture cannot otherwise
             // place — "the relay never heard it" and "the relay heard it
@@ -4609,9 +4794,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.handle_link_request(packet, interface_index, &raw, truncated_hash)
             }
             PacketType::Proof => self.handle_proof(packet, interface_index, full_packet_hash),
-            PacketType::Data => {
-                self.handle_data(packet, interface_index, full_packet_hash, truncated_hash)
-            }
+            PacketType::Data => self.handle_data(
+                packet,
+                interface_index,
+                full_packet_hash,
+                truncated_hash,
+                exempt_copy_seen,
+            ),
         }
     }
 
@@ -4638,6 +4827,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Journey PKT_DROP for a packet dropped inside a handler that already
     /// holds the packet hash (full or truncated — same `ph` prefix). Pair
     /// with `stats.record_drop(reason)` at the call site.
+    /// The `DEDUP_DROP` journey line for a copy of a packet this node has
+    /// already seen.
+    fn dedup_drop_event(&self, hash: &[u8; 32], packet: &Packet, interface_index: usize) {
+        crate::tracing::debug!(
+            target: PKT_EVENT_TARGET,
+            event = "DEDUP_DROP",
+            ph = %HexShort(&hash[..PKT_PH_BYTES]),
+            dst = %HexShort(&packet.destination_hash),
+            iface = %self.iface_name(interface_index),
+            r#type = ?packet.flags.packet_type,
+            context = ?packet.context,
+        );
+    }
+
     fn pkt_drop_event(&self, hash: &[u8], packet: &Packet, iface_in: usize, reason: DropReason) {
         crate::tracing::debug!(
             target: PKT_EVENT_TARGET,
@@ -4957,21 +5160,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // the unpack cost when a non-Full or duty-held interface exists; with
         // an all-Full, no-hold stack the blocked set is empty and behaviour
         // is identical to before.
-        let exclude_ifaces: Vec<InterfaceId> =
-            if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
-                Vec::new()
-            } else {
-                match Packet::unpack(data) {
-                    Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
-                        let is_local = self.local_destinations.contains(&pkt.destination_hash);
-                        self.announce_blocked_ifaces(&pkt.destination_hash, is_local)
-                            .into_iter()
-                            .map(InterfaceId)
-                            .collect()
-                    }
-                    _ => Vec::new(),
+        //
+        // Order 1320: an announce also leaves out each fresh interface that
+        // must not take it yet; that interface has queued its copy
+        // (`fresh_announce_pacing`).
+        let exclude_ifaces: Vec<InterfaceId> = if self.interface_modes.is_empty()
+            && self.duty_hold_ifaces.is_empty()
+            && self.fresh_announce_pacers.is_none()
+        {
+            Vec::new()
+        } else {
+            match Packet::unpack(data) {
+                Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
+                    let is_local = self.local_destinations.contains(&pkt.destination_hash);
+                    let mut blocked = self.announce_blocked_ifaces(&pkt.destination_hash, is_local);
+                    let paced =
+                        self.paced_broadcast_exclusions(data, pkt.destination_hash, &blocked);
+                    blocked.extend(paced);
+                    blocked.into_iter().map(InterfaceId).collect()
                 }
-            };
+                _ => Vec::new(),
+            }
+        };
 
         self.push_broadcast(
             data.to_vec(),
@@ -5195,6 +5405,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.check_receipt_timeouts(now);
         self.check_announce_rebroadcasts(now);
         self.drain_announce_queues(now);
+        self.drain_fresh_announce_queues(now);
         self.clean_link_table(now);
         self.clean_path_states();
         self.expire_pending_local_path_requests(now);
@@ -5217,12 +5428,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.should_ingress_limit(iface);
                 self.should_ingress_limit_pr(iface);
             }
-            use core::ops::Bound::{Excluded, Unbounded};
-            cursor = self
-                .interface_ingress_burst
-                .range((Excluded(iface), Unbounded))
-                .next()
-                .map(|(&next, _)| next);
+            cursor = self.interface_ingress_burst.next_key_after(iface);
         }
 
         // Codeberg #87: release held announces on the poll cadence (Python runs
@@ -5393,6 +5599,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             if !cap.queue.is_empty() {
                 update(cap.allowed_at_ms);
             }
+        }
+        if let Some(deadline) = self.fresh_announce_deadline() {
+            update(deadline);
         }
 
         // Discovery path request retry deadline
@@ -5569,14 +5778,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } => data.capacity() + hc::vec_bytes(exclude_ifaces),
             };
         }
-        bytes += hc::btree_map_bytes(&self.interface_announce_caps);
+        bytes += self.interface_announce_caps.heap_bytes();
         for cap in self.interface_announce_caps.values() {
             bytes += hc::vec_deque_bytes(&cap.queue);
             for queued in &cap.queue {
                 bytes += queued.raw.capacity();
             }
         }
-        bytes += hc::btree_map_bytes(&self.interface_held_announces);
+        if let Some(pacers) = self.fresh_announce_pacers.as_deref() {
+            bytes += core::mem::size_of::<fresh_announce_pacing::Pacers>();
+            bytes += hc::vec_bytes(pacers);
+        }
+        // What waits in each pacer's queue.
+        for (_, pacer) in self.fresh_announce_pacers.iter().flat_map(|p| p.iter()) {
+            bytes += hc::vec_deque_bytes(&pacer.queue);
+            for queued in &pacer.queue {
+                bytes += queued.raw.capacity();
+            }
+        }
+        bytes += self.interface_held_announces.heap_bytes();
         for held in self.interface_held_announces.values() {
             bytes += hc::btree_map_bytes(held);
             for announce in held.values() {
@@ -5588,40 +5808,44 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             bytes += entry.raw_packet.capacity();
         }
         bytes += hc::btree_set_bytes(&self.local_destinations)
-            + hc::btree_map_bytes(&self.interface_names)
+            + self.interface_names.heap_bytes()
             + self.torn_down_interfaces.as_ref().map_or(0, |torn| {
-                core::mem::size_of::<BTreeSet<usize>>() + hc::btree_set_bytes(torn)
+                core::mem::size_of::<IfaceSet>() + torn.heap_bytes()
             })
             + self
                 .interface_names
                 .values()
                 .map(|name| name.capacity())
                 .sum::<usize>()
-            + hc::btree_set_bytes(&self.offline_interfaces)
-            + hc::btree_set_bytes(&self.duty_hold_ifaces)
-            + hc::btree_map_bytes(&self.interface_peer_counts)
+            + self.offline_interfaces.heap_bytes()
+            + self.duty_hold_ifaces.heap_bytes()
+            + self.interface_peer_counts.heap_bytes()
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
             + hc::btree_map_bytes(&self.discovery_request_peers)
             + hc::btree_set_bytes(&self.discovery_extra_requesters)
             + self.loop_refusals.as_ref().map_or(0, |r| {
                 core::mem::size_of::<LoopRefusals>() + hc::vec_bytes(&r.0)
             })
-            + hc::btree_map_bytes(&self.interface_modes)
-            + hc::btree_map_bytes(&self.interface_kinds)
-            + hc::btree_map_bytes(&self.interface_ingress_control)
-            + hc::btree_map_bytes(&self.interface_egress_control)
-            + hc::btree_map_bytes(&self.interface_hw_mtus)
+            + self.interface_modes.heap_bytes()
+            + self.interface_kinds.heap_bytes()
+            + self.interface_ingress_control.heap_bytes()
+            + self.interface_egress_control.heap_bytes()
+            + self.interface_hw_mtus.heap_bytes()
             + self.relay_routes.heap_bytes()
             + self.forward_meters.heap_bytes()
-            + hc::btree_map_bytes(&self.interface_link_profiles)
+            + self.interface_link_profiles.heap_bytes()
             + hc::btree_map_bytes(&self.shared_instance_first_hop_answers)
-            + hc::btree_map_bytes(&self.direct_link_evidence)
-            + hc::btree_set_bytes(&self.local_client_interfaces)
+            + self.loss_pricing.as_ref().map_or(0, |l| {
+                core::mem::size_of::<LossPricing>()
+                    + l.interfaces.heap_bytes()
+                    + hc::btree_map_bytes(&l.evidence)
+            })
+            + self.local_client_interfaces.heap_bytes()
             + hc::btree_map_bytes(&self.pending_local_path_requests)
-            + hc::btree_map_bytes(&self.interface_announce_rate_configs)
-            + hc::btree_map_bytes(&self.interface_next_slot_ms)
-            + hc::btree_map_bytes(&self.interface_turnaround_ms)
-            + hc::btree_map_bytes(&self.interface_max_airtime_ms)
+            + self.interface_announce_rate_configs.heap_bytes()
+            + self.interface_next_slot_ms.heap_bytes()
+            + self.interface_turnaround_ms.heap_bytes()
+            + self.interface_max_airtime_ms.heap_bytes()
             + hc::btree_map_bytes(&self.ifac_configs)
             + hc::btree_map_bytes(&self.blackholed_identities)
             + hc::btree_map_bytes(&self.tunnels)
@@ -5636,15 +5860,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + hc::btree_map_bytes(&self.interface_tunnel_ids)
-            + hc::btree_map_bytes(&self.interface_ingress_burst);
+            + self.interface_tunnel_ids.heap_bytes()
+            + self.interface_ingress_burst.heap_bytes();
         for windows in [
             &self.interface_incoming_announce_times,
             &self.interface_outgoing_announce_times,
             &self.interface_incoming_pr_times,
             &self.interface_outgoing_pr_times,
         ] {
-            bytes += hc::btree_map_bytes(windows);
+            bytes += windows.heap_bytes();
             for window in windows.values() {
                 bytes += hc::vec_deque_bytes(window);
             }
@@ -6278,6 +6502,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 next_hop,
                 random_blob,
                 expires_ms,
+                cause: RefusalCause::ProvenLoop,
             });
         }
         crate::tracing::debug!(
@@ -6291,31 +6516,84 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Whether an announce for `dest_hash` relayed by `transport_id` and
-    /// carrying `random_blob` replays a route a returning relay proved
-    /// circular (leviculum#852). A different emission of the destination
-    /// ends the refusal: the loop was proven for the old one only.
-    fn refuses_proven_loop(
+    /// carrying `random_blob` replays a route this node refused for that
+    /// emission: one a returning relay proved circular (leviculum#852), or
+    /// one a forwarded link request died on (order 1672). A different
+    /// emission of the destination ends the refusal: the loop was proven,
+    /// and the next hop failed, for the old one only.
+    fn refused_next_hop(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         transport_id: Option<&[u8; TRUNCATED_HASHBYTES]>,
         random_blob: &[u8; crate::constants::RANDOM_HASHBYTES],
-    ) -> bool {
-        let Some(refusals) = self.loop_refusals.as_mut() else {
-            return false;
-        };
+    ) -> Option<RefusalCause> {
+        let refusals = self.loop_refusals.as_mut()?;
         let now = self.clock.now_ms();
         refusals.0.retain(|r| {
             r.expires_ms > now && (&r.dest_hash != dest_hash || &r.random_blob == random_blob)
         });
-        let refused = refusals.0.iter().any(|r| {
-            &r.dest_hash == dest_hash
-                && &r.random_blob == random_blob
-                && transport_id == Some(&r.next_hop)
-        });
+        let refused = refusals
+            .0
+            .iter()
+            .find(|r| {
+                &r.dest_hash == dest_hash
+                    && &r.random_blob == random_blob
+                    && transport_id == Some(&r.next_hop)
+            })
+            .map(|r| r.cause);
         if refusals.0.is_empty() {
             self.loop_refusals = None;
         }
         refused
+    }
+
+    /// A link request forwarded toward `dest_hash` expired unproven: refuse
+    /// the path's current next hop's copies of the emission the path holds
+    /// (order 1672). The unresponsive rule then moves the path to another
+    /// next hop's copy, more hops or not, and this refusal keeps the dead
+    /// next hop's shorter copy of the same emission from moving it back.
+    /// One refusal per (destination, next hop); a direct path has no next
+    /// hop to refuse.
+    fn refuse_unresponsive_next_hop(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
+        let Some(path) = self.storage.get_path(dest_hash) else {
+            return;
+        };
+        let Some(next_hop) = path.next_hop else {
+            return;
+        };
+        let Some(random_blob) = path
+            .random_blobs
+            .iter()
+            .max_by_key(|blob| emission_from_random_hash(blob))
+            .copied()
+        else {
+            return;
+        };
+        let expires_ms = path.expires_ms;
+        let path_hops = path.hops;
+        let iface = path.interface_index;
+        let now = self.clock.now_ms();
+        let refusals = &mut self.loop_refusals.get_or_insert_with(Box::default).0;
+        refusals.retain(|r| {
+            r.expires_ms > now && !(&r.dest_hash == dest_hash && r.next_hop == next_hop)
+        });
+        if refusals.len() >= MAX_LOOP_REFUSALS {
+            refusals.remove(0);
+        }
+        refusals.push(LoopRefusal {
+            dest_hash: *dest_hash,
+            next_hop,
+            random_blob,
+            expires_ms,
+            cause: RefusalCause::NextHopUnresponsive,
+        });
+        crate::tracing::debug!(
+            event = "PATH_UNRESPONSIVE",
+            dst = %HexShort(dest_hash),
+            next_hop = %HexShort(&next_hop),
+            iface = %self.iface_name(iface),
+            path_hops = path_hops,
+        );
     }
 
     // Blackholed identities (Codeberg #67)
@@ -6363,7 +6641,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4517. A destination with no cached
+    /// link-request path uses at transport.rs:4704. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7165,7 +7443,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1771 ran in the
+        // Gate on the already-incremented hops (transport.rs:1836 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7209,32 +7487,54 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         //   fewer-hops copy passes too because it is direct-link evidence
         //   for the knob even when it does not win.
         if let Some(path) = self.storage.get_path(&dest_hash) {
-            let same_emission_may_win = match self.config.path_choice {
-                PathChoice::Hops => accept_same_emission(
-                    SAME_EMISSION_RULE,
-                    SameEmissionCopy {
-                        hops: path.hops,
-                        interface_index: path.interface_index,
-                    },
-                    SameEmissionCopy {
-                        hops: packet.hops,
-                        interface_index,
-                    },
-                ),
-                PathChoice::HopsAndLoss => {
-                    packet.hops < path.hops
-                        || self.same_emission_cost_swap(
-                            &dest_hash,
-                            path,
-                            packet.hops,
-                            packet.transport_id.is_none(),
-                        )
-                }
-            };
+            // Against the count we installed and advertised the emission
+            // at, not a rebalanced one (`same_emission_hop_floor`).
+            let hop_floor = self.same_emission_hop_floor(&dest_hash, path);
+            let same_emission_may_win =
+                match self.same_emission_path_choice(path.interface_index, interface_index) {
+                    PathChoice::Hops => accept_same_emission(
+                        SAME_EMISSION_RULE,
+                        SameEmissionCopy {
+                            hops: hop_floor,
+                            interface_index: path.interface_index,
+                        },
+                        SameEmissionCopy {
+                            hops: packet.hops,
+                            interface_index,
+                        },
+                    ),
+                    PathChoice::HopsAndLoss => {
+                        packet.hops < hop_floor
+                            || self.same_emission_cost_swap(
+                                &dest_hash,
+                                path,
+                                hop_floor,
+                                packet.hops,
+                                packet.transport_id.is_none(),
+                                interface_index,
+                            )
+                    }
+                };
             if path.random_blobs.contains(&random_hash)
                 && !self.path_is_unresponsive(&dest_hash)
                 && !same_emission_may_win
             {
+                if packet.hops < path.hops {
+                    // A copy the rebalanced count would have taken as
+                    // "fewer hops" (order 1672: a neighbour's answer at 4
+                    // against our 3 rebalanced to 6). Named, so the next
+                    // field log says why the shorter-looking answer was left.
+                    crate::tracing::debug!(
+                        event = "PATH_REFUSED",
+                        dst = %HexShort(&dest_hash),
+                        next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
+                        iface = %self.iface_name(interface_index),
+                        hops = packet.hops,
+                        path_hops = path.hops,
+                        installed_hops = hop_floor,
+                        reason = "longer_than_installed",
+                    );
+                }
                 crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Dropped announce, random hash already seen (replay)"
@@ -7248,27 +7548,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // destination through us offers the same emission again. Taking it
         // would rebuild the loop the dedup gate just broke, so it counts as
         // a replay; a new emission, from anyone, passes.
-        if self.refuses_proven_loop(&dest_hash, packet.transport_id.as_ref(), &random_hash) {
+        //
+        // Order 1672: the same holds for a next hop a forwarded link
+        // request died on. Its copies of the emission the unresponsive rule
+        // moved the path away from are refused, or the shorter of them would
+        // move the path straight back onto the hop that just failed.
+        if let Some(cause) =
+            self.refused_next_hop(&dest_hash, packet.transport_id.as_ref(), &random_hash)
+        {
             crate::tracing::debug!(
-                dest = %HexShort(&dest_hash),
+                event = "PATH_REFUSED",
+                dst = %HexShort(&dest_hash),
+                next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
                 iface = %self.iface_name(interface_index),
-                "Dropped announce, its relay routes this destination through us (proven loop)"
+                hops = packet.hops,
+                path_hops = ?self.storage.get_path(&dest_hash).map(|p| p.hops),
+                reason = cause.as_str(),
             );
             self.stats.record_drop(DropReason::AnnounceReplay);
             return Ok(());
         }
 
-        // Direct-link evidence (Codeberg #230; no-op under the default
-        // `PathChoice::Hops`). Only flooded copies count: a path response is
+        // Direct-link evidence (Codeberg #230; a no-op while no interface
+        // prices loss). Only flooded copies count: a path response is
         // served once over one route, and a local client's announce crossed
         // no radio, so neither says anything about the direct link. Fed
         // before the acceptance arms so the copy under decision is already
         // evidence for itself.
         if !is_path_response && !self.is_local_client(interface_index) {
+            let direct = packet.transport_id.is_none() && self.prices_link_loss(interface_index);
             self.note_direct_link_evidence(
                 dest_hash,
                 emission_from_random_hash(&random_hash),
-                packet.transport_id.is_none(),
+                direct,
             );
         }
 
@@ -7301,26 +7613,57 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // rebroadcast ourselves (`retries > 0`). Without this guard, a neighbor
                 // heard within the jitter window of the initial entry could cancel our
                 // first-ever fire, violating the Python on-wire count.
-                if packet.hops == existing.hops.saturating_add(1) {
+                //
+                // Both arms count only a copy OF THE ENTRY'S ANNOUNCE, and the
+                // forwarded arm only while the retransmit is still in the
+                // future (order 1617, Refs #232). We keyed both on the
+                // destination and let the forwarded arm cancel any pending
+                // retransmit: Python's echo of a local client's PREVIOUS
+                // announce (hops + 2) then cancelled the client's renamed
+                // announce, whose entry starts at retries =
+                // PATHFINDER_RETRIES and is due the moment it lands, before
+                // it ever left, and the Python peer kept the old name. The
+                // reference also keys on the destination (Transport.py:1724)
+                // but wants `now < retransmit_timeout` (:1736), which a
+                // retransmit due now fails; a copy of another emission says
+                // nothing about whether this one was passed on either. The
+                // packet hash leaves out hops and the transport id, so every
+                // relay of one announce shares it. Wire unchanged; the
+                // deviation only keeps an announce on its way that nobody
+                // has forwarded yet.
+                let hops_on = packet.hops.wrapping_sub(existing.hops);
+                let copy_hash = if hops_on == 1 || hops_on == 2 {
+                    Some(crate::packet::packet_hash(raw))
+                } else {
+                    None
+                };
+                let echoes_entry = copy_hash.is_some()
+                    && copy_hash == Some(crate::packet::packet_hash(&existing.raw_packet));
+                let mut cancelled = None;
+                if echoes_entry && hops_on == 1 {
                     existing.local_rebroadcasts = existing.local_rebroadcasts.saturating_add(1);
                     if existing.retries > 0 && existing.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
                     {
                         existing.retransmit_at_ms = None;
-                        crate::tracing::trace!(
-                            dest = %HexShort(&dest_hash),
-                            "Rebroadcasted announce has been passed on to another node, no further tries needed"
-                        );
+                        cancelled = Some("passed_on");
                     }
-                } else if packet.hops == existing.hops.saturating_add(2)
+                } else if echoes_entry
                     && existing.retries > 0
-                    && existing.retransmit_at_ms.is_some()
+                    && existing.retransmit_at_ms.is_some_and(|due| now < due)
                 {
                     // Another node forwarded our rebroadcast (hops+2 means they got
                     // our retransmit at hops+1 and forwarded it)
                     existing.retransmit_at_ms = None;
-                    crate::tracing::trace!(
-                        dest = %HexShort(&dest_hash),
-                        "Rebroadcasted announce has been forwarded by another node, no further tries needed"
+                    cancelled = Some("forwarded");
+                }
+                if let (Some(reason), Some(h)) = (cancelled, copy_hash) {
+                    crate::tracing::debug!(
+                        event = "ANN_REBROADCAST_CANCELLED",
+                        dst = %HexShort(&dest_hash),
+                        ph = %HexShort(&h[..PKT_PH_BYTES]),
+                        hops = packet.hops,
+                        iface = %self.iface_name(interface_index),
+                        reason = reason,
                     );
                 }
 
@@ -7350,7 +7693,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         {
             let announce_emitted = emission_from_random_hash(&random_hash);
             let path_timebase = max_emission_from_blobs(&existing.random_blobs);
-            if packet.hops <= existing.hops {
+            // "Equal or fewer" is counted against the fewest hops we
+            // installed this emission at, which is the count the reference
+            // compares too: Python's path entry holds that count until a
+            // link proof rebalances it, and its same-emission test never
+            // looks at hops at all (Transport.py:1765-1774). A rebalance
+            // moves `existing.hops`, never the floor
+            // (`same_emission_hop_floor`, order 1672).
+            let hop_floor = self.same_emission_hop_floor(&dest_hash, existing);
+            if packet.hops <= hop_floor {
                 // Equal or fewer hops: accept if emission is newer, or if
                 // same emission but strictly fewer hops (same announce via
                 // a shorter path, e.g. direct vs relayed path response).
@@ -7376,12 +7727,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // re-hear evidence (`lower_route_cost`). With no evidence
                 // yet the costs degenerate to plain hop counts and the two
                 // knob settings decide identically.
-                let (same_emission_wins, same_emission_reason) = match self.config.path_choice {
+                let (same_emission_wins, same_emission_reason) = match self
+                    .same_emission_path_choice(existing.interface_index, interface_index)
+                {
                     PathChoice::Hops => (
                         accept_same_emission(
                             SAME_EMISSION_RULE,
                             SameEmissionCopy {
-                                hops: existing.hops,
+                                hops: hop_floor,
                                 interface_index: existing.interface_index,
                             },
                             SameEmissionCopy {
@@ -7395,8 +7748,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         self.same_emission_cost_swap(
                             &dest_hash,
                             existing,
+                            hop_floor,
                             packet.hops,
                             packet.transport_id.is_none(),
+                            interface_index,
                         ),
                         "same_emission_lower_cost",
                     ),
@@ -7407,6 +7762,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else if announce_emitted == path_timebase && same_emission_wins {
                     self.mark_path_unknown_state(&dest_hash);
                     Some(same_emission_reason)
+                } else if announce_emitted == path_timebase && from_local {
+                    // Order 1488: a local client's own announce, its blob
+                    // unseen (the replay gate above dropped a seen one), in
+                    // the second of the emission we hold. An emission has
+                    // one-second resolution (`Destination.py:282`), so a
+                    // client that announces twice in one second, or a second
+                    // client of the same identity while the first one's
+                    // hops-0 path still stands (its IPC disconnect not yet
+                    // handled), would lose the newer app data, a rename or
+                    // a new ratchet, and no peer would ever hear it. Only
+                    // the holder of the key signs a fresh blob, so this is
+                    // news and not a copy. Python refuses it
+                    // (Transport.py:1772); deviation rule: the wire is the
+                    // same, a Python peer stores what it is sent
+                    // (`Identity.validate_announce` runs before its path
+                    // rule), and a renamed sender reaches it.
+                    self.mark_path_unknown_state(&dest_hash);
+                    Some("local_client_same_second")
                 } else {
                     None
                 }
@@ -7431,12 +7804,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     && self.same_emission_cost_swap(
                         &dest_hash,
                         existing,
+                        hop_floor,
                         packet.hops,
                         packet.transport_id.is_none(),
+                        interface_index,
                     )
                 {
-                    // `path_choice = hops_and_loss` only (the predicate is
-                    // false under the default): a worse-HOPS copy of the
+                    // `hops_and_loss` races only (the predicate is false
+                    // unless one side's interface prices loss): a worse-HOPS copy of the
                     // installed emission whose route prices cheaper than the
                     // marginal direct link we hold — the relayed copy of the
                     // very announce the direct entry came from, arriving one
@@ -7446,6 +7821,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.mark_path_unknown_state(&dest_hash);
                     Some("same_emission_lower_cost_worse_hops")
                 } else {
+                    if announce_emitted == path_timebase && packet.hops < existing.hops {
+                        // The copy the rebalanced count would have taken as
+                        // "fewer hops" (order 1672). Named, so the next field
+                        // log says why the shorter-looking answer was left.
+                        crate::tracing::debug!(
+                            event = "PATH_REFUSED",
+                            dst = %HexShort(&dest_hash),
+                            next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
+                            iface = %self.iface_name(interface_index),
+                            hops = packet.hops,
+                            path_hops = existing.hops,
+                            installed_hops = hop_floor,
+                            reason = "longer_than_installed",
+                        );
+                    }
                     None
                 }
             }
@@ -7770,7 +8160,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let announce_table_took_it =
                 (!rate_blocked && !rate_limited && !is_path_response) || forwards_pending_response;
             if announce_table_took_it {
-                self.storage.set_announce(
+                self.insert_received_announce(
                     dest_hash,
                     AnnounceEntry {
                         timestamp_ms: now,
@@ -7839,8 +8229,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // above.
                         block_rebroadcasts: false,
                     },
+                    forwards_pending_response,
                 );
-
                 // Log when an announce is queued for rebroadcast (aids collision diagnosis)
                 if let Some(entry) = self.storage.get_announce(&dest_hash) {
                     if entry.retransmit_at_ms.is_some() {
@@ -9007,12 +9397,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         Ok(())
     }
 
+    /// `exempt_copy_seen`: this is a repeat of a packet whose link context
+    /// exempted it from the dedup gate.
     fn handle_data(
         &mut self,
         mut packet: Packet,
         interface_index: usize,
         full_packet_hash: [u8; 32],
         truncated_hash: [u8; TRUNCATED_HASHBYTES],
+        exempt_copy_seen: bool,
     ) -> Result<(), TransportError> {
         let dest_hash = packet.destination_hash;
 
@@ -9401,6 +9794,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // owner is gone. The node layer drops it as `link-data-no-link`.
             // Two daemons claimed a foreign link with a hard-coded
             // `matched=true` here (#407).
+            //
+            // A second copy is a duplicate here even in the link contexts
+            // the dedup gate above exempts (order 1376). The exemption keeps
+            // a held link's keepalives, channel and resource retransmissions
+            // alive; a link nobody here holds has no handler to serve, so
+            // the copy would only be dropped again under the same reason,
+            // and the log read as one drop written twice, byte for byte, on
+            // miauhaus (4a191df3). The reference drops both copies silently
+            // (`Transport.py:2124-2150` finds no active link); what changes
+            // is the line the second one gets.
+            if exempt_copy_seen {
+                self.dedup_drop_event(&full_packet_hash, &packet, interface_index);
+                self.stats.record_drop(DropReason::Duplicate);
+                return Ok(());
+            }
             crate::tracing::debug!(
                 event = "PKT_LOCAL",
                 dst = %HexShort(&dest_hash),
@@ -9580,7 +9988,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         data: &PacketData,
         prev_hop_iface: usize,
         next_hop_iface: usize,
-        hw_mtus: &BTreeMap<usize, u32>,
+        hw_mtus: &IfaceMap<u32>,
     ) -> Option<PacketData> {
         use crate::link::{
             decode_signaling_bytes, encode_signaling_bytes, LINK_REQUEST_BASE_SIZE, SIGNALING_SIZE,
@@ -9815,15 +10223,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // (leviculum#493). In the common all-`Full`, no-hold case the
             // blocked set is empty and the single Broadcast reaches every
             // interface as before.
-            let exclude_ifaces = if packet.flags.packet_type == PacketType::Announce {
-                let is_local = self.local_destinations.contains(&packet.destination_hash);
-                self.announce_blocked_ifaces(&packet.destination_hash, is_local)
-                    .into_iter()
-                    .map(InterfaceId)
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let mut exclude_ifaces: Vec<InterfaceId> =
+                if packet.flags.packet_type == PacketType::Announce {
+                    let is_local = self.local_destinations.contains(&packet.destination_hash);
+                    self.announce_blocked_ifaces(&packet.destination_hash, is_local)
+                        .into_iter()
+                        .map(InterfaceId)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             // The link of our own next hop for this destination gets no
             // copy (leviculum#854): its interface is named as the excluded
@@ -9835,6 +10244,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .map_or((None, None), |h| (Some(InterfaceId(h.iface)), Some(h.peer))),
                 _ => (None, None),
             };
+
+            // An announce this node originated (its own retry) is paced on a
+            // fresh interface like the first emission (order 1320).
+            if packet.flags.packet_type == PacketType::Announce
+                && packet.hops == 0
+                && self.fresh_announce_pacers.is_some()
+            {
+                let mut skip: Vec<usize> = exclude_ifaces.iter().map(|i| i.0).collect();
+                skip.extend(spare_iface.map(|i| i.0));
+                let paced =
+                    self.paced_broadcast_exclusions(&buf[..len], packet.destination_hash, &skip);
+                exclude_ifaces.extend(paced.into_iter().map(InterfaceId));
+            }
 
             // The packed buffer is the frame; no second copy of it.
             buf.truncate(len);
@@ -10187,6 +10609,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_ingress_burst
             .entry(id)
             .or_insert_with(|| IngressBurstState::new(now));
+        self.register_fresh_pacer(id);
     }
 
     /// Remove interface name (called during handle_interface_down cleanup).
@@ -10572,20 +10995,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         {
             return Vec::new();
         }
-        // Through a set because the chain can name an interface twice
-        // (duty-held AND moded), and the sources interleave arbitrarily. An
-        // interface with only a `transit: false` declaration (leviculum#51)
-        // has no mode entry but must still be excluded from transit-announce
-        // egress.
-        self.interface_modes
+        // Sorted and deduplicated because the chain can name an interface
+        // twice (duty-held AND moded), and the sources interleave
+        // arbitrarily. By sorted insertion rather than through a
+        // `BTreeSet<usize>`: the result is the same ascending list, and on a
+        // board the set's collect pulled in a generic stable sort of about
+        // 2.4 KB of flash for a list of a few interfaces (order 1300).
+        let mut blocked: Vec<usize> = Vec::new();
+        for idx in self
+            .interface_modes
+            // An interface with only a `transit: false` declaration (leviculum#51)
+            // has no mode entry but must still be excluded from transit-announce
+            // egress, so its key joins the chain.
             .keys()
             .chain(self.duty_hold_ifaces.iter())
             .chain(self.interface_transit.keys())
             .copied()
             .filter(|&idx| !self.announce_allowed_on_interface(idx, dest_hash, is_local))
-            .collect::<BTreeSet<usize>>()
-            .into_iter()
-            .collect()
+        {
+            if let Err(at) = blocked.binary_search(&idx) {
+                blocked.insert(at, idx);
+            }
+        }
+        blocked
     }
 
     /// Path-table entry lifetime (ms) for a destination learned through
@@ -11125,6 +11557,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
     }
+    /// The fewest hops this node has held `existing`'s emission at: the
+    /// count the copy that installed it carried, which is also the count
+    /// every rebroadcast and path response of ours told the neighbours.
+    ///
+    /// `existing.hops` is that count until a link proof rebalances it
+    /// (`rebalance_path_hops`, Python 1.5's `ALLOW_LINK_PATH_REBALANCE`).
+    /// A rebalance raises the live length of OUR route; it says nothing
+    /// about the copies a neighbour can offer, and a neighbour that learned
+    /// the emission through us offers it at this floor plus at least one.
+    /// Comparing a same-emission copy against the rebalanced count turned
+    /// such an echo into "fewer hops" (order 1672: 3 rebalanced to 6, then a
+    /// 4-hop copy of the same emission adopted on miauhaus, and every link
+    /// request after it died on that next hop). The installing copy sits in
+    /// the announce cache, written on every accepted announce
+    /// (`handle_announce`), with its pre-increment wire count; a cache that
+    /// holds another emission, or nothing, leaves the stored count.
+    fn same_emission_hop_floor(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        existing: &PathEntry,
+    ) -> u8 {
+        let timebase = max_emission_from_blobs(&existing.random_blobs);
+        self.storage
+            .get_announce_cache(dest_hash)
+            .and_then(|raw| {
+                let packet = Packet::unpack(raw).ok()?;
+                let announce = ReceivedAnnounce::from_packet(&packet).ok()?;
+                (emission_from_random_hash(announce.random_hash()) == timebase)
+                    .then(|| packet.hops.saturating_add(1))
+            })
+            .map_or(existing.hops, |installed| installed.min(existing.hops))
+    }
+
     /// Emission timestamp of the announce we hold in the cache for
     /// `dest_hash`, read from its random hash — the replay memory that
     /// survives a culled path entry (#374). `None` when nothing is cached or
@@ -11835,6 +12300,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // semantics are the ones a peer expects. It measurably improves
             // Priority 1: the packets that follow take one carrier crossing
             // instead of two and stop depending on a third node staying up.
+            // It stays so when the kept copy's peer dies before the release:
+            // `drop_held_announces_via_peer` then drops the copy, which is the
+            // state a node without the hold reaches too (the short path
+            // installed, the longer copy refused, the path culled with its
+            // peer), so no route through a dead link is ever released (#480).
             //
             // A tie takes the newest: at equal route quality the later announce
             // is the fresher statement (newer ratchet, newer app data).
@@ -11862,6 +12332,43 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 true
             }
         }
+    }
+
+    /// Forget every announce held on `iface` that arrived through `peer`,
+    /// returning how many went (Codeberg #480). Called beside
+    /// [`drop_paths_via_peer`](Self::drop_paths_via_peer) when that peer's
+    /// link dies.
+    ///
+    /// A held entry carries its arrival peer to the release (#589), so a
+    /// release after the peer is gone installs a path through a link that
+    /// no longer exists and rebroadcasts it; nothing replaces it until a
+    /// shorter announce arrives (ble_room_20, 2026-10-31: three probes died
+    /// as `BLE_TX_ROUTE_MISS`). The hold keeps one copy per destination, the
+    /// shorter one (see `hold_announce`), so a longer copy through a live
+    /// peer is not there to fall back to. Dropping the entry reaches the
+    /// state a node reaches with no hold at all: the short path installed,
+    /// the longer copy of the same emission refused, the path culled with
+    /// its peer. The destination is then unknown, and the next copy or a
+    /// path request learns it through whoever is still up.
+    ///
+    /// Python has no multi-peer interface and drops held announces only with
+    /// the interface; this is the per-peer grain of the same cleanup, local
+    /// to the table and silent on the wire.
+    pub fn drop_held_announces_via_peer(
+        &mut self,
+        iface: usize,
+        peer: &[u8; TRUNCATED_HASHBYTES],
+    ) -> usize {
+        let Some(queue) = self.interface_held_announces.get_mut(&iface) else {
+            return 0;
+        };
+        let before = queue.len();
+        queue.retain(|_, held| held.peer != Some(*peer));
+        let dropped = before - queue.len();
+        if queue.is_empty() {
+            self.interface_held_announces.remove(&iface);
+        }
+        dropped
     }
 
     /// Release at most one held announce for `iface` back into the normal inbound
@@ -11987,6 +12494,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_held_announces.remove(&iface);
         self.interface_ingress_control.remove(&iface);
         self.interface_egress_control.remove(&iface);
+        self.remove_fresh_pacer(iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -12607,7 +13115,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2954`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:3019`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14120,13 +14628,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Sub-case 1: Path missing, unconditionally try to rediscover
                 // (no throttle check). Python Transport.py:708-710.
                 should_request_path = true;
-            } else if !path_request_throttled && entry.hops == 0 {
+            } else if entry.hops == 0 {
                 // Sub-case 2: link initiated by a LOCAL CLIENT (lr_taken_hops == 0).
-                // Rediscover the path, but do NOT mark it unresponsive: Python
-                // Transport.py:715-717 sets path_request_conditions only — no
-                // mark_path_unresponsive, no blocked_if. Order matters (elif
-                // chain): this must sit before the is_direct and hops == 1 cases.
-                should_request_path = true;
+                // Rediscover the path (Python Transport.py:715-717). Order
+                // matters (elif chain): this must sit before the is_direct
+                // and hops == 1 cases.
+                should_request_path = !path_request_throttled;
+                // Deviation (order 1672): Python sets path_request_conditions
+                // only here — no mark_path_unresponsive. A daemon whose
+                // links all come from its own clients (a mailbox host, a
+                // desktop running lnomad) then never leaves a relayed next
+                // hop that stopped delivering: every answer to the path
+                // request is the emission it already holds, the longer
+                // copies are refused for as long as the path is not
+                // unresponsive, and the dead route stands until the
+                // destination announces again (miauhaus, 2026-11-11: five
+                // link requests in a row to one next hop, 102 s each).
+                // Marking it lets the unresponsive rule take another next
+                // hop's copy; refusing the dead next hop's copies of this
+                // emission keeps it from coming back. Wire unchanged, a
+                // path entry is ours alone; a link proven over the same
+                // destination after this one was set says the route works,
+                // and then nothing is marked.
+                if self.config.enable_transport
+                    && self
+                        .storage
+                        .get_path(&dest_hash)
+                        .is_some_and(|p| p.next_hop.is_some())
+                    && !self.link_proven_since(&dest_hash, entry.timestamp_ms)
+                {
+                    self.mark_path_unresponsive(&dest_hash);
+                    self.refuse_unresponsive_next_hop(&dest_hash);
+                }
             } else if !path_request_throttled
                 && self
                     .storage
@@ -14145,6 +14678,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 should_request_path = true;
                 if self.config.enable_transport {
                     self.mark_path_unresponsive(&dest_hash);
+                    // Order 1672, as in sub-case 2: the next hop that let
+                    // this request die does not get the emission back.
+                    if !self.link_proven_since(&dest_hash, entry.timestamp_ms) {
+                        self.refuse_unresponsive_next_hop(&dest_hash);
+                    }
                 }
             }
 
@@ -14167,6 +14705,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
             }
         }
+    }
+
+    /// Whether a link request toward `dest_hash` set at or after `since_ms`
+    /// has been proven: the route answered after the request that just
+    /// expired was sent, so that expiry says nothing against it (order
+    /// 1672 — on miauhaus the first of two requests expired 1.6 s after
+    /// the second one's proof came back over the same next hop).
+    fn link_proven_since(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES], since_ms: u64) -> bool {
+        self.storage.link_entries().iter().any(|(_, e)| {
+            &e.destination_hash == dest_hash && e.validated && e.timestamp_ms >= since_ms
+        })
     }
 
     /// Remove path_states and announce_rate entries for destinations no longer in path_table.
@@ -18963,7 +19512,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7936,,), a deliberate anti-replay
+            // `random_blobs` (transport.rs:8326,), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -25257,7 +25806,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1771) before
+        // The inbound path increments hops once (transport.rs:1836) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -30130,7 +30679,7 @@ mod tests {
         #[test]
         fn test_clamp_tcp_to_udp() {
             // A hop signalling 262144 → relay → a hop signalling 1064
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144); // TCP prev-hop
             hw_mtus.insert(1, 1064); // UDP next-hop
 
@@ -30151,7 +30700,7 @@ mod tests {
         #[test]
         fn test_no_clamp_same_mtu() {
             // Both interfaces same MTU, no clamping needed
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 1064);
             hw_mtus.insert(1, 1064);
 
@@ -30165,7 +30714,7 @@ mod tests {
         #[test]
         fn test_no_clamp_next_hop_larger() {
             // Next-hop MTU is larger than signaled, no clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 1064);
             hw_mtus.insert(1, 262144);
 
@@ -30182,7 +30731,7 @@ mod tests {
         #[test]
         fn test_no_signaling_bytes_passthrough() {
             // 64-byte request (no signaling), should pass through unchanged
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 
@@ -30207,7 +30756,7 @@ mod tests {
         /// hop, which is the frame size neither end can put in a datagram.
         #[test]
         fn test_next_hop_without_hw_mtu_strips_signalling() {
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             // iface 1 signals no MTU, so it is not in the map at all.
 
@@ -30232,7 +30781,7 @@ mod tests {
         /// further when the next hop signals no MTU either.
         #[test]
         fn test_no_signalling_and_no_next_hop_mtu_passthrough() {
-            let hw_mtus = BTreeMap::new();
+            let hw_mtus = IfaceMap::new();
 
             let data = make_lr_payload_no_signaling();
             let result =
@@ -30244,7 +30793,7 @@ mod tests {
         #[test]
         fn test_clamp_to_prev_hop_when_smaller() {
             // Signaled MTU higher than both interfaces, prev-hop is bottleneck
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 500); // prev-hop bottleneck
             hw_mtus.insert(1, 1064); // next-hop
 
@@ -30263,7 +30812,7 @@ mod tests {
         #[test]
         fn test_clamp_preserves_mode() {
             // Verify mode byte is preserved through clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 
@@ -30285,7 +30834,7 @@ mod tests {
         #[test]
         fn test_clamp_unknown_prev_hop_only_uses_next_hop() {
             // prev-hop HW_MTU not registered, defaults to MAX, only next-hop matters
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             // iface 0 not registered
             hw_mtus.insert(1, 1064);
 
@@ -30304,7 +30853,7 @@ mod tests {
         #[test]
         fn test_clamp_preserves_base_payload() {
             // Verify base 64 bytes are not modified by clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 
@@ -30484,6 +31033,268 @@ mod tests {
             let mut buf = [0u8; 500];
             let len = packet.pack(&mut buf).unwrap();
             (buf[..len].to_vec(), dest.hash().into_bytes())
+        }
+
+        /// The destinations whose announces the drained actions put on
+        /// `iface`, by a broadcast that does not leave it out or by a send
+        /// addressed to it.
+        fn announces_reaching(actions: &[Action], iface: usize) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+            actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        exclude_ifaces,
+                        ..
+                    } if *exclude_iface != Some(InterfaceId(iface))
+                        && !exclude_ifaces.contains(&InterfaceId(iface)) =>
+                    {
+                        Some(data)
+                    }
+                    Action::SendPacket {
+                        iface: to, data, ..
+                    } if to.0 == iface => Some(data),
+                    _ => None,
+                })
+                .filter_map(|data| Packet::unpack(data).ok())
+                .filter(|p| p.flags.packet_type == PacketType::Announce)
+                .map(|p| p.destination_hash)
+                .collect()
+        }
+
+        /// An announce for `dest` with the given random blob and app data, as
+        /// a client puts it on the IPC socket (hops 0).
+        fn make_client_announce(
+            dest: &Destination,
+            random_hash: [u8; crate::constants::RANDOM_HASHBYTES],
+            app_data: &[u8],
+        ) -> Vec<u8> {
+            let id = dest
+                .identity()
+                .expect("a single destination has an identity");
+            let mut signed = Vec::new();
+            signed.extend_from_slice(dest.hash().as_bytes());
+            signed.extend_from_slice(&id.public_key_bytes());
+            signed.extend_from_slice(dest.name_hash());
+            signed.extend_from_slice(&random_hash);
+            signed.extend_from_slice(app_data);
+            let signature = id.sign(&signed).expect("sign");
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&id.public_key_bytes());
+            payload.extend_from_slice(dest.name_hash());
+            payload.extend_from_slice(&random_hash);
+            payload.extend_from_slice(&signature);
+            payload.extend_from_slice(app_data);
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: dest.hash().into_bytes(),
+                context: PacketContext::None,
+                data: PacketData::Owned(payload),
+            };
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).expect("pack");
+            buf[..len].to_vec()
+        }
+
+        /// A random blob whose emission is `secs` (its last five bytes,
+        /// big-endian) and whose random half is `tag`.
+        fn blob(tag: u8, secs: u64) -> [u8; crate::constants::RANDOM_HASHBYTES] {
+            let mut b = [tag; crate::constants::RANDOM_HASHBYTES];
+            b[5..].copy_from_slice(&secs.to_be_bytes()[3..]);
+            b
+        }
+
+        /// Order 1488: two `loquax send` runs back to back, one identity, the
+        /// second with `--from`. Each is a client of the instance and
+        /// announces once; both announces fall in one second, which is the
+        /// whole resolution of an emission (`Destination.py:282`), and the
+        /// first client's IPC disconnect has not been handled yet, so its
+        /// hops-0 path still stands. The second announce is a fresh
+        /// emission by the destination's own holder (an unseen blob, new
+        /// app data) and must reach the network, or a Python peer keeps the
+        /// old name: land gate on 058c8878, Python heard one announce in
+        /// 40 s.
+        #[test]
+        fn a_clients_second_announce_in_one_second_reaches_the_network() {
+            const SECOND_CLIENT_IFACE: usize = 11;
+            let mut transport = make_transport_with_local_client();
+            transport.set_interface_name(SECOND_CLIENT_IFACE, "Local[rns/default]/1".into());
+            transport.set_local_client(SECOND_CLIENT_IFACE, true);
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "lxmf",
+                &["delivery"],
+            )
+            .expect("destination");
+            let dest_hash = dest.hash().into_bytes();
+            let secs = TEST_TIME_MS / 1000;
+
+            let first = make_client_announce(&dest, blob(0x11, secs), b"lew");
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &first)
+                .expect("process_incoming");
+            transport.poll();
+            assert!(
+                announces_reaching(&transport.drain_actions(), NETWORK_IFACE).contains(&dest_hash),
+                "the first announce leaves at once"
+            );
+            // Past one fresh-interface spacing, inside the same second.
+            transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS + 100);
+
+            let second = make_client_announce(&dest, blob(0x22, secs), b"lew@schneckenschreck");
+            transport
+                .process_incoming(SECOND_CLIENT_IFACE, &second)
+                .expect("process_incoming");
+            let mut reached = Vec::new();
+            for _ in 0..20 {
+                transport.poll();
+                for action in transport.drain_actions() {
+                    if let Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        exclude_ifaces,
+                        ..
+                    } = &action
+                    {
+                        if *exclude_iface != Some(InterfaceId(NETWORK_IFACE))
+                            && !exclude_ifaces.contains(&InterfaceId(NETWORK_IFACE))
+                        {
+                            reached.push(data.clone());
+                        }
+                    }
+                    if let Action::SendPacket { iface, data, .. } = &action {
+                        if iface.0 == NETWORK_IFACE {
+                            reached.push(data.clone());
+                        }
+                    }
+                }
+                transport.clock().advance(100);
+            }
+            assert!(
+                reached
+                    .iter()
+                    .any(|raw| raw.windows(20).any(|w| w == b"lew@schneckenschreck")),
+                "the renamed announce never left for the network ({} announces did)",
+                reached.len()
+            );
+        }
+
+        /// The other half: a client sending the very same announce again
+        /// (a seen blob) is a replay and is not forwarded a second time.
+        #[test]
+        fn a_clients_repeated_announce_is_not_forwarded_twice() {
+            let mut transport = make_transport_with_local_client();
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "lxmf",
+                &["delivery"],
+            )
+            .expect("destination");
+            let dest_hash = dest.hash().into_bytes();
+            let raw = make_client_announce(&dest, blob(0x11, TEST_TIME_MS / 1000), b"lew");
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                .expect("process_incoming");
+            transport.poll();
+            assert!(
+                announces_reaching(&transport.drain_actions(), NETWORK_IFACE).contains(&dest_hash)
+            );
+            transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS + 100);
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                .expect("process_incoming");
+            let mut again = 0;
+            for _ in 0..20 {
+                transport.poll();
+                again += announces_reaching(&transport.drain_actions(), NETWORK_IFACE)
+                    .iter()
+                    .filter(|d| **d == dest_hash)
+                    .count();
+                transport.clock().advance(100);
+            }
+            assert_eq!(again, 0, "a replayed client announce left again");
+        }
+
+        /// Order 1358: a Python peer counts every announce on its interface,
+        /// not knowing which ones this instance forwards for its local
+        /// clients. A client's announce is stored at hops 0 (the IPC hop is
+        /// undone, `incoming_hop_count`) and fires through `forward_on_all`,
+        /// whose own-announce gate puts it in the fresh network interface's
+        /// pacer: three clients announcing in one instant reach that
+        /// interface a spacing apart. (All three fall due in one poll, so
+        /// they leave in the announce table's order, not the clients'.)
+        #[test]
+        fn local_client_announces_are_paced_on_a_fresh_network_interface() {
+            let mut transport = make_transport_with_local_client();
+            let mut dests = Vec::new();
+            for _ in 0..3 {
+                let (raw, dest) = make_announce_raw(0, PacketContext::None);
+                transport
+                    .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                    .expect("process_incoming");
+                dests.push(dest);
+            }
+            let mut arrivals = Vec::new();
+            for step in 0..5u64 {
+                transport.poll();
+                for dest in announces_reaching(&transport.drain_actions(), NETWORK_IFACE) {
+                    arrivals.push((step * FRESH_ANNOUNCE_SPACING_MS, dest));
+                }
+                transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS);
+            }
+            let times: Vec<u64> = arrivals.iter().map(|(t, _)| *t).collect();
+            assert_eq!(
+                times,
+                alloc::vec![0, FRESH_ANNOUNCE_SPACING_MS, 2 * FRESH_ANNOUNCE_SPACING_MS],
+            );
+            for dest in &dests {
+                assert!(
+                    arrivals.iter().any(|(_, d)| d == dest),
+                    "a client announce never left"
+                );
+            }
+        }
+
+        /// The other half of order 1358's table: announces relayed from
+        /// another network interface stay unpaced on a fresh one. They are
+        /// transit traffic, as a Python relay would pass them on.
+        #[test]
+        fn relayed_network_announces_are_not_paced_on_a_fresh_interface() {
+            const OTHER_IFACE: usize = 1;
+            let mut transport = make_transport_with_local_client();
+            transport.set_interface_name(OTHER_IFACE, "tcp_client/127.0.0.2".into());
+            let mut dests = Vec::new();
+            for _ in 0..3 {
+                let (raw, dest) = make_announce_raw(0, PacketContext::None);
+                transport
+                    .process_incoming(NETWORK_IFACE, &raw)
+                    .expect("process_incoming");
+                dests.push(dest);
+            }
+            let mut reached = Vec::new();
+            for _ in 0..100 {
+                transport.poll();
+                assert_eq!(transport.fresh_announces_waiting(), 0);
+                reached.extend(announces_reaching(&transport.drain_actions(), OTHER_IFACE));
+                transport.clock().advance(100);
+            }
+            for dest in &dests {
+                assert!(reached.contains(dest), "a relayed announce never left");
+            }
         }
 
         #[test]
@@ -37510,6 +38321,12 @@ mod table_export_tests {
         assert_eq!(links[0].destination_hash, [0x03u8; TRUNCATED_HASHBYTES]);
     }
 }
+
+mod received_announce;
+
+mod fresh_announce_pacing;
+#[cfg(test)]
+pub(crate) use fresh_announce_pacing::FRESH_ANNOUNCE_SPACING_MS;
 
 // +ciris (leviculum#91): the relay table, kept at the end of the file so the
 // fork moves no line an upstream citation points at.

@@ -95,7 +95,7 @@ expect_refusal() {
     local what="$1" phrase="$2"
     if [ "$rc" -eq 0 ]; then
         bad "$what: exited 0, expected a refusal"
-    elif ! printf '%s' "$out" | grep -qF "$phrase"; then
+    elif ! grep -qF "$phrase" <<<"$out"; then
         bad "$what: refused, but the message never says '$phrase'"
     else
         ok "$what"
@@ -382,7 +382,7 @@ set -e
 expect_pass "without core.hooksPath the identical push is not refused"
 
 CHECKS=$((CHECKS + 1))
-if printf '%s' "$out" | grep -qF "carries Claude-specific files"; then
+if grep -qF "carries Claude-specific files" <<<"$out"; then
     FAILURES=$((FAILURES + 1))
     echo "[prepush-guard] FAIL    the hookless push was refused too; the proof" >&2
     echo "[prepush-guard]         above does not distinguish hook from no hook" >&2

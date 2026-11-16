@@ -591,6 +591,22 @@ impl Node {
             .await
     }
 
+    /// [`send_response_resource`](Self::send_response_resource), saying
+    /// whether the resource may be compressed: `false` for a responder whose
+    /// requesters include boards, which link no decompressor and refuse a
+    /// compressed resource with an RCL (1459).
+    pub async fn send_response_resource_with(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+        compress: bool,
+    ) -> Result<()> {
+        self.inner
+            .send_response_resource_with(link_id, request_id, response_data, compress)
+            .await
+    }
+
     /// Send a file-style response to a received request: a response Resource of
     /// the RAW bytes plus msgpack-encoded `metadata` (no `[request_id,
     /// response]` wrapper), the wire form NomadNet's `serve_file` uses.

@@ -3,7 +3,10 @@
 //! Nodes on the same LAN discover each other via IPv6 multicast and
 //! communicate over UDP. Matches Python Reticulum's `AutoInterface`.
 //!
-//! Linux only. All protocol logic is in `leviculum-std` (no core changes).
+//! Linux only. The wire facts (group address, token, discovery datagram,
+//! ports, cadences, dedup) live in `leviculum_core::auto_wire`, shared with
+//! the boards that speak AutoInterface without std (1479); this module adds
+//! the sockets, the NICs and the per-NIC orchestrator.
 
 pub(crate) mod orchestrator;
 
@@ -14,21 +17,23 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::UdpSocket;
 
+use leviculum_core::auto_wire as wire;
 use leviculum_core::crypto::full_hash;
 
-// Constants (match Python exactly)
-pub(crate) const DEFAULT_GROUP_ID: &[u8] = b"reticulum";
-pub(crate) const DEFAULT_DISCOVERY_PORT: u16 = 29716;
-pub(crate) const DEFAULT_DATA_PORT: u16 = 42671;
+// Constants (match Python exactly; the values live in `auto_wire`)
+pub(crate) use wire::{
+    Discovery as DiscoveryFields, DEFAULT_DATA_PORT, DEFAULT_DISCOVERY_PORT, DEFAULT_GROUP_ID,
+    DISCOVERY_PACKET_SIZE, NONCE_SIZE,
+};
 
 /// Peer timeout, peer removed if not heard for this long
-pub(crate) const PEERING_TIMEOUT_SECS: f64 = 22.0;
+pub(crate) const PEERING_TIMEOUT_SECS: f64 = wire::PEERING_TIMEOUT_MS as f64 / 1000.0;
 /// Multicast announce interval
-pub(crate) const ANNOUNCE_INTERVAL_SECS: f64 = 1.6;
+pub(crate) const ANNOUNCE_INTERVAL_SECS: f64 = wire::ANNOUNCE_INTERVAL_MS as f64 / 1000.0;
 /// Peer maintenance job interval
-pub(crate) const PEER_JOB_INTERVAL_SECS: f64 = 4.0;
+pub(crate) const PEER_JOB_INTERVAL_SECS: f64 = wire::PEER_JOB_INTERVAL_MS as f64 / 1000.0;
 /// Multicast echo timeout, carrier lost if no self-echo for this long
-pub(crate) const MCAST_ECHO_TIMEOUT_SECS: f64 = 6.5;
+pub(crate) const MCAST_ECHO_TIMEOUT_SECS: f64 = wire::MCAST_ECHO_TIMEOUT_MS as f64 / 1000.0;
 
 /// How long the orchestrator waits before looking for a usable NIC again
 /// while it has none.
@@ -84,77 +89,10 @@ pub(crate) const DEFAULT_MAX_PEERS_PER_SOURCE: usize = 4;
 /// neighbours give it.
 pub(crate) const DEFAULT_PEER_ADMISSION_INTERVAL_SECS: u64 = 5;
 
-/// Deduplication cache capacity (number of entries)
-pub(crate) const DEDUP_CACHE_SIZE: usize = 48;
-/// Deduplication cache TTL in seconds
-pub(crate) const DEDUP_TTL_SECS: f64 = 0.75;
-
 /// Hardware MTU for AutoInterface (matches Python `HW_MTU = 1196`)
-pub(crate) const AUTO_HW_MTU: u32 = 1196;
+pub(crate) const AUTO_HW_MTU: u32 = wire::HW_MTU;
 
-/// Which multicast address type the discovery group address carries, the
-/// second nibble of `ff<type><scope>:...`.
-///
-/// Python-RNS selects it per interface with the `multicast_address_type`
-/// config key (`MULTICAST_PERMANENT_ADDRESS_TYPE`
-/// (`reference/Reticulum/RNS/Interfaces/AutoInterface.py:58-59`), resolved at
-/// `AutoInterface.py:175-182`). The type is part of the group address, so two
-/// nodes that disagree on it are not in the same multicast group and never
-/// see each other, with no error on either side - discovery failure looks
-/// exactly like an empty network (Codeberg #282).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MulticastAddressType {
-    /// `"1"` - a transient IPv6 group. The default, as in Python.
-    #[default]
-    Temporary,
-    /// `"0"` - a well-known (permanent) IPv6 group.
-    Permanent,
-}
-
-impl MulticastAddressType {
-    /// The nibble this type contributes to the group address text.
-    fn as_nibble(self) -> &'static str {
-        match self {
-            Self::Temporary => "1",
-            Self::Permanent => "0",
-        }
-    }
-
-    /// Parse a `multicast_address_type` config value.
-    ///
-    /// Accepts exactly the two spellings Python honours, case-insensitively
-    /// (`AutoInterface.py:175-182`), so a config file that selects a group
-    /// under `rnsd` selects the same group here.
-    ///
-    /// Returns `None` for anything else instead of falling back to
-    /// `Temporary` as Python does. That fallback is the reason this knob is
-    /// worth having at all: a node that silently lands in a group the
-    /// operator did not ask for discovers nobody, and no log line anywhere
-    /// points at the address type. Rejecting names the typo at startup
-    /// instead. The deviation is config-side only - every value Python acts
-    /// on resolves identically here, so the derived address and the wire
-    /// traffic are unchanged.
-    pub fn from_config_str(value: &str) -> Option<Self> {
-        match value.trim().to_lowercase().as_str() {
-            "temporary" => Some(Self::Temporary),
-            "permanent" => Some(Self::Permanent),
-            _ => None,
-        }
-    }
-}
-
-// Scope mapping
-/// IPv6 multicast scope values matching Python's AutoInterface
-fn scope_to_byte(scope: &str) -> &'static str {
-    match scope.to_lowercase().as_str() {
-        "link" => "2",
-        "admin" => "4",
-        "site" => "5",
-        "organisation" => "8",
-        "global" => "e",
-        _ => "2", // default to link-local
-    }
-}
+pub use wire::MulticastAddressType;
 
 // Configuration
 /// Configuration for an AutoInterface instance
@@ -365,206 +303,81 @@ fn name_to_index(name: &str) -> u32 {
 }
 
 // Multicast address derivation
-/// Derive the IPv6 multicast discovery address from a group ID, scope and
-/// address type.
-///
-/// Matches Python's AutoInterface multicast address derivation:
-/// - SHA-256 hash the group_id
-/// - Take bytes [2..14] as big-endian 16-bit words
-/// - Format as `ff{type}{scope}:0:{word1}:{word2}:{word3}:{word4}:{word5}:{word6}`
+/// The IPv6 multicast discovery address for a group id, scope and address
+/// type: [`wire::multicast_address`], the scope given by its config name.
 pub(crate) fn derive_multicast_address(
     group_id: &[u8],
     scope: &str,
     address_type: MulticastAddressType,
 ) -> io::Result<Ipv6Addr> {
-    let g = full_hash(group_id);
-    let scope_byte = scope_to_byte(scope);
-
-    // Build the address string matching Python's format exactly.
-    // Python: gt = "0" then ":"+format(g[3]+(g[2]<<8)) for pairs at indices 2..14
-    let addr_str = format!(
-        "ff{}{}:0:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        address_type.as_nibble(),
-        scope_byte,
-        u16::from(g[3]) + (u16::from(g[2]) << 8),
-        u16::from(g[5]) + (u16::from(g[4]) << 8),
-        u16::from(g[7]) + (u16::from(g[6]) << 8),
-        u16::from(g[9]) + (u16::from(g[8]) << 8),
-        u16::from(g[11]) + (u16::from(g[10]) << 8),
-        u16::from(g[13]) + (u16::from(g[12]) << 8),
-    );
-
-    addr_str.parse().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("derive_multicast_address produced invalid IPv6: {}", e),
-        )
-    })
+    Ok(wire::multicast_address(
+        group_id,
+        wire::scope_nibble(scope),
+        address_type,
+    ))
 }
 
-// Discovery tokens
-/// Size of the per-instance nonce appended to discovery tokens.
-///
-/// Each orchestrator generates a random nonce at startup. This nonce is
-/// appended to every outgoing discovery token so that self-echo detection
-/// works correctly when multiple nodes share the same NIC addresses
-/// (e.g. two nodes in the same process for testing).
-const NONCE_SIZE: usize = 8;
-
-/// Create a discovery token for multicast announcement.
-///
-/// `token = SHA-256(group_id + link_local_address_string)`
-///
-/// The address string is the text representation of the IPv6 link-local
-/// address (e.g. "fe80::1"), matching Python's `str(addr).encode("utf-8")`.
+/// `token = full_hash(group_id + link_local_address_string)`
+/// ([`wire::discovery_token`]).
 pub(crate) fn make_discovery_token(group_id: &[u8], link_local_str: &str) -> [u8; 32] {
-    let mut input = Vec::with_capacity(group_id.len() + link_local_str.len());
-    input.extend_from_slice(group_id);
-    input.extend_from_slice(link_local_str.as_bytes());
-    full_hash(&input)
+    wire::discovery_token(group_id, link_local_str)
 }
 
-/// Discovery packet size: token(32) + nonce(8) + data_port(2) = 42 bytes.
-/// Token first for Python compatibility (Python reads `data[:32]`).
-pub(crate) const DISCOVERY_PACKET_SIZE: usize = 32 + NONCE_SIZE + 2;
-
-/// Build a wire-format discovery packet: `[token(32)] + [nonce(8)] + [data_port(2)]`.
-///
-/// Token comes first so that Python Reticulum (which reads `data[:32]`)
-/// gets the valid token directly. The nonce allows Rust receivers to
-/// distinguish self-echoes from peer tokens when multiple nodes share
-/// the same NIC addresses. The data_port tells Rust peers which port
-/// to send unicast data to (distinct per node for same-machine operation).
+/// `[token(32)] + [nonce(8)] + [data_port(2)]` ([`wire::discovery_packet`]).
 pub(crate) fn build_discovery_packet(
     token: &[u8; 32],
     nonce: &[u8; NONCE_SIZE],
     data_port: u16,
 ) -> [u8; DISCOVERY_PACKET_SIZE] {
-    let mut pkt = [0u8; DISCOVERY_PACKET_SIZE];
-    pkt[..32].copy_from_slice(token);
-    pkt[32..32 + NONCE_SIZE].copy_from_slice(nonce);
-    pkt[32 + NONCE_SIZE..].copy_from_slice(&data_port.to_be_bytes());
-    pkt
+    wire::discovery_packet(token, nonce, data_port)
 }
 
-/// Parsed discovery packet fields.
-///
-/// - 32-byte (Python): token only, nonce and data_port are `None`
-/// - 42-byte (Rust): token + nonce + data_port
-pub(crate) struct DiscoveryFields {
-    pub token: [u8; 32],
-    pub nonce: Option<[u8; NONCE_SIZE]>,
-    pub data_port: Option<u16>,
-}
-
-/// Parse a received discovery packet.
-///
-/// Accepts both 32-byte (Python: token only) and 42-byte (Rust: token + nonce + data_port)
-/// packets. Returns `None` if the packet is too short.
+/// Parse a received discovery packet, Python's 32 bytes or ours 42
+/// ([`wire::parse_discovery`]).
 pub(crate) fn parse_discovery_packet(data: &[u8]) -> Option<DiscoveryFields> {
-    if data.len() < 32 {
-        return None;
-    }
-    let mut token = [0u8; 32];
-    token.copy_from_slice(&data[..32]);
-    let nonce = if data.len() >= 32 + NONCE_SIZE {
-        let mut n = [0u8; NONCE_SIZE];
-        n.copy_from_slice(&data[32..32 + NONCE_SIZE]);
-        Some(n)
-    } else {
-        None
-    };
-    let data_port = if data.len() >= 32 + NONCE_SIZE + 2 {
-        Some(u16::from_be_bytes([
-            data[32 + NONCE_SIZE],
-            data[32 + NONCE_SIZE + 1],
-        ]))
-    } else {
-        None
-    };
-    Some(DiscoveryFields {
-        token,
-        nonce,
-        data_port,
-    })
+    wire::parse_discovery(data)
 }
 
-/// Verify a received discovery token against expected group_id and source address.
-///
-/// Uses constant-time comparison to prevent timing side channels.
+/// Verify a received discovery token in constant time
+/// ([`wire::verify_discovery_token`]).
 pub(crate) fn verify_discovery_token(token: &[u8], group_id: &[u8], src_addr_str: &str) -> bool {
-    if token.len() != 32 {
-        return false;
-    }
-    let expected = make_discovery_token(group_id, src_addr_str);
-    constant_time_eq(token, &expected)
-}
-
-/// Constant-time byte comparison
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    wire::verify_discovery_token(token, group_id, src_addr_str)
 }
 
 // Deduplication cache
-/// Cache for deduplicating packets received from multiple NICs.
-///
-/// Stores hashes of recently seen packets with timestamps.
-/// A packet is a duplicate if its hash was seen within DEDUP_TTL.
-///
-/// Uses a VecDeque with fixed max capacity matching Python's `deque(maxlen=48)`.
+/// Cache for deduplicating packets received from multiple NICs: the
+/// shared [`wire::Dedup`] ring on a monotonic clock that starts with the
+/// cache.
 pub(crate) struct DeduplicationCache {
-    entries: std::collections::VecDeque<(Instant, [u8; 32])>,
-    max_size: usize,
-    ttl: std::time::Duration,
+    ring: wire::Dedup,
+    epoch: Instant,
 }
 
 impl DeduplicationCache {
     pub(crate) fn new() -> Self {
         Self {
-            entries: std::collections::VecDeque::with_capacity(DEDUP_CACHE_SIZE),
-            max_size: DEDUP_CACHE_SIZE,
-            ttl: std::time::Duration::from_millis((DEDUP_TTL_SECS * 1000.0) as u64),
+            ring: wire::Dedup::new(),
+            epoch: Instant::now(),
         }
     }
 
     /// Check if data is a duplicate. If not, adds it to the cache.
     /// Returns `true` if the data was already seen (duplicate).
     pub(crate) fn is_duplicate(&mut self, data: &[u8]) -> bool {
-        let hash = full_hash(data);
-        let now = Instant::now();
-
-        // Check for existing entry within TTL
-        for &(timestamp, ref h) in &self.entries {
-            if *h == hash && now.duration_since(timestamp) < self.ttl {
-                return true;
-            }
-        }
-
-        // Not a duplicate, add to cache
-        if self.entries.len() >= self.max_size {
-            self.entries.pop_front();
-        }
-        self.entries.push_back((now, hash));
-        false
+        let now_ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.ring.is_duplicate(data, now_ms)
     }
 }
 
 // Unicast discovery port
 /// The unicast discovery port is discovery_port + 1 (matches Python)
 pub(crate) fn unicast_discovery_port(discovery_port: u16) -> u16 {
-    discovery_port + 1
+    wire::unicast_discovery_port(discovery_port)
 }
 
 /// Reverse peering interval = announce_interval * 3.25 (matches Python)
 pub(crate) fn reverse_peering_interval_secs() -> f64 {
-    ANNOUNCE_INTERVAL_SECS * 3.25
+    wire::REVERSE_PEERING_INTERVAL_MS as f64 / 1000.0
 }
 
 /// Short hex tag identifying a non-default discovery group.
@@ -617,7 +430,7 @@ pub(crate) fn bind_multicast_socket(
 
     // Bind: link-local scope binds to the multicast addr with scope_id,
     // other scopes bind to the multicast addr without scope_id.
-    let scope_id = if scope_to_byte(scope) == "2" {
+    let scope_id = if wire::scope_nibble(scope) == 0x2 {
         nic.index
     } else {
         0
@@ -1002,43 +815,15 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_cache_respects_max_size() {
-        let mut cache = DeduplicationCache::new();
-        // Fill past capacity
-        for i in 0..DEDUP_CACHE_SIZE + 10 {
-            let data = format!("packet_{}", i);
-            cache.is_duplicate(data.as_bytes());
-        }
-        assert!(cache.entries.len() <= DEDUP_CACHE_SIZE);
-    }
-
-    #[test]
-    fn test_dedup_cache_expires_after_ttl() {
-        let mut cache = DeduplicationCache {
-            entries: std::collections::VecDeque::with_capacity(DEDUP_CACHE_SIZE),
-            max_size: DEDUP_CACHE_SIZE,
-            // Use a very short TTL for testing
-            ttl: std::time::Duration::from_millis(1),
-        };
-        let data = b"expiring packet";
-        assert!(!cache.is_duplicate(data));
-        // Sleep past TTL
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert!(
-            !cache.is_duplicate(data),
-            "should not be dup after TTL expires"
-        );
-    }
-
-    #[test]
     fn test_scope_to_byte() {
-        assert_eq!(scope_to_byte("link"), "2");
-        assert_eq!(scope_to_byte("admin"), "4");
-        assert_eq!(scope_to_byte("site"), "5");
-        assert_eq!(scope_to_byte("organisation"), "8");
-        assert_eq!(scope_to_byte("global"), "e");
-        assert_eq!(scope_to_byte("Link"), "2"); // case insensitive
-        assert_eq!(scope_to_byte("unknown"), "2"); // default
+        let scope_to_byte = wire::scope_nibble;
+        assert_eq!(scope_to_byte("link"), 0x2);
+        assert_eq!(scope_to_byte("admin"), 0x4);
+        assert_eq!(scope_to_byte("site"), 0x5);
+        assert_eq!(scope_to_byte("organisation"), 0x8);
+        assert_eq!(scope_to_byte("global"), 0xe);
+        assert_eq!(scope_to_byte("Link"), 0x2); // case insensitive
+        assert_eq!(scope_to_byte("unknown"), 0x2); // default
     }
 
     #[test]
@@ -1101,16 +886,6 @@ mod tests {
         };
         let nics = enumerate_nics(&config);
         assert!(nics.is_empty());
-    }
-
-    #[test]
-    fn test_constant_time_eq() {
-        let a = [1u8, 2, 3, 4];
-        let b = [1u8, 2, 3, 4];
-        let c = [1u8, 2, 3, 5];
-        assert!(constant_time_eq(&a, &b));
-        assert!(!constant_time_eq(&a, &c));
-        assert!(!constant_time_eq(&a, &[1, 2, 3])); // different length
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@ use super::AutoPeerCount;
 mod auto;
 #[cfg(all(feature = "ble", target_os = "linux"))]
 mod ble;
+#[cfg(feature = "i2p")]
 mod i2p;
 #[cfg(feature = "serial")]
 mod kiss;
@@ -53,7 +54,9 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub peer_event_tx: &'a mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
     /// Test-only frame-corruption cadence.
     pub corrupt_every: Option<u64>,
-    /// Storage root; I2P persists its per-interface keyfile under it.
+    /// Storage root; I2P persists its per-interface keyfile under it, and
+    /// nothing else reads it, so a build without `i2p` has no reader.
+    #[cfg_attr(not(feature = "i2p"), allow(dead_code))]
     pub storage_path: Option<PathBuf>,
     /// Applied to each TCP client's connect socket before it dials.
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
@@ -72,9 +75,18 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// The node's 16-byte identity hash. The BLE interface publishes it in
     /// the Columba Identity characteristic, handshakes with it, and derives
     /// its advertised `LN-<hex8>` name from it — the same derivation the
-    /// firmware uses (`leviculum_ble_tx::device_name`).
-    #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
+    /// firmware uses (`leviculum_ble_tx::device_name`). The I2P builder
+    /// names a connectable interface's key file with it, as the reference
+    /// names it with the transport identity's hash.
+    #[cfg_attr(
+        not(any(feature = "i2p", all(feature = "ble", target_os = "linux"))),
+        allow(dead_code)
+    )]
     pub identity_hash: [u8; 16],
+    /// The node's goodbye count: a radio interface holds a token of it until
+    /// its task ends, so the node's stop waits for the goodbye (1567).
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
+    pub goodbyes: crate::interfaces::RadioGoodbyes,
 }
 
 /// Outcome of building one configured interface section.
@@ -151,7 +163,10 @@ pub(super) fn build_interface(
         | "PipeInterface"
         | "KISSInterface"
         | "AX25KISSInterface") => Err(feature_off(config, kind, "serial")),
+        #[cfg(feature = "i2p")]
         "I2PInterface" => i2p::build(idx, config, ctx),
+        #[cfg(not(feature = "i2p"))]
+        kind @ "I2PInterface" => Err(feature_off(config, kind, "i2p")),
         #[cfg(all(feature = "ble", target_os = "linux"))]
         "BLEInterface" => ble::build(idx, config, ctx),
         #[cfg(all(not(feature = "ble"), target_os = "linux"))]
@@ -162,6 +177,14 @@ pub(super) fn build_interface(
         "BLEInterface" => Err(crate::Error::Config(
             "BLEInterface is supported on Linux only (it requires BlueZ over D-Bus)".to_string(),
         )),
+        #[cfg(feature = "websocket")]
+        "WebSocketServerInterface" => websocket::build_server(idx, config, ctx),
+        #[cfg(feature = "websocket")]
+        "WebSocketClientInterface" => websocket::build_client(idx, config, ctx),
+        #[cfg(not(feature = "websocket"))]
+        kind @ ("WebSocketServerInterface" | "WebSocketClientInterface") => {
+            Err(feature_off(config, kind, "websocket"))
+        }
         other => {
             tracing::warn!("Unknown interface type: {}", other);
             Ok(Built::SelfManaged)
@@ -172,7 +195,9 @@ pub(super) fn build_interface(
 /// The refusal for an interface kind whose Cargo feature this build left out.
 #[cfg(any(
     not(feature = "serial"),
-    all(not(feature = "ble"), target_os = "linux")
+    not(feature = "i2p"),
+    all(not(feature = "ble"), target_os = "linux"),
+    not(feature = "websocket")
 ))]
 fn feature_off(config: &InterfaceConfig, kind: &str, feature: &str) -> Error {
     Error::Config(format!(
@@ -352,6 +377,7 @@ mod tests {
                 transport_enabled: false,
                 default_announce_rate: Default::default(),
                 identity_hash: [0u8; 16],
+                goodbyes: crate::interfaces::RadioGoodbyes::new(),
             }
         }
     }
@@ -687,6 +713,27 @@ mod tests {
             ),
             Err(other) => panic!("not a config error: {other}"),
             Ok(_) => panic!("BLEInterface built without the ble feature"),
+        }
+    }
+
+    /// 1576: the same for `I2PInterface` without `i2p`.
+    #[cfg(not(feature = "i2p"))]
+    #[test]
+    fn i2p_without_its_feature_is_refused_naming_the_feature() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "anon".to_string(),
+            interface_type: "I2PInterface".to_string(),
+            connectable: Some(true),
+            ..Default::default()
+        };
+        match build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) {
+            Err(Error::Config(msg)) => assert!(
+                msg.contains("'anon'") && msg.contains("I2PInterface") && msg.contains("`i2p`"),
+                "{msg}"
+            ),
+            Err(other) => panic!("not a config error: {other}"),
+            Ok(_) => panic!("I2PInterface built without the i2p feature"),
         }
     }
 
@@ -1394,6 +1441,7 @@ mod tests {
     /// neither see nor tear down. The id counter is the spawn's footprint:
     /// each spawned peer allocates exactly one id right before its spawn,
     /// so a full channel must leave the counter untouched for that peer.
+    #[cfg(feature = "i2p")]
     #[tokio::test]
     async fn i2p_peer_that_cannot_register_is_not_spawned() {
         let (owner, mut new_iface_rx) = CtxOwner::with_iface_channel(1);
@@ -1573,3 +1621,7 @@ mod tests {
         assert!(err.to_string().contains("max_peers_per_source"), "{err}");
     }
 }
+
+// +ciris (#109): the WebSocket server and client builders.
+#[cfg(feature = "websocket")]
+pub(crate) mod websocket;

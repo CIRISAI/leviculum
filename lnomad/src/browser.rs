@@ -16,49 +16,10 @@ use leviculum_micron::MicronDocument;
 
 use crate::color::ColorDepth;
 use crate::fetch::{FetchError, Session};
-use crate::render::{render_with_options, RenderedLink, RenderedPage};
-use crate::url::{parse_url, Target, UrlError};
+use crate::render::{render_with_options, RenderedPage};
+use crate::url::Target;
 
-/// Split a `#anchor` suffix off a link target, returning the base target and the
-/// anchor name (if any, and non-empty).
-fn split_anchor(target: &str) -> (&str, Option<String>) {
-    match target.split_once('#') {
-        Some((base, anchor)) if !anchor.is_empty() => (base, Some(anchor.to_string())),
-        _ => (target, None),
-    }
-}
-
-/// The preset (`key=value`) field components of a link, reconstructed into the
-/// backtick blob [`parse_url`] understands. Valueless components are form-field
-/// placeholders (interactive input, a v1 stub) and are dropped here.
-fn preset_field_blob(link: &RenderedLink) -> String {
-    link.fields
-        .iter()
-        .filter(|(_, v)| !v.is_empty())
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-/// Resolve a followed link into a fetch [`Target`] and any `#anchor`.
-///
-/// The link target is resolved against `current_dest` (for `:/page/x.mu`
-/// same-destination links) and its preset fields are carried through
-/// [`parse_url`], keeping URL grammar in one place.
-pub fn resolve_link(
-    link: &RenderedLink,
-    current_dest: Option<[u8; 16]>,
-) -> Result<(Target, Option<String>), UrlError> {
-    let (base, anchor) = split_anchor(&link.target);
-    let blob = preset_field_blob(link);
-    let url = if blob.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}`{blob}")
-    };
-    let target = parse_url(&url, current_dest)?;
-    Ok((target, anchor))
-}
+pub use crate::url::resolve_link;
 
 /// Options controlling how pages are fetched and rendered.
 #[derive(Debug, Clone, Copy)]
@@ -85,8 +46,8 @@ pub struct BrowserOptions {
 ///
 /// Public so the TUI shell (`main`) can fetch a page once and lay it out into a
 /// [`crate::app::Model`], sharing the exact fetch/parse path the print sink uses.
-pub async fn fetch_document(
-    session: &mut Session,
+pub async fn fetch_document<N: crate::fetch::NodeLend>(
+    session: &mut Session<N>,
     target: &Target,
     timeout: Duration,
 ) -> Result<MicronDocument, FetchError> {
@@ -183,6 +144,7 @@ pub async fn download_once<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::RenderedLink;
 
     const HASH_HEX: &str = "0123456789abcdef0123456789abcdef";
     const HASH_BYTES: [u8; 16] = [

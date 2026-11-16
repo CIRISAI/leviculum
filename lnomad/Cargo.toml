@@ -3,7 +3,7 @@ name = "lnomad"
 # Versioned independently of the leviculum stack — see the note in
 # lblogd/Cargo.toml. A browser's releases track its own UI and rendering
 # work, not the protocol core it happens to be built from.
-version = "0.1.1"
+version = "0.1.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -63,53 +63,109 @@ changelog = "../target/deb-changelog/lnomad"
 [features]
 # leviculum-std's interface families, forwarded and on by default (#463);
 # see lnpnd's manifest for why they are forwarded and not inherited.
-default = ["ble", "serial", "tui"]
-ble = ["leviculum-std/ble"]
-serial = ["leviculum-std/serial"]
+default = ["std", "ble", "serial", "i2p", "tui"]
+# The platform layer (slice 4a of docs/src/concepts/lnomad-everywhere.md):
+# fetching over a shared instance (`fetch`, `browser`, `transfer`), the files
+# (`download`, `identify`, `identity`, the store halves of `bookmarks` and
+# `names`), the image decoder, the command line and the terminal's text
+# field. Off, the crate is the browser core, `no_std` plus `alloc`: the model,
+# `update`, layout, scene, intents and catalogue a board takes, which `just
+# lnomad-core-no-std` builds for the firmware triples.
+std = [
+    "dep:leviculum-std",
+    "dep:rmpv",
+    "dep:tokio",
+    "dep:toml",
+    "dep:clap",
+    "dep:futures",
+    "dep:tui-input",
+    "dep:open",
+    "dep:image",
+    "leviculum-ui/std",
+    "serde/std",
+    "serde_json/std",
+    "thiserror/std",
+]
+ble = ["std", "leviculum-std/ble"]
+serial = ["std", "leviculum-std/serial"]
+i2p = ["std", "leviculum-std/i2p"]
 # The terminal frontend: the `tui` module, the terminal half of `image`, and
 # the binary. Off, the crate is the browser core and its pure helpers with no
 # terminal crate in the graph, which is what `just lnomad-core-no-tui` builds
 # (Codeberg #219: a second frontend is a swap, not a rework).
 tui = [
+    "std",
     "dep:leviculum-ui-ratatui",
     "dep:ratatui",
     "dep:crossterm",
     "dep:terminal_size",
 ]
+# `lnomad --gui`: the window (`gui`, slice 2 of
+# docs/src/concepts/lnomad-everywhere.md), on the window widgets shared with
+# Loquax. Off by default, so iced is in no graph that does not ask for it:
+# not the terminal package's, not the core's. Built for the gnu target, as
+# Loquax's window: winit opens X11 and Wayland with dlopen, which a
+# musl-static binary cannot do.
+gui = ["std", "dep:iced", "dep:leviculum-ui-iced"]
 
 [dependencies]
 leviculum-micron = { path = "../leviculum-micron" }
-leviculum-ui = { path = "../leviculum-ui" }
+# Default features off: its `std` half (the terminal editor's table) is
+# lnomad's `std`.
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The shared terminal widgets and shell, the frontend half (`tui`).
 leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", features = ["images"], optional = true }
+# The window's widgets (`gui`), shared with Loquax's window.
+leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
+# The window (`gui`): iced 0.14 as Loquax's window has it, the software
+# renderer alone; `advanced` for loading the page's face into the font
+# system a view drawn without a window uses; raster images without iced's
+# decoders, since a page's pictures are decoded by the `image` crate the
+# terminal decodes them with; Fira Sans embedded for the chrome, so a
+# picture and its golden agree on every host.
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "x11",
+    "wayland",
+    "thread-pool",
+    "image-without-codecs",
+    "advanced",
+    "fira-sans",
+], optional = true }
 # Default features off, see `[features]`.
-leviculum-std = { path = "../leviculum-std", default-features = false, features = ["compression"] }
+leviculum-std = { path = "../leviculum-std", default-features = false, features = ["compression"], optional = true }
 leviculum-core = { path = "../leviculum-core" }
-rmpv.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-serde.workspace = true
-toml.workspace = true
-clap = { version = "4", features = ["derive"] }
+rmpv = { workspace = true, optional = true }
+# thiserror, serde and serde_json without their default `std`, which
+# lnomad's `std` turns on: the core takes them with `alloc` only.
+thiserror = { version = "2", default-features = false }
+tokio = { workspace = true, optional = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# The scene's golden files (`app::scene`).
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+toml = { workspace = true, optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
 terminal_size = { version = "0.4", optional = true }
 ratatui = { version = "0.30.2", optional = true }
 crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
 unicode-width = "0.2.2"
-futures = "0.3.32"
+futures = { version = "0.3.32", optional = true }
 # Default features off: the core keeps an `Input` per text field, and the
 # default `ratatui-crossterm` feature would pull both terminal crates into it.
 # The key-to-edit table that feature carries is restated in
 # `leviculum_ui::input`.
-tui-input = { version = "0.15", default-features = false }
-open = "5"
+tui-input = { version = "0.15", default-features = false, optional = true }
+open = { version = "5", optional = true }
 # Decoding only. `image`'s default feature set pulls in every codec it knows;
 # these three are what a blog post actually carries, and each extra decoder is
 # attack surface for bytes handed to us by a stranger's node.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
+# The window's PNG goldens (`gui`); in the lock already, through Loquax's.
+png = "0.18"
 
 [lib]
 name = "lnomad"

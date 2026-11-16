@@ -43,6 +43,12 @@ pub trait TileSource: Sync {
     fn tiles_in(&self, bounds: &Bounds, zooms: RangeInclusive<u8>) -> Res<Vec<TileId>>;
     /// The uncompressed MVT bytes of `t`; `None` when the source has none.
     fn mvt(&self, t: TileId) -> Res<Option<Vec<u8>>>;
+    /// The cut is about to ask for `tiles` and nothing before them again:
+    /// a source that fetches as the cut goes fetches them now (1291).
+    fn want(&self, tiles: &[TileId]) -> Res<()> {
+        let _ = tiles;
+        Ok(())
+    }
 }
 
 impl<R: RangeRead> TileSource for Archive<R> {

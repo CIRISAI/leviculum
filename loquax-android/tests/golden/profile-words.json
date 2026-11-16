@@ -1,0 +1,14 @@
+{
+  "title": "Dein Profil",
+  "name": "Dein Name wird dort festgelegt, wo dein Postfach läuft.",
+  "address_label": "Deine Adresse",
+  "fours": "d6c5 42d7 df8e a66f b35d 8fe4 3081 e7b0",
+  "caption": "Scanne diesen Code, um mich als Kontakt hinzuzufügen",
+  "mailbox": "Postfach: Lews Rechner (verbunden)",
+  "state": "Verbunden über einen Vermittlungsserver",
+  "devices_label": "Deine Geräte",
+  "devices": [
+    "Dieses Gerät"
+  ],
+  "share": "Meine Adresse teilen"
+}

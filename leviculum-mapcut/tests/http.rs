@@ -35,6 +35,8 @@ fn want(cap: u64) -> Want {
         cap,
         profile: leviculum_map::profile::CUT_1,
         locale: Some("de".to_owned()),
+        buildings: true,
+        pois: true,
     }
 }
 

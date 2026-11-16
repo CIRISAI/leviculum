@@ -1,0 +1,40 @@
+┌● Loquax────────────────┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation starts││                                                    │
+│one with a contact's    ││                                                    │
+│code.                   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ ┌ Mailbox ─────────────────────────────────────────────────────────────────┐ │
+│ │Which mailbox                                                             │ │
+│ │Name: Lew Palm                                                            │ │
+│ │Address: 5a3e910c7742d81b6f03a4e258c92d80                                 │ │
+│ │This is your address too: the mailbox and you are one identity.           │ │
+│ │Runs on: miauhaus                                                         │ │
+│ │Version: 0.9.7                                                            │ │
+│ │                                                                          │ │
+│ │Connection                                                                │ │
+│ │This device connected for 12 min                                          │ │
+│ │Last contact: now                                                         │ │
+│ │Connection to miauhaus, shielded (the phone hears only its mailbox)       │ │
+│ │                                                                          │ │
+│ │Devices of this mailbox                                                   │ │
+│ │Fairphone: this device                                                    │ │
+│ │M9: last there 2 h ago                                                    │ │
+│ │Laptop: never connected yet                                               │ │
+│ │A device is added or removed on the mailbox itself.                       │ │
+│ │c  Show my code                                                           │ │
+│ │                                                                          │ │
+│ │a row's key runs it · q back                                              │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

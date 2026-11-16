@@ -115,3 +115,105 @@ fn lnsd_reports_a_taken_instance_name_in_words() {
         "the operator must get the sentence, not a Debug dump, got: {stderr}"
     );
 }
+
+/// Kills a daemon however the assertions turn out.
+struct Daemon(std::process::Child);
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts `lnsd -c <dir>` with the given extra arguments, quiet.
+fn start(dir: &std::path::Path, extra: &[&str]) -> Daemon {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lnsd"));
+    cmd.arg("--config")
+        .arg(dir)
+        .args(extra)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Daemon(spawn_supervised(cmd).expect("lnsd starts"))
+}
+
+/// 1638: a second lnsd under another instance name on the storage directory
+/// a running lnsd uses ran a second daemon on the same files. It refuses now,
+/// naming the running daemon's instance and pid.
+#[test]
+fn a_second_lnsd_under_another_name_on_the_same_storage_is_refused() {
+    let first_name = format!("storagelock{}", std::process::id());
+    let other_name = format!("storageother{}", std::process::id());
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_config(dir.path(), &first_name);
+
+    let first = start(dir.path(), &[]);
+    assert!(
+        wait_for_instance(&first_name, Duration::from_secs(10)),
+        "the first daemon never took @rns/{first_name}"
+    );
+
+    // Supervised and bounded: before 1638 the second daemon simply ran, and
+    // an unbounded wait for its exit hung the test instead of failing it.
+    let stderr_file = dir.path().join("second.stderr");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lnsd"));
+    cmd.arg("--config")
+        .arg(dir.path())
+        .arg("--instance-name")
+        .arg(&other_name)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&stderr_file).expect("stderr file"));
+    let mut second = Daemon(spawn_supervised(cmd).expect("second lnsd spawns"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = second.0.try_wait().expect("wait on second lnsd") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&stderr_file).unwrap_or_default();
+    let status = status.unwrap_or_else(|| {
+        panic!("the second daemon on a storage directory in use is still running after 15 s, stderr: {stderr}")
+    });
+    assert!(
+        !status.success(),
+        "the second daemon must not start on a storage directory in use, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("instance {first_name}")),
+        "stderr must name the running daemon's instance, got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("pid {}", first.0.id())),
+        "stderr must name the running daemon's pid, got: {stderr}"
+    );
+}
+
+/// Control for the test above: the same second start on its own storage
+/// directory runs.
+#[test]
+fn a_second_lnsd_under_another_name_on_its_own_storage_starts() {
+    let first_name = format!("storagectl{}", std::process::id());
+    let other_name = format!("storagectlother{}", std::process::id());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let own = tempfile::tempdir().expect("temp dir");
+    write_config(dir.path(), &first_name);
+
+    let _first = start(dir.path(), &[]);
+    assert!(
+        wait_for_instance(&first_name, Duration::from_secs(10)),
+        "the first daemon never took @rns/{first_name}"
+    );
+
+    let own_storage = own.path().to_string_lossy().into_owned();
+    let _second = start(
+        dir.path(),
+        &["--instance-name", &other_name, "--storage", &own_storage],
+    );
+    assert!(
+        wait_for_instance(&other_name, Duration::from_secs(10)),
+        "the second daemon on its own storage never took @rns/{other_name}"
+    );
+}

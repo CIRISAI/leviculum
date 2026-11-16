@@ -100,6 +100,7 @@ pub(crate) mod tracing {
 }
 
 pub(crate) mod announce;
+pub mod auto_wire;
 pub mod bounded_map;
 #[cfg(feature = "compression")]
 pub mod compression;
@@ -124,6 +125,7 @@ pub mod hex_fmt;
 pub mod identity;
 pub mod identity_store;
 pub mod ifac;
+pub mod iface_map;
 pub mod interface_counters;
 pub mod known_destinations;
 pub mod link;
@@ -141,6 +143,7 @@ pub mod node_name_store;
 pub mod packet;
 pub mod packet_hash_store;
 pub mod pn_config_store;
+pub mod position_share_store;
 pub mod radio_config_store;
 pub(crate) mod ratchet;
 pub mod ratchet_store;
@@ -161,6 +164,7 @@ pub(crate) mod test_utils;
 pub mod traits;
 pub mod transport;
 pub mod tunnel;
+pub mod wifi_credentials;
 
 // Re-export key types
 pub use announce::{

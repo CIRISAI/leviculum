@@ -72,12 +72,15 @@ public class BackupActivity extends Activity {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (seal()) {
-                    startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT)
-                            .addCategory(Intent.CATEGORY_OPENABLE)
-                            .setType("text/plain")
-                            .putExtra(Intent.EXTRA_TITLE, "loquax-backup.txt"), SAVE);
-                }
+                seal(new Runnable() {
+                    @Override
+                    public void run() {
+                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                                .addCategory(Intent.CATEGORY_OPENABLE)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_TITLE, "loquax-backup.txt"), SAVE);
+                    }
+                });
             }
         });
         body.addView(save, wrap());
@@ -85,9 +88,12 @@ public class BackupActivity extends Activity {
         print.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (seal()) {
-                    showPaper();
-                }
+                seal(new Runnable() {
+                    @Override
+                    public void run() {
+                        showPaper();
+                    }
+                });
             }
         });
         body.addView(print, wrap());
@@ -100,29 +106,45 @@ public class BackupActivity extends Activity {
         setContentView(frame);
     }
 
-    /** The line for the passphrase typed, twice the same; false with the reason said. */
-    private boolean seal() {
-        String typed = passphrase.getText().toString();
+    /**
+     * The line for the passphrase typed, twice the same, then `then`; or
+     * the reason said. The library seals it on the engine's thread (1464).
+     */
+    private void seal(final Runnable then) {
+        final String typed = passphrase.getText().toString();
         if (typed.length() < MIN_PASSPHRASE) {
             said.setText(getString(R.string.passphrase_short, MIN_PASSPHRASE));
-            return false;
+            return;
         }
         if (!typed.equals(again.getText().toString())) {
             said.setText(R.string.passphrase_differs);
-            return false;
+            return;
         }
         if (sealed != null && typed.equals(sealed.get("passphrase"))) {
-            return true;
+            then.run();
+            return;
         }
-        Map<String, Object> answer = Core.backup(typed);
-        if (Core.str(answer, "line").isEmpty()) {
-            said.setText(Core.str(answer, "error"));
-            return false;
-        }
-        answer.put("passphrase", typed);
-        sealed = answer;
-        said.setText("");
-        return true;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.backup(typed);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                if (Core.str(answer, "line").isEmpty()) {
+                    said.setText(Core.str(answer, "error"));
+                    return;
+                }
+                answer.put("passphrase", typed);
+                sealed = answer;
+                said.setText("");
+                then.run();
+            }
+        });
     }
 
     @Override

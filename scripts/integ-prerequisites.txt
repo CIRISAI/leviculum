@@ -7,6 +7,11 @@
 #
 #   <path that must exist> <member dir>/<target> [<exact test name>]
 #
+# The target is always qualified by its member directory: two packages may
+# share a target name (lnomad and loquax both have `scene_golden`), and a
+# bare name is refused by every checker for not saying which (1306). The
+# runners give a target whose name an excluded one shares its own `-p` run.
+#
 # Without a test name the line covers the whole target. A target or test with
 # several prerequisites gets several lines, and is skipped when ANY of them is
 # absent. A runner that finds a path absent leaves the target or test out of
@@ -16,6 +21,10 @@
 # deliberate (scripts/check-plain-clone.sh's header). A skip inside a test
 # reports `ok`, and scripts/nightly-green-ref.sh would sign a commit whose
 # interop suite measured nothing.
+#
+# A prerequisite written `command:<name>` is a program that must be on PATH
+# (`command -v <name>`), for a test that spawns a tool the clone cannot carry;
+# a missing one is printed as `command:<name> absent`.
 #
 # The path is a file INSIDE the submodule, not its directory: a clone made
 # without submodules has every submodule directory, empty.
@@ -36,11 +45,22 @@ reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
 # reference as well. Excluding the whole mvr target would take ~90 other tests
 # with them, so these go by exact name. Measured on a clone without
 # submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
-# only these, fail in the whole selection there.
+# only these, fail in the whole selection there. The `a_third_announce_*`
+# lines came after (1317, 1320), and spawn the same Python peer, as do the
+# `local_clients_announces_*` lines (1358) and the `a_link_proof_*` lines (1607).
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_link_proof_later_than_six_rtts_fails_the_python_receipt::a_link_proof_later_than_six_rtts_fails_the_python_receipt
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_link_proof_later_than_six_rtts_fails_the_python_receipt::the_same_held_proof_is_delivered_under_a_declared_receipt_deadline
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::a_third_announce_on_a_fresh_interface_waits_at_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::control_two_announces_on_a_fresh_interface_both_arrive
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::five_destinations_on_a_fresh_interface_all_arrive_at_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_restart
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_register_destination
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::control_one_local_client_announce_reaches_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::five_destinations_from_two_local_clients_all_arrive_at_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::three_local_clients_announces_all_reach_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::two_local_clients_announces_both_reach_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
@@ -49,8 +69,199 @@ reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_w
 # panics naming the submodule when it is not checked out.
 reference/LXMF/LXMF/__init__.py leviculum-lxmf/reference_lock
 
+# leviculum-lxmf lev_status_reference feeds the announce of a node that
+# serves /lev/status to the reference's pn_announce_data_is_valid, which
+# imports RNS and LXMF out of reference/ (order 1394).
+reference/Reticulum/RNS/__init__.py leviculum-lxmf/lev_status_reference
+reference/LXMF/LXMF/__init__.py leviculum-lxmf/lev_status_reference
+
 # loquax python_interop drives scripts/test_daemon.py, which imports RNS and
 # LXMF out of reference/ and tells the caller to init the submodule.
 # PythonPeer::start asserts the daemon says READY; there is no skip guard.
 reference/Reticulum/RNS/__init__.py loquax/python_interop
 reference/LXMF/LXMF/__init__.py loquax/python_interop
+
+# The same Python peer (loquax/tests/support/python_peer.rs) in the tests that
+# start one outside python_interop, by exact name: the rest of each target
+# needs no reference. Measured 2026-10-31 with a python3 that fails
+# scripts/test_daemon.py: these five, and only these, fail in loquax-android
+# and in the loquax-tui recipe's targets (1167). The two ratchet tests came
+# with 7688ae64 (stale_ratchet_round starts two peers) and failed in a clone
+# without submodules the same way (1203). home_node requires the `tui`
+# feature, so it runs in the `loquax-tui` recipe and not in the computed runs;
+# that recipe reads these lines through scripts/with-prerequisites.sh.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
+# The read receipt a Python writer sees once the phone says its viewport
+# (1496) starts the same Python peer.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_writer_sees_the_read_once_the_phone_says_its_viewport
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_writer_sees_the_read_once_the_phone_says_its_viewport
+# The voice round trip (1222) starts the same Python peer, and makes and
+# judges its sounds with the reference codecs: opus-tools and codec2 from
+# apt (scripts/install-ci.sh). Looked up on PATH, not at /usr/bin: a host
+# with them elsewhere runs the test (1353). scripts/check-python-test-
+# prerequisites.py refuses a test that spawns one of these four without its
+# `command:` line.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+# The photo (1220) and file (1221) round trips start the same Python peer;
+# the home node merge brought them beside 1282's guard, which found them.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
+# 1388: a group's photo without words to a stock Python member.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
+reference/Reticulum/RNS/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
+reference/LXMF/LXMF/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
+reference/Reticulum/RNS/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
+reference/LXMF/LXMF/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
+reference/Reticulum/RNS/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
+reference/LXMF/LXMF/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
+reference/Reticulum/RNS/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
+reference/LXMF/LXMF/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
+reference/Reticulum/RNS/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
+reference/LXMF/LXMF/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
+reference/Reticulum/RNS/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
+reference/LXMF/LXMF/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
+reference/Reticulum/RNS/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
+reference/LXMF/LXMF/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
+reference/Reticulum/RNS/__init__.py loquax/home_node a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce
+reference/LXMF/LXMF/__init__.py loquax/home_node a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce
+reference/Reticulum/RNS/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them
+reference/LXMF/LXMF/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them
+reference/Reticulum/RNS/__init__.py loquax/home_node a_group_on_the_home_reaches_a_stock_member_with_names_and_replies
+reference/LXMF/LXMF/__init__.py loquax/home_node a_group_on_the_home_reaches_a_stock_member_with_names_and_replies
+reference/Reticulum/RNS/__init__.py loquax/home_node the_owner_deletes_a_group_and_every_member_is_told
+reference/LXMF/LXMF/__init__.py loquax/home_node the_owner_deletes_a_group_and_every_member_is_told
+# 1462: the stock Python recipient's proof is one tick, never two.
+reference/Reticulum/RNS/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
+reference/LXMF/LXMF/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
+reference/Reticulum/RNS/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
+reference/LXMF/LXMF/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
+
+# loquax-android fling compiles Fling.java and its host test with javac and
+# runs them with java (1209). rust:bookworm carries no JDK, and the land gate
+# on 582be358 went red in its forge stage on the spawn (1256). scripts/ci-gate.sh
+# now installs one, so the forge runs the test; a developer host without a
+# JDK skips it here.
+command:javac loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
+command:java loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
+
+# The tests below spawn Python too and had no line until 1282, when the land
+# gate on d365c0d2 went red in its forge stage on home_reach's Python peer.
+# scripts/check-python-test-prerequisites.py (in `just guards`) now finds
+# every test that reaches a `Command::new("python...")` and refuses one
+# without a line here.
+
+# loquax-android home_reach starts the same Python peer as facade above
+# (loquax/tests/support/python_peer.rs), in this one test only (1274).
+reference/Reticulum/RNS/__init__.py loquax-android/home_reach home_reach_a_python_entry_holds_none_of_the_mailboxs_announces
+reference/LXMF/LXMF/__init__.py loquax-android/home_reach home_reach_a_python_entry_holds_none_of_the_mailboxs_announces
+
+# leviculum-ffi ffi_interop drives scripts/test_daemon.py, which imports RNS
+# out of reference/ (find_reticulum_path). PyDaemon::start returns None and the
+# test reports `ok` without it, which is the skip-inside-a-test this file's
+# header calls deliberate to avoid; declared so a runner says it left them out.
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop c_announce_seen_by_python
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop python_announce_seen_by_c
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop c_links_to_python_and_exchanges_data
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop c_sends_resource_received_by_python
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop python_accepts_ratcheted_c_announce
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop c_signature_verifies_under_python
+reference/Reticulum/RNS/__init__.py leviculum-ffi/ffi_interop c_channel_message_interops_with_python
+
+# The mvr loop harness starts the rnsd_interop TestDaemon in every iteration,
+# like the seven mvr lines above. #[ignore]d (~100 s), so only an explicit
+# `--ignored` run reaches it.
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_loop_race::rust_client_path_install_race_loop
+
+# lxmd store and identity takeovers: the Python reference writes what lnpnd
+# reads (scripts/make-lxmd-messagestore.py imports RNS and LXMF,
+# scripts/make-lxmd-identity.py RNS). Each test also checks the directories
+# itself and returns early, so these lines are what makes the absence visible.
+reference/Reticulum/RNS/__init__.py leviculum-std/lxmd_messagestore_takeover lnpnd_reads_a_store_python_lxmd_wrote
+reference/LXMF/LXMF/__init__.py leviculum-std/lxmd_messagestore_takeover lnpnd_reads_a_store_python_lxmd_wrote
+reference/Reticulum/RNS/__init__.py leviculum-std/lxmd_messagestore_takeover a_reopened_foreign_store_keeps_its_sequences
+reference/LXMF/LXMF/__init__.py leviculum-std/lxmd_messagestore_takeover a_reopened_foreign_store_keeps_its_sequences
+reference/Reticulum/RNS/__init__.py lnpnd/lxmd_messagestore_path the_default_data_dir_opens_the_store_lxmd_wrote
+reference/LXMF/LXMF/__init__.py lnpnd/lxmd_messagestore_path the_default_data_dir_opens_the_store_lxmd_wrote
+reference/Reticulum/RNS/__init__.py lnpnd/lxmd_identity_takeover an_lxmd_identity_keeps_the_node_address
+
+# In-tree scripts on the standard library alone: they need a python3 on PATH
+# and nothing else, which every gate image has, so these exclude nothing
+# anywhere a gate runs. Declared so a host without python3 says why.
+command:python3 leviculum-std/manifest_tmp_race concurrent_same_gate_invocations_both_exit_zero
+command:python3 leviculum-std/manifest_tmp_race startup_sweep_unlinks_only_this_gates_stale_tmps
+command:python3 lnpnd/event_log_analysis the_analysis_reads_what_the_writer_writes
+command:python3 loquax-android/device_walk_script the_walks_parsers_pass_their_tests
+
+# The recorder's level windows (1276): Levels.java against the core's rms.
+command:javac loquax-android/fling the_recorders_windows_are_the_librarys
+command:java loquax-android/fling the_recorders_windows_are_the_librarys
+
+# The service notice's rules (1345): Notice.java run with its host test.
+command:javac loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
+command:java loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
+
+# The form field's hint (1667): FormField.java run with its host test.
+command:javac loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+command:java loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+
+# When nothing changes, nothing is drawn (1455): Quiet.java run with its
+# host test.
+command:javac loquax-android/fling the_phone_draws_nothing_while_nothing_changes
+command:java loquax-android/fling the_phone_draws_nothing_while_nothing_changes
+
+# The map frame's size and the pinch's floor (1796): MapFrame.java run with
+# its host test.
+command:javac loquax-android/fling the_map_bitmap_follows_the_frame_and_the_pinch_stops_at_the_world
+command:java loquax-android/fling the_map_bitmap_follows_the_frame_and_the_pinch_stops_at_the_world
+
+# The join screen's server field (1464): ServerField.java run with its host
+# test.
+command:javac loquax-android/fling the_server_field_follows_a_typed_code
+command:java loquax-android/fling the_server_field_follows_a_typed_code
+
+# The join form's rules (1448): JoinForm.java run with its host test.
+command:javac loquax-android/fling the_join_form_says_a_failure_only_after_a_join
+command:java loquax-android/fling the_join_form_says_a_failure_only_after_a_join
+
+# The chat's Back (1449): BackRule.java run with its host test.
+command:javac loquax-android/fling back_closes_the_keyboard_and_keeps_the_reply
+command:java loquax-android/fling back_closes_the_keyboard_and_keeps_the_reply
+
+# A new conversation's picker rows (1448): PeopleRows.java with its host test.
+command:javac loquax-android/fling the_group_picker_is_the_people_list_with_check_marks
+command:java loquax-android/fling the_group_picker_is_the_people_list_with_check_marks
+
+# The Explore pane's rules (1618): ExploreRows.java run with its host test.
+command:javac loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
+command:java loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
+
+# The mailbox page holds still (1647): MailboxLines.java with its host test.
+command:javac loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+command:java loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+
+# The engine's questions (1496): Engine.java over host stand-ins for
+# Handler, Looper and Log, run with its host test.
+command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path
+command:java loquax-android/fling a_question_that_throws_reaches_its_failure_path
+
+# The time zone readers against the host's own tzdata (1684): the system
+# zone files the TZif reader and the std path read, which a container
+# without the tzdata package lacks.
+/usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones tzif_matches_the_hosts_libc
+/usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones system_zone_bytes_reads_zoneinfo
+
+# What a whole browser page costs to cross (1650): the facade's answer read
+# by MsgPack.java with its host test.
+command:javac loquax-android/browse a_long_page_crosses_in_time
+command:java loquax-android/browse a_long_page_crosses_in_time

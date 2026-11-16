@@ -96,11 +96,22 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
     `rnstatus` may take later collides. Against a Python `rnsd`, which serves
     neither, the flag prints nothing extra.
 
+**--src-tags**
+:   Under the name of each accepted TCP connection (shown with **-a**), print
+    a `Log tag   : src=<tag>` line: the daily pseudonym lnsd's log names the
+    connection by instead of its address (see lnsd(1), PEER ADDRESSES), so
+    a log line can be matched to the live connection. Leviculum extension,
+    off by default, so the output stays byte-identical to `rnstatus`'s. The
+    tag is the `src_tag` key of **-j**; `rnsd` serves none.
+
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.
 
 **-I**, **--monitor-interval** *seconds*
 :   Refresh interval for monitor mode (default: 1).
+
+**--no-start**
+:   Fail when no shared instance answers, as the tools did before the zero-config step 4, instead of starting **lnsd**(1) as a child. Without it, **lnstatus** looks for a running shared instance (the abstract socket `@rns/`*instance*, then TCP loopback at the configured `shared_instance_port`, else 37428, for the instance `default` or a configured port) and, when none answers, starts `lnsd -c` *dir* on the same configuration directory and waits until it accepts. The daemon is **lnstatus**'s child and goes when **lnstatus** exits; its output goes to `lnsd.log` in the configuration directory. One line on standard error says which, `INSTANCE started=yes via=unix pid=`*pid* after a start, and with **-v** also `INSTANCE found=yes via=unix pid=none`. A configuration with `share_instance = No` starts nothing. The **lnsd** started is `$LEVICULUM_LNSD`, else the one beside **lnstatus**, else the one on `PATH`.
 
 **-v**, **--verbose**
 :   Increase verbosity. Repeat for more detail.
@@ -134,6 +145,10 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 
 **-D**
 :   Show details and config entries for discovered interfaces.
+
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnstatus** takes the first directory of the lookup order **rnsd** uses, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`); the order is what lets Python clients find the system daemon without flags. When **lnstatus** cannot reach or authenticate to the daemon, it names the directory it took and why, the socket it dialled, and every other candidate directory that holds a `config`, with the **--config** that selects it. On a refused RPC key **lnstatus** also tries the other candidates' keys against the same socket, read-only, and names the one the daemon accepts.
 
 ## EXIT STATUS
 

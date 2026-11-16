@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Loquax
+GenericName=Messenger
+Comment=Write to people over Reticulum, the encrypted mesh
+Exec=loquax gui
+Icon=loquax
+Terminal=false
+StartupWMClass=loquax
+Categories=Network;InstantMessaging;Chat;
+Keywords=Reticulum;LXMF;mesh;messenger;chat;

@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.0-dev"
+version = "0.10.0-dev.10"
 dependencies = [
  "aes",
  "cbc",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.10.0-dev"
+version = "0.10.0-dev.10"
 dependencies = [
  "leviculum-core",
  "rand_core",
@@ -850,8 +850,15 @@ name = "leviculum-queue-budget"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
+
+[[package]]
 name = "leviculum-std"
-version = "0.10.0-dev"
+version = "0.10.0-dev.10"
 dependencies = [
  "bluer",
  "clap",
@@ -866,9 +873,11 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-queue-budget",
+ "leviculum-serial-mux",
  "libc",
  "md-5",
  "rand_core",
+ "rmp",
  "rmp-serde",
  "rmpv",
  "serde",

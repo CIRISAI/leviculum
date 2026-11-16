@@ -52,13 +52,14 @@ use core::future::Future;
 use core::pin::pin;
 use core::task::Poll;
 
+use leviculum_core::constants::RANDOM_HASHBYTES;
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{Clock as CoreClock, DestinationHash, NodeCore, Storage};
 use leviculum_lxmf::propagation_client::PropagationTransport;
 use leviculum_lxmf::router::{
-    LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
+    AttemptFailure, LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
     PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
     PATH_REQUEST_WAIT_MS,
 };
@@ -77,9 +78,12 @@ use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
 #[cfg(feature = "std")]
 mod shell;
 #[cfg(feature = "std")]
+pub(crate) use shell::tcp_section;
+#[cfg(feature = "std")]
 pub use shell::{
-    attach, attach_as, attach_leaf, attach_mesh, parse_server, AttachConfig, AttachError, Attached,
-    HomeRequest, InProcessOutbox, LeafConfig, MeshConfig, Role,
+    attach, attach_as, attach_leaf, attach_mesh, locale, parse_server, start_command,
+    start_command_here, AttachConfig, AttachError, Attached, HomeRequest, InProcessOutbox,
+    LeafConfig, Lender, Lent, MeshConfig, Role, LNSD_UNITS,
 };
 
 /// How soon the engine asks the driver to come back.
@@ -233,6 +237,18 @@ struct Unheard {
     path_requests: u32,
 }
 
+impl Unheard {
+    /// The held messages' heap: the list and every message's bytes.
+    fn heap_bytes(&self) -> usize {
+        self.messages.capacity() * core::mem::size_of::<([u8; 32], Vec<u8>)>()
+            + self
+                .messages
+                .iter()
+                .map(|(_, packed)| packed.capacity())
+                .sum::<usize>()
+    }
+}
+
 /// A selection waiting for the daemon's announce replays.
 struct PendingSelection {
     routes: Vec<Route>,
@@ -297,6 +313,13 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// The resource progress last said of each tracked message
+    /// ([`OutboxEvent::Progress`], 1662), as the router's outbound entry
+    /// holds it.
+    progress: BTreeMap<[u8; 32], u16>,
+    /// Why the last failed attempt of a tracked message failed, for its
+    /// [`OutboxEvent::Left`] (1330).
+    failures: BTreeMap<[u8; 32], AttemptFailure>,
     /// Stamps being mined, so a re-offer does not queue a second mine for the
     /// same work behind the first. Keyed by kind as well as id: a propagated
     /// message can need a recipient stamp and a node stamp in one run.
@@ -316,6 +339,24 @@ pub struct Engine {
     /// Whether every received message is also handed out packed
     /// ([`OutboxEvent::Packed`]): a home node archives it as it came.
     hands_out_packed: bool,
+    /// Packets to our delivery destination that no key we hold opened,
+    /// since the start: each is an `LXMF_RX_UNDECRYPTABLE` line and carries
+    /// this count. See [`Engine::undecryptable`].
+    undecryptable: u64,
+    /// Whether this engine answers for a home, and says its announces as
+    /// `HOME_ANNOUNCE` (1305). A hosted group's engine hands out packed too,
+    /// but announces the group, not the home.
+    says_home: bool,
+    /// The recipients of packed messages this run sent, each with the random
+    /// hash of the last announce heard from it. See [`Engine::replayed`].
+    recipients: BTreeMap<[u8; 16], Option<[u8; RANDOM_HASHBYTES]>>,
+    /// The recipient whose announce the event being handled repeats, set
+    /// for the length of one [`Engine::on_event`].
+    replayed: Option<[u8; 16]>,
+    /// Calls of [`Engine::on_tick`] this run (order 1723): an idle engine
+    /// ticks every `POLL_INTERVAL_MS`, so a tick deadline stuck at zero shows
+    /// here as a count far above that pace, whatever the host's speed.
+    ticks: u64,
 }
 
 impl Engine {
@@ -335,11 +376,18 @@ impl Engine {
             state,
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            progress: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
             unheard: BTreeMap::new(),
             hands_out_packed: false,
+            undecryptable: 0,
+            says_home: false,
+            recipients: BTreeMap::new(),
+            replayed: None,
+            ticks: 0,
         }
     }
 
@@ -359,9 +407,17 @@ impl Engine {
     }
 
     /// Hand every received message out packed as well
-    /// ([`OutboxEvent::Packed`]), for a home node's archive.
+    /// ([`OutboxEvent::Packed`]), for a home node's archive, and prove it
+    /// only on the [`Command::Prove`] that says it is archived.
     pub fn handing_out_packed(mut self) -> Self {
         self.hands_out_packed = true;
+        self
+    }
+
+    /// Say every announce of the identity as `HOME_ANNOUNCE` (1305): the
+    /// engine of a home node.
+    pub fn saying_home(mut self) -> Self {
+        self.says_home = true;
         self
     }
 
@@ -410,7 +466,16 @@ impl Engine {
                 return;
             }
         };
-        self.state = match register(core, identity) {
+        let registered = register(core, identity).and_then(|mut ready| {
+            if self.hands_out_packed {
+                ready
+                    .router
+                    .hold_proofs_until_kept(core)
+                    .map_err(|e| format!("hold proofs: {e:?}"))?;
+            }
+            Ok(ready)
+        });
+        self.state = match registered {
             Ok(ready) => {
                 self.emit(OutboxEvent::Ready {
                     address: ready.address,
@@ -474,6 +539,30 @@ impl Engine {
                 out.events.push(event);
             }
         }
+        self.say_progress(ready);
+    }
+
+    /// Each tracked message whose resource moved since it was last said
+    /// (1662): the router keeps the share in its outbound entry and
+    /// reports no event of it.
+    fn say_progress(&mut self, ready: &Ready) {
+        let outbound = ready.router.outbound();
+        let tracked = &self.tracked;
+        self.progress
+            .retain(|id, _| tracked.contains_key(id) && outbound.contains_key(id));
+        let moved: Vec<([u8; 32], u16)> = outbound
+            .iter()
+            .filter(|(id, _)| tracked.contains_key(*id))
+            .map(|(id, entry)| (*id, crate::ui::transfer::Transfer::permille(entry.progress)))
+            .filter(|(id, permille)| *permille > 0 && self.progress.get(id) != Some(permille))
+            .collect();
+        for (message_id, permille) in moved {
+            self.progress.insert(message_id, permille);
+            self.emit(OutboxEvent::Progress {
+                message_id,
+                permille,
+            });
+        }
     }
 
     /// Turn one router event into something the frontend can act on.
@@ -494,11 +583,32 @@ impl Engine {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
             }
+            RouterEvent::AttemptFailed { message_id, reason } => {
+                if self.tracked.contains_key(&message_id) {
+                    self.failures.insert(message_id, reason);
+                }
+            }
             RouterEvent::StampPending(request) => {
                 self.dispatch_stamp(StampJob::Delivery(request, Arc::default()));
             }
             RouterEvent::PropagationStampPending(request) => {
                 self.dispatch_stamp(StampJob::Propagation(request, Arc::default()));
+            }
+            RouterEvent::PropagationUploaded {
+                message_id,
+                transient_id,
+            } => {
+                if self.tracked.contains_key(&message_id) {
+                    let node = ready
+                        .router
+                        .outbound_propagation_node()
+                        .map(|node| *node.as_bytes());
+                    self.emit(OutboxEvent::Uploaded {
+                        message_id,
+                        transient_id,
+                        node,
+                    });
+                }
             }
             RouterEvent::MessageReceived(message) => {
                 let message = *message;
@@ -510,15 +620,21 @@ impl Engine {
                     (!verified).then(|| (message.message_id, message.source_hash, message.pack()));
                 let packed = self
                     .hands_out_packed
-                    .then(|| (message.message_id, message.pack()));
+                    .then(|| (message.message_id, message.pack(), message.method.into()));
+                let propagated = (message.method == DeliveryMethod::Propagated)
+                    .then_some((message.message_id, message.source_hash));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
                     verified,
+                    sent_at: message.timestamp as i64,
                     title: message.title,
                     body: message.content,
                     fields: message.fields,
                 });
+                if let Some((message_id, source)) = propagated {
+                    self.emit(OutboxEvent::Propagated { message_id, source });
+                }
                 if let Some((message_id, source, packed)) = held {
                     self.hold(message_id, source, packed.clone());
                     self.emit(OutboxEvent::Unverified {
@@ -527,17 +643,42 @@ impl Engine {
                         packed,
                     });
                 }
-                if let Some((message_id, packed)) = packed {
-                    self.emit(OutboxEvent::Packed { message_id, packed });
+                if let Some((message_id, packed, arrived)) = packed {
+                    self.emit(OutboxEvent::Packed {
+                        message_id,
+                        packed,
+                        arrived,
+                    });
                 }
             }
             RouterEvent::PeerAnnounced {
                 destination,
                 announce,
+                path_response,
             } => {
+                let destination = destination.into_bytes();
+                let name = announce.display_name();
+                // For a home's devices (1643): the name with the hearing's
+                // time and hops, which `Announced` does not carry. Only a
+                // home keeps it; every other host passes it by.
+                if let Some(name) = &name {
+                    let at = core.emission_secs();
+                    self.emit(OutboxEvent::NameHeard {
+                        row: crate::home::pages::NameRow {
+                            address: destination,
+                            name: name.clone(),
+                            first_seen: at,
+                            last_seen: at,
+                            hops: core
+                                .hops_to(&leviculum_core::DestinationHash::new(destination))
+                                .map(u32::from),
+                        },
+                    });
+                }
                 self.emit(OutboxEvent::Announced {
-                    destination: destination.into_bytes(),
-                    name: announce.display_name(),
+                    destination,
+                    name,
+                    path_response: path_response || self.replayed == Some(destination),
                 });
             }
             RouterEvent::PropagationSyncComplete(result) => {
@@ -586,14 +727,14 @@ impl Engine {
     }
 
     /// Notice messages the router has forgotten. A terminal state removes the
-    /// entry from the outbound map (`leviculum-lxmf/src/router.rs:771-773`),
+    /// entry from the outbound map (`leviculum-lxmf/src/router.rs:872-874`),
     /// and the frontend has to be told, because the state event and the
     /// removal can arrive in the same tick.
     ///
     /// The predicate is membership of `outbound()`, deliberately **not**
     /// `LxmfRouter::has_message`: that one asks the delivered-id dedup cache
     /// whether this id has already been *received*
-    /// (`leviculum-lxmf/src/router.rs:679-681`), which is false for every
+    /// (`leviculum-lxmf/src/router.rs:780-782`), which is false for every
     /// message we send. Reading it as "is still queued" reported every message
     /// as departed in the tick that queued it, with no state ever seen — see
     /// the regression test below.
@@ -606,9 +747,11 @@ impl Engine {
             .collect();
         for id in gone {
             let last = self.tracked.remove(&id).flatten();
+            let failure = self.failures.remove(&id);
             self.emit(OutboxEvent::Left {
                 message_id: id,
                 last,
+                failure,
             });
         }
     }
@@ -647,14 +790,33 @@ impl Engine {
                 Command::SendPacked { packed, via } => {
                     self.send_packed(ready, core, &packed, via, out);
                 }
+                Command::Prove { message_id } => {
+                    match ready.router.release_proofs(core, &message_id) {
+                        Ok(output) => self.absorb(ready, core, output, out),
+                        Err(e) => self.emit(OutboxEvent::Broken {
+                            detail: format!("router release_proofs: {e:?}"),
+                        }),
+                    }
+                }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census { seq } => {
+                    let census = self.census(seq, ready.router.heap_bytes());
+                    self.emit(OutboxEvent::Census(census));
+                }
+                Command::AnnouncePosition { position } => {
+                    self.announce_position(ready, core, &position, out)
+                }
                 // A client's commands: a messenger learns its states from its
                 // own router.
                 Command::HomeAccepted { .. }
                 | Command::HomeState { .. }
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
+                | Command::HomeStalled { .. }
+                | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
+                | Command::HomeHub { .. }
+                | Command::HomeHubRooms { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
             }
@@ -688,12 +850,58 @@ impl Engine {
             Via::Propagated => DeliveryMethod::Propagated,
             Via::Direct | Via::Link => DeliveryMethod::Direct,
         };
+        self.recipients
+            .entry(message.destination_hash)
+            .or_insert(None);
+        // A recipient whose key this node does not hold (a group's engine
+        // started again after a kill, 1307 G2, keeps no known identities):
+        // ask its path, as a stock app does before it writes to an address
+        // it holds no key for. The answer is an announce and brings the key;
+        // the router only asks for a path it lacks, and a client of a shared
+        // instance has the path without the key.
+        let destination = DestinationHash::new(message.destination_hash);
+        let keyless = core
+            .storage()
+            .get_identity(destination.as_bytes())
+            .is_none();
+        if keyless {
+            tracing::info!(
+                "ENGINE no key for {}: asking its path",
+                crate::address::to_hex(&message.destination_hash)
+            );
+            let output = core.request_path_unthrottled(&destination);
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
         if message.method == DeliveryMethod::Propagated
             && ready.router.outbound_propagation_node().is_none()
         {
             self.emit(OutboxEvent::Unsent {
                 message_id,
                 detail: "no propagation node is selected".to_string(),
+            });
+            return;
+        }
+        // A propagated leg cannot be encrypted for the node without the key.
+        // The router holds such a message, asks the path every
+        // `PATH_REQUEST_WAIT_MS` and charges no attempt
+        // (`leviculum-lxmf/src/router/propagation_runtime.rs`, the
+        // `Err(RouterError::Node(_))` arm after `ensure_prepared_upload`), so
+        // the leg never ended: on the field mailbox every such leg waited out
+        // the home's stall bound, 779 s, every hour for seven days (1406). It
+        // is not queued now, and said so; the next leg finds the key once
+        // the recipient's announce answered the path request above.
+        if message.method == DeliveryMethod::Propagated && keyless {
+            self.emit(OutboxEvent::KeyMissing {
+                message_id,
+                destination: message.destination_hash,
             });
             return;
         }
@@ -751,6 +959,7 @@ impl Engine {
             message_id,
             source,
             verified,
+            sent_at: message.timestamp as i64,
             title: message.title,
             body: message.content,
             fields: message.fields,
@@ -807,6 +1016,12 @@ impl Engine {
                     });
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census { seq } => {
+                    let census = self.census(seq, 0);
+                    self.emit(OutboxEvent::Census(census));
+                }
+                // A client receives nothing over the mesh, so it holds no proof.
+                Command::Prove { .. } => {}
                 Command::HomeAccepted { message_id } => {
                     self.emit(OutboxEvent::Queued { message_id });
                 }
@@ -823,6 +1038,7 @@ impl Engine {
                         Ok(message) => self.emit(OutboxEvent::HomeSent {
                             message_id: message.message_id,
                             destination: message.destination_hash,
+                            sent_at: message.timestamp as i64,
                             body: message.content,
                             fields: message.fields,
                         }),
@@ -832,20 +1048,39 @@ impl Engine {
                     }
                 }
                 Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
+                Command::HomePnStatus { answers } => {
+                    self.emit(OutboxEvent::HomePnStatus { answers });
+                }
+                Command::HomeStalled { message_id } => {
+                    self.emit(OutboxEvent::HomeStalled { message_id });
+                }
+                Command::HomeHub { hub } => self.emit(OutboxEvent::HubAnnounced { hub }),
+                Command::HomeHubRooms { hub, rooms } => {
+                    self.emit(OutboxEvent::HubRooms { hub, rooms })
+                }
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
+                    path_response: false,
                 }),
                 Command::HomePetname {
                     destination,
                     petname,
+                    at,
                 } => self.emit(OutboxEvent::HomePetname {
                     destination,
                     petname,
+                    at,
                 }),
-                Command::HomePeerState { destination, state } => {
-                    self.emit(OutboxEvent::HomePeerState { destination, state })
-                }
+                Command::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                } => self.emit(OutboxEvent::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"
@@ -856,7 +1091,10 @@ impl Engine {
                     detail: "a client of a Loquax Mailbox has no propagation node of its own"
                         .to_string(),
                 }),
-                Command::Resolve { .. } | Command::Cancel { .. } | Command::Announce => {}
+                Command::Resolve { .. }
+                | Command::Cancel { .. }
+                | Command::Announce
+                | Command::AnnouncePosition { .. } => {}
             }
         }
         for source in self.unheard_due(core, now_ms) {
@@ -1180,7 +1418,7 @@ impl Engine {
         out: &mut TickOutput,
     ) {
         let method = match request.via {
-            Via::Direct => delivery_method(request.body.len()),
+            Via::Direct => delivery_method(content_len(&request.body, &request.fields)),
             Via::Link => DeliveryMethod::Direct,
             Via::Propagated => {
                 // Guarded here rather than only in the CLI ordering, because
@@ -1236,6 +1474,65 @@ impl Engine {
     /// staying repliable; rate-limiting it against a stored last-announced
     /// timestamp belongs with the sync policy of a later slice, not here,
     /// where it would be a guess with no reader to justify it.
+    /// Announce `position` on our `lev.position` destination (1302),
+    /// registered beside the delivery destination, of the same identity, on
+    /// first use. A failure is said in the log and nothing else: a position
+    /// announce is a courtesy to the mesh, never a message's fate.
+    fn announce_position<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        position: &leviculum_lxmf::lev_position::Position,
+        out: &mut TickOutput,
+    ) {
+        let Some(identity) = core
+            .destination(&DestinationHash::new(ready.address))
+            .and_then(|d| d.identity())
+            .and_then(|identity| identity.private_key_bytes().ok())
+            .and_then(|bytes| Identity::from_private_key_bytes(&bytes).ok())
+        else {
+            tracing::warn!("loquax: no identity to announce a position with");
+            return;
+        };
+        let hash = leviculum_core::Destination::compute_destination_hash(
+            &crate::mesh_position::name_hash(),
+            identity.hash(),
+        );
+        if core.destination(&hash).is_none() {
+            match leviculum_core::Destination::new(
+                Some(identity),
+                leviculum_core::Direction::In,
+                leviculum_core::DestinationType::Single,
+                crate::mesh_position::APP_NAME,
+                &[crate::mesh_position::ASPECT],
+            ) {
+                Ok(destination) => core.register_destination(destination),
+                Err(e) => {
+                    tracing::warn!("loquax: lev.position destination: {e:?}");
+                    return;
+                }
+            }
+        }
+        let app_data = position.encode();
+        match core.announce_destination(&hash, Some(&app_data)) {
+            Ok(output) => {
+                if self.says_home {
+                    crate::events::home_announce(&ready.address, "all", "position");
+                }
+                self.absorb(
+                    ready,
+                    core,
+                    RouterOutput {
+                        core: output,
+                        events: Vec::new(),
+                    },
+                    out,
+                )
+            }
+            Err(e) => tracing::warn!("loquax: could not announce our position: {e:?}"),
+        }
+    }
+
     fn announce<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
@@ -1248,21 +1545,53 @@ impl Engine {
         self.announced = true;
         let app_data = announce::delivery(Some(&self.display_name), None);
         match core.announce_destination(&DestinationHash::new(ready.address), Some(&app_data)) {
-            Ok(output) => self.absorb(
-                ready,
-                core,
-                RouterOutput {
-                    core: output,
-                    events: Vec::new(),
-                },
-                out,
-            ),
+            Ok(output) => {
+                // A broadcast on every interface (`NodeCore::announce_destination`).
+                if self.says_home {
+                    crate::events::home_announce(&ready.address, "all", "delivery");
+                }
+                self.absorb(
+                    ready,
+                    core,
+                    RouterOutput {
+                        core: output,
+                        events: Vec::new(),
+                    },
+                    out,
+                )
+            }
             // Not fatal, and deliberately not an `OutboxEvent::Refused`: the
             // message still goes out, it just arrives unverifiable at a peer
             // that has never heard of us. Failing the send over it would turn
             // a cosmetic problem into a lost status line.
             Err(e) => tracing::warn!("loquax: could not announce our own address: {e:?}"),
         }
+    }
+
+    /// A packet to our delivery destination that no key we hold opened: the
+    /// sender encrypted it to a ratchet we never had or no longer keep, and
+    /// it is lost. Never silent: one warning per packet, with how many
+    /// ratchets we do hold and the count since the start. The core sends
+    /// no proof for it, as the reference does not, so the sender is not
+    /// told it arrived. Which ratchet the sender used cannot be read from
+    /// the packet ([`NodeEvent::PacketUndecryptable`]).
+    fn undecryptable<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &NodeCore<R, C, S>,
+        destination: DestinationHash,
+        len: usize,
+    ) {
+        self.undecryptable += 1;
+        let ratchets = core
+            .destination(&destination)
+            .map_or(0, leviculum_core::Destination::ratchet_count);
+        tracing::warn!(
+            event = "LXMF_RX_UNDECRYPTABLE",
+            dst = %crate::address::to_hex(destination.as_bytes()),
+            len = len,
+            ratchets = ratchets,
+            count = self.undecryptable,
+        );
     }
 
     /// Hold one received message until its sender's key is known.
@@ -1447,6 +1776,17 @@ fn candidates(ready: &Ready, routes: &[Route]) -> Vec<Candidate> {
         .collect()
 }
 
+/// The bytes a message's content costs on the wire: its body and its
+/// fields with a generous allowance for each field's framing (key, array
+/// and bin headers). A photo (1220) has an empty body and is all fields;
+/// counting the body alone sent it opportunistically into the router's
+/// oversized fallback.
+fn content_len(body: &[u8], fields: &[leviculum_lxmf::Field]) -> usize {
+    fields.iter().fold(body.len(), |sum, (_, value)| {
+        sum.saturating_add(value.len() + 9)
+    })
+}
+
 /// Which LXMF delivery method a body of this size should use.
 ///
 /// Opportunistic delivery is one encrypted packet with no link setup, so for
@@ -1522,8 +1862,18 @@ fn register<R: CryptoRngCore, C: CoreClock, S: Storage>(
         .map_err(|e| format!("the identity has no private key: {e:?}"))?;
     let copy = Identity::from_private_key_bytes(&bytes)
         .map_err(|e| format!("could not copy the identity: {e:?}"))?;
-    let destination =
+    let mut destination =
         LxmfNode::delivery_destination(copy).map_err(|e| format!("delivery destination: {e:?}"))?;
+    // Ratchets, as every Python LXMF router has them on its delivery
+    // destination (`reference/LXMF/LXMF/LXMRouter.py:357`). A peer that ever
+    // heard this identity announced with one, from any program, encrypts
+    // every single packet to it for 30 days (`RNS/Identity.py:69`); only an
+    // announce that carries a ratchet replaces it (`:618-619`). Without
+    // ours, such a packet decrypted with nothing (leviculum 1185). The
+    // registration loads the ratchets the storage kept, an import's among
+    // them, and every announce rotates on the reference cadence.
+    core.enable_ratchets(&mut destination)
+        .map_err(|e| format!("delivery destination ratchets: {e:?}"))?;
     let address = *destination.hash().as_bytes();
     let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
         .map_err(|e| format!("register delivery destination: {e:?}"))?;
@@ -1555,6 +1905,24 @@ fn is_propagation_node(name_hash: &[u8]) -> bool {
         )
 }
 
+impl Engine {
+    /// The identity whose private key this engine holds, the home
+    /// identity a board seals its position to; `None` on a client of a
+    /// home node, which never holds it.
+    fn own_identity<'a, R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &'a self,
+        core: &'a NodeCore<R, C, S>,
+    ) -> Option<&'a Identity> {
+        match &self.state {
+            State::Unregistered(identity) => Some(identity),
+            State::Ready(ready) => core
+                .destination(&DestinationHash::new(ready.address))
+                .and_then(|destination| destination.identity()),
+            State::Failed | State::Client(_) => None,
+        }
+    }
+}
+
 /// The two hooks, in the shape of the driver's `CoreProcessor` and with the
 /// same contract: both run with the core lock held, and neither blocks.
 impl Engine {
@@ -1565,11 +1933,76 @@ impl Engine {
         event: &NodeEvent,
     ) -> TickOutput {
         let mut out = TickOutput::empty();
+        // A position the mesh announces needs no router and no
+        // destination of ours (1302): a client of a home node shows it as
+        // the home node does.
+        // Plain ones always; a sealed one only when it is sealed to our
+        // identity (1313): our own boards, never a stranger's.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if crate::mesh_position::is_position(announce.name_hash()) {
+                let position =
+                    crate::mesh_position::read(announce.app_data(), self.own_identity(core));
+                match position {
+                    Some(position) => {
+                        let heard_at = i64::try_from(core.emission_secs()).unwrap_or(i64::MAX);
+                        self.emit(OutboxEvent::MeshPosition {
+                            identity: announce.computed_identity_hash(),
+                            location: position.location(heard_at),
+                            name: position.name,
+                        });
+                    }
+                    None => tracing::debug!(
+                        "loquax: a lev.position announce we cannot read (sealed to another)"
+                    ),
+                }
+            }
+        }
+        // A hub announcing (1599): every device lists the hubs its own node
+        // hears, and a home keeps them for its devices.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if crate::ui::hubs::is_hub(announce.name_hash()) {
+                let at = i64::try_from(core.emission_secs()).unwrap_or(i64::MAX);
+                self.emit(OutboxEvent::HubAnnounced {
+                    hub: crate::ui::hubs::HeardHub {
+                        hash: *announce.destination_hash().as_bytes(),
+                        name: crate::ui::hubs::announced_name(announce.app_data()),
+                        hops: core.hops_to(announce.destination_hash()),
+                        first: at,
+                        last: at,
+                        answered: None,
+                    },
+                });
+            }
+        }
+        // A NomadNet node announcing its pages (1579): a home keeps it for
+        // its devices, so a device switched on lists every page the home
+        // heard (`crate::home::pages`).
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if lnomad::discovery::is_nomad_node_announce(announce) {
+                let at = core.emission_secs();
+                self.emit(OutboxEvent::PageAnnounced {
+                    node: lnomad::discovery::DiscoveredNode {
+                        dest_hash: *announce.destination_hash().as_bytes(),
+                        name: lnomad::discovery::decode_node_name(announce.app_data()),
+                        first_seen: at,
+                        last_seen: at,
+                        hops: core.hops_to(announce.destination_hash()).map(u32::from),
+                    },
+                });
+            }
+        }
         if matches!(self.state, State::Client(_)) {
             return out;
         }
         let Some(mut ready) = self.take_ready(core) else {
             return out;
+        };
+        self.replayed = match event {
+            NodeEvent::AnnounceReceived { announce, .. } => self.replayed(
+                announce.destination_hash().into_bytes(),
+                announce.random_hash(),
+            ),
+            _ => None,
         };
         if let (Some(pending), NodeEvent::AnnounceReceived { announce, .. }) =
             (&mut self.pending_selection, event)
@@ -1577,10 +2010,26 @@ impl Engine {
             let heard = *announce.destination_hash().as_bytes();
             pending.asked.retain(|node| *node != heard);
         }
+        if let NodeEvent::PacketUndecryptable {
+            destination, len, ..
+        } = event
+        {
+            if *destination.as_bytes() == ready.address {
+                self.undecryptable(core, *destination, *len);
+            }
+        }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
             if is_propagation_node(announce.name_hash()) {
+                let decoded = leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
+                    announce.app_data(),
+                )
+                .ok();
                 self.emit(OutboxEvent::NodeAnnounced {
                     destination: *announce.destination_hash().as_bytes(),
+                    status: decoded
+                        .as_ref()
+                        .and_then(leviculum_lxmf::lev_status::announced_version),
+                    name: decoded.as_ref().and_then(|d| d.name()),
                 });
             }
         }
@@ -1599,8 +2048,66 @@ impl Engine {
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.poll_unheard(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
+        self.replayed = None;
         self.state = State::Ready(ready);
         out
+    }
+
+    /// Whether an announce from `destination` with `random` repeats the
+    /// last one heard from it, for a recipient this run sent to: `Some` of
+    /// it if so, and the announce becomes the last one heard either way.
+    ///
+    /// A repeat is a cache's copy, which says nothing of whether the
+    /// recipient is there (1332). The router asks a recipient's path again
+    /// whenever a direct link to it closes with a message still waiting
+    /// (`leviculum-lxmf/src/router.rs`, `needs_direct_link`), and a shared
+    /// instance forwards the network's answer to its client as a plain
+    /// announce, as the reference does (`Transport.py:1910-1930`, cited at
+    /// the pending forward in `leviculum-core/src/transport.rs`), so the
+    /// `PATH_RESPONSE` context 1330 reads is gone by then. On miauhaus every
+    /// copy handed on was tried direct again some 46 s after each attempt
+    /// nobody answered. Only a recipient that announces again sends a new
+    /// random hash.
+    fn replayed(
+        &mut self,
+        destination: [u8; 16],
+        random: &[u8; RANDOM_HASHBYTES],
+    ) -> Option<[u8; 16]> {
+        let last = self.recipients.get_mut(&destination)?;
+        let repeat = last.as_ref() == Some(random);
+        *last = Some(*random);
+        repeat.then_some(destination)
+    }
+
+    /// The engine's own tables beside `router_bytes`, its router's
+    /// (order 1585), as the answer to the census asked under `seq`.
+    fn census(&self, seq: u64, router_bytes: usize) -> crate::outbox::EngineCensus {
+        use leviculum_core::heap_census::{btree_map_bytes, vec_deque_bytes};
+        let engine_bytes = vec_deque_bytes(&self.events)
+            + vec_deque_bytes(&self.commands)
+            + vec_deque_bytes(&self.stamps)
+            + vec_deque_bytes(&self.stamp_answers)
+            + self.resolves.capacity() * core::mem::size_of::<Resolve>()
+            + btree_map_bytes(&self.tracked)
+            + btree_map_bytes(&self.failures)
+            + btree_map_bytes(&self.mining)
+            + btree_map_bytes(&self.unheard)
+            + self
+                .unheard
+                .values()
+                .map(Unheard::heap_bytes)
+                .sum::<usize>()
+            + btree_map_bytes(&self.recipients);
+        crate::outbox::EngineCensus {
+            seq,
+            router_bytes,
+            engine_bytes,
+            tracked: self.tracked.len(),
+            recipients: self.recipients.len(),
+            unheard: self.unheard.len(),
+            events_queued: self.events.len(),
+            ticks: self.ticks,
+        }
     }
 
     /// The periodic slot: commands, finished stamps, resolves and the
@@ -1611,6 +2118,7 @@ impl Engine {
         core: &mut NodeCore<R, C, S>,
         now_ms: u64,
     ) -> TickOutput {
+        self.ticks = self.ticks.saturating_add(1);
         if matches!(self.state, State::Client(_)) {
             return self.client_tick(core, now_ms);
         }
@@ -1767,6 +2275,664 @@ mod tests {
         )
     }
 
+    /// The ratchet public key in the delivery announce among `out`'s
+    /// packets, `None` when it carries none; panics without an announce.
+    fn announced_ratchet(out: &TickOutput, address: [u8; 16]) -> Option<[u8; 32]> {
+        out.actions
+            .iter()
+            .find_map(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => {
+                    leviculum_core::packet::Packet::unpack(data)
+                        .ok()
+                        .filter(|p| {
+                            p.flags.packet_type == leviculum_core::packet::PacketType::Announce
+                                && p.destination_hash == address
+                        })
+                }
+            })
+            .map(|p| {
+                // An announce with a ratchet says so in its context flag and
+                // carries it after the name hash and the random blob
+                // (`RNS/Destination.py`, announce): 64 + 10 + 10 bytes in.
+                p.flags.context_flag.then(|| {
+                    let data = p.data.as_slice();
+                    let mut ratchet = [0u8; 32];
+                    ratchet.copy_from_slice(&data[84..116]);
+                    ratchet
+                })
+            })
+            .expect("a delivery announce went out")
+    }
+
+    /// 1185: the delivery destination announces with a ratchet on the
+    /// reference cadence, rotates on announce once the interval passed, and
+    /// a restarted engine on the same storage holds what was announced.
+    /// Before 1185 the announce carried none, and a packet a peer encrypted
+    /// to the ratchet an earlier program of the same identity announced
+    /// decrypted with nothing.
+    #[test]
+    fn the_delivery_destination_announces_a_ratchet_and_keeps_it_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = leviculum_std::generate_identity();
+        let address = delivery_address(&identity).expect("address");
+        let copy = || {
+            Identity::from_private_key_bytes(&identity.private_key_bytes().expect("key"))
+                .expect("copy")
+        };
+        let hash = DestinationHash::new(address);
+
+        let mut core1 = core(dir.path());
+        let mut engine = Engine::new(copy(), b"r".to_vec());
+        let now_ms = core1.now_ms();
+        let out = engine.on_tick(&mut core1, now_ms);
+        let first = announced_ratchet(&out, address).expect("the announce carries a ratchet");
+        let destination = core1.destination(&hash).expect("registered");
+        assert_eq!(destination.current_ratchet_public(), Some(first));
+        // The reference cadence: `RNS/Destination.py:85,90`.
+        assert_eq!(destination.ratchet_interval(), 30 * 60 * 1000);
+        assert_eq!(destination.retained_ratchet_count(), 512);
+
+        // Rotation is the announce's, once the interval passed; shortened
+        // here to the core's minimum so the test need not wait half an hour.
+        core1
+            .destination_mut(&hash)
+            .expect("registered")
+            .set_ratchet_interval(1000);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        engine.submit(Command::Announce);
+        // The command is read after this tick's announce slot: the
+        // announce goes out on the tick after it.
+        let now_ms = core1.now_ms();
+        let _ = engine.on_tick(&mut core1, now_ms);
+        let out = engine.on_tick(&mut core1, now_ms);
+        let second = announced_ratchet(&out, address).expect("a ratchet again");
+        assert_ne!(second, first, "the announce after the interval rotates");
+        assert_eq!(
+            core1
+                .destination(&hash)
+                .expect("registered")
+                .ratchet_count(),
+            2
+        );
+        drop(core1);
+
+        // A restart on the same storage: the same ratchets, the newest
+        // announced first.
+        let mut core2 = core(dir.path());
+        let mut engine = Engine::new(copy(), b"r".to_vec());
+        let now_ms = core2.now_ms();
+        let out = engine.on_tick(&mut core2, now_ms);
+        assert_eq!(announced_ratchet(&out, address), Some(second));
+        assert_eq!(
+            core2
+                .destination(&hash)
+                .expect("registered")
+                .ratchet_count(),
+            2
+        );
+    }
+
+    /// A signed announce of `identity`'s `app.aspects` destination carrying
+    /// `app_data`, as the bytes an interface hands the core.
+    fn announce_bytes(
+        identity: &Identity,
+        app: &str,
+        aspects: &[&str],
+        app_data: &[u8],
+    ) -> Vec<u8> {
+        let copy = Identity::from_private_key_bytes(&identity.private_key_bytes().expect("key"))
+            .expect("copy");
+        let mut destination = leviculum_core::Destination::new(
+            Some(copy),
+            leviculum_core::Direction::In,
+            leviculum_core::DestinationType::Single,
+            app,
+            aspects,
+        )
+        .expect("destination");
+        let packet = destination
+            .announce(Some(app_data), &mut rand_core::OsRng, 1_000, 1)
+            .expect("announce");
+        let mut bytes = [0u8; 512];
+        let len = packet.pack(&mut bytes).expect("pack");
+        bytes[..len].to_vec()
+    }
+
+    /// 1332: an announce from a recipient this run sent to that repeats the
+    /// last one heard from it is a cache's copy, reported as heard from a
+    /// cache however it came; the recipient's next own announce is live. A
+    /// peer nothing was sent to is reported as the wire says.
+    #[test]
+    fn a_repeat_of_a_recipients_announce_is_reported_as_heard_from_a_cache() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let member = leviculum_std::generate_identity();
+        let address = delivery_address(&member).expect("address");
+        let sender = leviculum_std::generate_identity();
+        let packed = leviculum_lxmf::Message::create(
+            address,
+            delivery_address(&sender).expect("address"),
+            &sender,
+            1_793_500_000.0,
+            Vec::new(),
+            b"Brot ist da".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message")
+        .pack();
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Link,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let hear = |engine: &mut Engine, core: &mut StdNodeCore, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(core, event);
+            }
+            drain(engine)
+                .into_iter()
+                .filter_map(|event| match event {
+                    OutboxEvent::Announced {
+                        destination,
+                        path_response,
+                        ..
+                    } if destination == address => Some(path_response),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let once = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &once),
+            [false],
+            "first heard: live"
+        );
+        // A direct link that fails its handshake expires the path, and the
+        // router asks it again: a transport node's copy comes back, one hop
+        // further, the same announce.
+        assert!(core.remove_path(&address));
+        let mut replay = once.clone();
+        replay[1] = replay[1].saturating_add(1);
+        assert_eq!(
+            hear(&mut engine, &mut core, &replay),
+            [true],
+            "the same announce again"
+        );
+        let again = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &again),
+            [false],
+            "the member announced"
+        );
+    }
+
+    /// 1579: a NomadNet node's `nomadnetwork.node` announce reaches the seam
+    /// as the row lnomad's registry makes of the same announce (one type,
+    /// one decoder), named, with its hops; the control: another aspect of
+    /// the same name is no page.
+    #[test]
+    fn a_nomadnet_announce_reaches_the_seam_as_lnomads_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let pages = |events: &[OutboxEvent]| -> Vec<lnomad::discovery::DiscoveredNode> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::PageAnnounced { node } => Some(node.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let node = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&node, "nomadnetwork", &["node"], b"Marcel's node"),
+        );
+        let heard = pages(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        let mut registry = lnomad::NomadNodeRegistry::new();
+        assert!(registry.observe_parts(
+            &lnomad::nomad_node_name_hash(),
+            heard[0].dest_hash,
+            b"Marcel's node",
+            heard[0].hops,
+            heard[0].last_seen,
+        ));
+        assert_eq!(registry.nodes(), [&heard[0]]);
+        assert_eq!(heard[0].name.as_deref(), Some("Marcel's node"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "nomadnetwork", &["other"], b"x"),
+        );
+        assert!(pages(&events).is_empty(), "another aspect: {events:?}");
+    }
+
+    /// 1643: a peer's `lxmf.delivery` announce with a name reaches the
+    /// seam as a name row with the hearing's time and hops, beside the
+    /// `Announced` that names it here; the control: a nameless announce is
+    /// no row, though it is still `Announced`.
+    #[test]
+    fn a_named_delivery_announce_reaches_the_seam_as_a_name_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let rows = |events: &[OutboxEvent]| -> Vec<crate::home::pages::NameRow> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::NameHeard { row } => Some(row.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let announced = |events: &[OutboxEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, OutboxEvent::Announced { .. }))
+                .count()
+        };
+        let peer = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(Some(b"Kaja"), None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&peer, "lxmf", &["delivery"], &app_data),
+        );
+        let heard = rows(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(announced(&events), 1);
+        assert_eq!(heard[0].address, delivery_address(&peer).expect("address"));
+        assert_eq!(heard[0].name, "Kaja");
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert!(heard[0].last_seen > 0 && heard[0].first_seen == heard[0].last_seen);
+        let nameless = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(None, None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&nameless, "lxmf", &["delivery"], &app_data),
+        );
+        assert!(rows(&events).is_empty(), "no name, no row: {events:?}");
+        assert_eq!(announced(&events), 1);
+    }
+
+    /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,
+    /// named by its app data without the protocol's word, with its hops;
+    /// the control: the same node's announce of another aspect is no hub.
+    #[test]
+    fn a_hub_announce_reaches_the_seam_as_a_heard_hub() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let hubs = |events: &[OutboxEvent]| -> Vec<crate::ui::hubs::HeardHub> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::HubAnnounced { hub } => Some(hub.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let salon = leviculum_std::generate_identity();
+        let app_data = leviculum_rrc::Value::Map(vec![(
+            leviculum_rrc::Value::Text("hub".into()),
+            leviculum_rrc::Value::Text("Le_Salon_FR RRC".into()),
+        )])
+        .encode();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&salon, "rrc", &["hub"], &app_data),
+        );
+        let heard = hubs(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(heard[0].name.as_deref(), Some("Le Salon FR"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert_eq!(heard[0].first, heard[0].last);
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "rrc", &["room"], &app_data),
+        );
+        assert!(
+            hubs(&events).is_empty(),
+            "another aspect is no hub: {events:?}"
+        );
+    }
+
+    /// 1302: a `lev.position` announce the core heard reaches the screen's
+    /// seam as the announcing identity's position, the identity whose
+    /// delivery address the core keys it by; the same node's delivery
+    /// announce is no position, nor is a position announce in a layout
+    /// the codec does not read. A client of a home node hears it too.
+    #[test]
+    fn a_position_announce_reaches_the_seam_as_the_identitys_position() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let anna = leviculum_std::generate_identity();
+        let location = leviculum_lxmf::telemetry::Location {
+            latitude_e6: 43_773_100,
+            longitude_e6: 11_256_000,
+            altitude_e2: 5_000,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 0,
+            last_update: 1_793_500_000,
+        };
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let fixture = crate::mesh_position::manual(&location, Some("Anna".into())).encode();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&anna, "lev", &["position"], &fixture),
+        );
+        assert_eq!(
+            mesh_fix(&events, anna.hash()),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Anna".into())
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            crate::mesh_position::delivery_of(anna.hash()),
+            delivery_address(&anna).expect("address"),
+            "the position is keyed by the peer's delivery address"
+        );
+
+        // The delivery announce of the same node is a name, not a place.
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&anna, "lxmf", &["delivery"], &fixture),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboxEvent::MeshPosition { .. })),
+            "{events:?}"
+        );
+        // 1302's stand-in layout is no position.
+        let bob = leviculum_std::generate_identity();
+        let mut stand_in = [0u8; 18];
+        stand_in[0] = 1;
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&bob, "lev", &["position"], &stand_in),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboxEvent::MeshPosition { .. })),
+            "{events:?}"
+        );
+
+        // `loquax announce`'s command: an engine announces its own position
+        // on `lev.position` beside its delivery destination, and the engine
+        // of another core hears it as that identity's.
+        let sender_dir = tempfile::tempdir().expect("tempdir");
+        let mut sender_core = self::core(sender_dir.path());
+        let dave = leviculum_std::generate_identity();
+        let dave_hash = *dave.hash();
+        let mut sender = Engine::new(dave, b"dave".to_vec());
+        let now_ms = sender_core.now_ms();
+        let _ = sender.on_tick(&mut sender_core, now_ms);
+        sender.submit(Command::AnnouncePosition {
+            position: crate::mesh_position::manual(&location, Some("Dave".into())),
+        });
+        let mut out = sender.on_tick(&mut sender_core, now_ms);
+        out.merge(sender.on_tick(&mut sender_core, now_ms));
+        let sent: Vec<Vec<u8>> = out
+            .actions
+            .iter()
+            .map(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => data.clone(),
+            })
+            .collect();
+        assert!(!sent.is_empty(), "the position announce went out");
+        // A fresh listener: the one above heard four unknown announces on
+        // one interface, and the core's ingress burst limit holds a fifth
+        // (`leviculum-core/src/transport.rs`, `handle_announce_inner`).
+        let listener_dir = tempfile::tempdir().expect("tempdir");
+        let mut listener_core = self::core(listener_dir.path());
+        let mut listener = engine_named(b"listener");
+        let now_ms = listener_core.now_ms();
+        let _ = listener.on_tick(&mut listener_core, now_ms);
+        let _ = drain(&mut listener);
+        for bytes in &sent {
+            let out = listener_core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = listener.on_event(&mut listener_core, event);
+            }
+        }
+        let heard = drain(&mut listener);
+        assert_eq!(
+            mesh_fix(&heard, &dave_hash),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Dave".into())
+            )),
+            "{heard:?}"
+        );
+
+        // A client of a home node shows it as the home node would.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_, _, mut client, mut client_core) = client_setup(dir.path());
+        let carol = leviculum_std::generate_identity();
+        let out = client_core.handle_packet(
+            InterfaceId(0),
+            &announce_bytes(&carol, "lev", &["position"], &fixture),
+        );
+        for event in &out.events {
+            let _ = client.on_event(&mut client_core, event);
+        }
+        let heard = drain(&mut client);
+        assert_eq!(
+            mesh_fix(&heard, carol.hash()),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Anna".into())
+            )),
+            "{heard:?}"
+        );
+    }
+
+    /// The coordinates and name of the first [`OutboxEvent::MeshPosition`]
+    /// for `identity` among `events`, if one is there.
+    fn mesh_fix(events: &[OutboxEvent], identity: &[u8; 16]) -> Option<(i32, i32, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            OutboxEvent::MeshPosition {
+                identity: heard,
+                location,
+                name,
+            } if heard == identity => {
+                Some((location.latitude_e6, location.longitude_e6, name.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// 1313: a board's position sealed to another identity is no pin on our
+    /// map, though the announce is a valid `lev.position` one; the positive
+    /// control seals the same position to our home identity, and that one
+    /// is a pin. A client of the home holds no key, so it shows neither.
+    #[test]
+    fn a_position_sealed_to_another_identity_is_no_pin_and_ours_is() {
+        use crate::ui::tests::Field;
+        use crate::ui::{update, UiEvent, UiModel};
+        use leviculum_core::transport::InterfaceId;
+        use leviculum_lxmf::lev_position::AppData;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let home = leviculum_std::generate_identity();
+        let home_copy =
+            Identity::from_private_key_bytes(&home.private_key_bytes().expect("a private key"))
+                .expect("identity");
+        let mut engine = Engine::new(home, b"home".to_vec());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut model = UiModel::<Field>::new(&[]);
+        let hear = |engine: &mut Engine,
+                    core: &mut StdNodeCore,
+                    model: &mut UiModel<Field>,
+                    bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(core, event);
+            }
+            let events = drain(engine);
+            for event in &events {
+                if matches!(event, OutboxEvent::MeshPosition { .. }) {
+                    let _ = update(model, UiEvent::Engine(event.clone()));
+                }
+            }
+            events
+        };
+        let position = crate::mesh_position::manual(
+            &leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 0,
+                last_update: 1_793_500_000,
+            },
+            None,
+        );
+
+        // A stranger's board, sealed to its own owner.
+        let board = leviculum_std::generate_identity();
+        let owner = leviculum_std::generate_identity();
+        let theirs = position.seal(&owner, &mut rand_core::OsRng).expect("seal");
+        assert!(matches!(AppData::parse(&theirs), Some(AppData::Sealed(_))));
+        let events = hear(
+            &mut engine,
+            &mut core,
+            &mut model,
+            &announce_bytes(&board, "lev", &["position"], &theirs),
+        );
+        assert_eq!(mesh_fix(&events, board.hash()), None, "{events:?}");
+        let board_peer = crate::mesh_position::delivery_of(board.hash());
+        assert!(
+            model.map_pins().iter().all(|pin| pin.peer != board_peer),
+            "a stranger's sealed position is no pin"
+        );
+
+        // Positive control: our own board, sealed to our home identity.
+        let ours_board = leviculum_std::generate_identity();
+        let ours = position
+            .seal(&home_copy, &mut rand_core::OsRng)
+            .expect("seal");
+        let ours_bytes = announce_bytes(&ours_board, "lev", &["position"], &ours);
+        let events = hear(&mut engine, &mut core, &mut model, &ours_bytes);
+        assert_eq!(
+            mesh_fix(&events, ours_board.hash()),
+            Some((43_773_100, 11_256_000, None)),
+            "{events:?}"
+        );
+        let ours_peer = crate::mesh_position::delivery_of(ours_board.hash());
+        assert!(
+            model.map_pins().iter().any(|pin| pin.peer == ours_peer),
+            "our own board is a pin: {:?}",
+            model.map_pins()
+        );
+
+        // A client of the home holds no key: our board's sealed announce
+        // is no position there.
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let (_, _, mut client, mut client_core) = client_setup(client_dir.path());
+        let out = client_core.handle_packet(InterfaceId(0), &ours_bytes);
+        for event in &out.events {
+            let _ = client.on_event(&mut client_core, event);
+        }
+        let heard = drain(&mut client);
+        assert_eq!(mesh_fix(&heard, ours_board.hash()), None, "{heard:?}");
+    }
+
+    /// 1185: a packet to our delivery destination that did not decrypt is
+    /// counted and said (`LXMF_RX_UNDECRYPTABLE`); one to another of the
+    /// core's destinations is not ours to report.
+    #[test]
+    fn an_undecryptable_packet_to_our_address_is_counted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let identity = leviculum_std::generate_identity();
+        let address = delivery_address(&identity).expect("address");
+        let mut engine = Engine::new(identity, b"u".to_vec());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let undecryptable = |destination: [u8; 16]| NodeEvent::PacketUndecryptable {
+            destination: DestinationHash::new(destination),
+            len: 211,
+            interface_index: 0,
+        };
+        let _ = engine.on_event(&mut core, &undecryptable([0x77; 16]));
+        assert_eq!(engine.undecryptable, 0);
+        let _ = engine.on_event(&mut core, &undecryptable(address));
+        let _ = engine.on_event(&mut core, &undecryptable(address));
+        assert_eq!(engine.undecryptable, 2);
+    }
+
     /// A home node's identity, the engine's client of it, and a core.
     fn client_setup(dir: &std::path::Path) -> (Identity, [u8; 16], Engine, StdNodeCore) {
         let home = leviculum_std::generate_identity();
@@ -1875,6 +3041,7 @@ mod tests {
         let _ = engine.on_tick(&mut core, now_ms);
         let events = drain(&mut engine);
         assert!(events.contains(&OutboxEvent::Received {
+            sent_at: 1_800_000_000,
             message_id: message.message_id,
             source,
             title: Vec::new(),
@@ -2421,12 +3588,84 @@ mod tests {
         );
     }
 
+    /// 1330: the home's "direct failed" line said `reason=failed`, the
+    /// router's state, which does not tell a link that died mid-transfer
+    /// from one that never came. A failed attempt's reason is kept until the
+    /// message leaves, and goes with it; control: a message whose attempts
+    /// never failed leaves with none.
+    #[test]
+    fn a_message_leaves_with_why_its_last_attempt_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let queue = |engine: &mut Engine, core: &mut _, destination| {
+            engine.submit(Command::Send(Box::new(SendRequest {
+                destination,
+                title: Vec::new(),
+                body: vec![b'x'; 2_000],
+                fields: Vec::new(),
+                via: Via::Direct,
+            })));
+            let now_ms = leviculum_core::node::NodeCore::now_ms(core);
+            let _ = engine.on_tick(core, now_ms);
+            drain(engine)
+                .into_iter()
+                .find_map(|event| match event {
+                    OutboxEvent::Queued { message_id } => Some(message_id),
+                    _ => None,
+                })
+                .expect("queued")
+        };
+        let died = queue(&mut engine, &mut core, [0x33; 16]);
+        let quiet = queue(&mut engine, &mut core, [0x34; 16]);
+        let reason = AttemptFailure::Delivery(leviculum_lxmf::DeliveryFailure::LinkClosed(
+            leviculum_core::LinkCloseReason::Stale,
+        ));
+        let ready = engine.take_ready(&mut core).expect("ready");
+        engine.report(
+            &ready,
+            &core,
+            RouterEvent::AttemptFailed {
+                message_id: died,
+                reason,
+            },
+        );
+        engine.state = State::Ready(ready);
+
+        engine.submit(Command::Cancel { message_id: died });
+        engine.submit(Command::Cancel { message_id: quiet });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let left: Vec<_> = drain(&mut engine)
+            .into_iter()
+            .filter_map(|event| match event {
+                OutboxEvent::Left {
+                    message_id,
+                    failure,
+                    ..
+                } => Some((message_id, failure)),
+                _ => None,
+            })
+            .collect();
+        assert!(left.contains(&(died, Some(reason))), "{left:?}");
+        assert!(left.contains(&(quiet, None)), "{left:?}");
+    }
+
     /// A short status line must not pay for a link handshake; a body that
     /// cannot fit in one packet must not try.
     #[test]
     fn short_bodies_go_by_packet_and_long_ones_by_link() {
         assert_eq!(delivery_method(8), DeliveryMethod::Opportunistic);
         assert_eq!(delivery_method(64_000), DeliveryMethod::Direct);
+        // A photo: no body, its bytes in a field (1220).
+        let photo = crate::ui::photos::photo_fields("jpg", vec![0; 100_000]);
+        assert_eq!(
+            delivery_method(content_len(b"", &photo)),
+            DeliveryMethod::Direct
+        );
+        assert_eq!(content_len(b"hi", &[]), 2);
     }
 
     /// Mine `job` with the test clock and recorded effects, on a runtime
@@ -2726,6 +3965,76 @@ mod tests {
         );
     }
 
+    /// 1406, the field mailbox on 2026-11-04: a propagated leg to a
+    /// recipient whose key this node does not hold cannot be encrypted for
+    /// the node, and the router held it without a word until the home's
+    /// stall bound gave it up after 779 s, every hour for seven days. It is
+    /// said at once as a missing key, and the recipient's path is asked, as
+    /// a direct leg asks it; nothing waits in the router.
+    /// Control: the same message with the key known is queued.
+    #[test]
+    fn a_propagated_leg_without_the_recipients_key_fails_at_once_and_asks_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        engine.submit(Command::SelectPn {
+            preferred: Some([8; 16]),
+            mailbox: None,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        let asks_path = |out: &TickOutput, destination: [u8; 16]| {
+            out.actions.iter().any(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => {
+                    data.windows(16).any(|window| window == destination)
+                }
+            })
+        };
+
+        let (packed, id) = packed_message([0x42; 16]);
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Propagated,
+        });
+        let out = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            !events.contains(&OutboxEvent::Queued { message_id: id }),
+            "a leg without the key was queued: {events:?}"
+        );
+        assert!(
+            events.contains(&OutboxEvent::KeyMissing {
+                message_id: id,
+                destination: [0x42; 16],
+            }),
+            "{events:?}"
+        );
+        assert!(asks_path(&out, [0x42; 16]), "no path request: {out:?}");
+
+        // Control: with the recipient's key held, the leg is queued.
+        let recipient = leviculum_std::generate_identity();
+        let known = delivery_address(&recipient).expect("address");
+        core.remember_identity(
+            DestinationHash::new(known),
+            Identity::from_public_key_bytes(&recipient.public_key_bytes()).expect("public key"),
+        );
+        let (packed, id) = packed_message(known);
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Propagated,
+        });
+        let out = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            events.contains(&OutboxEvent::Queued { message_id: id }),
+            "the leg with the key was not queued: {events:?}"
+        );
+        assert!(!asks_path(&out, known), "a path asked with the key held");
+    }
+
     /// A client's engine names a bubble after the id the home node gave it,
     /// and gives it the states pulled from the archive; it sends nothing
     /// itself; its fence comes back behind the commands before it.
@@ -2769,5 +4078,39 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(events[3], OutboxEvent::Fenced { token: 3 });
+    }
+
+    /// 1732: a home node's engine and a client's echo the number of the
+    /// census they answer, so the mailbox can tell the census an answer
+    /// belongs to.
+    #[test]
+    fn an_engine_answers_a_census_under_its_number() {
+        let census_seq = |events: Vec<OutboxEvent>| {
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    OutboxEvent::Census(answer) => Some(answer.seq),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no census answer"))
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        engine.submit(Command::Census { seq: 41 });
+        let _ = engine.on_tick(&mut core, now_ms);
+        assert_eq!(census_seq(drain(&mut engine)), 41);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, _address, mut engine, mut core) = client_setup(dir.path());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        engine.submit(Command::Census { seq: 42 });
+        let _ = engine.on_tick(&mut core, now_ms);
+        assert_eq!(census_seq(drain(&mut engine)), 42);
     }
 }

@@ -667,6 +667,7 @@ fn the_help_text_says_it_needs_root_and_never_uses_the_network() {
         "--no-telemetry",
         "--set-time",
         "--set-telemetry",
+        "--ask",
     ] {
         assert!(help.contains(flag), "{flag} missing from --help:\n{help}");
     }

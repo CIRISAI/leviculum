@@ -1,15 +1,16 @@
 #!/bin/sh
 # postrm for leviculum — on purge, remove state/socket files and the
-# system user/group. `config` under /etc/reticulum is a conffile and
-# handled by dpkg's conffile machinery.
+# system user/group. `config` under /etc/reticulum is left: lnsd wrote it on
+# its first start into a directory Python-RNS tools share, and it may carry
+# their settings too. A `config` an older package shipped is an obsolete
+# conffile, which dpkg removes on purge itself.
 
 set -e
 
 case "$1" in
     purge)
         rm -rf /etc/reticulum/storage /etc/reticulum/identities
-        # Clean up an empty /etc/reticulum if dpkg has already removed
-        # the conffile.
+        # Clean up /etc/reticulum if nothing is left in it.
         if [ -d /etc/reticulum ]; then
             rmdir --ignore-fail-on-non-empty /etc/reticulum
         fi

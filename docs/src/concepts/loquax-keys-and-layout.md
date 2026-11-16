@@ -148,6 +148,29 @@ The first four rows are `lnomad`'s `SCROLL_KEYS` rows unchanged, read from
 the shared table (section 4); the `Ctrl-↑`/`Ctrl-↓` spelling is the one
 chord `loquax` adds to them.
 
+**In the conversation (M) the keys read by the line (1529, Lew on the
+M9, 2026-11-07).** Before, a press jumped a message, which skipped the
+middle of a long one and landed at its start on the way back. The rule
+is a pager with a focus (`step`, `loquax/src/ui/pager.rs`), one place
+for the terminal and the M9:
+
+| Key | in M |
+|---|---|
+| `↓` / `↑`, `j` / `k`, `Ctrl-n` / `Ctrl-p`; the M9's ring up and down | the view a line. The selection stays on a message while it has lines still to come and moves to the next only once its last line is on screen and the next one's first; on the way up a long message is entered at its end, line by line, never at its start |
+| `→` / `←` (1529); the page keys, `Space`, `Ctrl-f` / `Ctrl-b`, `Ctrl-v` / `Alt-v`; the M9's ring right and left | a page: a screen less one line of overlap. The selection goes to the first message the page brought lines of (the last, up); a page that reaches the bottom selects the newest and the pane follows it again, one that reaches the top the first |
+| `Ctrl-d` / `Ctrl-u` | half a screen, the same selection rule |
+| `g` / `G`, `Home` / `End` | the first message at the top, the newest at the bottom |
+
+`Enter` and the message's keys (`I`, `y`, `d`, `e`) act on the selected
+message as before. A held key repeats where its source repeats: the
+terminal's own key repeat, and on the M9 the keyboard controller's code
+answered again on the 10 ms poll, which the driver takes as a press each
+time (no timer of the board's). A message counts as read (the receipt's
+viewport, `hit::viewport`) once its last line has been on screen, not
+when its bubble was selected or half of it showed. The window and the
+phone scroll freely and keep their own selection rules; the list (L)
+stays a row an entry.
+
 ### Conversations
 
 | Action | vi | Emacs | mail, chat | mouse | where |
@@ -165,8 +188,9 @@ chord `loquax` adds to them.
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
 | open the message: one with a position (a report, or a text with telemetry) the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report or a text with a position; click a delivery mark for the detail | M |
-| the message's detail view and ledger, any message | `v` | | palette `details` (Signal `Ctrl-D`, vi's half page here) | click its delivery mark | M |
+| the message's detail view and ledger, any message | `I` (`v` until 1475) | | palette `details` (Signal `Ctrl-D`, vi's half page here; WhatsApp's Info) | click its delivery mark | M |
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
+| the copy mode: a cursor on the text that selects as it moves (1475) | `v` | `Ctrl-Space` (the mark) | `Shift` with an arrow | drag | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
 | delete from this device | `d`, then confirm | | `d` (mutt; aerc asks first) | | M, from the history slice on |
 | react: a quick emoji by its digit, or typed text and `Enter` (1104) | `e` | | palette `react` (the long press in Signal and Columba) | | M |
@@ -213,6 +237,7 @@ compose too.
 | next / previous way of drawing the map (1093) | `t` / `T` | | `F2` | | P |
 | every way of drawing the map, the one now marked | | | palette `map drawing` | | P |
 | the glyph test: which glyph sets the font draws | `g` | | | | P |
+| the time zones and their clocks over the map, or away again (1684) | `z` | | | the map menu's "Time zones" | P |
 | every pin in view again | | | `0` | | P |
 | next / previous pin | | | `Tab` / `Shift-Tab` | | P |
 | open the pin's conversation | | | `Enter` | click the pin | P |
@@ -288,7 +313,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:148`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:256`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -444,10 +469,10 @@ text. Here it is in cells.
 │▌ok, bring the T114.    ││ are you at the field site tomorrow?  13:58         │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
 │ Bob ·b7d0        12:40 ││                yes, from ten. Shall I bring the    │
-│ you: the antenna is…   ││                T114 and the long antenna?  14:02 ✓ │
+│ you: the antenna is…   ││               T114 and the long antenna?  14:02 ✓✓ │
 │                        ││                                                    │
 │ <9c31e0a2…>        Fri ││                    ── Today ──                     │
-│ hello? is this th… [1] ││                                 on my way  09:12 ⌂ │
+│ hello? is this th… [1] ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
 │ Carol ·17ee     22 Oct ││ ──────────────────── 2 new ─────────────────────── │
 │ you: thanks, merged    ││ ok, bring the T114.  14:04                         │
@@ -467,7 +492,7 @@ text. Here it is in cells.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -479,20 +504,20 @@ text. Here it is in cells.
 │ MESSAGES                       3 ││                          nothing earlier on this device                          │
 │ ▌Alice                     14:05 ││                             ── Friday 23 October ──                              │
 │ ▌and the small «tripod» if it…   ││ did the board come back from the soak?  19:40                                    │
-│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
 │  you to Alice              14:06 ││                                                                                  │
 │  the «tripod» fits               ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
 │  Bob                       3 Oct ││ gate is locked after six, so the car park by the road it is.  13:58              │
 │  the «tripod» stays in the van,  ││                                                                                  │
 │                                  ││                           yes, from ten. Shall I bring the T114 and the long     │
-│                                  ││                           antenna, or is the stick enough for the hill?  14:02 ✓ │
+│                                  ││                          antenna, or is the stick enough for the hill?  14:02 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                               on my way  09:12 ⌂ │
-│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
 │                                  ││                                                                                  │
 │                                  ││ ────────────────────────────── 2 new ─────────────────────────────────────────── │
 │                                  ││ ok, bring the T114.  14:04                                                       │
@@ -500,8 +525,8 @@ text. Here it is in cells.
 │                                  ││ and the small «tripod»                                                           │
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ✓ │
-│                                  ││                                                          leaving in ten  14:07 ○ │
+│                                  ││                                                      the «tripod» fits  14:06 ✓✓ │
+│                                  ││                                                         leaving in ten  14:07 ◷  │
 │                                  │├─ to Alice ─────────────────────── Enter send · Alt-Enter newline · M-x commands ─┤
 │                                  ││ ▏                                                                                │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -585,7 +610,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
 - **The list's title is our own address** (`Loquax afbda7b3`), as before,
   not `Chats`.
 - **The header's second row at 120 columns has the propagation node half only**
-  (`propagation node 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
+  (`relay Bern adopted · synced 14:03`, the relay by the name it announces, `a relay` without one, never its hash (1587), right-aligned, with the rule
   under it). How the peer is reached and when it was last heard need the
   path table read for the screen, which nothing does yet. At 80 columns
   the propagation node's state is words, the longest form that fits, never the `⌂`
@@ -595,7 +620,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
   the mark take the pane's last quarter if they fit there, else a row of
   their own. Both mockups already do this.
 - **A send still waiting names its leg** before the time
-  (`are you there  direct 2 s · 12:00 ○`), and a received message whose
+  (`are you there  direct 2 s · 12:00 ◷`), and a received message whose
   signature could not be checked yet, its sender's key unknown, says
   `unverified` after its time, until the key arrives and the block changes
   in place; one whose signature does not hold says `INVALID signature`.
@@ -687,7 +712,9 @@ the propagation node page's decision, or fills a gap they leave:
   announced name, then a space and the address's first four hex digits
   after a `·` (`Alice ·4f2a`); with neither, the address form
   `<9c31e0a2…>` as before. A name is cut before its hash, so the hash
-  always stays.
+  always stays. *Superseded 2026-11-08 (1452): the name alone, the tail
+  only on a collision, "Unknown" instead of the address form, and no `≈`;
+  see [the user interface page](loquax-ui.md), "Built 2026-10-26, names".*
 - **Sanitising** removes control characters, the bidi embeddings,
   overrides, isolates and marks, and the invisible code points (Unicode's
   default-ignorables: zero-width characters, the soft hyphen, the Hangul
@@ -722,7 +749,9 @@ the propagation node page's decision, or fills a gap they leave:
   section 2, "Blocking, and names from the palette".)
 - **Trust** is the three words of the propagation node page in the header:
   `known` with a petname, `blocked` with a block (over a petname),
-  `unknown` else. Beside a petname that differs from what the peer
+  `unknown` else; since 1279 (the ninety percent walk, finding 21) the
+  default `unknown` is not drawn, and the header says nothing of a missing
+  propagation node until a send needs one (`no relay`). Beside a petname that differs from what the peer
   announces the header adds `announces Ally`, the provenance of option C.
   `blocked` was only said until Lew decided what it does on 2026-10-28
   (1082): stored silently, see the propagation node page, section 2.
@@ -745,7 +774,7 @@ newest messages, its marks, its ledger, its pin and its unread count, and
 the names peers announced. The frames are pinned from three runs over one
 home in `loquax/tests/fixtures/tui_history.frames`: an exchange with Bob
 and a send to Carol cut off by quitting; a restart that shows both from the
-store, Bob by name, the proof `✓`, the cut-off send `○` with the restart in
+store, Bob by name, the proof `✓✓`, the cut-off send `◷` with the restart in
 its ledger, then pins Bob and deletes his reply; and a third start that
 shows the pin and the deletion kept. Where it differs from the text above,
 or fills a gap it leaves:
@@ -758,7 +787,7 @@ or fills a gap it leaves:
   the view staying on what the reader was reading. The pages say "the last
   screens" and name no number.
 - **The restart discontinuity** is the page's: a send still queued or in
-  flight at exit is `○` after the restart, with `Loquax restarted: no
+  flight at exit is `◷` after the restart, with `Loquax restarted: no
   longer being sent` in its ledger at the time of the start. Nothing sends
   it again, because nothing holds the router's queue across a restart
   (`loquax/src/engine.rs`, "What it deliberately does not do"); no screen
@@ -785,7 +814,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:160`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:268`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -803,7 +832,7 @@ foreground colours can carry the two sides in a terminal the way Signal
 and WhatsApp do on the phone. They can. This part says how; Lew took all
 five proposals of part 6 as they stood, and "Built" after it names where
 the build differs from the text. The table is `leviculum-ui/src/tokens.rs`
-(`tokens`, `leviculum-ui/src/tokens.rs:353`).
+(`tokens`, `leviculum-ui/src/tokens.rs:304`).
 
 The model is the desktop apps': Signal Desktop and WhatsApp Desktop tint
 our own blocks in the app's accent and draw the other side's in a neutral
@@ -845,16 +874,21 @@ and every dim tone below 3:1. So the tones join the table, per theme and
 tier, measured against the own tint and the selected own tint, because a
 mark only ever sits in an own block:
 
-| Tone (state) | truecolor dark | truecolor light | 256 dark | 256 light |
+Since 2026-11-01 (1232) the column draws the tick ladder of
+[read receipts](loquax-read-receipts.md), section 3, and needs three tones,
+not eight: grey for every rung before read, the green for read, the red
+for not sent. Each keeps the value its state had in the table before, so
+the contrast measured for it holds (`Tones` in
+`leviculum-ui/src/tokens.rs`, checked at 3:1 over both own tints):
+
+| Tone (rungs) | truecolor dark | truecolor light | 256 dark | 256 light |
 |---|---|---|---|---|
-| dim gray (queued) | `#b4bcc8` | `#4f5866` | 250 | 240 |
-| dim yellow (proof of work) | `#c8ad4a` | `#7d6a33` | 179 | 94 |
-| yellow (in flight) | `#f2d45c` | `#6b5200` | 221 | 58 |
-| amber (sent, unproven) | `#ffb347` | `#8a4500` | 214 | 130 |
-| blue (at a propagation node) | `#a8ccff` | `#1a46a0` | 153 | 19 |
-| green (delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
-| red (refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
-| dim red (given up) | `#e8a29c` | `#8a4a45` | 181 | 95 |
+| grey (sending, mailbox, delivered; the old queued) | `#b4bcc8` | `#4f5866` | 250 | 240 |
+| green (read; the old delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
+| red (not sent; the old refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
+
+Read is bold besides, and drawn `✔✔` against delivered's `✓✓`, so it does
+not rest on the colour alone.
 
 In 16 colours the marks take the block's text colour. Over the blue own
 tint the bright red (9) is 2.4:1 and the bright blue (12) 2.0:1 on the
@@ -872,7 +906,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:308`), and both have `16`.
+   (`loquax/src/main.rs:454`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -905,23 +939,23 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:223`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:251`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:214`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:367`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
 - a terminal that does not answer in time and sets no `COLORFGBG` gives
   dark, as in `lnomad`;
 - a palette action `theme` toggles for the session, the way `t` calls
-  `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
+  `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:352`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2732`).
+  (`loquax/src/ui.rs:6144`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -966,10 +1000,10 @@ not mapped.
 │▌ok, bring the T114.    ││ are you at the field site tomorrow?  13:58         │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
 │ Bob ·b7d0        12:40 ││                yes, from ten. Shall I bring the    │
-│ you: the antenna is…   ││                T114 and the long antenna?  14:02 ✓ │
+│ you: the antenna is…   ││               T114 and the long antenna?  14:02 ✓✓ │
 │                        ││                                                    │
 │ <9c31e0a2…>        Fri ││                    ── Today ──                     │
-│ hello? is this th… [1] ││                                 on my way  09:12 ⌂ │
+│ hello? is this th… [1] ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
 │ Carol ·17ee     22 Oct ││ ──────────────────── 2 new ─────────────────────── │
 │ you: thanks, merged    ││ ok, bring the T114.  14:04                         │
@@ -1023,7 +1057,7 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -1035,20 +1069,20 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 │ MESSAGES                       3 ││                          nothing earlier on this device                          │
 │ ▌Alice                     14:05 ││                             ── Friday 23 October ──                              │
 │ ▌and the small «tripod» if it…   ││ did the board come back from the soak?  19:40                                    │
-│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
 │  you to Alice              14:06 ││                                                                                  │
 │  the «tripod» fits               ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
 │  Bob                       3 Oct ││ gate is locked after six, so the car park by the road it is.  13:58              │
 │  the «tripod» stays in the van,  ││                                                                                  │
 │                                  ││                           yes, from ten. Shall I bring the T114 and the long     │
-│                                  ││                           antenna, or is the stick enough for the hill?  14:02 ✓ │
+│                                  ││                          antenna, or is the stick enough for the hill?  14:02 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                               on my way  09:12 ⌂ │
-│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
 │                                  ││                                                                                  │
 │                                  ││ ────────────────────────────── 2 new ─────────────────────────────────────────── │
 │                                  ││ ok, bring the T114.  14:04                                                       │
@@ -1056,8 +1090,8 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 │                                  ││ and the small «tripod»                                                           │
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ✓ │
-│                                  ││                                                          leaving in ten  14:07 ○ │
+│                                  ││                                                      the «tripod» fits  14:06 ✓✓ │
+│                                  ││                                                         leaving in ten  14:07 ◷  │
 │                                  │├─ to Alice ─────────────────────── Enter send · Alt-Enter newline · M-x commands ─┤
 │                                  ││ ▏                                                                                │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -1110,14 +1144,15 @@ The same pairs, plus the two the larger frame adds: the date pill is
 7.1:1 on dark and 10.8:1 on light in truecolor (6.3:1 and 8.1:1 in 256),
 and the `2 new` rule over the pane is at least 6.5:1 on dark and 5.3:1 on
 light in truecolor against the reference panes (`#000000` and `#282c34`,
-`#ffffff` and `#fdf6e3`). The marks in this frame (`✓` `⌂` `◇` `○`) are
-5.1:1 to 6.7:1 over the own tint and 3.6:1 to 5.4:1 over the selected one
-in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
+`#ffffff` and `#fdf6e3`). The marks in this frame (`✓✓` `✓` `◷`, drawn
+before 1232 as `✓` `⌂` `◇` `○`) are 5.1:1 to 6.7:1 over the own tint and
+3.6:1 to 5.4:1 over the selected one in truecolor, 3.4:1 to 9.3:1 and 3.1:1
+to 8.6:1 in 256; the ladder's three tones are among the values measured.
 
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:883`) writes characters only, and the existing
+  (`loquax/src/tui.rs:1329`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1180,7 +1215,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:999`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1484`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:
@@ -1292,17 +1327,75 @@ sees. Where it differs from the table:
   `lnomad`.
 - **`--no-mouse`** starts without capture and the palette's `mouse`
   switches it; without capture the terminal's own selection works.
+- **Shift+drag is the terminal's own selection, capture or not** (1444):
+  xterm, VTE terminals (GNOME Terminal, Tilix), Konsole, kitty, Alacritty,
+  foot and WezTerm hand a drag with Shift held to their own selection and
+  never report it, so the text lands in the PRIMARY selection and the
+  terminal's copy as it does in any other program. Loquax asks nothing
+  that would stop it.
+- **The window selects as a desktop program does** (1444): a double
+  click on a bubble's words selects the word, a triple click its line, a
+  press and a drag a range across bubbles in reading order, a Shift+click
+  moves the end, a plain click or `Escape` clears it, `Ctrl-A` selects the
+  whole conversation. Every change is put on the PRIMARY selection (a
+  middle click elsewhere pastes it), `Ctrl-C` puts it on the clipboard.
+  Within one bubble the copy is its words; across bubbles one line each,
+  `Name, 14:05: text`. A middle click on the compose field pastes the
+  PRIMARY selection where it clicked (at its cursor until 1475); the field keeps its own selection,
+  `Ctrl-C` and `Ctrl-V`. The rules are the core's
+  (`loquax/src/ui/selection.rs`), the pointer's place in a text the
+  shared widget's (`leviculum-ui-iced/src/select.rs`).
+- **Every text in the window selects** (1475), not only the bubbles'
+  words: the day lines, a group's own lines ("Anna joined."), a reply's
+  quote, a bubble's position line, each conversation's last line in the
+  list, and in the profile the address and the code (shown under the QR
+  as text for it). Each is a run of its own in the core, in reading
+  order, so a drag runs through all of them. Across runs the copy is one
+  line a bubble, `Name, 14:05: ` and the bubble's quote (`> `), words and
+  position line joined by ` · `; a day line or a group's line stands
+  alone on its line; the address is copied without the blanks between its
+  fours. The window has no detail view to select in: the Info is the
+  phone's.
+- **A list row and a position line are buttons** (1475): a plain click
+  opens the chat or the map as before; the pointer moved more than 4
+  pixels with the button held, or a double click, selects instead. The
+  open that the release of such a drag still sends is dropped within that
+  one event; a double click opens with its first click and selects with
+  its second, as two clicks are.
+- **The pane scrolls at its edge** (1475): while a drag selects, the
+  pointer within 32 pixels of the chat's or the list's top or bottom edge,
+  or past it, scrolls that way on every frame, faster the deeper it is,
+  and the selection follows into what scrolls in.
+- **A middle click pastes where it clicks** (1475): the compose field's
+  cursor goes to the click, then the PRIMARY selection is pasted there.
+- **The terminal's copy mode** (1475, `loquax/src/ui/copy_mode.rs`): `v`
+  (vi's visual mode), `Ctrl-Space` (the Emacs mark) or a `Shift`+arrow in
+  the messages puts a cursor on the selected message's first character
+  and selects from there to wherever it goes: the arrows, `h` `j` `k`
+  `l`, `w` `b`, `0` `$` (`Home` `End`), and the Emacs `Ctrl-f` `Ctrl-b`
+  `Ctrl-n` `Ctrl-p` `Ctrl-a` `Ctrl-e` `Alt-f` `Alt-b`. `y`, `Alt-w` or
+  `Enter` copy it through OSC 52 and leave; `Esc`, `Ctrl-g`, `q` or `v`
+  leave without a copy; a click leaves too. The selection is the core's,
+  the same as the window's: a cursor cell is a place in its message's
+  text, the copy one line a message with its writer and time across
+  messages. It is drawn as a drag's, in inverse video. A terminal that
+  does not take OSC 52 copies nothing; the copy mode cannot change that.
+  The details moved from `v` to `I` for it.
+- **The phone stays as it is** (1475): WhatsApp offers no selection
+  inside a bubble either; a long press with Copy copies the message whole,
+  and that is the phone's model.
 - **A key script** says `click`, `wheel` and `drag` at cells counted from
   1, and writes each copy's OSC 52 sequence into its frames
   (`loquax/tests/fixtures/tui_mouse.frames`).
 
 ## 6. What is deliberately not copied from the phone apps
 
-- **Read receipts** beyond the LXMF proof. The proof says the bytes
-  reached the destination identity; nothing on the wire says a human read
-  them (`leviculum-lxmf/src/constants.rs:60-86` has no such field), and
-  the delivery decision of 2026-08-10 already forbids implying one. No
-  second check mark, no blue ticks.
+- **Read receipts inferred from the proof.** The proof says the bytes
+  reached the destination identity, not that a person read them, and
+  nothing is read off it. Replaced on 2026-10-31: Loquax shows a read only
+  on the peer's own signed receipt, and its two ticks mean delivered, two
+  heavier accent ticks read ([read receipts](loquax-read-receipts.md),
+  the glyph ladder). A contact without receipts stays at delivered.
 - **Typing indicators.** No LXMF field carries one, and sending one would
   be a transmission per keystroke, which the quiet keyboard rules out on
   its own.
@@ -1404,7 +1497,7 @@ layout's.
    periculum's.* The SQLite store of [storage](loquax-storage.md),
    conversations and messages across restarts, the ledger persisted,
    search over FTS5, local delete, pinning, and the restart discontinuity
-   shown honestly (a message queued at exit is `○` again after restart).
+   shown honestly (a message queued at exit is `◷` again after restart).
    Depends on the storage decision's implementation, on 4 for FTS5, and
    on 2 for where history is drawn. *Acceptance:* tests over the store's
    durability rule (atomic writes, corrupt is not missing); a restart in

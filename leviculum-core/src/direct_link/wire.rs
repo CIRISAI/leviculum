@@ -151,6 +151,11 @@ pub enum Signal {
     },
     Complete {
         session: SessionId,
+        /// +ciris (leviculum#107): the path MTU this side's probe found
+        /// (`"m"`), so the link moves at the smaller of both ends' finds.
+        /// `None` is what every older peer sends: the link moves at
+        /// [`super::DIRECT_LINK_MTU`], as before.
+        mtu: Option<u32>,
     },
 }
 
@@ -173,7 +178,7 @@ impl Signal {
             | Signal::Accept { session }
             | Signal::Reject { session, .. }
             | Signal::Ready { session, .. }
-            | Signal::Complete { session } => session,
+            | Signal::Complete { session, .. } => session,
         }
     }
 
@@ -217,9 +222,14 @@ impl Signal {
                 }
                 write_extras(&mut buf, *commit, host_payload.as_deref());
             }
-            Signal::Accept { session } | Signal::Complete { session } => {
+            Signal::Accept { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
                 write_session(&mut buf, session);
+            }
+            Signal::Complete { session, mtu } => {
+                msgpack::write_fixmap_header(&mut buf, 1 + u8::from(mtu.is_some()));
+                write_session(&mut buf, session);
+                write_path_mtu(&mut buf, *mtu);
             }
             Signal::Reject { session, reason } => {
                 msgpack::write_fixmap_header(&mut buf, 2);
@@ -284,7 +294,10 @@ impl Signal {
                 responder_local: fields.local,
                 commit: fields.commit,
             },
-            _ => Signal::Complete { session },
+            _ => Signal::Complete {
+                session,
+                mtu: fields.mtu,
+            },
         };
         Ok(signal)
     }
@@ -301,6 +314,7 @@ struct Fields {
     local: Vec<SocketAddr>,
     commit: bool,
     host_payload: Option<Vec<u8>>,
+    mtu: Option<u32>,
 }
 
 impl Fields {
@@ -320,7 +334,7 @@ impl Fields {
                 b"p" => fields.protocol = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"r" => fields.reason = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"l" => fields.local = read_local(data, &mut pos)?,
-                b"c" => fields.commit = read_bool(data, &mut pos)?,
+                b"c" => fields.commit = msgpack::read_bool(data, &mut pos)?,
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -328,6 +342,7 @@ impl Fields {
                     }
                     fields.host_payload = Some(bin.to_vec());
                 }
+                b"m" => fields.mtu = read_path_mtu(data, &mut pos)?,
                 _ => msgpack::skip_msgpack_value(data, &mut pos)?,
             }
         }
@@ -362,17 +377,6 @@ fn write_extras(buf: &mut Vec<u8>, commit: bool, host_payload: Option<&[u8]>) {
         msgpack::write_fixstr(buf, "h");
         msgpack::write_bin(buf, payload);
     }
-}
-
-fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
-    let byte = *data.get(*pos)?;
-    let value = match byte {
-        0xc3 => true,
-        0xc2 => false,
-        _ => return None,
-    };
-    *pos += 1;
-    Some(value)
 }
 
 /// +ciris: `"l"`, the sender's host candidates, as an array of endpoints.
@@ -708,10 +712,13 @@ const MTU_PROBE_MAGIC: &[u8; 4] = b"RNSM";
 
 /// +ciris (leviculum#104): the probe sizes, largest first. Each is the size
 /// of the UDP payload, which is what a Reticulum packet at that MTU fills:
-/// `DIRECT_LINK_MTU`, then the IPv6 minimum link MTU. A path that carries
-/// neither (a tunnel, an APN or 464XLAT clamping below it) signals no MTU,
-/// so links over it hold the base 500.
-pub const MTU_PROBE_STEPS: [u32; 2] = [super::DIRECT_LINK_MTU, 1280];
+/// `DIRECT_LINK_MTU`, then the IPv6 minimum link MTU, then (leviculum#107)
+/// what an IPv6 path of exactly that minimum carries once its 40-byte IPv6
+/// and 8-byte UDP headers are paid. A path that carries none (a tunnel, an
+/// APN or 464XLAT clamping below it) signals no MTU, so links over it hold
+/// the base 500. A peer that answers probes acks any size it receives
+/// whole, so a step added here needs nothing new from it.
+pub const MTU_PROBE_STEPS: [u32; 3] = [super::DIRECT_LINK_MTU, 1280, 1232];
 
 /// The high half of the sequence number a probe carries, and its ack echoes.
 const MTU_PROBE_SEQ_TAG: u32 = 0xFFFE_0000;
@@ -761,6 +768,31 @@ pub const fn mtu_probe_acked_size(seq: u32) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// +ciris (leviculum#107): `"m"`, the path MTU a COMPLETE carries, written
+/// only when set. A COMPLETE goes only to a peer on the two-sided commit
+/// (leviculum#89), so rns-rs never sees one; a leviculum peer from before
+/// this field skips the unknown key (its decoder always has), and so would
+/// rns-rs's, which looks keys up by name in a decoded map.
+fn write_path_mtu(buf: &mut Vec<u8>, mtu: Option<u32>) {
+    if let Some(mtu) = mtu {
+        msgpack::write_fixstr(buf, "m");
+        msgpack::write_uint(buf, u64::from(mtu));
+    }
+}
+
+/// `"m"` as sent, or `None` when it is not an unsigned integer that fits a
+/// `u32`: such a value is skipped rather than refusing the signal, so a later
+/// encoding of the field reads here as absent.
+fn read_path_mtu(data: &[u8], pos: &mut usize) -> Option<Option<u32>> {
+    let mut at = *pos;
+    if let Some(value) = msgpack::read_msgpack_uint(data, &mut at) {
+        *pos = at;
+        return Some(u32::try_from(value).ok());
+    }
+    msgpack::skip_msgpack_value(data, pos)?;
+    Some(None)
 }
 
 #[cfg(test)]
@@ -852,7 +884,10 @@ mod tests {
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
             (
-                Signal::Complete { session: SESSION },
+                Signal::Complete {
+                    session: SESSION,
+                    mtu: None,
+                },
                 "81a173c41011111111111111111111111111111111",
             ),
         ];
@@ -1056,5 +1091,48 @@ mod tests {
             None,
             "a keepalive ack is not a probe ack"
         );
+    }
+
+    /// +ciris (leviculum#107): a COMPLETE with the probed path MTU is the
+    /// plain COMPLETE plus one `"m"` entry; one without it is byte for byte
+    /// what it always was (pinned above).
+    #[test]
+    fn complete_carries_the_path_mtu_as_one_extra_key() {
+        let signal = Signal::Complete {
+            session: SESSION,
+            mtu: Some(1280),
+        };
+        let golden = hex("82a173c41011111111111111111111111111111111a16dcd0500");
+        assert_eq!(signal.encode(), golden);
+        assert_eq!(Signal::decode(MSG_UPGRADE_COMPLETE, &golden), Ok(signal));
+    }
+
+    /// +ciris (leviculum#107): a `"m"` that is not a `u32` reads as absent
+    /// rather than refusing the COMPLETE, and the key means nothing to any
+    /// other signal.
+    #[test]
+    fn a_path_mtu_this_side_cannot_use_is_absent() {
+        for value in [
+            |b: &mut Vec<u8>| msgpack::write_nil(b),
+            |b: &mut Vec<u8>| msgpack::write_uint(b, u64::from(u32::MAX) + 1),
+            |b: &mut Vec<u8>| msgpack::write_fixstr(b, "1280"),
+        ] {
+            let mut body = Vec::new();
+            msgpack::write_fixmap_header(&mut body, 2);
+            msgpack::write_fixstr(&mut body, "m");
+            value(&mut body);
+            write_session(&mut body, &SESSION);
+            assert_eq!(
+                Signal::decode(MSG_UPGRADE_COMPLETE, &body),
+                Ok(Signal::Complete {
+                    session: SESSION,
+                    mtu: None
+                })
+            );
+            assert_eq!(
+                Signal::decode(MSG_UPGRADE_ACCEPT, &body),
+                Ok(Signal::Accept { session: SESSION })
+            );
+        }
     }
 }

@@ -26,9 +26,11 @@
 //!   are one more, so a peer keeps its name across a restart.
 //! - **`fields` is filled, `title` and `timestamp` stay empty for now**:
 //!   the engine's `Received` event carries the fields, which the store keeps
-//!   whole as one raw msgpack map; it does not carry the sender's time, and
-//!   the screen drops the title. The columns are there so filling them is no
-//!   migration.
+//!   whole as one raw msgpack map, and the screen drops the title. The
+//!   column `received_at` holds the time a message shows, which since 1445
+//!   is when its writer wrote it (the event's `sent_at`, a group copy's
+//!   writer's); when this device took it is the first line of its ledger.
+//!   The columns are there so filling them is no migration.
 //! - **Positions are a table** (`positions`, schema 2): every position a
 //!   telemetry field carried, keyed by who measured and the fix time, so the
 //!   same fix arriving directly and again in a collector's stream is one row
@@ -52,6 +54,21 @@
 //!   message a client handed in with `/send`, signed and packed once, with
 //!   its state, so a restart keeps retrying it. Each state change is an
 //!   archive entry as well, written in the same transaction.
+//! - **Drafts are a table** (`drafts`, schema 8, 1219): a conversation's
+//!   message typed and not sent, one row a conversation, beside it and not
+//!   in the config. The model writes it once typing paused
+//!   ([`crate::ui::history::DRAFT_DEBOUNCE_MS`]), each write one
+//!   transaction as every write is, and deletes it once sent.
+//! - **Read receipts are two columns** (schema 9, 1230): a message of ours
+//!   the peer read is state 8 with the reader's time in `messages.read_at`,
+//!   and `conversations.receipts` says whether the peer's latest message
+//!   carried the receipt mark (`docs/src/concepts/loquax-read-receipts.md`).
+//! - **Position shares are a table** (`shares`, schema 10, 1273): a
+//!   conversation's running share, one row a conversation: its span, its
+//!   start and end in unix seconds (no end until stopped), and the last
+//!   report it sent (the fix's integers, when it went, whether it went for
+//!   a move), which is what its cadence goes on from after a restart. The
+//!   row goes when the share stops.
 //! - **Imported history sits below seq 0** (schema 6, `crate::import`): a
 //!   conversation's imported rows are older than what loquax wrote, so they
 //!   take negative keys below the store's lowest, in the source's time
@@ -65,7 +82,11 @@
 //!
 //! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
-//! outbox and schema 6 the two provenance columns of imported messages,
+//! outbox, schema 6 the two provenance columns of imported messages, schema 7
+//! a conversation's mute, archive and verification, schema 8 the drafts,
+//! schema 9 the two read-receipt columns, schema 10 the shares, schema 11
+//! the groups a home hosts, schema 12 a copy's digest and the groups a
+//! device knows and schema 13 whether a copy waits at a propagation node,
 //! nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
@@ -97,7 +118,11 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
-use crate::ui::history::{Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::counters::{Counters, Op, Ops};
+use crate::ui::groups::{GroupInfo, Standing};
+use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::listing::Listing;
+use crate::ui::share::{Report, Share, Span};
 use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
 use leviculum_lxmf::telemetry::Location;
@@ -106,10 +131,15 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 22;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
+
+/// How far apart two writes of a device's `last_seen` are at least
+/// (1642, [`Store::device_seen`]): the mailbox page says "last seen" to
+/// the minute.
+pub const SEEN_EVERY_SECS: i64 = 60;
 
 /// The most results a search returns from the store.
 pub const SEARCH_LIMIT: usize = 200;
@@ -257,6 +287,249 @@ ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 8 adds to schema 7: a conversation's draft, the message
+/// typed and not sent (1219): its text, the LXMF id a reply answers, and
+/// what is to go with it as a JSON array (empty until attachments exist).
+const SCHEMA_V8: &str = "
+CREATE TABLE drafts(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    body TEXT NOT NULL,
+    reply BLOB,
+    attachments TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (identity, peer));
+";
+
+/// What schema 9 adds to schema 8: read receipts (1230). When the peer
+/// read one of ours, its reader's clock in unix seconds, beside `state` 8
+/// (read); and whether the peer's latest message carried the `lev`
+/// namespace's read-receipt mark.
+const SCHEMA_V9: &str = "
+ALTER TABLE messages ADD COLUMN read_at INTEGER;
+ALTER TABLE conversations ADD COLUMN receipts INTEGER NOT NULL DEFAULT 0;
+";
+
+/// What schema 10 adds to schema 9: a conversation's running position
+/// share (1273). `span` is [`Span::word`]; `last_*` the last report it
+/// sent, all null before the first.
+const SCHEMA_V10: &str = "
+CREATE TABLE shares(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    span TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    until INTEGER,
+    last_lat INTEGER,
+    last_lon INTEGER,
+    last_alt INTEGER,
+    last_accuracy INTEGER,
+    last_fix_at INTEGER,
+    last_at INTEGER,
+    last_moved INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (identity, peer));
+";
+
+/// What schema 11 adds to schema 10: the groups this home hosts (1307,
+/// `docs/drafts/group-chats-study-2026-11.md` 5.4), their members and the
+/// fan-out's bookkeeping, one row a copy of a member's message to another
+/// member. The group's private key is not here: it is a file beside the
+/// identity's ([`crate::home::group`]). See [`groups`] for the columns.
+const SCHEMA_V11: &str = "
+CREATE TABLE groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin BLOB NOT NULL,
+    epoch INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, address));
+CREATE TABLE group_members(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    flags INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    left_at INTEGER,
+    PRIMARY KEY (identity, grp, address));
+CREATE TABLE group_fanout(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    original BLOB NOT NULL,
+    member BLOB NOT NULL,
+    copy BLOB NOT NULL,
+    state INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    proven_at INTEGER,
+    read_at INTEGER,
+    PRIMARY KEY (identity, grp, original, member));
+CREATE UNIQUE INDEX group_fanout_by_copy ON group_fanout(identity, copy);
+";
+
+/// What schema 12 adds to schema 11 (1307 G2): the digest a held copy went
+/// out in (`group_fanout.digest`, null for a copy sent alone), and the
+/// groups a device knows (`client_groups`), kept as the messages taught
+/// them, so a restart lists every group before any of its messages is
+/// loaded. `members` is the `lev` key `0x05` as the wire carries it.
+const SCHEMA_V12: &str = "
+ALTER TABLE group_fanout ADD COLUMN digest BLOB;
+CREATE INDEX group_fanout_by_digest ON group_fanout(identity, digest);
+CREATE TABLE client_groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin_name TEXT NOT NULL,
+    inviter BLOB,
+    ours INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    standing INTEGER NOT NULL,
+    members BLOB NOT NULL,
+    PRIMARY KEY (identity, address));
+";
+
+/// What schema 13 adds to schema 12 (1307 pass four): whether a group's
+/// copy waits at a propagation node (`group_fanout.propagated`, 1 once a
+/// node took it), so a restart does not upload it again.
+const SCHEMA_V13: &str = "
+ALTER TABLE group_fanout ADD COLUMN propagated INTEGER NOT NULL DEFAULT 0;
+";
+
+/// What schema 14 adds to schema 13 (1385): how a position came
+/// (`positions.source`, 0 in a message's telemetry, 1 announced to the
+/// mesh), so the track keeps the announced fixes too and a restart gives
+/// them back as such.
+const SCHEMA_V14: &str = "
+ALTER TABLE positions ADD COLUMN source INTEGER NOT NULL DEFAULT 0;
+";
+
+/// What schema 15 adds to schema 14 (1409): what the propagation node is
+/// still to be asked about (`pn_asks`, one row per open `transient_id`:
+/// our message id, the node it was uploaded to and when, unix seconds),
+/// and the nodes whose announce said they answer `/lev/status`
+/// (`pn_nodes`, with the version they said), so a restart asks about the
+/// uploads before it ([`crate::pn_status::Asker::restore`]).
+const SCHEMA_V15: &str = "
+CREATE TABLE pn_asks(
+    identity BLOB NOT NULL,
+    transient BLOB NOT NULL,
+    message BLOB NOT NULL,
+    node BLOB NOT NULL,
+    uploaded_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, transient));
+CREATE TABLE pn_nodes(
+    identity BLOB NOT NULL,
+    node BLOB NOT NULL,
+    version INTEGER NOT NULL,
+    PRIMARY KEY (identity, node));
+";
+
+/// What schema 16 adds to schema 15 (1466): when a group copy's member's
+/// device said it has it (`group_fanout.device_at`, unix seconds, null
+/// until then): its `0x07`, or its read receipt, which includes it. The
+/// writer's two ticks count these, not the proofs, which a member's
+/// mailbox signs too.
+const SCHEMA_V16: &str = "
+ALTER TABLE group_fanout ADD COLUMN device_at INTEGER;
+";
+
+/// What schema 17 adds to schema 16 (1490): the conversation's row as
+/// the list shows it ([`crate::ui::listing::Listing`]), written beside
+/// the fold that changed it, read whole by [`Store::start`] so a
+/// restart reads summaries, not bodies. NULL where unknown or where a
+/// write touched messages without handing a fresh row; the start read
+/// falls back to a page for those and the next fold heals the column.
+const SCHEMA_V17: &str = "
+ALTER TABLE conversations ADD COLUMN listing BLOB;
+";
+
+/// What schema 18 adds to schema 17 (1579, [`crate::home::pages`]): the
+/// NomadNet pages the home heard (`home_pages`, one row a node, at most
+/// [`crate::home::pages::PAGES_CAP`]) and the identity's bookmarks with
+/// their tombstones (`home_bookmarks`, keyed by lnomad's URL, `at` the
+/// writing device's clock in unix milliseconds). `stamp` is the home's
+/// change counter, shared by both tables: a device asks for the rows with
+/// a stamp after its own.
+const SCHEMA_V18: &str = "
+CREATE TABLE home_pages(
+    identity BLOB NOT NULL,
+    dest BLOB NOT NULL,
+    name TEXT,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    hops INTEGER,
+    count INTEGER NOT NULL,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, dest));
+CREATE INDEX home_pages_by_stamp ON home_pages(identity, stamp);
+CREATE TABLE home_bookmarks(
+    identity BLOB NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    deleted INTEGER NOT NULL,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, url));
+CREATE INDEX home_bookmarks_by_stamp ON home_bookmarks(identity, stamp);
+";
+
+/// What schema 19 adds to schema 18 (1635): the petnames this device
+/// set that its home node has not taken yet (`owed_petnames`, one row a
+/// peer, the newest name, NULL for a cleared one), so a restart hands
+/// them again and a pull of an older entry does not undo them.
+const SCHEMA_V19: &str = "
+CREATE TABLE owed_petnames(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    petname TEXT,
+    PRIMARY KEY (identity, peer));
+";
+
+/// What schema 20 adds to schema 19 (1642): when the mailbox last heard
+/// from each admitted device (`home_devices.last_seen`, unix seconds, NULL
+/// until the first request after the migration), so the mailbox page of
+/// every device can say which devices it knows and when each was last
+/// there.
+const SCHEMA_V20: &str = "
+ALTER TABLE home_devices ADD COLUMN last_seen INTEGER;
+";
+
+/// What schema 21 adds to schema 20 (1640): the peer states this device
+/// set that its home node has not taken yet (`owed_peer_states`, one row a
+/// peer, the newest state whole, `muted_until` NULL for unmuted), as
+/// `owed_petnames` holds the petnames.
+const SCHEMA_V21: &str = "
+CREATE TABLE owed_peer_states(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    blocked INTEGER NOT NULL,
+    pinned INTEGER NOT NULL,
+    archived INTEGER NOT NULL,
+    muted_until INTEGER,
+    PRIMARY KEY (identity, peer));
+";
+
+/// What schema 22 adds to schema 21 (1643, [`crate::home::pages::NameRow`]):
+/// the name of every LXMF delivery announce the home heard (`home_names`,
+/// one row an address, at most [`crate::home::pages::NAMES_CAP`], the one
+/// heard longest ago going first). `stamp` is the counter `home_pages` and
+/// `home_bookmarks` share, so the rows ride in the same `/pages` delta.
+const SCHEMA_V22: &str = "
+CREATE TABLE home_names(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    hops INTEGER,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, address));
+CREATE INDEX home_names_by_stamp ON home_names(identity, stamp);
+CREATE INDEX home_names_by_last_seen ON home_names(identity, last_seen);
+";
+
+pub mod groups;
+pub mod pages;
+
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
 /// the seq with its sign bit flipped: the same order, and every row of an
@@ -293,6 +566,41 @@ const TABLES_V4: [&str; 3] = ["archive", "home_devices", "home_tokens"];
 
 /// The tables schema 5 adds.
 const TABLES_V5: [&str; 1] = ["home_outbox"];
+
+/// The table schema 8 adds.
+const TABLES_V8: [&str; 1] = ["drafts"];
+
+/// The table schema 10 adds.
+const TABLES_V10: [&str; 1] = ["shares"];
+
+/// The tables schema 11 adds.
+const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
+
+/// The table schema 12 adds.
+const TABLES_V12: [&str; 1] = ["client_groups"];
+
+/// The tables schema 15 adds.
+const TABLES_V15: [&str; 2] = ["pn_asks", "pn_nodes"];
+
+/// The tables schema 18 adds.
+const TABLES_V18: [&str; 2] = ["home_pages", "home_bookmarks"];
+
+/// The table schema 19 adds.
+const TABLES_V19: [&str; 1] = ["owed_petnames"];
+
+/// The table schema 21 adds.
+const TABLES_V21: [&str; 1] = ["owed_peer_states"];
+
+/// The table schema 22 adds.
+const TABLES_V22: [&str; 1] = ["home_names"];
+
+/// What [`Store::put_hub`] writes: a hub heard, or the rooms a kept hub
+/// named (1643).
+#[derive(Clone, Copy)]
+enum HubPut<'a> {
+    Heard(&'a crate::ui::hubs::HeardHub),
+    Rooms(&'a [u8; 16], &'a [String]),
+}
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -340,6 +648,9 @@ pub struct Store {
     conn: Connection,
     path: PathBuf,
     identity: [u8; 16],
+    /// The rows read and the commits made since the last reset (1489,
+    /// [`crate::ui::counters`]); shared with the commit hook.
+    ops: std::sync::Arc<Ops>,
 }
 
 impl Store {
@@ -364,11 +675,7 @@ impl Store {
         let conn = Connection::open_with_flags(path, flags).map_err(|e| failed(path, e))?;
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_MS))
             .map_err(|e| failed(path, e))?;
-        let store = Self {
-            conn,
-            path: path.to_path_buf(),
-            identity,
-        };
+        let store = Self::over(conn, path, identity);
         match fresh {
             true => store.create()?,
             false => store.check()?,
@@ -405,11 +712,55 @@ impl Store {
                 format!("schema {version}; start Loquax once to bring it to {SCHEMA_VERSION}"),
             ));
         }
-        Ok(Some(Self {
+        Ok(Some(Self::over(conn, path, identity)))
+    }
+
+    /// The store over an open connection, its commits counted where the
+    /// counters are on ([`crate::ui::counters`]): every commit, a
+    /// transaction's and a lone statement's alike, is one sync to the disk.
+    fn over(mut conn: Connection, path: &Path, identity: [u8; 16]) -> Self {
+        let ops = std::sync::Arc::new(Ops::new());
+        if crate::ui::counters::ON {
+            let counting = std::sync::Arc::clone(&ops);
+            let hooked = conn.commit_hook(Some(move || {
+                counting.add(Op::Commits, 1);
+                // Never veto the commit.
+                false
+            }));
+            if let Err(error) = hooked {
+                tracing::debug!("STORE no commit counter: {error}");
+            }
+        }
+        Self {
             conn,
             path: path.to_path_buf(),
             identity,
-        }))
+            ops,
+        }
+    }
+
+    /// The rows the store's reads handed up and the commits it made since
+    /// it opened or the last [`Store::reset_counters`] (1489); `None` in a
+    /// release build without the `counters` feature.
+    pub fn counters(&self) -> Option<Counters> {
+        self.ops.read()
+    }
+
+    /// Start the store's count afresh.
+    pub fn reset_counters(&self) {
+        self.ops.reset();
+    }
+
+    /// `rows`, counted as read.
+    fn read<T>(&self, rows: Vec<T>) -> Vec<T> {
+        self.ops.add(Op::StoreRowsRead, rows.len());
+        rows
+    }
+
+    /// One row read, when there was one.
+    fn read_one<T>(&self, row: T) -> T {
+        self.ops.add(Op::StoreRowsRead, 1);
+        row
     }
 
     /// Where it is.
@@ -420,7 +771,11 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
+             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} {SCHEMA_V21} {SCHEMA_V22} \
+             PRAGMA user_version = {SCHEMA_VERSION}; \
+             COMMIT;"
         );
         self.conn
             .execute_batch(&batch)
@@ -491,8 +846,53 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 8 {
+            if let Some(missing) = missing(&TABLES_V8) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 10 {
+            if let Some(missing) = missing(&TABLES_V10) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 11 {
+            if let Some(missing) = missing(&TABLES_V11) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 12 {
+            if let Some(missing) = missing(&TABLES_V12) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 15 {
+            if let Some(missing) = missing(&TABLES_V15) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 18 {
+            if let Some(missing) = missing(&TABLES_V18) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 19 {
+            if let Some(missing) = missing(&TABLES_V19) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 21 {
+            if let Some(missing) = missing(&TABLES_V21) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 22 {
+            if let Some(missing) = missing(&TABLES_V22) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
-            return self.migrate();
+            return self.migrate(version);
         }
         Ok(())
     }
@@ -500,13 +900,21 @@ impl Store {
     /// An older schema to this one: each later schema's tables, all or
     /// none. The version is read again under the write lock, so two loquax
     /// opening one old file at once migrate it once.
-    fn migrate(&self) -> Result<(), StoreError> {
-        let migrate = || -> rusqlite::Result<()> {
+    ///
+    /// Each migration says one line, `HOME store migrated from= to= steps=
+    /// took_ms=`, and one that fails says `HOME store migration refused`
+    /// before the error goes up (1305: miauhaus went from 7 to 12 with no
+    /// trace but a read of `user_version`).
+    fn migrate(&self, seen: i32) -> Result<(), StoreError> {
+        let started = std::time::Instant::now();
+        let mut from = None;
+        let mut migrate = || -> rusqlite::Result<()> {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
             let version: i32 = self
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))?;
             if version < SCHEMA_VERSION {
+                from = Some(version);
                 let mut batch = String::new();
                 if version < 2 {
                     batch.push_str(SCHEMA_V2);
@@ -523,7 +931,52 @@ impl Store {
                 if version < 6 {
                     batch.push_str(SCHEMA_V6);
                 }
-                batch.push_str(SCHEMA_V7);
+                if version < 7 {
+                    batch.push_str(SCHEMA_V7);
+                }
+                if version < 8 {
+                    batch.push_str(SCHEMA_V8);
+                }
+                if version < 9 {
+                    batch.push_str(SCHEMA_V9);
+                }
+                if version < 10 {
+                    batch.push_str(SCHEMA_V10);
+                }
+                if version < 11 {
+                    batch.push_str(SCHEMA_V11);
+                }
+                if version < 12 {
+                    batch.push_str(SCHEMA_V12);
+                }
+                if version < 13 {
+                    batch.push_str(SCHEMA_V13);
+                }
+                if version < 14 {
+                    batch.push_str(SCHEMA_V14);
+                }
+                if version < 15 {
+                    batch.push_str(SCHEMA_V15);
+                }
+                if version < 16 {
+                    batch.push_str(SCHEMA_V16);
+                }
+                if version < 17 {
+                    batch.push_str(SCHEMA_V17);
+                }
+                if version < 18 {
+                    batch.push_str(SCHEMA_V18);
+                }
+                if version < 19 {
+                    batch.push_str(SCHEMA_V19);
+                }
+                if version < 20 {
+                    batch.push_str(SCHEMA_V20);
+                }
+                if version < 21 {
+                    batch.push_str(SCHEMA_V21);
+                }
+                batch.push_str(SCHEMA_V22);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -532,7 +985,35 @@ impl Store {
             }
             self.conn.execute_batch("COMMIT")
         };
-        migrate().map_err(|e| failed(&self.path, e))
+        let outcome = migrate();
+        // Read under the write lock: another loquax may have migrated first,
+        // which says nothing here. A failure before the read is said with
+        // the version the open read.
+        let from = match (from, &outcome) {
+            (Some(from), _) => from,
+            (None, Ok(())) => return Ok(()),
+            (None, Err(_)) => seen,
+        };
+        let took_ms = started.elapsed().as_millis();
+        match outcome {
+            Ok(()) => {
+                tracing::info!(
+                    "HOME store migrated from={from} to={SCHEMA_VERSION} steps={} took_ms={took_ms} \
+                     path={}",
+                    SCHEMA_VERSION - from,
+                    self.path.display()
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "HOME store migration refused from={from} to={SCHEMA_VERSION} took_ms={took_ms} \
+                     path={}: {error}",
+                    self.path.display()
+                );
+                Err(failed(&self.path, error))
+            }
+        }
     }
 
     fn configure(&self) -> Result<(), StoreError> {
@@ -549,6 +1030,7 @@ impl Store {
         let last: Option<i64> = self
             .conn
             .query_row("SELECT MAX(seq) FROM messages", [], |row| row.get(0))
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         // Never below seq 0: imported history sits there, and the model counts
         // on from here.
@@ -562,7 +1044,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
-                 (SELECT MAX(seq) FROM messages m \
+                 c.receipts, (SELECT MAX(seq) FROM messages m \
                   WHERE m.identity = c.identity AND m.conversation = c.peer) AS last \
                  FROM conversations c WHERE c.identity = ?1 \
                  ORDER BY last DESC",
@@ -578,15 +1060,20 @@ impl Store {
                         muted_until: row.get::<_, Option<i64>>(3)?,
                         archived: row.get::<_, bool>(4)?,
                         verified: row.get::<_, bool>(5)?,
+                        receipts: row.get::<_, bool>(6)?,
                     },
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
+        let mut groups = self.client_groups()?;
         let mut out = Vec::new();
         for (peer, pinned, unread, flags) in rows {
             let peer = self.address(&peer)?;
             let (messages, earlier) = self.page(peer, u64::MAX, None)?;
+            let draft = self.draft(peer)?;
+            let group = groups.remove(&peer);
             out.push(Restored {
                 peer,
                 pinned,
@@ -594,7 +1081,166 @@ impl Store {
                 unread: unread.max(0) as usize,
                 messages,
                 earlier,
+                draft,
+                group,
+                listing: None,
             });
+        }
+        // A group with no conversation row yet (only its state came) is
+        // listed too, after the others.
+        for (peer, group) in groups {
+            out.push(Restored {
+                peer,
+                pinned: false,
+                flags: Flags::default(),
+                unread: 0,
+                messages: Vec::new(),
+                earlier: 0,
+                draft: Draft::default(),
+                group: Some(group),
+                listing: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The conversations as a restart reads them (1490, schema 17): the
+    /// summaries alone, no body. A conversation whose `listing` column
+    /// is missing or does not decode (an older store, an import, a
+    /// write that touched messages without a fresh row) is handed its
+    /// newest page instead, as [`Store::restore`] hands every one, and
+    /// the next fold writes the column. The open conversation's page
+    /// follows through the same [`StoreWrite`] reads the scrollback
+    /// uses.
+    pub fn start(&self) -> Result<Vec<Restored>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
+                 c.receipts, c.listing, (SELECT MAX(seq) FROM messages m \
+                  WHERE m.identity = c.identity AND m.conversation = c.peer) AS last, \
+                 (SELECT COUNT(*) FROM messages m \
+                  WHERE m.identity = c.identity AND m.conversation = c.peer) AS held \
+                 FROM conversations c WHERE c.identity = ?1 \
+                 ORDER BY last DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)?,
+                    Flags {
+                        muted_until: row.get::<_, Option<i64>>(3)?,
+                        archived: row.get::<_, bool>(4)?,
+                        verified: row.get::<_, bool>(5)?,
+                        receipts: row.get::<_, bool>(6)?,
+                    },
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut groups = self.client_groups()?;
+        let mut drafts = self.drafts()?;
+        let mut out = Vec::new();
+        for (peer, pinned, unread, flags, listing, held) in rows {
+            let peer = self.address(&peer)?;
+            let listing = listing.as_deref().and_then(Listing::decode);
+            let (messages, earlier) = match listing.is_some() {
+                true => (Vec::new(), held.max(0) as usize),
+                false => self.page(peer, u64::MAX, None)?,
+            };
+            let draft = drafts.remove(&peer).unwrap_or_default();
+            let group = groups.remove(&peer);
+            out.push(Restored {
+                peer,
+                pinned,
+                flags,
+                unread: unread.max(0) as usize,
+                messages,
+                earlier,
+                draft,
+                group,
+                listing,
+            });
+        }
+        // A group with no conversation row yet (only its state came) is
+        // listed too, after the others.
+        for (peer, group) in groups {
+            out.push(Restored {
+                peer,
+                pinned: false,
+                flags: Flags::default(),
+                unread: 0,
+                messages: Vec::new(),
+                earlier: 0,
+                draft: Draft::default(),
+                group: Some(group),
+                listing: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The groups the device knows (1307 G2), by address, as the model
+    /// last wrote them. A row whose members are no membership is damage.
+    pub fn client_groups(&self) -> Result<BTreeMap<[u8; 16], GroupInfo>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT address, name, admin_name, inviter, ours, epoch, standing, members \
+                 FROM client_groups WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut out = BTreeMap::new();
+        for (address, name, admin_name, inviter, ours, epoch, standing, members) in rows {
+            let address = self.address(&address)?;
+            let corrupt = |what: &str| StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("a group's {what}"),
+            };
+            let (_, members) =
+                GroupInfo::members_from(&members).ok_or_else(|| corrupt("members"))?;
+            let standing = match standing {
+                0 => Standing::Invited,
+                1 => Standing::Joined,
+                2 => Standing::Left,
+                3 => Standing::Ended,
+                _ => return Err(corrupt("standing")),
+            };
+            out.insert(
+                address,
+                GroupInfo {
+                    address,
+                    name,
+                    admin_name,
+                    inviter: inviter.map(|i| self.address(&i)).transpose()?,
+                    ours,
+                    epoch: u64::try_from(epoch).map_err(|_| corrupt("epoch"))?,
+                    members,
+                    standing,
+                },
+            );
         }
         Ok(out)
     }
@@ -634,6 +1280,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         let through = through.map(seq_of);
         let lowest = match (window_start, through) {
@@ -645,7 +1292,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT seq, id, direction, state, unproven, verification, last_leg, \
-                 received_at, utc_offset, size, content, fields FROM messages \
+                 received_at, utc_offset, size, content, fields, read_at FROM messages \
                  WHERE identity = ?1 AND conversation = ?2 AND seq < ?3 AND seq >= ?4 \
                  ORDER BY seq",
             )
@@ -656,6 +1303,7 @@ impl Store {
                 row_message,
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut ledger = self
             .conn
@@ -670,7 +1318,10 @@ impl Store {
                     })
                 })
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                .map(|rows| self.read(rows))
                 .map_err(|e| self.failed(e))?;
+            crate::ui::arrival::before_1462(message);
+            crate::ui::groups::before_1466(message);
         }
         let first = messages.first().map_or(before, |m| seq_of(m.activity));
         let earlier: i64 = self
@@ -681,6 +1332,7 @@ impl Store {
                 params![&self.identity[..], &peer[..], first],
                 |row| row.get(0),
             )
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         Ok((messages, earlier.max(0) as usize))
     }
@@ -696,10 +1348,135 @@ impl Store {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| failed(&path, e))?;
+        // A batch that touches a conversation's messages without handing
+        // a fresh listing leaves the column NULL (1490): the start read
+        // falls back to a page there, so an import or a foreign writer
+        // can never leave a stale row on screen. Peers are resolved
+        // before the deletes run.
+        let mut dirty: alloc::collections::BTreeSet<[u8; 16]> = Default::default();
+        let mut listed: alloc::collections::BTreeSet<[u8; 16]> = Default::default();
+        for write in writes {
+            match write {
+                StoreWrite::Message { peer, .. } => {
+                    dirty.insert(*peer);
+                }
+                StoreWrite::ForgetMessage { key } => {
+                    let found: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT conversation FROM messages \
+                             WHERE identity = ?1 AND seq = ?2",
+                            params![&identity[..], seq_of(*key)],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| failed(&path, e))?;
+                    if let Some(peer) = found.and_then(|p| <[u8; 16]>::try_from(p.as_slice()).ok())
+                    {
+                        dirty.insert(peer);
+                    }
+                }
+                StoreWrite::ForgetId { id } => {
+                    let found: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT conversation FROM messages \
+                             WHERE identity = ?1 AND id = ?2",
+                            params![&identity[..], &id[..]],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| failed(&path, e))?;
+                    if let Some(peer) = found.and_then(|p| <[u8; 16]>::try_from(p.as_slice()).ok())
+                    {
+                        dirty.insert(peer);
+                    }
+                }
+                StoreWrite::Listing { peer, .. } => {
+                    listed.insert(*peer);
+                }
+                _ => {}
+            }
+        }
         for write in writes {
             apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
         }
+        for peer in dirty.difference(&listed) {
+            tx.execute(
+                "UPDATE conversations SET listing = NULL \
+                 WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// The peer states this device owes its home node (1640), as the last
+    /// [`StoreWrite::OwedPeerStates`] kept them.
+    pub fn owed_peer_states(
+        &self,
+    ) -> Result<BTreeMap<[u8; 16], crate::home::wire::PeerState>, StoreError> {
+        let read = || -> rusqlite::Result<BTreeMap<[u8; 16], crate::home::wire::PeerState>> {
+            let mut statement = self.conn.prepare(
+                "SELECT peer, blocked, pinned, archived, muted_until FROM owed_peer_states \
+                 WHERE identity = ?1",
+            )?;
+            let rows = statement.query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    crate::home::wire::PeerState {
+                        blocked: row.get(1)?,
+                        pinned: row.get(2)?,
+                        archived: row.get(3)?,
+                        muted_until: row.get(4)?,
+                    },
+                ))
+            })?;
+            let mut owed = BTreeMap::new();
+            for row in rows {
+                let (peer, state) = row?;
+                // A row of another length is no address: passed over.
+                if let Ok(peer) = <[u8; 16]>::try_from(peer.as_slice()) {
+                    owed.insert(peer, state);
+                }
+            }
+            Ok(owed)
+        };
+        read().map_err(|e| self.failed(e))
+    }
+
+    /// The petnames this device owes its home node (1635), as the last
+    /// [`StoreWrite::OwedPetnames`] kept them.
+    pub fn owed_petnames(&self) -> Result<BTreeMap<[u8; 16], Option<String>>, StoreError> {
+        let read = || -> rusqlite::Result<BTreeMap<[u8; 16], Option<String>>> {
+            let mut statement = self
+                .conn
+                .prepare("SELECT peer, petname FROM owed_petnames WHERE identity = ?1")?;
+            let rows = statement.query_map(params![&self.identity[..]], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let mut owed = BTreeMap::new();
+            for row in rows {
+                let (peer, petname) = row?;
+                // A row of another length is no address: passed over.
+                if let Ok(peer) = <[u8; 16]>::try_from(peer.as_slice()) {
+                    owed.insert(peer, petname);
+                }
+            }
+            Ok(owed)
+        };
+        read().map_err(|e| self.failed(e))
+    }
+
+    /// What the propagation node is still to be asked about (1409), as
+    /// [`Store::save_pn_asks`] kept it.
+    pub fn pn_asks(&self) -> Result<crate::pn_status::AskerState, StoreError> {
+        read_pn_asks(&self.conn, &self.identity).map_err(|e| self.failed(e))
+    }
+
+    /// Keep what the propagation node is still to be asked about, all of
+    /// it in place of what was kept.
+    pub fn save_pn_asks(&mut self, state: &crate::pn_status::AskerState) -> Result<(), StoreError> {
+        self.write(&[StoreWrite::PnAsks(state.clone())])
     }
 
     /// Whether a message received with this id is already held: the
@@ -751,6 +1528,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .filter_map(|(id, source, packed)| {
@@ -817,17 +1595,30 @@ impl Store {
 
     /// Every position the store holds, or `peer`'s only.
     fn fixes(&self, peer: Option<[u8; 16]>) -> Result<Vec<Fix>, StoreError> {
+        self.fixes_between(peer, i64::MIN, i64::MAX)
+    }
+
+    /// The positions whose fix time is in `[from, to)`, `peer`'s or every
+    /// peer's, by fix time: the track's reader (1385). The table's key
+    /// starts with the peer and the fix time, so a window is a range.
+    pub fn fixes_between(
+        &self,
+        peer: Option<[u8; 16]>,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Fix>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
-                 speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
-                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2)",
+                 speed_e2, bearing_e2, accuracy_e2, telemetry, source FROM positions \
+                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2) \
+                 AND fix_time >= ?3 AND fix_time < ?4 ORDER BY fix_time",
             )
             .map_err(|e| self.failed(e))?;
         let peer = peer.map(|peer| peer.to_vec());
         let rows = statement
-            .query_map(params![&self.identity[..], peer], |row| {
+            .query_map(params![&self.identity[..], peer, from, to], |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
@@ -843,22 +1634,72 @@ impl Store {
                     },
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
-            .map(|(peer, via, message, location, received_at, telemetry)| {
-                Ok(Fix {
-                    peer: self.address(&peer)?,
-                    via: self.address(&via)?,
-                    message: message.map(key_of),
-                    received_at,
-                    location,
-                    telemetry,
-                })
-            })
+            .map(
+                |(peer, via, message, location, received_at, telemetry, source)| {
+                    Ok(Fix {
+                        peer: self.address(&peer)?,
+                        via: self.address(&via)?,
+                        message: message.map(key_of),
+                        received_at,
+                        location,
+                        telemetry,
+                        source: source_of(source),
+                    })
+                },
+            )
             .collect()
+    }
+
+    /// The positions we shared (1201), newest first, at most `limit`: who
+    /// got one, when we sent it (unix seconds, when the store knows), and
+    /// where we were. The privacy page's list; read from our own messages
+    /// that carry telemetry, so a deleted message leaves it.
+    pub fn shared(&self, limit: usize) -> Result<Vec<(Fix, Option<i64>)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, conversation, received_at, fields FROM messages \
+                 WHERE identity = ?1 AND direction = 1 AND fields IS NOT NULL \
+                 ORDER BY seq DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut shared = Vec::new();
+        for (seq, peer, sent, packed) in rows {
+            if shared.len() >= limit {
+                break;
+            }
+            let Some(fields) = unpack_fields(&packed) else {
+                continue;
+            };
+            let read = crate::telemetry::read(self.identity, &fields, sent);
+            if let Some(fix) = crate::telemetry::shown_fix(&read) {
+                let mut fix = fix.clone();
+                // Who got it: the conversation, not who measured.
+                fix.via = self.address(&peer)?;
+                fix.message = Some(key_of(seq));
+                shared.push((fix, sent));
+            }
+        }
+        Ok(shared)
     }
 
     /// How many positions the store holds for `peer`: the track.
@@ -885,6 +1726,7 @@ impl Store {
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(peer, name)| Ok((self.address(&peer)?, name)))
@@ -945,6 +1787,7 @@ impl Store {
             .map_err(|e| self.failed(e))?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
             let key: i64 = row.get(0).map_err(|e| self.failed(e))?;
             let peer: Vec<u8> = row.get(1).map_err(|e| self.failed(e))?;
             let peer = self.address(&peer)?;
@@ -973,6 +1816,159 @@ impl Store {
         Ok(out)
     }
 
+    /// The running position shares (1273), by conversation. A row this
+    /// loquax cannot read (a span it does not know, half a last report) is
+    /// refused as corrupt, as every other row is.
+    pub fn shares(&self) -> Result<Vec<([u8; 16], Share)>, StoreError> {
+        type Row = (Vec<u8>, String, i64, Option<i64>, [Option<i64>; 6], bool);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT peer, span, started_at, until, last_lat, last_lon, last_alt, \
+                 last_accuracy, last_fix_at, last_at, last_moved FROM shares \
+                 WHERE identity = ?1 ORDER BY peer",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows: Vec<Row> = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    [
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ],
+                    row.get(10)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let corrupt = |detail: String| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail,
+        };
+        let mut out = Vec::new();
+        for (peer, span, started_at, until, last, moved) in rows {
+            let peer = self.address(&peer)?;
+            let span =
+                Span::of_word(&span).ok_or_else(|| corrupt(format!("a share's span {span:?}")))?;
+            let last = match last {
+                [None, None, None, None, None, None] => None,
+                [Some(lat), Some(lon), Some(alt), Some(accuracy), Some(fix_at), Some(at)] => {
+                    Some(Report {
+                        fix: Location::saturating(lat, lon, alt, 0, 0, accuracy, fix_at),
+                        at,
+                        moved,
+                    })
+                }
+                _ => return Err(corrupt("a share's last report is half there".to_string())),
+            };
+            out.push((
+                peer,
+                Share {
+                    span,
+                    started_at,
+                    until,
+                    last,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// `peer`'s draft (1219), the empty one for none.
+    /// Every conversation's draft in one read: what the start read
+    /// joins, a row per draft that exists instead of an ask per
+    /// conversation (1490).
+    fn drafts(&self) -> Result<BTreeMap<[u8; 16], Draft>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT peer, body, reply, attachments FROM drafts WHERE identity = ?1")
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut out = BTreeMap::new();
+        for (peer, text, reply, attachments) in rows {
+            let peer = self.address(&peer)?;
+            let reply = match reply {
+                Some(id) => Some(id.as_slice().try_into().map_err(|_| StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!("a draft's reply id of {} bytes", id.len()),
+                })?),
+                None => None,
+            };
+            let attachments =
+                serde_json::from_str(&attachments).map_err(|e| StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!("a draft's attachments: {e}"),
+                })?;
+            out.insert(
+                peer,
+                Draft {
+                    text,
+                    reply,
+                    attachments,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    fn draft(&self, peer: [u8; 16]) -> Result<Draft, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT body, reply, attachments FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&self.identity[..], &peer[..]],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map(|row| self.read_one(row))
+            .map_err(|e| self.failed(e))?;
+        let Some((text, reply, attachments)) = row else {
+            return Ok(Draft::default());
+        };
+        let reply = match reply {
+            Some(id) => Some(id.as_slice().try_into().map_err(|_| StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("a draft's reply id of {} bytes", id.len()),
+            })?),
+            None => None,
+        };
+        let attachments = serde_json::from_str(&attachments).map_err(|e| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail: format!("a draft's attachments: {e}"),
+        })?;
+        Ok(Draft {
+            text,
+            reply,
+            attachments,
+        })
+    }
+
     fn address(&self, bytes: &[u8]) -> Result<[u8; 16], StoreError> {
         bytes.try_into().map_err(|_| StoreError::Corrupt {
             path: self.path.clone(),
@@ -992,6 +1988,9 @@ pub struct Device {
     pub device: [u8; 16],
     pub name: String,
     pub admitted_at: i64,
+    /// When the mailbox last heard from it (1642), unix seconds; `None`
+    /// before its first request since schema 20.
+    pub last_seen: Option<i64>,
 }
 
 /// What redeeming an admission token came to.
@@ -1181,6 +2180,152 @@ impl Store {
         self.archive_newest_of(crate::home::KIND_PETNAME, peer, packed, at, cap_bytes)
     }
 
+    /// Append a hub entry ([`crate::home::KIND_HUB`], 1599) for a hub the
+    /// home heard announcing, when it says something new: a hub not kept
+    /// yet, or with another name or hops, or heard
+    /// [`crate::home::HUB_REFRESH_SECS`] after its kept hearing. Its first
+    /// hearing stays the kept one, and so do the rooms its kept entry
+    /// carries (1643). Only a hub's newest entry is kept, and past
+    /// [`crate::ui::hubs::HEARD_BOUND`] hubs the one heard longest ago goes.
+    /// `None` when nothing was appended.
+    pub fn archive_hub(
+        &mut self,
+        hub: &crate::ui::hubs::HeardHub,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.put_hub(HubPut::Heard(hub), cap_bytes)
+    }
+
+    /// The rooms a kept hub's answer to `/list` named when the home asked
+    /// it (1643): its entry again with them, when they differ from the
+    /// kept entry's. `None` when nothing was appended: the rooms are the
+    /// kept ones, or the archive keeps no entry of the hub (it went past
+    /// the bound while the question was out).
+    pub fn archive_hub_rooms(
+        &mut self,
+        hub: &[u8; 16],
+        rooms: &[String],
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.put_hub(HubPut::Rooms(hub, rooms), cap_bytes)
+    }
+
+    fn put_hub(&mut self, put: HubPut<'_>, cap_bytes: u64) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let kind = i64::from(crate::home::KIND_HUB);
+        let hash = match put {
+            HubPut::Heard(hub) => hub.hash,
+            HubPut::Rooms(hash, _) => *hash,
+        };
+        let prefix = crate::home::wire::name_entry_prefix(&hash);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let newest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                params![&identity[..], kind, prefix_len, &prefix[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        let kept = newest
+            .as_deref()
+            .and_then(|packed| crate::home::wire::read_hub_entry_rooms(packed).ok());
+        let (entry, rooms) = match (put, kept) {
+            (HubPut::Heard(hub), None) => (hub.clone(), None),
+            (HubPut::Heard(hub), Some((kept, rooms))) => {
+                let same = kept.name == hub.name.clone().or(kept.name.clone())
+                    && kept.hops == hub.hops.or(kept.hops);
+                if same && hub.last < kept.last.saturating_add(crate::home::HUB_REFRESH_SECS) {
+                    return Ok(None);
+                }
+                let mut entry = hub.clone();
+                entry.first = kept.first.min(hub.first);
+                entry.name = hub.name.clone().or(kept.name.clone());
+                entry.hops = hub.hops.or(kept.hops);
+                (entry, rooms)
+            }
+            (HubPut::Rooms(..), None) => return Ok(None),
+            (HubPut::Rooms(_, rooms), Some((kept, kept_rooms))) => {
+                if kept_rooms.as_deref() == Some(rooms) {
+                    return Ok(None);
+                }
+                (kept, Some(rooms.to_vec()))
+            }
+        };
+        let packed = crate::home::wire::hub_entry_rooms(&entry, rooms.as_deref());
+        let mut keyed = packed.clone();
+        keyed.extend_from_slice(&entry.last.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_HUB,
+            &id,
+            &packed,
+            entry.last,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    kind,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    prefix_len,
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+            // The bound: the hubs heard longest ago go.
+            let bound = i64::try_from(crate::ui::hubs::HEARD_BOUND).unwrap_or(i64::MAX);
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq IN \
+                 (SELECT seq FROM archive WHERE identity = ?1 AND kind = ?2 \
+                  ORDER BY at DESC, seq DESC LIMIT -1 OFFSET ?3)",
+                params![&identity[..], kind, bound],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// The hubs the archive keeps ([`crate::home::KIND_HUB`]), last heard
+    /// first.
+    pub fn archived_hubs(&self) -> Result<Vec<crate::ui::hubs::HeardHub>, StoreError> {
+        let path = self.path.clone();
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 ORDER BY at DESC, seq DESC",
+            )
+            .map_err(|e| failed(&path, e))?;
+        let rows = statement
+            .query_map(
+                params![&self.identity[..], i64::from(crate::home::KIND_HUB)],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| failed(&path, e))?;
+        let mut hubs = Vec::new();
+        for packed in rows {
+            let packed = packed.map_err(|e| failed(&path, e))?;
+            if let Ok(hub) = crate::home::wire::read_hub_entry(&packed) {
+                hubs.push(hub);
+            }
+        }
+        Ok(hubs)
+    }
+
     /// Whether the archive holds a petname entry for `peer`, a cleared one
     /// too: the reader said their word on that peer's name (1159).
     pub fn archive_holds_petname(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
@@ -1191,6 +2336,52 @@ impl Store {
     /// said its word on that peer's block, pin, archive and mute (1162).
     pub fn archive_holds_peer_state(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
         self.archive_holds_of(crate::home::KIND_PEERSTATE, peer)
+    }
+
+    /// The bytes of the archive entry of `kind` kept under `id`, while the
+    /// archive still holds it.
+    pub fn archive_entry(&self, kind: u8, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 AND id = ?3",
+                params![&self.identity[..], i64::from(kind), &id[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Whether a seen mark in the archive names the message `id` (1234):
+    /// some device saw it already, and its read receipt went then.
+    pub fn archive_seen(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        self.archive_marked(&crate::home::wire::SEEN_MARK_PREFIX, id)
+    }
+
+    /// Whether an arrived mark in the archive names `id` (1462): a device
+    /// said it has it, so its sender's device receipt went.
+    pub fn archive_arrived(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        self.archive_marked(&crate::home::wire::ARRIVED_MARK_PREFIX, id)
+    }
+
+    /// Whether a mark beginning with `prefix` in the archive names `id`.
+    fn archive_marked(&self, prefix: &[u8; 2], id: &[u8; 32]) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 AND instr(packed, ?5) > 0 LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_MARK),
+                    prefix.len() as i64,
+                    &prefix[..],
+                    &id[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
     }
 
     /// Whether the archive holds an entry of `kind` whose bytes begin with
@@ -1289,13 +2480,26 @@ impl Store {
         cursor: u64,
         max_bytes: usize,
     ) -> Result<crate::home::wire::Page, StoreError> {
+        self.archive_since_folded(cursor, max_bytes, crate::home::wire::Fold::All)
+    }
+
+    /// [`Self::archive_since`] for a device that folds (1439): only the
+    /// entries `fold` keeps, skipped in the query, so a board past an
+    /// archive's imported head gets its first page of names at once.
+    pub fn archive_since_folded(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+        fold: crate::home::wire::Fold,
+    ) -> Result<crate::home::wire::Page, StoreError> {
         let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+            .prepare(&format!(
+                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2{} \
                  ORDER BY seq",
-            )
+                fold_clause(fold)
+            ))
             .map_err(|e| self.failed(e))?;
         let mut rows = statement
             .query(params![&self.identity[..], cursor])
@@ -1304,6 +2508,7 @@ impl Store {
         let mut bytes = 0usize;
         let mut more = false;
         while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
             let packed: Vec<u8> = row.get(3).map_err(|e| self.failed(e))?;
             if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
                 more = true;
@@ -1331,7 +2536,36 @@ impl Store {
             entries,
             more,
             first: first.map_or(0, |seq| seq as u64),
+            left: None,
         })
+    }
+
+    /// How many archive entries come after `seq` (1415): what a paged
+    /// `/sync` answer says still waits.
+    pub fn archive_count_after(&self, seq: u64) -> Result<u64, StoreError> {
+        self.archive_count_after_folded(seq, crate::home::wire::Fold::All)
+    }
+
+    /// How many entries a device that folds as `fold` still gets after
+    /// `seq` (1439): `left` as that device will see it arrive.
+    pub fn archive_count_after_folded(
+        &self,
+        seq: u64,
+        fold: crate::home::wire::Fold,
+    ) -> Result<u64, StoreError> {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        let count: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM archive WHERE identity = ?1 AND seq > ?2{}",
+                    fold_clause(fold)
+                ),
+                params![&self.identity[..], seq],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     /// The archive's newest sequence, 0 when it is empty: what a wake
@@ -1377,6 +2611,48 @@ impl Store {
     pub fn data_version(&self) -> Result<i64, StoreError> {
         self.conn
             .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(|e| self.failed(e))
+    }
+
+    /// The newest message the archive received from `peer`, packed as it
+    /// came (1307 pass six): what that peer's client last said of itself.
+    /// An LXMF message packs its destination, then its source.
+    pub fn archive_newest_from(&self, peer: &[u8; 16]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 17, 16) = ?3 ORDER BY seq DESC LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    &peer[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Forget every archived message of the conversation with `group`
+    /// (1307 pass four, its admin deleted it): the members' lines to it,
+    /// what the owner's devices sent it and what it sent the owner. The
+    /// count removed. Devices that pulled them keep theirs until the
+    /// group's last membership tells them it ended.
+    pub fn archive_forget_group(&mut self, group: &[u8; 16]) -> Result<usize, StoreError> {
+        // An LXMF message packs its destination, then its source.
+        self.conn
+            .execute(
+                "DELETE FROM archive WHERE identity = ?1 AND ( \
+                 (kind IN (?3, ?4) AND substr(packed, 1, 16) = ?2) \
+                 OR (kind = ?5 AND substr(packed, 17, 16) = ?2))",
+                params![
+                    &self.identity[..],
+                    &group[..],
+                    i64::from(crate::home::KIND_GROUP),
+                    i64::from(crate::home::KIND_SENT),
+                    i64::from(crate::home::KIND_RECEIVED)
+                ],
+            )
             .map_err(|e| self.failed(e))
     }
 
@@ -1465,6 +2741,113 @@ impl Store {
         Ok(added)
     }
 
+    /// Every archive entry's id, kind and time, oldest first, without its
+    /// bytes: what `loquax mailbox archive` prints, and what the N-home cells
+    /// compare across homes (1305).
+    pub fn archive_index(&self) -> Result<Vec<([u8; 32], u8, i64)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, kind, at FROM archive WHERE identity = ?1 ORDER BY seq")
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                let id: Vec<u8> = row.get(0)?;
+                let kind: i64 = row.get(1)?;
+                Ok((
+                    <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                    u8::try_from(kind).unwrap_or(u8::MAX),
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| self.failed(e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// The archive after `cursor` as a move carries it (1281): each entry
+    /// with its id, oldest first, a page of about `max_bytes` but at least
+    /// one entry, and whether more follow, beside the oldest sequence held.
+    pub fn archive_moving(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<(Vec<crate::home::wire::Moving>, bool, u64), StoreError> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, id, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![&self.identity[..], cursor])
+            .map_err(|e| self.failed(e))?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
+            let packed: Vec<u8> = row.get(4).map_err(|e| self.failed(e))?;
+            if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(packed.len());
+            let seq: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let kind: i64 = row.get(1).map_err(|e| self.failed(e))?;
+            let id: Vec<u8> = row.get(2).map_err(|e| self.failed(e))?;
+            entries.push(crate::home::wire::Moving {
+                seq: seq as u64,
+                kind: u8::try_from(kind).unwrap_or(u8::MAX),
+                id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                at: row.get(3).map_err(|e| self.failed(e))?,
+                packed,
+            });
+        }
+        let first: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok((entries, more, first.map_or(0, |seq| seq as u64)))
+    }
+
+    /// Append the entries a move brought (1281), in their order, each of
+    /// its own kind, id and time, all or none, under the cap: how many were
+    /// new to this archive.
+    pub fn archive_moved_in(
+        &mut self,
+        entries: &[crate::home::wire::Moving],
+        cap_bytes: u64,
+    ) -> Result<usize, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let mut added = 0;
+        for entry in entries {
+            let seq = append_in(
+                &tx,
+                &identity,
+                entry.kind,
+                &entry.id,
+                &entry.packed,
+                entry.at,
+                cap_bytes,
+            )
+            .map_err(|e| failed(&path, e))?;
+            added += usize::from(seq.is_some());
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(added)
+    }
+
     /// How many bytes of packed messages the archive holds.
     pub fn archive_bytes(&self) -> Result<u64, StoreError> {
         let total: i64 = self
@@ -1501,6 +2884,22 @@ impl Store {
         at: i64,
         ttl_secs: i64,
     ) -> Result<Redeemed, StoreError> {
+        self.redeem_token_as(token, device, "", at, ttl_secs)
+    }
+
+    /// [`Store::redeem_token`], with the name the device brought in its
+    /// join: a token issued without a name (a phone's "Link a device",
+    /// 1264, which cannot know the other device's name) admits it under
+    /// that one. A token with a name keeps it, as the person who issued it
+    /// chose it.
+    pub fn redeem_token_as(
+        &mut self,
+        token: &[u8; 16],
+        device: &[u8; 16],
+        brought: &str,
+        at: i64,
+        ttl_secs: i64,
+    ) -> Result<Redeemed, StoreError> {
         let identity = self.identity;
         let path = self.path.clone();
         let tx = self
@@ -1515,9 +2914,15 @@ impl Store {
             )
             .optional()
             .map_err(|e| failed(&path, e))?;
-        let Some((name, created_at)) = open else {
+        let Some((mut name, created_at)) = open else {
             return Ok(Redeemed::Unknown);
         };
+        if name.trim().is_empty() {
+            name = match brought.trim() {
+                "" => "device".to_string(),
+                brought => brought.to_string(),
+            };
+        }
         tx.execute(
             "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
             params![&identity[..], &token[..]],
@@ -1555,8 +2960,8 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT device, name, admitted_at FROM home_devices WHERE identity = ?1 \
-                 ORDER BY admitted_at, name",
+                "SELECT device, name, admitted_at, last_seen FROM home_devices \
+                 WHERE identity = ?1 ORDER BY admitted_at, name",
             )
             .map_err(|e| self.failed(e))?;
         let rows = statement
@@ -1565,19 +2970,36 @@ impl Store {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
-            .map(|(device, name, admitted_at)| {
+            .map(|(device, name, admitted_at, last_seen)| {
                 Ok(Device {
                     device: self.address(&device)?,
                     name,
                     admitted_at,
+                    last_seen,
                 })
             })
             .collect()
+    }
+
+    /// `device` asked at `at` (1642): its `last_seen` moves there, at most
+    /// once a [`SEEN_EVERY_SECS`], so a busy link does not write on every
+    /// request. A device that is not admitted changes nothing.
+    pub fn device_seen(&self, device: &[u8; 16], at: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE home_devices SET last_seen = ?3 WHERE identity = ?1 AND device = ?2 \
+                 AND (last_seen IS NULL OR last_seen <= ?3 - ?4)",
+                params![&self.identity[..], &device[..], at, SEEN_EVERY_SECS],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
     }
 
     /// The admission tokens still open at `now`. Expired ones are removed
@@ -1610,6 +3032,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(token, name, created_at)| {
@@ -1748,6 +3171,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(id, destination, packed, created_at, propagated)| {
@@ -1781,15 +3205,21 @@ impl Store {
             .map_err(|e| failed(&path, e))?;
         let update = match change {
             Change::Propagated => {
-                "UPDATE home_outbox SET propagated = 1 WHERE identity = ?1 AND id = ?2"
+                Some("UPDATE home_outbox SET propagated = 1 WHERE identity = ?1 AND id = ?2")
             }
-            Change::Delivered => "UPDATE home_outbox SET state = 1 WHERE identity = ?1 AND id = ?2",
+            Change::Delivered => {
+                Some("UPDATE home_outbox SET state = 1 WHERE identity = ?1 AND id = ?2")
+            }
             Change::Ended { .. } => {
-                "UPDATE home_outbox SET state = 2 WHERE identity = ?1 AND id = ?2"
+                Some("UPDATE home_outbox SET state = 2 WHERE identity = ?1 AND id = ?2")
             }
+            // Still open: the row keeps no leg, so a restart tries it anew.
+            Change::Stalled => None,
         };
-        tx.execute(update, params![&identity[..], &id[..]])
-            .map_err(|e| failed(&path, e))?;
+        if let Some(update) = update {
+            tx.execute(update, params![&identity[..], &id[..]])
+                .map_err(|e| failed(&path, e))?;
+        }
         // A state entry's bytes are the message id, which is all a client
         // needs to find the message the change is of.
         let seq = append_in(&tx, &identity, change.kind(), id, &id[..], at, cap_bytes)
@@ -1965,6 +3395,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut out = Vec::with_capacity(rows.len());
         for (peer, id, mut row) in rows {
@@ -2044,17 +3475,23 @@ fn import_in(
     let mut block = {
         let mut statement = tx.prepare(
             "SELECT id, direction, state, verification, timestamp, received_at, title, \
-             content, fields, origin_verdict, origin FROM messages \
+             content, fields, origin_verdict, origin, read_at FROM messages \
              WHERE identity = ?1 AND conversation = ?2 AND origin IS NOT NULL",
         )?;
         let rows = statement
             .query_map(params![&identity[..], &peer[..]], |row| {
                 let id: Vec<u8> = row.get(0)?;
+                let read: Option<i64> = row.get(11)?;
                 Ok((
                     ImportRow {
                         id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
                         outbound: row.get::<_, i64>(1)? == 1,
-                        delivery: row.get::<_, Option<i64>>(2)?.and_then(state_of),
+                        // With its time (1506): a receipt that read an
+                        // imported message since keeps it through the
+                        // block's new layout.
+                        delivery: row
+                            .get::<_, Option<i64>>(2)?
+                            .and_then(|code| delivery_of(code, read)),
                         signature: signature_of(row.get(3)?),
                         timestamp: row.get(4)?,
                         received_at: row.get(5)?,
@@ -2100,8 +3537,8 @@ fn import_in(
         tx.execute(
             "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
              verification, timestamp, received_at, size, title, content, fields, origin, \
-             origin_verdict) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             origin_verdict, read_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 seq,
                 &identity[..],
@@ -2118,6 +3555,7 @@ fn import_in(
                 (!row.fields.is_empty()).then(|| pack_fields(&row.fields)),
                 origin,
                 row.origin_verdict,
+                read_at(row.delivery),
             ],
         )?;
         let name = origin_name(origin);
@@ -2193,6 +3631,23 @@ fn append_in(
     Ok(Some(seq as u64))
 }
 
+/// The archive query's condition for a device that folds as `fold`
+/// (1439), built from the wire's own constants so the home serves exactly
+/// what `Fold::keeps` says; empty for a device that keeps everything.
+fn fold_clause(fold: crate::home::wire::Fold) -> String {
+    use crate::home::wire::{Fold, BOARD_ENTRY_MAX, BOARD_KINDS};
+    match fold {
+        Fold::All => String::new(),
+        Fold::Board => {
+            let kinds: Vec<String> = BOARD_KINDS.iter().map(u8::to_string).collect();
+            format!(
+                " AND kind IN ({}) AND length(packed) <= {BOARD_ENTRY_MAX}",
+                kinds.join(",")
+            )
+        }
+    }
+}
+
 fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
     let detail = error.to_string();
     // SQLite's words for a file that is not whole, wherever they surface.
@@ -2207,6 +3662,94 @@ fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
             detail,
         },
     }
+}
+
+fn read_pn_asks(
+    conn: &Connection,
+    identity: &[u8; 16],
+) -> rusqlite::Result<crate::pn_status::AskerState> {
+    let mut state = crate::pn_status::AskerState::default();
+    let mut asks = conn.prepare(
+        "SELECT transient, message, node, uploaded_at FROM pn_asks WHERE identity = ?1 \
+         ORDER BY uploaded_at, transient",
+    )?;
+    let rows = asks.query_map(params![&identity[..]], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (transient, message, node, uploaded_at) = row?;
+        // A row of another length is no id: passed over.
+        if let (Ok(transient_id), Ok(message_id), Ok(node)) = (
+            <[u8; 32]>::try_from(transient.as_slice()),
+            <[u8; 32]>::try_from(message.as_slice()),
+            <[u8; 16]>::try_from(node.as_slice()),
+        ) {
+            state.open.push(crate::pn_status::Open {
+                transient_id,
+                message_id,
+                node,
+                uploaded_at,
+            });
+        }
+    }
+    let mut nodes =
+        conn.prepare("SELECT node, version FROM pn_nodes WHERE identity = ?1 ORDER BY node")?;
+    let rows = nodes.query_map(params![&identity[..]], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (node, version) = row?;
+        if let Ok(node) = <[u8; 16]>::try_from(node.as_slice()) {
+            state
+                .answering
+                .push((node, u64::try_from(version).unwrap_or(0)));
+        }
+    }
+    Ok(state)
+}
+
+fn write_pn_asks(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    state: &crate::pn_status::AskerState,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM pn_asks WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    tx.execute(
+        "DELETE FROM pn_nodes WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    for open in &state.open {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_asks(identity, transient, message, node, uploaded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &identity[..],
+                &open.transient_id[..],
+                &open.message_id[..],
+                &open.node[..],
+                open.uploaded_at
+            ],
+        )?;
+    }
+    for (node, version) in &state.answering {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_nodes(identity, node, version) VALUES (?1, ?2, ?3)",
+            params![
+                &identity[..],
+                &node[..],
+                i64::try_from(*version).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn apply(
@@ -2233,11 +3776,11 @@ fn apply(
             tx.execute(
                 "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
                  unproven, verification, last_leg, received_at, utc_offset, size, content, \
-                 fields) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 fields, read_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT(seq) DO UPDATE SET id = excluded.id, state = excluded.state, \
                  unproven = excluded.unproven, verification = excluded.verification, \
-                 last_leg = excluded.last_leg",
+                 last_leg = excluded.last_leg, read_at = excluded.read_at",
                 params![
                     key,
                     &identity[..],
@@ -2253,6 +3796,7 @@ fn apply(
                     message.size as i64,
                     message.body,
                     (!message.fields.is_empty()).then(|| pack_fields(&message.fields)),
+                    read_at(message.delivery),
                 ],
             )?;
             // The ledger only grows: the lines past what the store has.
@@ -2278,11 +3822,11 @@ fn apply(
         } => {
             tx.execute(
                 "INSERT INTO conversations(identity, peer, pinned, unread, muted_until, \
-                 archived, verified) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 archived, verified, receipts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(identity, peer) DO UPDATE SET \
                  pinned = excluded.pinned, unread = excluded.unread, \
                  muted_until = excluded.muted_until, archived = excluded.archived, \
-                 verified = excluded.verified",
+                 verified = excluded.verified, receipts = excluded.receipts",
                 params![
                     &identity[..],
                     &peer[..],
@@ -2290,7 +3834,8 @@ fn apply(
                     *unread as i64,
                     flags.muted_until,
                     flags.archived,
-                    flags.verified
+                    flags.verified,
+                    flags.receipts
                 ],
             )?;
         }
@@ -2312,23 +3857,230 @@ fn apply(
                 params![&identity[..], &peer[..]],
             )?;
             tx.execute(
+                "DELETE FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
                 "DELETE FROM conversations WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
+                "DELETE FROM shares WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
             tx.execute(
                 "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
+            tx.execute(
+                "DELETE FROM client_groups WHERE identity = ?1 AND address = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Listing { peer, listing } => {
+            tx.execute(
+                "INSERT INTO conversations(identity, peer, listing) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET listing = excluded.listing",
+                params![&identity[..], &peer[..], listing.encode()],
+            )?;
+        }
+        StoreWrite::ReadThrough { id } => {
+            // Another device read through `id` and the screen does not
+            // hold it (1490): the rows say it instead. Everything
+            // received after it stays unread; the kept listing's badge
+            // follows where it can, and heals from a page otherwise.
+            let found: Option<(Vec<u8>, i64)> = tx
+                .query_row(
+                    "SELECT conversation, seq FROM messages \
+                     WHERE identity = ?1 AND id = ?2 AND direction = 0",
+                    params![&identity[..], &id[..]],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((peer, seq)) = found {
+                let after: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE identity = ?1 \
+                     AND conversation = ?2 AND direction = 0 AND seq > ?3",
+                    params![&identity[..], &peer[..], seq],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "UPDATE conversations SET unread = MIN(unread, ?3) \
+                     WHERE identity = ?1 AND peer = ?2",
+                    params![&identity[..], &peer[..], after],
+                )?;
+                let blob: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT listing FROM conversations \
+                         WHERE identity = ?1 AND peer = ?2",
+                        params![&identity[..], &peer[..]],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if let Some(listing) = blob.as_deref().and_then(Listing::decode) {
+                    let patched = match after {
+                        0 => {
+                            let mut read = listing;
+                            read.unread_rows = 0;
+                            Some(read.encode())
+                        }
+                        // Reports among the rest are not told apart
+                        // here: the next fold, or a page at start,
+                        // rewrites the row.
+                        _ => None,
+                    };
+                    tx.execute(
+                        "UPDATE conversations SET listing = ?3 \
+                         WHERE identity = ?1 AND peer = ?2",
+                        params![&identity[..], &peer[..], patched],
+                    )?;
+                }
+            }
+        }
+        StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
+        StoreWrite::OwedPeerStates(owed) => {
+            tx.execute(
+                "DELETE FROM owed_peer_states WHERE identity = ?1",
+                params![&identity[..]],
+            )?;
+            for (peer, state) in owed {
+                tx.execute(
+                    "INSERT INTO owed_peer_states(identity, peer, blocked, pinned, archived, \
+                     muted_until) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        &identity[..],
+                        &peer[..],
+                        state.blocked,
+                        state.pinned,
+                        state.archived,
+                        state.muted_until
+                    ],
+                )?;
+            }
+        }
+        StoreWrite::OwedPetnames(owed) => {
+            tx.execute(
+                "DELETE FROM owed_petnames WHERE identity = ?1",
+                params![&identity[..]],
+            )?;
+            for (peer, petname) in owed {
+                tx.execute(
+                    "INSERT INTO owed_petnames(identity, peer, petname) VALUES (?1, ?2, ?3)",
+                    params![&identity[..], &peer[..], petname],
+                )?;
+            }
+        }
+        StoreWrite::Group(group) => {
+            tx.execute(
+                "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
+                 epoch, standing, members) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(identity, address) DO UPDATE SET name = excluded.name, \
+                 admin_name = excluded.admin_name, inviter = excluded.inviter, \
+                 ours = excluded.ours, epoch = excluded.epoch, standing = excluded.standing, \
+                 members = excluded.members",
+                params![
+                    &identity[..],
+                    &group.address[..],
+                    group.name,
+                    group.admin_name,
+                    group.inviter.as_ref().map(|i| &i[..]),
+                    group.ours,
+                    i64::try_from(group.epoch).unwrap_or(i64::MAX),
+                    match group.standing {
+                        Standing::Invited => 0,
+                        Standing::Joined => 1,
+                        Standing::Left => 2,
+                        Standing::Ended => 3,
+                    },
+                    group.members_bytes()
+                ],
+            )?;
+        }
+        StoreWrite::Draft { peer, draft } if draft.is_empty() => {
+            tx.execute(
+                "DELETE FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        // Beside its conversation, so a conversation with nothing in it but
+        // a draft comes back at start.
+        StoreWrite::Draft { peer, draft } => {
+            tx.execute(
+                "INSERT INTO conversations(identity, peer) VALUES (?1, ?2) \
+                 ON CONFLICT DO NOTHING",
+                params![&identity[..], &peer[..]],
+            )?;
+            let attachments = serde_json::to_string(&draft.attachments)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute(
+                "INSERT INTO drafts(identity, peer, body, reply, attachments) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET body = excluded.body, \
+                 reply = excluded.reply, attachments = excluded.attachments",
+                params![
+                    &identity[..],
+                    &peer[..],
+                    draft.text,
+                    draft.reply.as_ref().map(|id| &id[..]),
+                    attachments,
+                ],
+            )?;
+        }
+        StoreWrite::Share { peer, share: None } => {
+            tx.execute(
+                "DELETE FROM shares WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Share {
+            peer,
+            share: Some(share),
+        } => {
+            let last = share.last.as_ref();
+            tx.execute(
+                "INSERT INTO shares(identity, peer, span, started_at, until, last_lat, last_lon, \
+                 last_alt, last_accuracy, last_fix_at, last_at, last_moved) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET span = excluded.span, \
+                 started_at = excluded.started_at, until = excluded.until, \
+                 last_lat = excluded.last_lat, last_lon = excluded.last_lon, \
+                 last_alt = excluded.last_alt, last_accuracy = excluded.last_accuracy, \
+                 last_fix_at = excluded.last_fix_at, last_at = excluded.last_at, \
+                 last_moved = excluded.last_moved",
+                params![
+                    &identity[..],
+                    &peer[..],
+                    share.span.word(),
+                    share.started_at,
+                    share.until,
+                    last.map(|l| l.fix.latitude_e6),
+                    last.map(|l| l.fix.longitude_e6),
+                    last.map(|l| l.fix.altitude_e2),
+                    last.map(|l| l.fix.accuracy_e2),
+                    last.map(|l| l.fix.last_update),
+                    last.map(|l| l.at),
+                    last.is_some_and(|l| l.moved),
+                ],
+            )?;
         }
         StoreWrite::Position(fix) => {
             let l = &fix.location;
             tx.execute(
-                "INSERT OR IGNORE INTO positions(identity, peer, via, message, fix_time, \
+                // One row a peer and fix time: the first to arrive stays,
+                // except that a fix a message carried takes the place of
+                // the same fix announced, so the row names its message.
+                "INSERT INTO positions(identity, peer, via, message, fix_time, \
                  received_at, lat_e6, lon_e6, alt_e2, speed_e2, bearing_e2, accuracy_e2, \
-                 telemetry) \
+                 telemetry, source) \
                  VALUES (?1, ?2, ?3, \
                  (SELECT seq FROM messages WHERE seq = ?4 AND identity = ?1), \
-                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(identity, peer, fix_time) DO UPDATE SET \
+                 via = excluded.via, message = excluded.message, \
+                 received_at = excluded.received_at, telemetry = excluded.telemetry, \
+                 source = excluded.source \
+                 WHERE positions.source = 1 AND excluded.source = 0",
                 params![
                     &identity[..],
                     &fix.peer[..],
@@ -2343,11 +4095,29 @@ fn apply(
                     l.bearing_e2,
                     i64::from(l.accuracy_e2),
                     fix.telemetry,
+                    source_code(fix.source),
                 ],
             )?;
         }
     }
     Ok(())
+}
+
+/// `positions.source` of a fix's source (schema 14).
+fn source_code(source: crate::telemetry::Source) -> i64 {
+    match source {
+        crate::telemetry::Source::Telemetry => 0,
+        crate::telemetry::Source::Mesh => 1,
+    }
+}
+
+/// The source `positions.source` names; an unknown code reads as a
+/// message's, the column's default.
+fn source_of(code: i64) -> crate::telemetry::Source {
+    match code {
+        1 => crate::telemetry::Source::Mesh,
+        _ => crate::telemetry::Source::Telemetry,
+    }
 }
 
 /// The key of the received message with this id, other than `except`.
@@ -2375,7 +4145,10 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         outbound: direction == 1,
         body: row.get(10)?,
         id: id.and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok()),
-        delivery: state.and_then(state_of),
+        delivery: match state {
+            Some(code) => delivery_of(code, row.get(12)?),
+            None => None,
+        },
         signature: signature_of(row.get(5)?),
         leg: None,
         unproven: row.get(4)?,
@@ -2436,6 +4209,29 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
         DeliveryState::Delivered => 5,
         DeliveryState::Rejected => 6,
         DeliveryState::Failed => 7,
+        DeliveryState::Read { .. } => 8,
+        DeliveryState::Arrived => 9,
+    }
+}
+
+/// `messages.read_at` for a state: the time of a read, NULL otherwise. A
+/// read at 0 is one whose time nobody knows (an import's, 1506): NULL as
+/// well, so no row ever keeps an invented epoch.
+fn read_at(state: Option<DeliveryState>) -> Option<i64> {
+    match state {
+        Some(DeliveryState::Read { at }) if at > 0 => Some(i64::from(at)),
+        _ => None,
+    }
+}
+
+/// A row's state with its `read_at`: a read without one (a row another
+/// writer left) is read at 0, the time unknown.
+fn delivery_of(code: i64, read_at: Option<i64>) -> Option<DeliveryState> {
+    match state_of(code)? {
+        DeliveryState::Read { .. } => Some(DeliveryState::Read {
+            at: read_at.and_then(|at| u32::try_from(at).ok()).unwrap_or(0),
+        }),
+        other => Some(other),
     }
 }
 
@@ -2449,6 +4245,8 @@ pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
         5 => DeliveryState::Delivered,
         6 => DeliveryState::Rejected,
         7 => DeliveryState::Failed,
+        8 => DeliveryState::Read { at: 0 },
+        9 => DeliveryState::Arrived,
         _ => return None,
     })
 }
@@ -2558,6 +4356,8 @@ mod tests {
             at: at(1_010),
             what: "delivered (direct)".to_string(),
         });
+        // 1230: a read with its time, in the row written over the first.
+        sent.delivery = Some(DeliveryState::Read { at: 1_020 });
         put(&mut store, ALICE, sent.clone());
         store
             .write(&[StoreWrite::Conversation {
@@ -2568,6 +4368,7 @@ mod tests {
                     muted_until: Some(i64::MAX),
                     archived: true,
                     verified: true,
+                    receipts: true,
                 },
             }])
             .expect("pin");
@@ -2584,11 +4385,125 @@ mod tests {
         // 1146: the mute, the archive and the verified mark survive.
         assert_eq!(alice.flags.muted_until, Some(i64::MAX));
         assert!(alice.flags.archived && alice.flags.verified);
+        // 1230: the peer's receipt mark, and the read's time.
+        assert!(alice.flags.receipts);
+        assert_eq!(
+            alice.messages[0].delivery,
+            Some(DeliveryState::Read { at: 1_020 })
+        );
         assert_eq!(
             alice.messages,
             vec![sent, message(2, false, "yes, from ten")]
         );
         assert_eq!(store.last_key().expect("last key"), key_of(2));
+    }
+
+    /// 1506: an imported message its source kept as read without a time
+    /// is read at no known time. The store keeps `read_at` NULL (the column
+    /// takes NULL since schema 9, no schema step), restores it as read at
+    /// 0, and the Info sheet says "Read" without a time, never the epoch's.
+    /// A read the store did know the time of keeps it when a second import
+    /// lays the imported block out again.
+    #[test]
+    fn an_imported_read_message_has_no_read_time_and_never_the_epoch() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let row = |n: u8, delivery| ImportRow {
+            id: [n; 32],
+            outbound: true,
+            timestamp: Some(1_700_000_000.0 + f64::from(n)),
+            received_at: Some(1_700_000_000 + i64::from(n)),
+            title: Vec::new(),
+            content: format!("imported {n}"),
+            fields: Vec::new(),
+            delivery,
+            signature: Signature::Unverified,
+            origin_verdict: None,
+            held: None,
+        };
+        let untimed = row(1, Some(DeliveryState::Read { at: 0 }));
+        let timed = row(2, Some(DeliveryState::Read { at: 1_700_000_100 }));
+        store
+            .import_conversation(ALICE, "ratspeak", &[untimed.clone(), timed])
+            .expect("import");
+        let read_at = |store: &Store, id: [u8; 32]| -> Option<i64> {
+            store
+                .conn
+                .query_row(
+                    "SELECT read_at FROM messages WHERE id = ?1",
+                    params![&id[..]],
+                    |row| row.get(0),
+                )
+                .expect("the row")
+        };
+        assert_eq!(read_at(&store, [1; 32]), None, "never an invented time");
+        assert_eq!(read_at(&store, [2; 32]), Some(1_700_000_100));
+        // The archive entry carries the state alone and reads back the same.
+        let entry = crate::import::archive::entry("ratspeak", &ALICE, &untimed);
+        let (_, _, back) = crate::import::archive::read_entry(&entry).expect("entry");
+        assert_eq!(back.delivery, Some(DeliveryState::Read { at: 0 }));
+        // A second import lays the block out again; both keep what they had.
+        store
+            .import_conversation(ALICE, "ratspeak", &[row(3, None)])
+            .expect("again");
+        assert_eq!(read_at(&store, [1; 32]), None);
+        assert_eq!(read_at(&store, [2; 32]), Some(1_700_000_100));
+        let restored = store.restore().expect("restore");
+        let alice = restored.iter().find(|c| c.peer == ALICE).expect("alice");
+        let untimed = alice
+            .messages
+            .iter()
+            .find(|m| m.id == Some([1; 32]))
+            .expect("the untimed one");
+        assert_eq!(untimed.delivery, Some(DeliveryState::Read { at: 0 }));
+
+        // The words: "Read" alone, the timed one with its time.
+        let mut model = crate::ui::UiModel::<crate::ui::tests::Field>::new(&[]);
+        crate::ui::update(
+            &mut model,
+            crate::ui::UiEvent::Clock(WallTime {
+                unix_secs: 1_700_100_000,
+                offset_secs: 0,
+            }),
+        );
+        model.restore(restored);
+        let words = |id: [u8; 32]| -> Vec<(String, String)> {
+            let key = model.conversations[0]
+                .messages
+                .iter()
+                .find(|m| m.id == Some(id))
+                .expect("it")
+                .activity;
+            crate::ui::info::message_info(&model, ALICE, key)
+                .expect("info")
+                .rows
+                .iter()
+                .map(|row| row.resolve(crate::ui::strings::Lang::En))
+                .collect()
+        };
+        let state = |rows: &[(String, String)]| {
+            rows.iter()
+                .find(|(label, _)| label == "Status")
+                .map(|(_, value)| value.clone())
+        };
+        let untimed_rows = words([1; 32]);
+        assert_eq!(
+            state(&untimed_rows).as_deref(),
+            Some("Read"),
+            "{untimed_rows:?}"
+        );
+        assert!(
+            !untimed_rows
+                .iter()
+                .any(|(_, v)| v.contains("1970") || v.contains("00:00")),
+            "no epoch: {untimed_rows:?}"
+        );
+        let timed_rows = words([2; 32]);
+        assert_eq!(
+            state(&timed_rows).as_deref(),
+            Some("Read at 22:15"),
+            "{timed_rows:?}"
+        );
     }
 
     #[test]
@@ -2672,6 +4587,154 @@ mod tests {
         // Nor is a row under another of our addresses.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(!other.holds_received(&id).expect("ask"));
+    }
+
+    /// 1643: the rooms a hub named when the home asked it ride its entry,
+    /// a new entry only when they changed; the hourly refresh of the
+    /// hearing keeps them; a hub the archive does not keep gets none. An
+    /// entry without rooms reads as none, and the plain reader reads an
+    /// entry with them as the hub.
+    #[test]
+    fn a_hubs_rooms_ride_its_entry_and_survive_the_refresh() {
+        use crate::ui::hubs::HeardHub;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let hub = |at: i64| HeardHub {
+            hash: [1; 16],
+            name: Some("Villa".into()),
+            hops: Some(2),
+            first: at,
+            last: at,
+            answered: None,
+        };
+        let rooms = |packed: &[u8]| {
+            crate::home::wire::read_hub_entry_rooms(packed)
+                .expect("a hub entry")
+                .1
+        };
+        let newest = |store: &Store| {
+            let page = store.archive_since(0, usize::MAX).expect("since");
+            page.entries
+                .iter()
+                .rfind(|e| e.kind == crate::home::KIND_HUB)
+                .map(|e| e.packed.clone())
+                .expect("a hub entry")
+        };
+        assert_eq!(
+            store
+                .archive_hub_rooms(&[1; 16], &["#lab".into()], u64::MAX)
+                .expect("rooms"),
+            None,
+            "a hub not kept gets no rooms"
+        );
+        let heard = store.archive_hub(&hub(1000), u64::MAX).expect("heard");
+        assert_eq!(rooms(&newest(&store)), None);
+        let named = vec!["#lab".to_string(), "#chat".to_string()];
+        let with = store
+            .archive_hub_rooms(&[1; 16], &named, u64::MAX)
+            .expect("rooms");
+        assert!(with > heard, "the rooms are news");
+        assert_eq!(rooms(&newest(&store)), Some(named.clone()));
+        assert_eq!(
+            store
+                .archive_hub_rooms(&[1; 16], &named, u64::MAX)
+                .expect("again"),
+            None,
+            "the same rooms again are none"
+        );
+        let refreshed = store
+            .archive_hub(&hub(1000 + 3600), u64::MAX)
+            .expect("refresh");
+        assert!(refreshed > with);
+        assert_eq!(
+            rooms(&newest(&store)),
+            Some(named),
+            "the refresh keeps them"
+        );
+        let plain = crate::home::wire::read_hub_entry(&newest(&store)).expect("plain");
+        assert_eq!((plain.first, plain.last), (1000, 4600));
+        assert_eq!(store.archived_hubs().expect("hubs").len(), 1);
+        let none = store
+            .archive_hub_rooms(&[1; 16], &[], u64::MAX)
+            .expect("none");
+        assert!(none.is_some(), "a hub that names none now");
+        assert_eq!(rooms(&newest(&store)), Some(Vec::new()));
+    }
+
+    /// 1599: the home remembers the hubs it hears for its devices: one
+    /// entry a hub, the newest, its first hearing kept; a hearing within
+    /// the hour that says nothing new appends nothing; past the bound the
+    /// hub heard longest ago goes. The control: a name entry is no hub.
+    #[test]
+    fn the_home_remembers_hubs_newest_once_and_bounded() {
+        use crate::ui::hubs::{HeardHub, HEARD_BOUND};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let hub = |hash: [u8; 16], name: Option<&str>, hops: u8, at: i64| HeardHub {
+            hash,
+            name: name.map(Into::into),
+            hops: Some(hops),
+            first: at,
+            last: at,
+            answered: None,
+        };
+        let first = store
+            .archive_hub(&hub([1; 16], Some("Le Salon FR"), 9, 1000), u64::MAX)
+            .expect("append");
+        assert!(first.is_some(), "a new hub is news");
+        assert_eq!(
+            store
+                .archive_hub(&hub([1; 16], Some("Le Salon FR"), 9, 1600), u64::MAX)
+                .expect("ask"),
+            None,
+            "heard again within the hour, nothing new"
+        );
+        assert_eq!(
+            store
+                .archive_hub(&hub([1; 16], None, 9, 1700), u64::MAX)
+                .expect("ask"),
+            None,
+            "a hearing without a name keeps the name"
+        );
+        let moved = store
+            .archive_hub(&hub([1; 16], None, 7, 1800), u64::MAX)
+            .expect("append");
+        assert!(moved > first, "other hops are news");
+        let later = store
+            .archive_hub(&hub([1; 16], None, 7, 1800 + 3600), u64::MAX)
+            .expect("append");
+        assert!(later > moved, "an hour on, the last hearing is news");
+        store
+            .archive_name(ALICE, "Alice", 10, u64::MAX)
+            .expect("name");
+        let hubs = store.archived_hubs().expect("hubs");
+        assert_eq!(hubs.len(), 1, "one entry a hub, and a name is no hub");
+        assert_eq!(
+            (
+                hubs[0].name.as_deref(),
+                hubs[0].hops,
+                hubs[0].first,
+                hubs[0].last
+            ),
+            (Some("Le Salon FR"), Some(7), 1000, 5400)
+        );
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let kinds: Vec<u8> = page.entries.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [crate::home::KIND_HUB, crate::home::KIND_NAME]);
+        // The bound: the hub heard longest ago goes.
+        for i in 0..HEARD_BOUND {
+            let mut hash = [2; 16];
+            hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            store
+                .archive_hub(&hub(hash, None, 3, 10_000 + i as i64), u64::MAX)
+                .expect("append");
+        }
+        let hubs = store.archived_hubs().expect("hubs");
+        assert_eq!(hubs.len(), HEARD_BOUND);
+        assert!(
+            hubs.iter().all(|h| h.hash != [1; 16]),
+            "Le Salon FR, heard longest ago, went"
+        );
     }
 
     #[test]
@@ -2971,6 +5034,7 @@ mod tests {
                 last_update: fix_time,
             },
             telemetry: vec![0x81, 0x01, 0x05],
+            source: crate::telemetry::Source::Telemetry,
         }
     }
 
@@ -3034,6 +5098,168 @@ mod tests {
         assert!(other.positions().expect("positions").is_empty());
     }
 
+    /// 1385: an announced fix is kept and comes back as announced; the
+    /// same fix in a message takes its row and names the message; the
+    /// reader gives a peer's window in fix-time order.
+    #[test]
+    fn announced_fixes_are_kept_and_a_message_takes_their_row() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        let mesh = |t: i64| Fix {
+            message: None,
+            telemetry: Vec::new(),
+            source: Source::Mesh,
+            ..fix(BOB, BOB, None, t)
+        };
+        store
+            .write(&[
+                StoreWrite::Position(mesh(3_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(4_000)),
+            ])
+            .expect("write");
+        assert_eq!(
+            store.track_len(BOB).expect("track"),
+            3,
+            "one row a fix time"
+        );
+        let told = fix(BOB, BOB, Some(key_of(1)), 5_000);
+        store
+            .write(&[StoreWrite::Position(told.clone())])
+            .expect("write");
+        // Announced again after the message: the message's row stays.
+        store
+            .write(&[StoreWrite::Position(mesh(5_000))])
+            .expect("write");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        let window = store
+            .fixes_between(Some(BOB), 3_500, 6_000)
+            .expect("window");
+        assert_eq!(window, vec![mesh(4_000), told], "in fix-time order");
+        let all = store.fixes_between(None, i64::MIN, i64::MAX).expect("all");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].source, Source::Mesh);
+    }
+
+    /// 1385's store numbers: a day at a 5 min cadence is 288 rows; a year
+    /// of one peer is 105 120 rows, and the file it takes is printed for
+    /// the report (`-- --nocapture`). A stored announced fix carries no
+    /// Telemeter, so a row is the key, the integers and the column heads.
+    #[test]
+    fn a_year_of_one_peer_at_five_minutes() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let per_day = 86_400 / 300;
+        assert_eq!(per_day, 288);
+        let start = 1_700_000_000i64;
+        let rows: Vec<StoreWrite> = (0..365 * per_day)
+            .map(|i| {
+                let t = start + i * 300;
+                let mut f = fix(BOB, BOB, None, t);
+                f.source = Source::Mesh;
+                f.telemetry = Vec::new();
+                f.location.latitude_e6 += (i % 977) as i32 * 13;
+                f.location.longitude_e6 += (i % 1009) as i32 * 17;
+                f.location.speed_e2 = (i % 300) as u32;
+                f.location.bearing_e2 = (i % 36_000) as i32;
+                f.location.accuracy_e2 = 800;
+                StoreWrite::Position(f)
+            })
+            .collect();
+        for chunk in rows.chunks(10_000) {
+            store.write(chunk).expect("write");
+        }
+        assert_eq!(store.track_len(BOB).expect("track"), 105_120);
+        store
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .expect("vacuum");
+        let size = std::fs::metadata(home.path().join(STORE_FILE))
+            .expect("file")
+            .len();
+        let empty = {
+            let other = tempfile::tempdir().expect("other");
+            let s = Store::open_in(other.path(), US).expect("open");
+            s.conn.execute_batch("VACUUM;").expect("vacuum");
+            std::fs::metadata(other.path().join(STORE_FILE))
+                .expect("file")
+                .len()
+        };
+        let per_row = (size - empty) as f64 / 105_120.0;
+        std::println!(
+            "TRACK-STORE rows=105120 file={size} empty={empty} per_row={per_row:.1} bytes"
+        );
+        assert!(size - empty < 16 * 1024 * 1024, "{size}");
+    }
+
+    /// 1201: the positions we shared, newest first, each with whom and
+    /// when; a text of ours and a report we received are none of them.
+    #[test]
+    fn the_positions_we_shared_are_listed_newest_first_with_whom() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let place = |lat: i64, t: i64| Location::saturating(lat, 13_000_000, 0, 0, 0, 0, t);
+        let mut first = message(1, true, "");
+        first.fields = crate::ui::position_fields(place(52_000_000, 900));
+        put(&mut store, BOB, first);
+        put(&mut store, BOB, message(2, true, "just text"));
+        let mut theirs = message(3, false, "");
+        theirs.fields = crate::ui::position_fields(place(48_000_000, 950));
+        put(&mut store, BOB, theirs);
+        let mut second = message(4, true, "");
+        second.fields = crate::ui::position_fields(place(53_000_000, 990));
+        put(&mut store, ALICE, second);
+        let shared = store.shared(10).expect("shared");
+        let seen: Vec<([u8; 16], i32, Option<i64>)> = shared
+            .iter()
+            .map(|(fix, sent)| (fix.via, fix.location.latitude_e6, *sent))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ALICE, 53_000_000, Some(1_004)),
+                (BOB, 52_000_000, Some(1_001))
+            ]
+        );
+        assert!(shared.iter().all(|(fix, _)| fix.peer == US));
+        assert_eq!(store.shared(1).expect("one").len(), 1);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(other.shared(10).expect("shared").is_empty());
+    }
+
+    /// The second audit of 1757: a message of ours whose `lev` names BOB
+    /// as a group copy's writer lists our position, not BOB's.
+    #[test]
+    fn a_position_we_shared_naming_a_writer_is_ours() {
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let place = Location::saturating(52_000_000, 13_000_000, 0, 0, 0, 0, 900);
+        let mut ours = message(1, true, "");
+        Lev {
+            group_copy: Some(GroupCopy {
+                sender: BOB,
+                sent_ms: 1,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }
+        .put_into(&mut ours.fields);
+        ours.fields.extend(crate::ui::position_fields(place));
+        put(&mut store, ALICE, ours);
+        let shared = store.shared(10).expect("shared");
+        let seen: Vec<([u8; 16], [u8; 16], i32)> = shared
+            .iter()
+            .map(|(fix, _)| (fix.peer, fix.via, fix.location.latitude_e6))
+            .collect();
+        assert_eq!(seen, [(US, ALICE, 52_000_000)]);
+    }
+
     #[test]
     fn deleting_a_message_keeps_its_position_and_a_conversation_takes_them() {
         let home = tempfile::tempdir().expect("home");
@@ -3093,6 +5319,47 @@ mod tests {
         // Opened again it is a current store, not migrated twice.
         let store = Store::open_in(home.path(), US).expect("reopen");
         assert_eq!(store.positions().expect("positions").len(), 1);
+    }
+
+    /// 1305: a migration says where it came from, where it went, how many
+    /// steps and how long; a current store says nothing; a migration that
+    /// fails says it was refused.
+    #[test]
+    fn a_migration_says_one_line_and_a_failed_one_says_it_was_refused() {
+        use leviculum_std::test_support::log_capture::{capture_logs, captured};
+        let home = tempfile::tempdir().expect("home");
+        v1_store(home.path());
+        let (buf, guard) = capture_logs();
+        drop(Store::open_in(home.path(), US).expect("schema 1 opens"));
+        drop(Store::open_in(home.path(), US).expect("reopen"));
+        drop(guard);
+        let log = captured(&buf);
+        let line = format!(
+            "HOME store migrated from=1 to={SCHEMA_VERSION} steps={}",
+            SCHEMA_VERSION - 1
+        );
+        assert_eq!(log.matches(&line).count(), 1, "one line, once: {log}");
+        assert!(log.contains("took_ms="), "{log}");
+
+        // A schema 1 store that already holds schema 2's table: the step
+        // to 2 fails, and nothing moves.
+        let broken = tempfile::tempdir().expect("home");
+        v1_store(broken.path());
+        Connection::open(broken.path().join(STORE_FILE))
+            .expect("open")
+            .execute_batch("CREATE TABLE positions(x INTEGER);")
+            .expect("a table in the way");
+        let (buf, guard) = capture_logs();
+        assert!(Store::open_in(broken.path(), US).is_err());
+        drop(guard);
+        let log = captured(&buf);
+        assert!(
+            log.contains(&format!(
+                "HOME store migration refused from=1 to={SCHEMA_VERSION}"
+            )),
+            "{log}"
+        );
+        assert!(!log.contains("HOME store migrated"), "{log}");
     }
 
     /// A store this loquax wrote, opened by the loquax before it: the check
@@ -3224,6 +5491,536 @@ mod tests {
             )
             .expect("origin columns exist");
         assert_eq!(origins, 0);
+    }
+
+    /// A position share (1273) survives a restart as it stood: before its
+    /// first report and after one, replaced in place, gone when stopped or
+    /// with its conversation, and a row that is not whole is refused.
+    #[test]
+    fn a_share_is_kept_until_it_stops() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let fresh = Share::start(Span::UntilStopped, 1_793_500_000);
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(fresh),
+            }])
+            .expect("write");
+        assert_eq!(store.shares().expect("shares"), [(BOB, fresh)]);
+        let mut sent = Share::start(Span::Hours8, 1_793_500_000);
+        sent.last = Some(Report {
+            fix: Location::saturating(
+                -33_868_800,
+                151_209_300,
+                -1_250,
+                0,
+                0,
+                65_535,
+                1_793_499_990,
+            ),
+            at: 1_793_500_060,
+            moved: true,
+        });
+        store
+            .write(&[
+                StoreWrite::Share {
+                    peer: BOB,
+                    share: Some(sent),
+                },
+                StoreWrite::Share {
+                    peer: ALICE,
+                    share: Some(fresh),
+                },
+            ])
+            .expect("replace");
+        assert_eq!(
+            store.shares().expect("shares"),
+            [(ALICE, fresh), (BOB, sent)],
+            "in place, every integer as it was"
+        );
+        store
+            .write(&[StoreWrite::Share {
+                peer: ALICE,
+                share: None,
+            }])
+            .expect("stop");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget");
+        assert!(store.shares().expect("shares").is_empty());
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(sent),
+            }])
+            .expect("again");
+        store
+            .conn
+            .execute("UPDATE shares SET last_at = NULL", [])
+            .expect("break it");
+        assert!(matches!(store.shares(), Err(StoreError::Corrupt { .. })));
+        store
+            .conn
+            .execute("UPDATE shares SET last_at = 1, span = 'forever'", [])
+            .expect("break it");
+        assert!(matches!(store.shares(), Err(StoreError::Corrupt { .. })));
+        drop(store);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("other");
+        assert!(other.shares().expect("shares").is_empty());
+    }
+
+    /// A schema 9 store, as 1270's loquax wrote it, gains the shares
+    /// table and nothing else.
+    #[test]
+    fn a_schema_9_store_migrates_with_no_share() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} {SCHEMA_V6} \
+             {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} PRAGMA user_version = 9; COMMIT;"
+        ))
+        .expect("schema 9");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 9 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert!(store.shares().expect("shares").is_empty());
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(Share::start(Span::Hour1, 5)),
+            }])
+            .expect("a share in the migrated store");
+        drop(store);
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE shares").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1635: the petnames a device owes its home node come back after a
+    /// restart as they were kept, a cleared one as `None`; a write
+    /// replaces all of them, and another identity sees none. A store of
+    /// schema 18 gains the table on open.
+    #[test]
+    fn owed_petnames_survive_a_restart_and_a_schema_18_store_gains_them() {
+        let home = tempfile::tempdir().expect("home");
+        let owed = BTreeMap::from([([0x5a; 16], None), ([0x5b; 16], Some("Mum".to_string()))]);
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert!(store.owed_petnames().expect("read").is_empty());
+            store
+                .write(&[StoreWrite::OwedPetnames(owed.clone())])
+                .expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.owed_petnames().expect("read"), owed);
+        let fewer = BTreeMap::from([([0x5b; 16], Some("Mum".to_string()))]);
+        store
+            .write(&[StoreWrite::OwedPetnames(fewer.clone())])
+            .expect("replaced");
+        assert_eq!(store.owed_petnames().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.owed_petnames().expect("read").is_empty());
+        drop((store, other));
+
+        let old = tempfile::tempdir().expect("an older home");
+        drop(Store::open_in(old.path(), US).expect("create"));
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch(
+            "DROP TABLE owed_petnames; ALTER TABLE home_devices DROP COLUMN last_seen; \
+             DROP TABLE owed_peer_states; DROP TABLE home_names; PRAGMA user_version = 18;",
+        )
+        .expect("made schema 18");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        store
+            .write(&[StoreWrite::OwedPetnames(fewer.clone())])
+            .expect("kept");
+        assert_eq!(store.owed_petnames().expect("read"), fewer);
+    }
+
+    /// 1643: a schema 21 store gains `home_names` on open, empty, and its
+    /// pages keep their stamps: the first name heard takes the next one.
+    /// Control: a store of this schema missing the table is refused as
+    /// damaged, not migrated over.
+    #[test]
+    fn a_schema_21_store_gains_the_name_rows() {
+        let old = tempfile::tempdir().expect("an older home");
+        let mut store = Store::open_in(old.path(), US).expect("create");
+        let page = store
+            .page_heard(&lnomad::discovery::DiscoveredNode {
+                dest_hash: [0x7c; 16],
+                name: Some("Relay".into()),
+                first_seen: 1,
+                last_seen: 1,
+                hops: None,
+            })
+            .expect("page")
+            .expect("stamped");
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE home_names; PRAGMA user_version = 21;")
+            .expect("made schema 21");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        assert_eq!(store.names_kept().expect("count"), 0);
+        let stamp = store
+            .name_heard(&crate::home::pages::NameRow {
+                address: [0x3c; 16],
+                name: "Kaja".into(),
+                first_seen: 2,
+                last_seen: 2,
+                hops: Some(1),
+            })
+            .expect("name")
+            .expect("stamped");
+        assert_eq!(stamp, page + 1);
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE home_names;")
+            .expect("damaged");
+        drop(conn);
+        assert!(matches!(
+            Store::open_in(old.path(), US),
+            Err(StoreError::Corrupt { .. })
+        ));
+    }
+
+    /// 1642: a schema 19 store gains `home_devices.last_seen`, NULL for
+    /// the devices it held; a request moves it, at most once a minute.
+    #[test]
+    fn a_schema_19_store_gains_when_each_device_was_last_there() {
+        let old = tempfile::tempdir().expect("an older home");
+        let mut store = Store::open_in(old.path(), US).expect("create");
+        store.issue_token(&[1; 16], "Fairphone", 10).expect("token");
+        store
+            .redeem_token(&[1; 16], &[0x77; 16], 20, 3600)
+            .expect("admitted");
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch(
+            "ALTER TABLE home_devices DROP COLUMN last_seen; DROP TABLE owed_peer_states; \
+             DROP TABLE home_names; PRAGMA user_version = 19;",
+        )
+        .expect("made schema 19");
+        drop(conn);
+        let store = Store::open_in(old.path(), US).expect("migrated");
+        let devices = store.devices().expect("devices");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].last_seen, None, "not heard since the migration");
+        store.device_seen(&[0x77; 16], 100).expect("seen");
+        store
+            .device_seen(&[0x77; 16], 130)
+            .expect("inside the minute");
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(100));
+        store.device_seen(&[0x77; 16], 160).expect("a minute on");
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(160));
+        store.device_seen(&[0x55; 16], 200).expect("a stranger");
+        assert_eq!(store.devices().expect("devices").len(), 1);
+    }
+
+    /// 1640: the peer states a device owes its home node come back after a
+    /// restart as they were kept, an unmuted one as `None` and an always
+    /// mute as `i64::MAX`; a write replaces all of them, and another
+    /// identity sees none. A store of schema 20 gains the table on open.
+    #[test]
+    fn owed_peer_states_survive_a_restart_and_a_schema_20_store_gains_them() {
+        use crate::home::wire::PeerState;
+        let home = tempfile::tempdir().expect("home");
+        let owed = BTreeMap::from([
+            ([0x5a; 16], PeerState::default()),
+            (
+                [0x5b; 16],
+                PeerState {
+                    blocked: true,
+                    pinned: true,
+                    archived: true,
+                    muted_until: Some(i64::MAX),
+                },
+            ),
+        ]);
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert!(store.owed_peer_states().expect("read").is_empty());
+            store
+                .write(&[StoreWrite::OwedPeerStates(owed.clone())])
+                .expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.owed_peer_states().expect("read"), owed);
+        let fewer = BTreeMap::from([(
+            [0x5b; 16],
+            PeerState {
+                muted_until: Some(1_800_000_000),
+                ..PeerState::default()
+            },
+        )]);
+        store
+            .write(&[StoreWrite::OwedPeerStates(fewer.clone())])
+            .expect("replaced");
+        assert_eq!(store.owed_peer_states().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.owed_peer_states().expect("read").is_empty());
+        drop((store, other));
+
+        let old = tempfile::tempdir().expect("an older home");
+        drop(Store::open_in(old.path(), US).expect("create"));
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch(
+            "DROP TABLE owed_peer_states; DROP TABLE home_names; PRAGMA user_version = 20;",
+        )
+        .expect("made schema 20");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        store
+            .write(&[StoreWrite::OwedPeerStates(fewer.clone())])
+            .expect("kept");
+        assert_eq!(store.owed_peer_states().expect("read"), fewer);
+    }
+
+    /// 1409: what the propagation node is still to be asked about comes
+    /// back after a restart as it was kept, a write replaces all of it, and
+    /// another identity sees none.
+    #[test]
+    fn what_the_node_is_to_be_asked_survives_a_restart() {
+        use crate::pn_status::{AskerState, Open};
+        let home = tempfile::tempdir().expect("home");
+        let state = AskerState {
+            open: vec![
+                Open {
+                    transient_id: [0x81; 32],
+                    message_id: [0x61; 32],
+                    node: [0x9c; 16],
+                    uploaded_at: 1_800_000_000,
+                },
+                Open {
+                    transient_id: [0x82; 32],
+                    message_id: [0x62; 32],
+                    node: [0x9d; 16],
+                    uploaded_at: 1_800_000_100,
+                },
+            ],
+            answering: vec![([0x9c; 16], 1)],
+        };
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert_eq!(store.pn_asks().expect("read"), AskerState::default());
+            store.save_pn_asks(&state).expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.pn_asks().expect("read"), state);
+        let fewer = AskerState {
+            open: state.open[1..].to_vec(),
+            answering: Vec::new(),
+        };
+        store.save_pn_asks(&fewer).expect("replaced");
+        assert_eq!(store.pn_asks().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert_eq!(other.pn_asks().expect("read"), AskerState::default());
+    }
+
+    /// 1307 G2, item 2: a group the model wrote comes back with every
+    /// field, and with no conversation row of its own (only its state
+    /// came) it is listed still; written again it is replaced; it goes
+    /// with its conversation, and another identity sees none.
+    #[test]
+    fn a_group_the_device_knows_comes_back_without_its_messages() {
+        use crate::ui::groups::{GroupInfo, GroupMember, Standing};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let group = GroupInfo {
+            address: [0x22; 16],
+            name: "Familie".into(),
+            admin_name: "Lew".into(),
+            inviter: Some(BOB),
+            ours: false,
+            epoch: 3,
+            members: vec![
+                GroupMember {
+                    address: BOB,
+                    name: "Lew".into(),
+                    admin: true,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: US,
+                    name: "Me".into(),
+                    admin: false,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: [0x55; 16],
+                    name: "Anna".into(),
+                    admin: false,
+                    joined: false,
+                    left: true,
+                },
+            ],
+            standing: Standing::Joined,
+        };
+        store
+            .write(&[StoreWrite::Group(GroupInfo {
+                epoch: 2,
+                ..group.clone()
+            })])
+            .expect("write");
+        store
+            .write(&[StoreWrite::Group(group.clone())])
+            .expect("again");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].peer, group.address);
+        assert!(restored[0].messages.is_empty());
+        assert_eq!(restored[0].group.as_ref(), Some(&group));
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.restore().expect("restore").is_empty());
+        drop(other);
+        store
+            .write(&[StoreWrite::ForgetConversation {
+                peer: group.address,
+            }])
+            .expect("forget");
+        assert!(store.restore().expect("restore").is_empty());
+    }
+
+    /// 1219: a draft is kept beside its conversation, comes back at start
+    /// with its reply, is replaced in place, and goes when empty or with
+    /// its conversation; a conversation holding nothing but a draft comes
+    /// back too.
+    #[test]
+    fn a_draft_is_kept_beside_its_conversation() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let draft = |text: &str, reply: Option<[u8; 32]>| Draft {
+            text: text.to_string(),
+            reply,
+            attachments: Vec::new(),
+        };
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("on my", Some([7; 32])),
+            }])
+            .expect("write");
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("on my way", Some([7; 32])),
+            }])
+            .expect("replace");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1, "a draft alone lists its conversation");
+        assert_eq!(restored[0].peer, BOB);
+        assert_eq!(restored[0].draft, draft("on my way", Some([7; 32])));
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 1, "one row a conversation");
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: Draft::default(),
+            }])
+            .expect("clear");
+        assert_eq!(store.restore().expect("restore")[0].draft, Draft::default());
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("again", None),
+            }])
+            .expect("write");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget");
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 0, "the draft goes with its conversation");
+        // Another identity's store does not see it.
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("mine", None),
+            }])
+            .expect("write");
+        drop(store);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("other");
+        assert!(other.restore().expect("restore").is_empty());
+    }
+
+    /// 1219: a schema 7 store migrates to 8 in place, its conversations as
+    /// they were and no draft in them.
+    #[test]
+    fn a_schema_7_store_migrates_with_no_drafts() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"
+        ))
+        .expect("schema 7");
+        conn.execute(
+            "INSERT INTO conversations(identity, peer, pinned) VALUES (?1, ?2, 1)",
+            params![&US[..], &BOB[..]],
+        )
+        .expect("a pinned conversation");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 7 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        let restored = store.restore().expect("restore");
+        assert!(restored[0].pinned);
+        assert_eq!(restored[0].draft, Draft::default());
+    }
+
+    /// A schema 8 store, the one before read receipts (1230), migrates in
+    /// place: its delivered message stays delivered, and no peer is known
+    /// to send receipts.
+    #[test]
+    fn a_schema_8_store_migrates_with_no_receipts() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"
+        ))
+        .expect("schema 8");
+        conn.execute(
+            "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
+             verification, size, content) VALUES (1, ?1, ?2, ?3, 1, 5, 1, 2, 'hi')",
+            params![&US[..], &BOB[..], &[7u8; 32][..]],
+        )
+        .expect("a delivered message");
+        conn.execute(
+            "INSERT INTO conversations(identity, peer) VALUES (?1, ?2)",
+            params![&US[..], &BOB[..]],
+        )
+        .expect("its conversation");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 8 opens");
+        let restored = store.restore().expect("restore");
+        assert_eq!(
+            restored[0].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        assert!(!restored[0].flags.receipts);
     }
 
     /// A schema 3 store, as the loquax before the home node wrote it,

@@ -67,7 +67,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   which runs `meshtastic --port /dev/ttyACM0 --enter-dfu`. This
   firmware-side admin command is the only software-only DFU entry on a
   board with no accessible RESET pin. Requires the `meshtastic` CLI
-  (`pip install meshtastic`). (`Justfile:2180-2189`)
+  (`pip install meshtastic`). (`Justfile:2334-2343`)
 
 - **Manual fallback.** Where the software command is unavailable, the
   bootloader is reached by a **needle double-tap in the hidden pinhole**
@@ -75,7 +75,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   through a small pinhole, double-tapped with a needle. *(This pinhole
   detail comes from project field notes, not from the firmware source;
   the source confirms only that the device "has no externally accessible
-  RESET pin", `Justfile:2181-2182`.)*
+  RESET pin", `Justfile:2335-2336`.)*
 
 - **The same pinhole gives a plain reset with a single tap**, which is
   what [When USB stays dark](#when-usb-stays-dark) asks for first: one
@@ -86,7 +86,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
 
 - **After our firmware lands**, subsequent flashes use the touch handler
   in `src/usb.rs` and the DFU recipe is no longer needed.
-  (`Justfile:2183-2184`)
+  (`Justfile:2337-2338`)
 
 > **Do not flash foreign nRF52 firmware onto the Pocket V2 without a
 > recovery plan.** Project field experience is that prebuilt
@@ -118,15 +118,15 @@ if id_store.load() => Some(identity)   -> "Identity loaded from flash"
 else                                   -> generate new, then save
 ```
 
-(`leviculum-nrf/src/node_loop.rs:320-429`,
-`leviculum-nrf/src/bin/rak4631.rs:181-292`. The identity lives on the
+(`leviculum-nrf/src/node_loop.rs:320-433`, the T114 and the RAK4631
+alike. The identity lives on the
 board's `identity_flash_page`, e.g. `0xEC000` on the T114,
 `leviculum-nrf/src/boards/t114.rs:193`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash`
-(`leviculum-nrf/src/node_loop.rs:381`) and an `[IDENTITY]` line with the
-full hash (`note_boot_identity`, `leviculum-nrf/src/node_loop.rs:709`,
+(`leviculum-nrf/src/node_loop.rs:385`) and an `[IDENTITY]` line with the
+full hash (`note_boot_identity`, `leviculum-nrf/src/node_loop.rs:713`,
 and again on the 5 s banner). Both are on the boot-critical log path, so attaching after the
 board has come up still shows them (Codeberg #234).
 
@@ -143,6 +143,23 @@ Codeberg #359 has paid that price once already: the recurrence of
 2026-09-02 was recovered with a power cycle and answered
 `prev_magic=absent reset_reason=0x00000000` on the next boot, which is
 the instrument being honest, not the instrument failing.
+
+A board that still shows up in `lsusb -v` is not necessarily alive. The
+Pocket that froze on 2026-10-31 seemed to answer USB control requests
+for 23 hours afterwards. That was `lsusb` returning descriptors, and the
+firmware cannot have served them: embassy-usb answers the control pipe
+from `usb_task`, which runs on the thread-mode executor, and the dying
+boot's persistent tail shows that thread mode had stopped (the LoRa task,
+on its own interrupt executor, went on logging, but the two-second
+`[STACK] tag=tick` line was missing). What answered was the hub or the
+kernel's cached descriptors. The evidence that counts is the debug port
+or the persistent tail. When the LoRa task finds the main loop not
+taking frames and thread mode has not beaten for 5 s, it writes
+`THREAD_STALL beat_age_ms=.. site=.. site_age_ms=.. waiting=lora` into
+that tail. `site` names the blocking call thread mode was in, or `none`
+(`leviculum-nrf/firmware/src/thread_watch.rs`). Separately,
+`LOG_DROPPED n=` counts the bytes the debug ring lost to a writer that
+lapped its reader, so a gap in a capture is not mistaken for silence.
 
 If the board enumerates nothing on USB after a flash or a bad image:
 
@@ -180,13 +197,13 @@ If the board enumerates nothing on USB after a flash or a bad image:
    [Structured event logs](../structured-event-logs.md). The same port
    replays the previous boot's HardFault/panic post-mortem and the
    persistent log: look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and
-   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:649-659`;
+   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:667-675`;
    `leviculum-nrf/README.md:59-60`).
 4. **Only now force the bootloader manually.** On a T114, double-tap
    RESET to get the UF2 drive regardless of the running image
    (`leviculum-nrf/README.md:38`). On a Pocket V2, use the hidden-pinhole
    needle double-tap (see above) — the board has no accessible RESET pin
-   (`Justfile:2181-2182`).
+   (`Justfile:2335-2336`).
 5. **Re-flash the known-good LNode firmware** once the UF2 drive appears:
    `just flash` (T114) or `just flash-rak4631` /
    `just flash-rak4631-pocket` (RAK4631). See [Flashing](flashing.md).
@@ -204,4 +221,4 @@ physical device.)**
 > always recoverable by re-running the flash recipe. The nRF52 LNodes
 > (T114, RAK4631) are different — a bad external image can leave the
 > device USB-dark, which is why a recovery plan matters here.
-> (`Justfile:2191-2195`)
+> (`Justfile:2345-2349`)

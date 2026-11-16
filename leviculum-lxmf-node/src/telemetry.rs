@@ -47,6 +47,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+use leviculum_lxmf::lev::{GroupCopy, Lev};
 use leviculum_lxmf::msgpack::{self, Number};
 use leviculum_lxmf::telemetry::{decode_stream_field_value, PowerProducer, Telemetry};
 use leviculum_lxmf::Message;
@@ -74,7 +75,9 @@ pub enum Reading {
 /// One reading on its way to both sinks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
-    /// Who measured. The message's source for a `FIELD_TELEMETRY` reading;
+    /// Who measured. For a `FIELD_TELEMETRY` reading the message's source,
+    /// or the writer a group copy names where the reader's groups vouch
+    /// for it ([`Lev::reading_writer`], the rule Loquax files a pin by);
     /// for a `FIELD_TELEMETRY_STREAM` row it is the row's own source, which
     /// is the whole point of a collector exchange — the rows are other
     /// people's readings.
@@ -92,12 +95,24 @@ pub struct Report {
 ///
 /// Empty for the ordinary case: somebody's chat message to an address that
 /// also collects. A message carrying both field numbers yields both, which
-/// is what "and/or" on the wire means.
+/// is what "and/or" on the wire means. The helper joins no group, so a
+/// reading is never a group copy's writer's: [`reports_with`] with no
+/// group's word.
 pub fn reports(message: &Message) -> Vec<Report> {
+    reports_with(message, |_| false)
+}
+
+/// [`reports`] for a reader whose groups `lists` knows: whether the
+/// message's source is a group it joined whose membership at the copy's
+/// epoch lists the copy's writer, not as left. A `FIELD_TELEMETRY`
+/// reading is that writer's only then, by [`Lev::reading_writer`], and
+/// the source's in every other case (the second audit of 1757).
+pub fn reports_with(message: &Message, lists: impl Fn(&GroupCopy) -> bool) -> Vec<Report> {
+    let measurer = Lev::reading_writer(&message.fields, &message.source_hash, |copy| lists(copy));
     let mut out = Vec::new();
     for (id, value) in &message.fields {
         match *id {
-            FIELD_TELEMETRY => out.push(direct(message, value)),
+            FIELD_TELEMETRY => out.push(direct(message, measurer, value)),
             FIELD_TELEMETRY_STREAM => out.extend(stream(message, value)),
             _ => {}
         }
@@ -105,8 +120,8 @@ pub fn reports(message: &Message) -> Vec<Report> {
     out
 }
 
-/// A first-hand reading: `FIELD_TELEMETRY`.
-fn direct(message: &Message, value: &[u8]) -> Report {
+/// A first-hand reading: `FIELD_TELEMETRY`, measured by `measurer`.
+fn direct(message: &Message, measurer: [u8; 16], value: &[u8]) -> Report {
     // Sideband stores the packed bytes in the field, so the value is a
     // msgpack bin wrapping the blob (`Telemetry::encode_field_value`). A
     // value that is not even that is kept as itself — there is no inner blob
@@ -115,13 +130,13 @@ fn direct(message: &Message, value: &[u8]) -> Report {
     let mut p = 0;
     match msgpack::read_bin(value, &mut p) {
         Ok(blob) => Report {
-            source: message.source_hash.to_vec(),
+            source: measurer.to_vec(),
             via: message.source_hash,
             raw: blob.to_vec(),
             reading: decode(blob),
         },
         Err(e) => Report {
-            source: message.source_hash.to_vec(),
+            source: measurer.to_vec(),
             via: message.source_hash,
             raw: value.to_vec(),
             reading: Reading::Undecodable(format!("FIELD_TELEMETRY is not a msgpack bin: {e:?}")),
@@ -520,6 +535,46 @@ mod tests {
             .find(|(k, _)| *k == key)
             .map(|(_, v)| v.as_str())
             .unwrap_or_else(|| panic!("no {key} among {fields:?}"))
+    }
+
+    /// A group copy's reading (1687, the second audit of 1757): credited to
+    /// the writer it names only where the reader's groups list that writer
+    /// at the copy's epoch, by the rule Loquax files pins by. A forged
+    /// copy, naming a writer the group does not list, and the same valid
+    /// copy read by the helper itself, which joins no group, are the
+    /// group's own reading.
+    #[test]
+    fn only_a_valid_group_copy_is_credited_to_its_writer() {
+        const GROUP: [u8; 16] = [0x60; 16];
+        const MEMBER: [u8; 16] = [0x4d; 16];
+        const FORGER: [u8; 16] = [0x5e; 16];
+        let copy_of = |writer: [u8; 16]| {
+            let mut message = received_report(&walk_reading());
+            message.source_hash = GROUP;
+            let mut fields = Vec::new();
+            Lev {
+                group_copy: Some(GroupCopy {
+                    sender: writer,
+                    sent_ms: 1,
+                    epoch: 2,
+                }),
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+            fields.extend(message.fields.iter().cloned());
+            message.fields = fields;
+            message
+        };
+        // The reader's group: GROUP lists MEMBER at epoch 2.
+        let lists = |copy: &GroupCopy| copy.sender == MEMBER && copy.epoch <= 2;
+        let who = |reports: Vec<Report>| -> Vec<(Vec<u8>, [u8; 16])> {
+            reports.into_iter().map(|r| (r.source, r.via)).collect()
+        };
+        let valid = copy_of(MEMBER);
+        assert_eq!(who(reports_with(&valid, lists)), [(MEMBER.to_vec(), GROUP)]);
+        let forged = copy_of(FORGER);
+        assert_eq!(who(reports_with(&forged, lists)), [(GROUP.to_vec(), GROUP)]);
+        assert_eq!(who(reports(&valid)), [(GROUP.to_vec(), GROUP)]);
     }
 
     /// Scaled integers print exactly, sign and all — the property the whole

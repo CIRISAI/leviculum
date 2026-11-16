@@ -328,8 +328,15 @@ impl<R: RangeRead> Archive<R> {
     /// Where `t`'s blob lies; `None` when the archive does not hold it.
     pub fn locate(&self, t: TileId) -> Res<Option<Located>> {
         let id = tile_id(t);
-        let mut dir: Arc<Vec<DirEntry>> = Arc::new(self.root.clone());
+        // The root borrowed, never copied: an extract's root holds every
+        // tile's entry (Germany's parts hundreds of thousands), and a copy
+        // per tile made the cut of a country quadratic.
+        let mut leaf: Option<Arc<Vec<DirEntry>>> = None;
         for _ in 0..=MAX_DEPTH {
+            let dir: &[DirEntry] = match &leaf {
+                Some(l) => l,
+                None => &self.root,
+            };
             // The last entry at or before `id`.
             let i = match dir.binary_search_by_key(&id, |e| e.0) {
                 Ok(i) => i,
@@ -338,7 +345,7 @@ impl<R: RangeRead> Archive<R> {
             };
             let (first, off, len, run) = dir[i];
             if run == 0 {
-                dir = self.leaf(off, len)?;
+                leaf = Some(self.leaf(off, len)?);
                 continue;
             }
             if id - first < u64::from(run) {
@@ -483,6 +490,44 @@ fn put_varint(mut v: u64, out: &mut Vec<u8>) {
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// A synthetic archive for measurements (1527): every tile of `bounds` at
+/// `zooms` holds `mvt` (uncompressed MVT) and after it a field an MVT
+/// reader skips, `pad` bytes that differ from tile to tile, so no two
+/// blobs are stored once and a box's bytes grow with its tiles as a real
+/// archive's do. Served throttled, the size of a load shows in its time.
+pub fn padded(
+    mvt: &[u8],
+    bounds: &Bounds,
+    zooms: RangeInclusive<u8>,
+    pad: usize,
+    metadata: &serde_json::Value,
+) -> Res<Vec<u8>> {
+    let mut tiles = BTreeMap::new();
+    for z in zooms {
+        let (xs, ys) = tile_range(bounds, z);
+        for x in xs.into_iter().flatten() {
+            for y in ys.clone() {
+                let t = TileId { z, x, y };
+                let mut blob = mvt.to_vec();
+                // Field 15, length-delimited: unknown to the Tile message.
+                blob.push(15 << 3 | 2);
+                put_varint(pad as u64, &mut blob);
+                let mut v = tile_id(t).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                blob.extend((0..pad).map(|_| {
+                    v ^= v << 13;
+                    v ^= v >> 7;
+                    v ^= v << 17;
+                    v as u8
+                }));
+                tiles.insert(t, blob);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    write(&tiles, NONE, metadata, &mut out)?;
+    Ok(out)
 }
 
 /// Write a PMTiles v3 archive of `tiles` (raw blobs as `tile_compression`

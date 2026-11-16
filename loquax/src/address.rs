@@ -5,7 +5,10 @@
 //! `lnomad` puts on the clipboard when a page links a correspondent
 //! (`follow_link`, `lnomad/src/app/event.rs:1597-1606`): that handoff exists
 //! precisely so the address can be pasted here, and refusing the form the
-//! browser produces would break it for the sake of strictness.
+//! browser produces would break it for the sake of strictness. The other is
+//! a whole contact code, `lxma://<address>:<key>` ([`crate::lxma`]), which
+//! Columba and Sideband share: it parses to its address, once its key has
+//! been checked against it.
 
 use alloc::string::String;
 
@@ -24,6 +27,8 @@ pub enum AddressError {
     WrongLength { got: usize },
     /// A character that is not a hex digit.
     NotHex { position: usize, character: char },
+    /// A contact code (`lxma://`) that is not one.
+    Contact(crate::lxma::LxmaError),
 }
 
 impl core::fmt::Display for AddressError {
@@ -43,6 +48,7 @@ impl core::fmt::Display for AddressError {
                 "an LXMF address is hex; character {} is {character:?}",
                 position + 1
             ),
+            Self::Contact(error) => write!(f, "{error}"),
         }
     }
 }
@@ -58,6 +64,11 @@ impl core::error::Error for AddressError {}
 /// simply never answers.
 pub fn parse(text: &str) -> Result<[u8; ADDRESS_BYTES], AddressError> {
     let trimmed = text.trim();
+    if crate::lxma::is_lxma(trimmed) {
+        return crate::lxma::parse(trimmed)
+            .map(|contact| contact.address)
+            .map_err(AddressError::Contact);
+    }
     let hex = trimmed.strip_prefix(URI_PREFIX).unwrap_or(trimmed);
     if hex.is_empty() {
         return Err(AddressError::Empty);
@@ -179,6 +190,22 @@ mod tests {
     fn an_empty_address_is_its_own_error() {
         assert_eq!(parse(""), Err(AddressError::Empty));
         assert_eq!(parse("lxmf@"), Err(AddressError::Empty));
+    }
+
+    /// The pencil and the terminal take a contact code where an address
+    /// goes: its address, or the code's own complaint.
+    #[test]
+    fn a_contact_code_parses_to_its_address() {
+        let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let code = crate::lxma::encode(&identity.public_key_bytes()).expect("a code");
+        assert_eq!(
+            parse(&code),
+            Ok(crate::engine::delivery_address(&identity).expect("address"))
+        );
+        assert_eq!(
+            parse("lxma://00"),
+            Err(AddressError::Contact(crate::lxma::LxmaError::NoKey))
+        );
     }
 
     #[test]

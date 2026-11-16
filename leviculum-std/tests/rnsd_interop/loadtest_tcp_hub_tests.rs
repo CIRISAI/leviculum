@@ -268,9 +268,19 @@ fn locate_lnsd() -> PathBuf {
     );
 }
 
+/// The hub's `max_connections_per_source` for the load runs. Every client
+/// connects from 127.0.0.1 by design (24 steady plus 6 churn in the smoke, more
+/// in `--full`), so the cap sits above that rather than off.
+const LOADTEST_PER_SOURCE_CAP: usize = 1024;
+
 /// Spawn `lnsd` from a `type = BackboneInterface` server config on `port`,
 /// with transport enabled, capturing stderr+stdout to a log file.
 fn spawn_lnsd_hub(port: u16) -> LnsdHub {
+    spawn_lnsd_hub_capped(port, LOADTEST_PER_SOURCE_CAP)
+}
+
+/// [`spawn_lnsd_hub`] with an explicit `max_connections_per_source`.
+fn spawn_lnsd_hub_capped(port: u16, per_source_cap: usize) -> LnsdHub {
     let bin = locate_lnsd();
     let config_dir = tempfile::Builder::new()
         .prefix("loadtest_lnsd_")
@@ -287,7 +297,8 @@ fn spawn_lnsd_hub(port: u16) -> LnsdHub {
          \x20 [[Backbone Load Hub]]\n\
          \x20   type = BackboneInterface\n\
          \x20   listen_on = 127.0.0.1\n\
-         \x20   port = {port}\n"
+         \x20   port = {port}\n\
+         \x20   max_connections_per_source = {per_source_cap}\n"
     );
     std::fs::write(config_dir.path().join("config"), config).expect("write lnsd config");
 
@@ -1488,6 +1499,186 @@ async fn loadtest_tcp_hub_soak() {
     let log = read_log(&hub.log_path);
     let log_failures = scan_log_for_failures(&log);
     report_and_assert("lnsd_soak", &res, &params, &log_failures);
+}
+
+/// The per-source cap (1190) the load hub raises, at its default: 16 clients
+/// from 127.0.0.2 are held and lose nothing, the 17th and 18th are closed
+/// right after accept, and `TCP_SOURCE_CAPPED` names the source (by its
+/// daily tag, order 1678) and the held count. It is reported once per source per minute, so the two refusals are
+/// one line. The sink connects from 127.0.0.1 and stays outside the count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns lnsd binary; run on demand"]
+async fn a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_nothing() {
+    const CAP: usize = 16;
+    const PKTS: u32 = 20;
+    const SOURCE: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 2);
+    // Generous against a CPU quota; the server closes right after accept.
+    const CLOSE_WINDOW: Duration = Duration::from_secs(5);
+
+    init_tracing();
+    // port-handoff: the hub is an lnsd process that reads its port from its config file.
+    let port = pick_free_tcp_port().expect("hub port");
+    let hub = spawn_lnsd_hub_capped(port, CAP);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let hub_addr: std::net::SocketAddr = ([127, 0, 0, 1], hub.port).into();
+    let sink = TestDaemon::start().await.expect("start sink daemon");
+
+    let dest_info = sink
+        .register_destination("loadtest", &["sink"])
+        .await
+        .expect("register sink destination");
+    let sink_hash: [u8; 16] = hex::decode(&dest_info.hash)
+        .expect("sink hash hex")
+        .try_into()
+        .expect("sink hash 16 bytes");
+    let dest = sink_out_destination(&dest_info.public_key);
+    sink.add_client_interface("127.0.0.1", hub.port, Some("SinkToHub"))
+        .await
+        .expect("sink connects to hub as TCP client");
+    assert!(
+        warm_up_path(
+            hub_addr,
+            &dest,
+            sink_hash,
+            hub.transport_id,
+            &sink,
+            &dest_info.hash
+        )
+        .await,
+        "warm-up failed: the path to the sink never installed"
+    );
+
+    let mut rng = rand_core::OsRng;
+    let mut frame_for =
+        |id: u32, seq: u32| build_lt_frame(&dest, sink_hash, hub.transport_id, id, seq, &mut rng);
+    let connect = || async {
+        let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+        socket
+            .bind((SOURCE, 0).into())
+            .expect("bind the shared source");
+        socket.connect(hub_addr).await
+    };
+    let delivered = |per_source: &HashMap<u32, (u32, Option<u32>, Option<u32>)>, id: u32| {
+        per_source.get(&id).map_or(0, |(distinct, _, _)| *distinct)
+    };
+
+    // The sixteen: each sends seq 0, and all sixteen reach the sink before
+    // the seventeenth connects, so the hub holds every one of them.
+    let mut held = Vec::with_capacity(CAP);
+    for id in 0..CAP as u32 {
+        let mut stream = connect().await.unwrap_or_else(|e| {
+            panic!(
+                "held client {id}: connect to the hub: {e}\n--- hub log ---\n{}",
+                read_log(&hub.log_path)
+            )
+        });
+        stream.write_all(&frame_for(id, 0)).await.expect("write");
+        held.push(stream);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (per_source, _) = sink.get_loadtest_stats().await.expect("stats");
+        if (0..CAP as u32).all(|id| delivered(&per_source, id) >= 1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first {CAP} clients did not all reach the sink: {per_source:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The seventeenth and eighteenth: closed by the hub within the window,
+    // and the frame each wrote never arrives. The hub refuses with a reset
+    // right after accept (`tcp.rs::refuse`), and on loopback that reset can
+    // land before the client task polls its connect: tokio then reads it from
+    // `SO_ERROR` and the connect itself fails with ECONNRESET. That is the
+    // refusal arriving early, not a fault; under a CPU quota it is the usual
+    // order (1250: 17 of 20 runs).
+    for id in CAP as u32..CAP as u32 + 2 {
+        let mut stream = match connect().await {
+            Ok(stream) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(e) => panic!("client {id} past the cap: connect to the hub: {e}"),
+        };
+        let _ = stream.write_all(&frame_for(id, 0)).await;
+        let closed = tokio::time::timeout(CLOSE_WINDOW, async {
+            let mut buf = [0u8; 512];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .is_ok();
+        assert!(
+            closed,
+            "client {id} past the cap of {CAP} was not closed within {CLOSE_WINDOW:?}"
+        );
+    }
+
+    // The sixteen keep their connections and lose nothing.
+    for seq in 1..PKTS {
+        for (id, stream) in held.iter_mut().enumerate() {
+            stream
+                .write_all(&frame_for(id as u32, seq))
+                .await
+                .unwrap_or_else(|e| panic!("held client {id} lost its connection: {e}"));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let per_source = loop {
+        let (per_source, _) = sink.get_loadtest_stats().await.expect("stats");
+        let done = (0..CAP as u32).all(|id| delivered(&per_source, id) >= PKTS);
+        if done || tokio::time::Instant::now() >= deadline {
+            break per_source;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    for id in 0..CAP as u32 {
+        assert_eq!(
+            per_source.get(&id).copied(),
+            Some((PKTS, Some(0), Some(PKTS - 1))),
+            "held client {id} must deliver seq 0..{PKTS} contiguously"
+        );
+    }
+    for id in CAP as u32..CAP as u32 + 2 {
+        assert_eq!(
+            delivered(&per_source, id),
+            0,
+            "refused client {id} must deliver nothing"
+        );
+    }
+
+    let log = read_log(&hub.log_path);
+    let capped: Vec<String> = log
+        .lines()
+        .map(strip_ansi)
+        .filter(|l| l.contains("event=\"TCP_SOURCE_CAPPED\""))
+        .collect();
+    assert_eq!(
+        capped.len(),
+        1,
+        "two refusals inside a minute are one TCP_SOURCE_CAPPED line: {capped:#?}"
+    );
+    // The source is named by its daily tag, eight hex characters, never by
+    // its address (order 1678); the tag's key lives only inside lnsd.
+    let tag = capped[0]
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("source="))
+        .unwrap_or_default();
+    assert!(
+        tag.len() == 8
+            && tag.bytes().all(|b| b.is_ascii_hexdigit())
+            && !capped[0].contains(&SOURCE.to_string())
+            && capped[0].contains(&format!("held={CAP}")),
+        "TCP_SOURCE_CAPPED must name the source by its tag and the held count: {}",
+        capped[0]
+    );
+    drop(held);
 }
 
 /// A/B: the SAME generator drives our `lnsd` and a real Python `rnsd`

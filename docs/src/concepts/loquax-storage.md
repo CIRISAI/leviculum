@@ -3,7 +3,7 @@
 Part of the [Loquax design record](loquax.md).
 
 The library stores one key (`ROUTER_STATE_KEY`, `b"lxmf/router-state"`,
-`leviculum-lxmf/src/router.rs:67`) and hands each received message to the
+`leviculum-lxmf/src/router.rs:65`) and hands each received message to the
 application exactly once. **All history is the client's problem.**
 
 ## Options
@@ -83,7 +83,7 @@ Three reasons for the shape:
    problem it once was on our side: the emission timestamp carries it, as
    the reference's `time.time()` does, because at whole-second granularity
    two identical messages created inside one second collapse to one ID —
-   `leviculum-lxmf/src/router.rs:534-538`, Codeberg #217. Precision and
+   `leviculum-lxmf/src/router.rs:593-597`, Codeberg #217. Precision and
    skew are different failures, and only the second one is a sorting
    question.)
 3. **`fields` stored as raw msgpack, not exploded into columns.** Unknown
@@ -130,7 +130,7 @@ the whole argument.
 
 Nothing in this program may use `fs::write` on a file it cannot afford to
 lose, and nothing may treat a corrupt load as an empty load
-(`lnomad/src/bookmarks.rs:116-130`). Bookmarks can be silently forgotten.
+(`lnomad/src/bookmarks.rs:121-136`). Bookmarks can be silently forgotten.
 Mail cannot.
 
 ## Built 2026-10-27 (leviculum 1049)
@@ -164,6 +164,28 @@ this page leaves, or departs from it:
   external content over `messages` kept by triggers, with the `trigram`
   tokenizer so a query matches a substring, as the screen's own matcher
   does. A query shorter than three characters scans with `LIKE`.
+- **Drafts** (schema 8, 1219). `drafts`, a row a conversation: the text
+  typed and not sent, the LXMF id a reply being written answers, and the
+  attachments to go with it as a JSON array, empty for now. Written once
+  typing paused for half a second, or at once when the conversation is
+  left, the screen quits or the phone's session ends; deleted when the
+  message is sent and with its conversation. A conversation that holds
+  nothing but a draft comes back at start.
+- **Read receipts** (schema 9, 1230). A message of ours the peer read is
+  `state` 8 with the reader's time, unix seconds, in `messages.read_at`;
+  `conversations.receipts` is 1 while the peer's latest message carried the
+  `lev` receipt mark ([read receipts](loquax-read-receipts.md)). A schema 8
+  file gains both columns empty in place.
+- **Position shares** (schema 10, 1273). `shares`, a row a conversation
+  while our share runs there: its span (`15_min`, `1_h`, `8_h`,
+  `until_stopped`), its start and end in unix seconds (no end until
+  stopped), and the last report it sent (the fix's integers, when it went,
+  whether it went for a move), from which its cadence goes on after a
+  restart. Written on every start, report and stop, deleted at the stop
+  and with its conversation. A share whose end passed while the app was
+  gone ends at the first clock with its end report. A row with a span
+  this program does not know, or half a last report, is refused as
+  corrupt. A schema 9 file gains the empty table in place.
 - **Writes.** The model notes what a fold changed, and the shell writes it
   in one `BEGIN IMMEDIATE` transaction before the next event, rollback
   journal, `synchronous=FULL`, foreign keys on. A crash leaves the store as

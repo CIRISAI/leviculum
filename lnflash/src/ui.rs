@@ -147,6 +147,9 @@ pub(crate) mod testing {
         pub typed: Vec<String>,
         pub human_steps: Vec<String>,
         pub human_refuses: bool,
+        /// Every confirm and ask put, in order: what a "nothing asked" test
+        /// asserts empty (#476).
+        pub questions: Vec<String>,
     }
 
     impl Fake {
@@ -184,6 +187,7 @@ pub(crate) mod testing {
 
         fn confirm(&mut self, question: &str) -> io::Result<bool> {
             self.said.push(question.to_string());
+            self.questions.push(question.to_string());
             Ok(if self.answers.is_empty() {
                 false
             } else {
@@ -193,6 +197,7 @@ pub(crate) mod testing {
 
         fn ask(&mut self, prompt: &str) -> io::Result<Option<String>> {
             self.said.push(prompt.to_string());
+            self.questions.push(prompt.to_string());
             if self.typed.is_empty() {
                 return Ok(None);
             }

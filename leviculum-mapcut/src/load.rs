@@ -1,17 +1,23 @@
 //! A box of an archive, local or remote, cut into a region under a size
 //! cap (1089): the tiles are located first, from the directories alone, and
 //! when the box's tiles down to the deepest zoom asked would fetch more than
-//! the cap, the deepest zoom is lowered until they do not. Only then is
-//! anything fetched, in as few ranges as the archive's layout allows.
+//! the cap, the deepest zoom is lowered until they do not ([`plan`]). Only
+//! then is anything fetched, a round of the cut at a time, coarse to fine,
+//! each round in as few ranges as the archive's layout allows, so the region
+//! file shows its shallow zooms while the deep ones still arrive (1291,
+//! [`cut_planned`]).
 
+use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{PoisonError, RwLock};
 
-use leviculum_map::region::Bounds;
+use leviculum_map::region::{Bounds, TileId};
 
-use crate::cut::{cut, CutOptions, CutStats};
-use crate::pmtiles::{Archive, RangeRead};
-use crate::{notice, source_line, Res, ATTRIBUTION};
+use crate::cut::{cut_streamed, in_bounds, CutOptions, CutStats, Progress};
+use crate::pmtiles::{Archive, Fetched, Located, RangeRead};
+use crate::{notice, source_line, Res, TileSource, ATTRIBUTION};
 
 /// What to load.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +33,10 @@ pub struct Want {
     /// The language names are kept in beside the local ones
     /// ([`CutOptions::locale`]).
     pub locale: Option<String>,
+    /// Cut the buildings too ([`CutOptions::buildings`]).
+    pub buildings: bool,
+    /// Cut the pois and travel attributes too ([`CutOptions::pois`]).
+    pub pois: bool,
 }
 
 /// What a load fetched and wrote.
@@ -109,6 +119,22 @@ pub fn load<R: RangeRead, W: Write + Seek>(
     threads: usize,
     out: W,
 ) -> Res<Loaded> {
+    let planned = plan(archive, want)?;
+    cut_planned(archive, want, planned, by, threads, out, &mut |_| {})
+}
+
+/// The tiles a load fetches, located and under the cap, before any is
+/// fetched: what names the region's zooms before it is written.
+#[derive(Debug)]
+pub struct Planned {
+    /// The zooms the region holds.
+    pub zooms: RangeInclusive<u8>,
+    chosen: Vec<Located>,
+}
+
+/// Locate `want`'s tiles in `archive` and lower the deepest zoom until
+/// they fit the cap.
+pub fn plan<R: RangeRead>(archive: &Archive<R>, want: &Want) -> Res<Planned> {
     let located = archive.locate_in(&want.bounds, want.zooms.clone())?;
     if located.is_empty() {
         return Err(Box::new(Empty));
@@ -119,9 +145,72 @@ pub fn load<R: RangeRead, W: Write + Seek>(
             bytes,
             cap: want.cap,
         })?;
-    let chosen: Vec<_> = located.into_iter().filter(|l| l.0.z <= hi).collect();
-    let fetched = archive.fetch(&chosen)?;
-    let zooms = *want.zooms.start()..=hi;
+    Ok(Planned {
+        zooms: *want.zooms.start()..=hi,
+        chosen: located.into_iter().filter(|l| l.0.z <= hi).collect(),
+    })
+}
+
+/// The planned tiles of an archive, fetched a round of the cut at a time
+/// ([`TileSource::want`]): the round the cut works on is all it holds.
+struct Arriving<'a, R: RangeRead> {
+    archive: &'a Archive<R>,
+    chosen: HashMap<TileId, Located>,
+    round: RwLock<Option<Fetched>>,
+    bytes: AtomicU64,
+    requests: AtomicUsize,
+}
+
+impl<R: RangeRead> TileSource for Arriving<'_, R> {
+    fn tiles_in(&self, bounds: &Bounds, zooms: RangeInclusive<u8>) -> Res<Vec<TileId>> {
+        Ok(self
+            .chosen
+            .keys()
+            .copied()
+            .filter(|t| zooms.contains(&t.z) && in_bounds(*t, bounds))
+            .collect())
+    }
+
+    fn mvt(&self, t: TileId) -> Res<Option<Vec<u8>>> {
+        let round = self.round.read().unwrap_or_else(PoisonError::into_inner);
+        match round.as_ref() {
+            Some(fetched) => fetched.mvt(t),
+            None => Ok(None),
+        }
+    }
+
+    fn want(&self, tiles: &[TileId]) -> Res<()> {
+        let located: Vec<Located> = tiles
+            .iter()
+            .filter_map(|t| self.chosen.get(t).copied())
+            .collect();
+        let fetched = self.archive.fetch(&located)?;
+        self.bytes.fetch_add(fetched.bytes, Ordering::Relaxed);
+        self.requests.fetch_add(fetched.requests, Ordering::Relaxed);
+        *self.round.write().unwrap_or_else(PoisonError::into_inner) = Some(fetched);
+        Ok(())
+    }
+}
+
+/// Fetch `planned`'s tiles and cut them into `out`, a round at a time,
+/// telling `progress` after each round is written ([`cut_streamed`]).
+pub fn cut_planned<R: RangeRead, W: Write + Seek>(
+    archive: &Archive<R>,
+    want: &Want,
+    planned: Planned,
+    by: &str,
+    threads: usize,
+    out: W,
+    progress: &mut dyn FnMut(Progress),
+) -> Res<Loaded> {
+    let zooms = planned.zooms;
+    let fetched = Arriving {
+        archive,
+        chosen: planned.chosen.into_iter().map(|l| (l.0, l)).collect(),
+        round: RwLock::new(None),
+        bytes: AtomicU64::new(0),
+        requests: AtomicUsize::new(0),
+    };
     let opts = CutOptions {
         bounds: want.bounds,
         zooms: zooms.clone(),
@@ -130,12 +219,15 @@ pub fn load<R: RangeRead, W: Write + Seek>(
         notice: notice(by, want.profile, &source_line(archive)),
         threads,
         locale: want.locale.clone(),
+        buildings: want.buildings,
+        pois: want.pois,
+        round: crate::cut::ROUND,
     };
-    let stats = cut(&fetched, &opts, out)?;
+    let stats = cut_streamed(&fetched, &opts, out, progress)?;
     Ok(Loaded {
         zooms,
-        fetched: fetched.bytes,
-        requests: fetched.requests,
+        fetched: fetched.bytes.load(Ordering::Relaxed),
+        requests: fetched.requests.load(Ordering::Relaxed),
         stats,
     })
 }

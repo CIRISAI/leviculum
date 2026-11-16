@@ -17,7 +17,7 @@
 //! | short | `status` | wakes the display (Pocket V2), then the battery in quarters on the LED and the buzzer ([`Feedback::status`]) |
 //! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s, then one position report if a recipient is set (the node loop, on [`ANNOUNCE_PRESS`]) |
 //! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists; the 2 s mark blips "release now" |
-//! | very long, 8 s | `hold8` | nothing yet: the power off, once the board can sleep |
+//! | very long, 8 s | `hold8` | the board switches off ([`POWER_OFF`], order 1511); the 8 s mark plays `power-off` |
 //!
 //! # The Pocket V2's display
 //!
@@ -41,7 +41,9 @@ use core::future::pending;
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use leviculum_announce_policy::{ButtonEvent, ButtonGate, PressAction, LONG_PRESS_MIN_MS};
+use leviculum_announce_policy::{
+    ButtonEvent, ButtonGate, PressAction, HOLD8_MIN_MS, LONG_PRESS_MIN_MS,
+};
 
 use crate::feedback::{Feedback, Sinks};
 use crate::seams::{ButtonInput, Clock};
@@ -57,6 +59,14 @@ pub async fn announce_press() {
     ANNOUNCE_PRESS.wait().await;
 }
 
+/// Raised once by a very long press at its release (order 1511): the bind
+/// crate's button task waits on it beside the press handling and switches
+/// the board off. The signal goes up at the release, not at the 8 s mark,
+/// because the button is the wake source: a board switched off with the
+/// button still down would sense the press it is waiting for and wake at
+/// once.
+pub static POWER_OFF: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// The board's button, until it is released: the press handling over the
 /// registered feedback sinks, [`ANNOUNCE_PRESS`] and, on a board with the
 /// `display` capability, `board_state::DISPLAY_WAKE`. `board` is the
@@ -71,6 +81,7 @@ pub async fn run<I: ButtonInput, C: Clock>(mut input: I, clock: C, board: &str) 
         &crate::feedback::FEEDBACK,
         crate::feedback::battery_percent,
         &ANNOUNCE_PRESS,
+        &POWER_OFF,
         wake,
     )
     .run(&mut input, &clock)
@@ -117,6 +128,7 @@ pub struct Button<'a, S> {
     feedback: &'a Feedback<S>,
     battery: fn() -> Option<u8>,
     announce: &'a Signal<CriticalSectionRawMutex, ()>,
+    power_off: &'a Signal<CriticalSectionRawMutex, ()>,
     wake: Option<&'a Signal<CriticalSectionRawMutex, ()>>,
     /// The lines written, for a test to read.
     #[cfg(test)]
@@ -131,6 +143,7 @@ impl<'a, S: Sinks> Button<'a, S> {
         feedback: &'a Feedback<S>,
         battery: fn() -> Option<u8>,
         announce: &'a Signal<CriticalSectionRawMutex, ()>,
+        power_off: &'a Signal<CriticalSectionRawMutex, ()>,
         wake: Option<&'a Signal<CriticalSectionRawMutex, ()>>,
     ) -> Self {
         Self {
@@ -139,6 +152,7 @@ impl<'a, S: Sinks> Button<'a, S> {
             feedback,
             battery,
             announce,
+            power_off,
             wake,
             #[cfg(test)]
             written: alloc::vec::Vec::new(),
@@ -190,9 +204,9 @@ impl<'a, S: Sinks> Button<'a, S> {
         let press = match event {
             ButtonEvent::Press(press) => press,
             // The moment a held button reaches 2 s and 8 s, so the rig can
-            // see it. At 2 s the board blips "release now" (order 892); the
-            // 8 s mark has no signal until it powers the board off. The
-            // gesture itself is the `BTN_PRESS` line at the release.
+            // see it. At 2 s the board blips "release now" (order 892), at
+            // 8 s it plays `power-off`, the light running down (order 1511).
+            // The gesture itself is the `BTN_PRESS` line at the release.
             ButtonEvent::Held { ms } => {
                 self.write(Line::Hold {
                     board: self.board,
@@ -200,6 +214,8 @@ impl<'a, S: Sinks> Button<'a, S> {
                 });
                 if ms == LONG_PRESS_MIN_MS {
                     self.feedback.release_now();
+                } else if ms == HOLD8_MIN_MS {
+                    self.feedback.power_off();
                 }
                 return;
             }
@@ -223,10 +239,12 @@ impl<'a, S: Sinks> Button<'a, S> {
             // battery in quarters on the LED and the buzzer (order 892).
             // The mode blink joins it once there is a mode.
             PressAction::Status => self.feedback.status((self.battery)()),
+            // The very long press switches the board off, at the release
+            // (`POWER_OFF` says why not at the mark).
+            PressAction::Hold8 => self.power_off.signal(()),
             // Recognised and reported, nothing else: the long press becomes
-            // the mode switch in the pass that builds Tracker mode, the very
-            // long one the power off in the pass that builds the sleep.
-            PressAction::Long | PressAction::Hold8 => {}
+            // the mode switch in the pass that builds Tracker mode.
+            PressAction::Long => {}
             PressAction::RateLimited | PressAction::Debounced => {}
         }
     }
@@ -249,6 +267,7 @@ mod tests {
         played: Vec<(Sink, &'static str)>,
         announces: usize,
         wakes: usize,
+        power_offs: usize,
     }
 
     /// Run the press handling over `edges` (`(t_ms, pressed)`) until the
@@ -258,15 +277,24 @@ mod tests {
     fn press(edges: &[(u64, bool)], until_ms: u64) -> Outcome {
         let feedback = Feedback::new(RecordingSinks::new(LED_AND_BUZZER));
         let announce = Signal::new();
+        let power_off = Signal::new();
         let wake = Signal::new();
         let clock = FakeClock::new();
         let input = FakeButtonInput::new(&clock, edges);
-        let mut button = Button::new("test", &feedback, || Some(60), &announce, Some(&wake));
-        let (mut announces, mut wakes) = (0, 0);
+        let mut button = Button::new(
+            "test",
+            &feedback,
+            || Some(60),
+            &announce,
+            &power_off,
+            Some(&wake),
+        );
+        let (mut announces, mut wakes, mut power_offs) = (0, 0, 0);
         let mut handle = &input;
         drive(button.run(&mut handle, &clock), &clock, until_ms, |_| {
             announces += usize::from(announce.try_take().is_some());
             wakes += usize::from(wake.try_take().is_some());
+            power_offs += usize::from(power_off.try_take().is_some());
             input.next_edge_ms()
         });
         Outcome {
@@ -279,6 +307,7 @@ mod tests {
                 .collect(),
             announces,
             wakes,
+            power_offs,
         }
     }
 
@@ -360,6 +389,44 @@ mod tests {
         );
         assert_eq!(out.wakes, 1);
         assert_eq!(out.announces, 0);
+    }
+
+    // Held from 1000 to 9500: the 2 s mark as above, then the second hold
+    // deadline `pressed_at + HOLD8_MIN_MS = 9000` reports `Held { ms: 8000 }`,
+    // which writes `BTN_HOLD` and plays `power-off` (`else if ms ==
+    // HOLD8_MIN_MS`). The release settles at 9550, `held_ms = 8500 >=
+    // HOLD8_MIN_MS`: `Hold8`, which wakes the display and raises
+    // `power_off` once, at the release and not at the mark.
+    #[test]
+    fn a_hold_to_8_s_plays_power_off_at_the_mark_and_switches_off_at_the_release() {
+        let out = press(&[(1_000, true), (9_500, false)], 60_000);
+        assert_eq!(
+            out.lines,
+            vec![
+                "BTN_HOLD board=test ms=2000",
+                "BTN_HOLD board=test ms=8000",
+                "BTN_PRESS board=test action=hold8 held_ms=8500",
+            ]
+        );
+        assert_eq!(
+            out.played,
+            vec![
+                (Sink::Led, "release-now"),
+                (Sink::Buzzer, "release-now"),
+                (Sink::Led, "power-off"),
+                (Sink::Buzzer, "power-off"),
+            ]
+        );
+        assert_eq!(out.power_offs, 1);
+        assert_eq!(out.announces, 0);
+    }
+
+    // The same press still held: the mark has played, the board stays on.
+    #[test]
+    fn a_button_still_held_past_8_s_does_not_switch_off_yet() {
+        let out = press(&[(1_000, true)], 20_000);
+        assert_eq!(out.power_offs, 0);
+        assert!(out.played.contains(&(Sink::Led, "power-off")));
     }
 
     // Down at 1000, up at 1030: the second edge restarts the quiet period

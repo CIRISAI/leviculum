@@ -1,6 +1,6 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -10,14 +10,14 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                  No messages yet                   │
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: waiting ---
-┌  Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
-│▌<61ddb79a…>      12:00 ││                                                    │
+┌  tui───────────────────┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown          12:00 ││                                                    │
 │▌you: are you there     ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -25,16 +25,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                are you there  direct 2 s · 12:00 ○ │
-│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││               are you there  direct 2 s · 12:00 ◷  │
+│                        │├● to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: delivered ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown────────── no propagation node ┐
-│▌them ·61dd       12:00 ││                                                    │
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             12:00 ││                                                    │
 │▌you: are you there     ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -42,10 +42,10 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                             are you there  12:00 ✓ │
-│                        │├● to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││                            are you there  12:00 ✓  │
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

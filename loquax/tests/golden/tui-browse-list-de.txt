@@ -1,0 +1,24 @@
+lnomad · Mit : eine URL eingeben
+NomadNet-Seiten                                                                █
+                                                                               █
+Tippe auf einen Knoten, um seine Seiten zu öffnen, oder gib oben eine Adresse  █
+ein.                                                                           █
+                                                                               █
+                                                                               █
+                                                                               █
+    ┌ Orte ────────────────────────────────────────────────────────────────┐   █
+    │Lesezeichen                                                           │   █
+    │  (keine)                                                             │   █
+    │                                                                      │   █
+    │Gehörte Seiten                                                        │   █
+    │  Marcel's node  ·  gesehen vor 1 Min.  ·  über 2 Stationen erreichbar│   █
+    │  Relay Süd  ·  gesehen vor 1 Min.  ·  direkt erreichbar              │   █
+    └──────────────────────────────────────────────────────────────────────┘   █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+Alt-← zurück │ Alt-→ vor │ R neu laden │ f Hinweis │ ? Hilfe │ q beenden

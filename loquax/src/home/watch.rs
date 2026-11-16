@@ -42,9 +42,15 @@ pub fn wants_pull(newest: u64, cursor: u64) -> bool {
 
 /// How long one attempt to open the link and ask `/watch` may take.
 const ATTEMPT: Duration = Duration::from_secs(30);
-/// How often the link is looked at besides its events: a closed link whose
-/// event the tap lost is found within this.
-const LOOK: Duration = Duration::from_secs(5);
+/// The longest the link goes unlooked at besides its events. The watch is
+/// event-driven (1176): a closed link says so with `LinkClosed`, a tap that
+/// lost events says so with `Lagged` and the link is looked at then, and a
+/// frontend that went away closes the channel. This look is only the
+/// backstop for a close no event reported, and it is the link keepalive's
+/// ceiling (`KEEPALIVE_MAX`, Link.py:92; `LINK_KEEPALIVE_SECS`), so on a
+/// phone it never wakes more often than the link's own keepalive does. It
+/// was 5 s before 1176, a wakeup every 5 s for the life of the app.
+pub const LOOK: Duration = Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS);
 
 /// The wait before the next attempt to open the watching link: doubled on
 /// each attempt that did not come up, back to the first once a link stood.
@@ -127,9 +133,19 @@ pub struct Watch {
 /// it drops.
 pub async fn run(watch: Watch, events: UnboundedSender<WatchEvent>) {
     let mut backoff = Backoff::default();
+    let mut lengthen = super::keepalive::Lengthen::default();
     loop {
-        let wait = match keep(&watch, &events).await {
-            Ok(()) => backoff.held(),
+        let wait = match keep(&watch, &events, lengthen.on()).await {
+            Ok(held) => {
+                if lengthen.ended(held.as_secs()) {
+                    tracing::warn!(
+                        "HOME watch: the mailbox dropped {} links in a row before their \
+                         first keepalive; the next ones keep the reference's interval",
+                        super::keepalive::SHORT_HOLDS
+                    );
+                }
+                backoff.held()
+            }
             Err(error) => {
                 tracing::info!("HOME watch: {error}");
                 backoff.failed()
@@ -143,14 +159,26 @@ pub async fn run(watch: Watch, events: UnboundedSender<WatchEvent>) {
     }
 }
 
-/// One watching link, from its opening to its end: `Ok` once it stood and
-/// dropped, the error when it never came up.
-async fn keep(watch: &Watch, events: &UnboundedSender<WatchEvent>) -> Result<(), HomeError> {
+/// One watching link, from its opening to its end: `Ok` with how long it
+/// stood once it dropped, the error when it never came up. `long` gives
+/// the link the device link's keepalive ([`super::keepalive`], 1346): the
+/// phone is the initiator, the side that sends them, and the mailbox
+/// takes the same interval for the link once it is asked on it.
+async fn keep(
+    watch: &Watch,
+    events: &UnboundedSender<WatchEvent>,
+    long: bool,
+) -> Result<Duration, HomeError> {
     // Subscribed before the request, so a wake right behind the answer is
     // heard.
     let mut tap = watch.node.subscribe_events();
     let deadline = tokio::time::Instant::now() + ATTEMPT;
     let link = client::open(&watch.node, &watch.public_key, &watch.device, deadline).await?;
+    if long {
+        watch
+            .node
+            .set_link_keepalive(&link, super::keepalive::LINK_KEEPALIVE_SECS);
+    }
     let cursor = client::load_cursor(&watch.home);
     let answer = client::request(
         &watch.node,
@@ -173,12 +201,14 @@ async fn keep(watch: &Watch, events: &UnboundedSender<WatchEvent>) -> Result<(),
         }
     };
     tracing::info!("HOME watching cursor={cursor} newest={newest}");
+    let since = tokio::time::Instant::now();
     let _ = events.send(WatchEvent::Watching(true));
     let _ = events.send(WatchEvent::Wake(newest));
     listen(watch, &link, &mut tap, events).await;
     let _ = events.send(WatchEvent::Watching(false));
-    tracing::info!("HOME watch link dropped");
-    Ok(())
+    let held = since.elapsed();
+    tracing::info!("HOME watch link dropped after {}s", held.as_secs());
+    Ok(held)
 }
 
 /// Hand on the wakes on `link` until it closes or nobody listens.
@@ -188,9 +218,20 @@ async fn listen(
     tap: &mut leviculum_std::driver::EventTap,
     events: &UnboundedSender<WatchEvent>,
 ) {
-    let mut look = tokio::time::interval(LOOK);
+    // The first tick of an interval is at once; the link was just checked.
+    let mut look = tokio::time::interval_at(tokio::time::Instant::now() + LOOK, LOOK);
+    let mut carrier = leviculum_std::interfaces::carrier_changes();
     loop {
         tokio::select! {
+            // A TCP client that lost its connection tells the core nothing
+            // (it redials on its own): its carrier says it.
+            Ok(()) = carrier.changed() => {
+                if !carried(&watch.node) {
+                    tracing::info!("HOME watch: no connection left under the link");
+                    let _ = watch.node.close_link(link).await;
+                    return;
+                }
+            }
             event = tap.recv() => match event {
                 Some(TapEvent::Event(NodeEvent::MessageReceived { link_id, data, .. }))
                     if link_id == *link =>
@@ -206,18 +247,35 @@ async fn listen(
                 Some(TapEvent::Event(NodeEvent::LinkClosed { link_id, .. })) if link_id == *link => {
                     return;
                 }
+                // The connection under the link is gone and none is left
+                // (1346). A dropped connection keeps its links, in case it
+                // comes back under the same index, and this one would wait
+                // for its stale timeout, twice the long keepalive, before
+                // the device said it is not watching. Closed here, it says
+                // so when the connection does, and the next one comes up on
+                // whatever connection the rotation finds. The carrier arm
+                // above hears a TCP client's loss, this one a removal.
+                Some(TapEvent::Event(NodeEvent::InterfaceDown(_))) if !carried(&watch.node) => {
+                    tracing::info!("HOME watch: no connection left under the link");
+                    let _ = watch.node.close_link(link).await;
+                    return;
+                }
                 Some(TapEvent::Lagged(lost)) => {
                     tracing::info!("HOME watch lost {lost} node events; pulling");
                     let _ = events.send(WatchEvent::Wake(u64::MAX));
+                    // The lost events may have held this link's close.
+                    if !watch.node.link_is_established(link) {
+                        return;
+                    }
                 }
                 Some(_) => {}
                 None => return,
             },
+            () = events.closed() => {
+                let _ = watch.node.close_link(link).await;
+                return;
+            }
             _ = look.tick() => {
-                if events.is_closed() {
-                    let _ = watch.node.close_link(link).await;
-                    return;
-                }
                 if !watch.node.link_is_established(link) {
                     return;
                 }
@@ -226,9 +284,23 @@ async fn listen(
     }
 }
 
+/// Whether the node has a connection that is up besides a local client's.
+fn carried(node: &ReticulumNode) -> bool {
+    node.interface_stats()
+        .iter()
+        .any(|interface| !interface.is_local_client && interface.online)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watch's own timer is no faster than the link keepalive's
+    /// ceiling (1176): the link's events carry everything else.
+    #[test]
+    fn the_watch_looks_no_more_often_than_the_link_keepalive() {
+        assert!(LOOK >= Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS));
+    }
 
     #[test]
     fn a_wake_pulls_only_past_the_cursor() {

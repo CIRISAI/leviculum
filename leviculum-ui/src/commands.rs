@@ -64,6 +64,15 @@ pub enum Command {
     Map,
     /// Load the map's region of the visible area.
     LoadMapArea,
+    /// Bring the Browse tab, the NomadNet pages, to the front (Loquax
+    /// 1369), where the host has it.
+    Browse,
+    /// Bring the Rooms tab, Reticulum Relay Chat on a hub, to the front
+    /// (Loquax 1379), where the host has it.
+    Rooms,
+    /// Bring the Explore tab, the pages and the public rooms under one
+    /// button, to the front (Loquax 1578).
+    Explore,
     /// Choose how the map is drawn, from the ways the frontend offers.
     MapDrawing,
     /// Give the open conversation's peer a name of the reader's own, or
@@ -85,6 +94,73 @@ pub enum Command {
     /// Bring over contacts and history from another messenger found in its
     /// default place.
     Import,
+    /// Turn sending read receipts off, and on again: off, none is sent and
+    /// none is shown.
+    ReadReceipts,
+    /// Start a conversation: the palette takes a friend's code or address
+    /// as text.
+    NewConversation,
+    /// Add a contact: a friend's code, then the name for it.
+    AddContact,
+    /// Show our own contact code and its QR, for a friend to add us.
+    MyCode,
+    /// Make a group (Loquax 1307): tick the friends, then its name.
+    NewGroup,
+    /// Join the group whose invitation the open conversation holds.
+    JoinGroup,
+    /// Show the open group's members.
+    Members,
+    /// Leave the open group, after asking.
+    LeaveGroup,
+    /// Remove a member from the open group, its admin's: the palette takes
+    /// the member's name.
+    RemoveMember,
+    /// Add members to the open group, its admin's (Loquax 1307 G2): tick
+    /// the friends, then Enter.
+    AddMembers,
+    /// Delete the open group for everyone, its admin's, after asking
+    /// (Loquax 1307 pass four).
+    DeleteGroup,
+    /// Make the open group again with the same people, once the reader
+    /// left it or it ended (Loquax 1307 pass four): Enter keeps its name.
+    StartAgain,
+    /// Answer the message under the cursor: the next send replies to it
+    /// (Loquax 1371).
+    Reply,
+    /// Send the message under the cursor again, one of ours that failed.
+    SendAgain,
+    /// Forward the message under the cursor: the palette takes a friend's
+    /// name.
+    Forward,
+    /// Mute the open conversation until unmuted, or unmute it.
+    Mute,
+    /// Mark the open peer's identity as compared in person, or no longer.
+    Verify,
+    /// Mark the open conversation unread, or read.
+    MarkUnread,
+    /// The next of the three photo sizes a sent picture is scaled to.
+    PhotoSize,
+    /// Set the own position by hand: the palette takes latitude and
+    /// longitude, or the map's centre.
+    Position,
+    /// Share the own position with the open conversation, once or for a
+    /// while.
+    SharePosition,
+    /// Stop sharing the position with the open conversation.
+    StopSharing,
+    /// Delete every map on this device, after asking.
+    DeleteAllMaps,
+    /// Send a picture to the open conversation: the palette takes its
+    /// path.
+    SendPicture,
+    /// Send a file to the open conversation: the palette takes its path.
+    SendFile,
+    /// Read a friend's code from a picture of its QR: the palette takes
+    /// the picture's path.
+    CodeFromPicture,
+    /// The settings' nine sections (Loquax 1450), as the phone's menu and
+    /// the window's gear open them.
+    Settings,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -96,9 +172,14 @@ pub struct PaletteEntry {
     pub command: Command,
 }
 
-/// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 31] = [
+/// The table, in the order the palette lists it unfiltered. A first user's
+/// two commands stand right under `send`, where an open palette shows them
+/// (1263), and the code a friend adds us by right after them (1279).
+pub const COMMANDS: [PaletteEntry; 61] = [
     entry("send", Command::Send),
+    entry("new conversation", Command::NewConversation),
+    entry("add contact", Command::AddContact),
+    entry("my code", Command::MyCode),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
     entry("help", Command::Help),
@@ -121,6 +202,9 @@ pub const COMMANDS: [PaletteEntry; 31] = [
     entry("map", Command::Map),
     entry("load map area", Command::LoadMapArea),
     entry("map drawing", Command::MapDrawing),
+    entry("browse", Command::Browse),
+    entry("rooms", Command::Rooms),
+    entry("explore", Command::Explore),
     entry("rename", Command::Rename),
     entry("react", Command::React),
     entry("block", Command::Block),
@@ -129,6 +213,30 @@ pub const COMMANDS: [PaletteEntry; 31] = [
     entry("archive", Command::Archive),
     entry("archived", Command::Archived),
     entry("import", Command::Import),
+    entry("read receipts", Command::ReadReceipts),
+    entry("new group", Command::NewGroup),
+    entry("join group", Command::JoinGroup),
+    entry("members", Command::Members),
+    entry("leave group", Command::LeaveGroup),
+    entry("remove member", Command::RemoveMember),
+    entry("add members", Command::AddMembers),
+    entry("delete group", Command::DeleteGroup),
+    entry("start again", Command::StartAgain),
+    entry("reply", Command::Reply),
+    entry("send again", Command::SendAgain),
+    entry("forward", Command::Forward),
+    entry("mute", Command::Mute),
+    entry("verify", Command::Verify),
+    entry("mark unread", Command::MarkUnread),
+    entry("photo size", Command::PhotoSize),
+    entry("position", Command::Position),
+    entry("share position", Command::SharePosition),
+    entry("stop sharing", Command::StopSharing),
+    entry("delete all maps", Command::DeleteAllMaps),
+    entry("send picture", Command::SendPicture),
+    entry("send file", Command::SendFile),
+    entry("code in a picture", Command::CodeFromPicture),
+    entry("settings", Command::Settings),
 ];
 
 /// The entry that runs `command`.

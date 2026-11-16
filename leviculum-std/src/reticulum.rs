@@ -105,6 +105,17 @@ impl Reticulum {
         compose_diagnostic_dump(self.node.diagnostic_dump())
     }
 
+    /// Attach an interface to the running node, the way a section of the
+    /// configuration is attached at start. The serial medium of the
+    /// automatic layer hands a board found after the start through here
+    /// (#471 step 5). See [`ReticulumNode::spawn_interface`].
+    pub fn spawn_interface(
+        &self,
+        config: crate::config::InterfaceConfig,
+    ) -> Result<Vec<leviculum_core::transport::InterfaceId>> {
+        self.node.spawn_interface(config)
+    }
+
     /// Take the event receiver (can only be called once)
     pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
         self.node.take_event_receiver()
@@ -171,8 +182,7 @@ pub fn compose_diagnostic_dump(core_dump: String) -> String {
 /// Pull the number out of the core dump's `=== Total estimated: N bytes ===`
 /// line, so the RSS line below it can be followed by the gap between the two.
 fn parse_estimated_total(dump: &str) -> Option<u64> {
-    let rest = dump.split("=== Total estimated: ").nth(1)?;
-    rest.split_whitespace().next()?.parse().ok()
+    crate::census::total_estimated(dump)
 }
 
 #[cfg(test)]

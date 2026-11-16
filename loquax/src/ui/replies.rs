@@ -19,11 +19,16 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use leviculum_lxmf::constants::{FIELD_AUDIO, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_RENDERER};
+use leviculum_lxmf::constants::{
+    FIELD_AUDIO, FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE,
+    FIELD_RENDERER,
+};
 use leviculum_lxmf::reply::Reply;
 use leviculum_lxmf::Field;
+use leviculum_ui::delivery::DeliveryState;
 
-use super::{Message, UiEffect, UiModel};
+use super::{Message, StoreWrite, UiEffect, UiModel};
+use crate::home::wire::MarkFlag;
 
 /// The longest quote sent, in characters: enough to know the message by,
 /// short enough not to double a long one on the air.
@@ -38,7 +43,13 @@ pub const FORWARDED_FIELDS: [i64; 4] = [
 ];
 
 /// What a reply quotes of `body`: its first line, cut at [`QUOTE_CHARS`].
+///
+/// A relay's post (1482) is quoted by its writer and words, `"Anna: Hallo"`,
+/// not by the first line of the relay's prefix, the writer's name alone.
 pub fn quote(body: &str) -> String {
+    let named = leviculum_lxmf::relay::prefix(body)
+        .map(|writer| alloc::format!("{}: {}", writer.name, writer.text));
+    let body = named.as_deref().unwrap_or(body);
     let first = body.lines().next().unwrap_or("").trim();
     match first.chars().count() > QUOTE_CHARS {
         true => {
@@ -85,11 +96,18 @@ impl<B> UiModel<B> {
             .messages
             .iter()
             .find(|t| t.id == Some(reply.to));
+        // A target this device does not hold (1482): a relay passes the
+        // writer's own copy's id through. Its quote names its writer when
+        // the relay's prefix is in it; without a quote, a stub says the
+        // message is not here, never an empty block.
         Some(Quoted {
             text: match (target, reply.quote) {
                 (Some(target), _) => quote(&target.body),
-                (None, Some(quote)) => quote,
-                (None, None) => String::new(),
+                (None, Some(text)) if leviculum_lxmf::relay::prefix(&text).is_some() => {
+                    quote(&text)
+                }
+                (None, Some(text)) => text,
+                (None, None) => String::from(super::strings::StrId::QuoteNotHere.text(self.lang)),
             },
             ours: target.map(|t| t.outbound),
             to: reply.to,
@@ -104,10 +122,12 @@ impl<B> UiModel<B> {
         target: [u8; 32],
         body: String,
     ) -> Vec<UiEffect> {
-        if body.trim().is_empty() {
+        let body = super::outgoing(body);
+        if body.is_empty() {
             return Vec::new();
         }
         let index = self.conversation(peer);
+        self.clear_draft(peer);
         let quote = self.conversations[index]
             .messages
             .iter()
@@ -134,6 +154,51 @@ impl<B> UiModel<B> {
             return Vec::new();
         }
         let index = self.conversation(to);
+        self.send_fields(index, body, fields)
+    }
+
+    /// Send the message `key` of `peer`'s conversation again, one of ours
+    /// that was rejected or given up: it leaves this device's store and the
+    /// screen (as a delete would, without its line), and a new message with
+    /// its text and its fields goes out. The `lev` pair it carried goes
+    /// with it: the new one gets the mark of its own send. Anything else,
+    /// or a key no longer there, does nothing.
+    pub(super) fn send_again(&mut self, peer: [u8; 16], key: u64) -> Vec<UiEffect> {
+        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+            return Vec::new();
+        };
+        let Some(message) = self.conversations[c]
+            .messages
+            .iter()
+            .find(|m| m.activity == key)
+        else {
+            return Vec::new();
+        };
+        let failed = matches!(
+            message.delivery,
+            Some(DeliveryState::Failed | DeliveryState::Rejected)
+        );
+        if !message.outbound || !failed {
+            return Vec::new();
+        }
+        let body = message.body.clone();
+        let fields: Vec<Field> = message
+            .fields
+            .iter()
+            .filter(|(k, _)| *k != FIELD_CUSTOM_TYPE && *k != FIELD_CUSTOM_DATA)
+            .cloned()
+            .collect();
+        if let Some(id) = self.remove_message(peer, key) {
+            self.forgotten.push(StoreWrite::ForgetMessage { key });
+            // What it saved goes with it: the new one has its own key (1662).
+            self.saved_goes(peer, Some(key));
+            // The home's other devices drop the failed one too.
+            if let (true, Some(id)) = (self.home_client, id) {
+                self.mark_out(MarkFlag::Deleted, alloc::vec![id]);
+            }
+        }
+        let index = self.conversation(peer);
+        self.select(index);
         self.send_fields(index, body, fields)
     }
 

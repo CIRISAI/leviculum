@@ -1,0 +1,85 @@
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: typed ---
+┌  tui───────────────────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││hello from the tui                                  │
+│                        ││on two lines                                        │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: queued ---
+┌  tui───────────────────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: hello from the tui ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ◷  │
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 4: delivered ---
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             12:00 ││                                                    │
+│▌du: hello from the tui ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ✓  │
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 5: reply ---
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             12:00 ││                                                    │
+│▌hello back             ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ✓  │
+│                        ││                               ┌───────────────────┐│
+│                        ││ hello back                    │✓ message from them││
+│                        ││ also on two lines  12:00      └───────────────────┘│
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

@@ -235,3 +235,65 @@ fn relayed_link_data_is_not_counted() {
          (the firmware's `link_fwd=` field, order 368)"
     );
 }
+
+/// Order 1376: one dropped packet, one line. The miauhaus deploy of 4a191df3
+/// wrote one `PKT_DROP reason=link-data-no-link` line twice, byte for byte.
+/// No drop site emits twice; what does is a second COPY of the packet. The
+/// link contexts the reference exempts from packet-hash dedup
+/// (`Transport.py:1347-1352`) passed the copy to the node layer, which
+/// dropped it again under the same reason, so the log read as one drop
+/// written twice. A copy for a link nobody here holds has no handler whose
+/// retransmission the exemption serves, so it dies as a `DEDUP_DROP`, and
+/// the context dedup never touched (`None`) is the control. It reads the
+/// lines, so it needs the `tracing` capture.
+#[cfg(feature = "tracing")]
+#[test]
+fn a_second_copy_of_link_data_for_an_unheld_link_is_a_duplicate_not_a_second_drop() {
+    for context in [
+        PacketContext::None,
+        PacketContext::Channel,
+        PacketContext::Keepalive,
+        PacketContext::Resource,
+        PacketContext::ResourceReq,
+        PacketContext::ResourcePrf,
+        PacketContext::CacheRequest,
+    ] {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let (node, logs) = crate::test_log_capture::with_captured_logs(|| {
+            let mut node: TransportNode =
+                NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+            let iface = add_iface(&mut node, "shared", true);
+            let mut raw = link_data_packet([0x6b; 16], 48);
+            // HEADER_1: flags, hops, the 16-byte destination, then context.
+            raw[18] = context.to_byte();
+            let _ = node.handle_packet(InterfaceId(iface), &raw);
+            let _ = node.handle_packet(InterfaceId(iface), &raw);
+            node
+        });
+        let drops = logs
+            .lines()
+            .filter(|line| line.contains("event=\"PKT_DROP\""))
+            .count();
+        let duplicates = logs
+            .lines()
+            .filter(|line| line.contains("event=\"DEDUP_DROP\""))
+            .count();
+        assert_eq!(
+            (drops, duplicates),
+            (1, 1),
+            "{context:?}: two copies of one packet for an unheld link must read \
+             as one drop and one duplicate, logs:\n{logs}"
+        );
+        assert_eq!(
+            node.transport().stats().drops_link_data_no_link(),
+            1,
+            "{context:?}: the duplicate copy must not count as a second \
+             link-data-no-link drop"
+        );
+        assert_eq!(
+            node.transport().stats().drops_duplicate(),
+            1,
+            "{context:?}: the second copy is counted as the duplicate it is"
+        );
+    }
+}

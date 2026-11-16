@@ -60,6 +60,30 @@ final class Book {
                 == PackageManager.PERMISSION_GRANTED;
     }
 
+    /**
+     * The phone owner's name from the address book's own profile card ("Me"),
+     * for the first start's name field (walk finding 9); empty when there is
+     * none or it cannot be read. Android lets an app read the profile only
+     * with READ_CONTACTS, which the first start does not ask for: without
+     * it the field starts empty.
+     */
+    static String ownerName(Context context) {
+        if (!canRead(context)) {
+            return "";
+        }
+        try (Cursor cursor = context.getContentResolver().query(
+                ContactsContract.Profile.CONTENT_URI,
+                new String[] {Contacts.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                return name == null ? "" : name.trim();
+            }
+        } catch (RuntimeException unreadable) {
+            // No profile provider, or no grant after all: no name.
+        }
+        return "";
+    }
+
     /** Ask for READ_CONTACTS, only ever because the user asked for suggestions. */
     static void ask(Activity screen) {
         screen.requestPermissions(new String[] {Manifest.permission.READ_CONTACTS}, ASK);

@@ -1,7 +1,7 @@
 # The Core Lock Budget
 
 The async driver owns exactly one `NodeCore` behind one mutex
-(`leviculum-std/src/driver/mod.rs:1602`). Every packet the node decrypts,
+(`leviculum-std/src/driver/mod.rs:1739`). Every packet the node decrypts,
 routes, forwards or emits passes through it. It is the narrowest point
 in the stack, and the rule that follows from that is:
 
@@ -25,18 +25,18 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1614` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1675` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1649` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1710` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:4400`).
+(`leviculum-std/src/driver/mod.rs:4653`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1734`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1795`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -55,7 +55,7 @@ Resource to the same link cannot build at all
 (`ResourceError::TransferInProgress`), so re-using one would not repeat
 the measurement. Both harnesses are `#[ignore]`d and print every number
 below:
-`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2622`) for the
+`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2855`) for the
 send tables, `measure_deferred_tick_costs`
 (`leviculum-lxmf/tests/direct_delivery_attempts.rs:1560`) for the tick
 table.
@@ -166,7 +166,7 @@ That figure is consistent with the table above: eight times the
 
 `LxmfRouter` can hand the build out instead, under
 `RouterConfig::defer_resource_builds`
-(`leviculum-lxmf/src/router.rs:127`). What the tick then costs, for one
+(`leviculum-lxmf/src/router.rs:142`). What the tick then costs, for one
 due message, measured the same way:
 
 | payload | deferred tick | composed tick (incompressible) |
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:6966`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:7291`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -219,6 +219,18 @@ and they may not call back into the driver's public async API: those
 methods wait for room on a bounded channel that the same loop drains
 (`action_dispatch_tx.reserve().await` in `dispatch_committed`), so a
 full channel deadlocks the node.
+
+**The commit gate is a second lock, taken before the core lock.**
+`dispatch_committed` holds the gate of its `ActionTx` across the commit
+and the enqueue, and the loop's new-interface branch holds the same gate
+from its drain of the action channel through the new interface's
+interface-up (order 1656). That makes "committed and queued" one step as
+far as an interface registration can see: without it an announce
+committed between the drain and the interface-up reached the new
+interface twice, and a Python peer held the next destination's announce
+as the third of a burst. The gate is held only across synchronous code
+and always outside the core lock, never inside it: a path that holds the
+core lock and then takes the gate would deadlock against both holders.
 
 Those are one rule, not two, and knowing which way round matters when
 you have to enforce it. The second is a consequence of the first: an
@@ -243,11 +255,11 @@ The async route is one such path and not the instructive one. Consider
 the `block_on` case the previous wording named as the whole residue: a
 callee that smuggles a `PacketSender` and blocks on `send` does not
 reach the bounded channel at all, because `PacketSender::send`
-(`leviculum-std/src/driver/sender.rs:92-107`) takes the core lock in a
+(`leviculum-std/src/driver/sender.rs:89-104`) takes the core lock in a
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
-And no `block_on` is needed. The number is **89** in this fork (58 upstream), and it is a number
+And no `block_on` is needed. The number is **94** in this fork (63 upstream), and it is a number
 rather than a phrase on purpose: `scripts/check-core-lock-census.py`
 rebuilds the list of public methods that lock the core out of the
 sources on every `just fast` and pins it, name by name, in a
@@ -258,7 +270,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:3699`) is
+(`leviculum-std/src/driver/mod.rs:3915`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is
@@ -284,7 +296,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1940`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:2009`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms
@@ -357,7 +369,7 @@ The emission can. Until #418 the event-log layer wrote each line with
 a blocking `write(2)`, flushed, under a process-global mutex, on the
 thread that emitted it — and the event loop emits while it holds the
 core mutex (`apply_inbound`,
-`leviculum-std/src/driver/mod.rs:5467`). A `write(2)` to a USB disk
+`leviculum-std/src/driver/mod.rs:5743`). A `write(2)` to a USB disk
 under writeback throttling blocks for seconds, so the loop stopped,
 and everything that wanted the core queued behind it. That is why the
 symptom was total silence rather than a missing log line.
@@ -369,7 +381,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1692`): the emitting thread does a
+`leviculum-std/src/event_log.rs:2032`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
@@ -384,9 +396,9 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6958`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:5087`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1809`) | one batch write to the log file took ≥ 50 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:7236`) | announce handling itself took ≥ 100 ms |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:5363`) | an outside thread waited ≥ 250 ms for the core lock |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:2149`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`
@@ -427,10 +439,10 @@ The flush now keeps to the shape in all three phases:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:824` |
-| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:872` |
-| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:669` |
-| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:917` |
+| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:836` |
+| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:883` |
+| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:713` |
+| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:928` |
 
 The capture is sliced rather than made a single cheap copy because a
 cheap copy of 50 000 identities and their announces does not exist; the

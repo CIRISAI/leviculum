@@ -4,9 +4,12 @@
 [auto]
   # An AutoInterface on the LAN when this file names none.
   lan = yes
-  # The shipped list of public servers (not built yet).
-  servers = no
-  # BLE when an adapter is present (not built yet).
-  bluetooth = no
-  # LNodes and RNodes on USB serial ports (not built yet).
-  serial = no
+  # Up to two servers of the shipped public list, left for the
+  # network's own discovered ones once enough stand. A pinned list:
+  # server_list = host:port, host:port
+  servers = yes
+  # BLE when an adapter is present, Columba-compatible.
+  bluetooth = yes
+  # LNodes by their USB strings, RNodes after a second of
+  # silence and one detect request, on USB serial ports.
+  serial = yes

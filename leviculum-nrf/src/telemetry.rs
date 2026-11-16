@@ -55,7 +55,7 @@ use leviculum_lxmf::telemetry::{
     build_report, celsius_from_quarter_degrees, screen_telemetry_request, Battery, Location,
     PhysicalLink, Telemetry, TelemetryRequestVerdict,
 };
-use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
+use leviculum_persist_ack::{Answer, PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::reporter::{
     accuracy_m, deliver_newest, key_step, location_source, owed_retry, path_withhold,
     report_position, report_time, FlashSave, KeyRecordDebt, KeyStep, LocationSource, SaveStep,
@@ -238,7 +238,7 @@ pub fn inbound_fixed_position_receiver(
 
 /// The telemetry flash page layout (`BoardConfig::telemetry_flash_page`).
 ///
-/// One 4 KiB page carries four independent records, because the page is
+/// One 4 KiB page carries seven independent records, because the page is
 /// the last one the bootloader's `USER_FLASH_END` protects on both boards
 /// — 0xEB000/0xEC000 hold radio config and identity, and 0xED000 upward is
 /// Heltec's license/version band on the T114 (memory.x) — so a second
@@ -251,6 +251,7 @@ pub fn inbound_fixed_position_receiver(
 /// +0x300  node name record         ("LNAM", node_name_store)          44 B
 /// +0x400  propagation-node config  ("LPNC", pn_config_store)          12 B
 /// +0x500  remote-mgmt allow-list   ("LMGA", mgmt_allow_store)        136 B
+/// +0x600  position share           ("LPSH", position_share_store)       8 B
 /// ```
 ///
 /// The target keeps offset 0, where every fielded board already has it, so
@@ -264,7 +265,7 @@ pub fn inbound_fixed_position_receiver(
 /// The offsets are 0x100 apart and the longest record is 136 bytes (the
 /// allow-list, whose own bound is argued in
 /// [`leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`]), so no
-/// two records overlap and the page (4096 B) has room for ten more. The
+/// two records overlap and the page (4096 B) has room for nine more. The
 /// compile-time assertion below is what keeps that true when a record
 /// grows.
 const TARGET_OFFSET: u32 = 0x000;
@@ -278,6 +279,8 @@ const NAME_OFFSET: u32 = 0x300;
 const PN_CONFIG_OFFSET: u32 = 0x400;
 /// See [`TARGET_OFFSET`].
 const MGMT_ALLOW_OFFSET: u32 = 0x500;
+/// See [`TARGET_OFFSET`].
+const POSITION_SHARE_OFFSET: u32 = 0x600;
 
 /// The page layout's collision check, run by the compiler rather than by
 /// a reviewer reading three offsets: each record must end before the next
@@ -306,6 +309,10 @@ const _: () = {
     );
     assert!(
         MGMT_ALLOW_OFFSET + leviculum_core::mgmt_allow_store::ENCODED_SIZE_ALIGNED as u32
+            <= POSITION_SHARE_OFFSET
+    );
+    assert!(
+        POSITION_SHARE_OFFSET + leviculum_core::position_share_store::ENCODED_SIZE_ALIGNED as u32
             <= PAGE_SIZE
     );
 };
@@ -334,6 +341,7 @@ static PENDING_SAVE_PN: Channel<CriticalSectionRawMutex, (SaveTicket, StoredPnCo
     Channel::new();
 static PENDING_SAVE_MGMT: Channel<CriticalSectionRawMutex, (SaveTicket, StoredMgmtAllow), 1> =
     Channel::new();
+static PENDING_SAVE_SHARE: Channel<CriticalSectionRawMutex, (SaveTicket, u8), 1> = Channel::new();
 
 /// One record's persist bookkeeping: the [`PersistGate`] that says whether
 /// a given save has reached the page, plus the wake-up that saves the
@@ -366,9 +374,12 @@ impl PersistSlot {
         }
     }
 
-    pub(crate) fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
-        self.gate.finish(ticket, outcome);
+    /// Settle `ticket`; `true` when the requester had already answered it
+    /// as pending ([`PersistGate::finish`]).
+    pub(crate) fn finish(&self, ticket: SaveTicket, outcome: Persisted) -> bool {
+        let late = self.gate.finish(ticket, outcome);
         self.wake.signal(());
+        late
     }
 }
 
@@ -378,6 +389,7 @@ static MEDIA_PERSIST: PersistSlot = PersistSlot::new();
 static NAME_PERSIST: PersistSlot = PersistSlot::new();
 static PN_PERSIST: PersistSlot = PersistSlot::new();
 static MGMT_PERSIST: PersistSlot = PersistSlot::new();
+static SHARE_PERSIST: PersistSlot = PersistSlot::new();
 
 /// A save the caller may wait for with [`confirm`], returned by every
 /// `request_save*`.
@@ -404,23 +416,27 @@ impl PendingSave {
 /// How long a caller waits for the store task before answering the frame
 /// with the truth instead of a promise.
 ///
-/// The observed cost of one page write is ~200 ms (#358), and the store
-/// task's own retry budget is [`SAVE_RETRIES`] ×
-/// [`SAVE_RETRY_MS`](leviculum_telemetry_policy::reporter::SAVE_RETRY_MS) plus
-/// three erase-and-write rounds — call it 1.2 s if the SoftDevice keeps
-/// refusing flash access while the radio is busy. 2.5 s covers that twice
-/// over and still lands inside the 3.5 s window lnflash gives one control
-/// conversation (`lnflash::radio::ACK_WITHIN`), so a board that has to
-/// report a failure gets the report out before the host stops listening.
+/// The observed cost of one page write is ~200 ms (#358), so an idle board
+/// answers durable well inside this. 2.5 s still lands inside the 3.5 s
+/// window lnflash gives one control conversation
+/// (`lnflash::radio::ACK_WITHIN`). The store task's own retry budget is
+/// longer than any host waits ([`SAVE_RETRIES`], order 1626): a SoftDevice
+/// that times flash access out while a BLE link is busy or being torn down
+/// costs ~1 s a round (741 ms measured on the T114, plus
+/// [`SAVE_RETRY_MS`](leviculum_telemetry_policy::reporter::SAVE_RETRY_MS)),
+/// so a write still running when this window closes is answered
+/// [`Persist::Pending`], and only one the store task gave up on is
+/// [`Persist::Lost`].
 const PERSIST_CONFIRM_WITHIN: embassy_time::Duration = embassy_time::Duration::from_millis(2_500);
 
 /// Wait until the store task has settled `save`, and say what a reset
 /// would find (Codeberg #358).
 ///
 /// This is what turns the control-envelope ack from "applied" into "a
-/// reset cannot lose this". The wait is bounded: a wedged store task
-/// makes the frame answer [`Persist::Lost`] — the truth — rather than
-/// holding the transport port open forever.
+/// reset cannot lose this". The wait is bounded: a store task still
+/// writing when it runs out makes the frame answer [`Persist::Pending`]
+/// rather than holding the transport port open, and the store task logs
+/// `persist landed` or `persist gave up` when it settles (order 1626).
 ///
 /// It does block the calling task for the duration, which for the serial
 /// task means it stops servicing the transport CDC — typically ~200 ms,
@@ -445,19 +461,21 @@ pub async fn confirm(save: PendingSave) -> Persist {
             .is_err()
         {
             // One last look: the store task may have finished between the
-            // poll above and the deadline.
-            return match save.slot.gate.poll(save.ticket) {
-                Some(Persisted::Durable) => Persist::Durable,
-                Some(Persisted::Lost) => Persist::Lost,
-                None => {
+            // poll above and the deadline. Still running is pending, not
+            // lost (order 1626): the store task keeps trying past this
+            // window, and a write it has not given up on usually lands.
+            return match save.slot.gate.answer_at_deadline(save.ticket) {
+                Answer::Durable => Persist::Durable,
+                Answer::Lost => Persist::Lost,
+                Answer::Pending => {
                     crate::log::log_fmt(
                         "[TELEMETRY] ",
                         format_args!(
-                            "persist unconfirmed after {} ms",
+                            "persist pending after {} ms",
                             PERSIST_CONFIRM_WITHIN.as_millis()
                         ),
                     );
-                    Persist::Lost
+                    Persist::Pending
                 }
             };
         }
@@ -555,6 +573,20 @@ fn read_mgmt_record(page: u32) -> [u8; leviculum_core::mgmt_allow_store::ENCODED
     read_record(page + MGMT_ALLOW_OFFSET)
 }
 
+fn read_share_record(
+    page: u32,
+) -> [u8; leviculum_core::position_share_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + POSITION_SHARE_OFFSET)
+}
+
+/// Read the persisted position-share setting (order 1301), or `None` for
+/// a blank or corrupt record, which the board runs as the default
+/// (`leviculum_announce_policy::ShareSetting::Default`). Same read-safety
+/// argument as [`load`].
+pub fn load_position_share(page: u32) -> Option<u8> {
+    leviculum_core::position_share_store::decode_position_share(&read_share_record(page))
+}
+
 fn read_record<const N: usize>(addr: u32) -> [u8; N] {
     let mut buf = [0u8; N];
     // SAFETY: `addr` is inside a flash page supplied by the board config,
@@ -573,7 +605,8 @@ fn read_record<const N: usize>(addr: u32) -> [u8; N] {
 /// cooperative and single-core, so nothing runs between the `try_receive`
 /// and the `try_send` that could refill a depth-1 channel. If it somehow
 /// did, the ticket would go unanswered and [`confirm`] would time out and
-/// report [`Persist::Lost`] — slow, but still the truth.
+/// report [`Persist::Pending`] with no `persist landed` line ever following,
+/// which a host that re-asks reads as the old value still on the page.
 pub fn request_save(target: &TelemetryTargetWire) -> PendingSave {
     let save = TARGET_PERSIST.issue();
     if PENDING_SAVE.try_send((save.ticket, *target)).is_err() {
@@ -647,6 +680,17 @@ pub fn request_save_mgmt_allow(list: StoredMgmtAllow) -> PendingSave {
     save
 }
 
+/// Ask the store task to persist the position-share setting byte (order
+/// 1301). Never blocks, like [`request_save`].
+pub fn request_save_position_share(setting: u8) -> PendingSave {
+    let save = SHARE_PERSIST.issue();
+    if PENDING_SAVE_SHARE.try_send((save.ticket, setting)).is_err() {
+        let _ = PENDING_SAVE_SHARE.try_receive();
+        let _ = PENDING_SAVE_SHARE.try_send((save.ticket, setting));
+    }
+    save
+}
+
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
 /// words and rejects an unaligned source pointer.
 #[repr(align(4))]
@@ -659,7 +703,7 @@ struct Aligned<const N: usize>([u8; N]);
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
-    use embassy_futures::select::{select, select4, Either, Either4};
+    use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
@@ -670,7 +714,11 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 PENDING_SAVE_MEDIA.receive(),
                 PENDING_SAVE_NAME.receive(),
             ),
-            select(PENDING_SAVE_PN.receive(), PENDING_SAVE_MGMT.receive()),
+            select3(
+                PENDING_SAVE_PN.receive(),
+                PENDING_SAVE_MGMT.receive(),
+                PENDING_SAVE_SHARE.receive(),
+            ),
         )
         .await;
         // Whichever record the request names, the others are read back off
@@ -682,6 +730,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         let mut name = Aligned(read_name_record(page));
         let mut pn = Aligned(read_pn_record(page));
         let mut mgmt = Aligned(read_mgmt_record(page));
+        let mut share = Aligned(read_share_record(page));
         // Which record this request names, its ticket, and the word the
         // log line uses. The ticket goes back through the slot on every
         // exit path below — that is what the requester's ack waits on.
@@ -702,13 +751,19 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 name = Aligned(encode_node_name(chosen.as_ref()));
                 (&NAME_PERSIST, ticket, "node-name")
             }
-            Either::Second(Either::First((ticket, config))) => {
+            Either::Second(Either3::First((ticket, config))) => {
                 pn = Aligned(encode_pn_config(&config));
                 (&PN_PERSIST, ticket, "pn-config")
             }
-            Either::Second(Either::Second((ticket, list))) => {
+            Either::Second(Either3::Second((ticket, list))) => {
                 mgmt = Aligned(encode_mgmt_allow(&list));
                 (&MGMT_PERSIST, ticket, "mgmt-allow")
+            }
+            Either::Second(Either3::Third((ticket, setting))) => {
+                share = Aligned(leviculum_core::position_share_store::encode_position_share(
+                    setting,
+                ));
+                (&SHARE_PERSIST, ticket, "position-share")
             }
         };
 
@@ -723,36 +778,59 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             && read_name_record(page) == name.0
             && read_pn_record(page) == pn.0
             && read_mgmt_record(page) == mgmt.0
+            && read_share_record(page) == share.0
         {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             slot.finish(ticket, Persisted::Durable);
             continue;
         }
 
+        let started = embassy_time::Instant::now();
         let mut save = FlashSave::new();
         let written = loop {
+            let asked = embassy_time::Instant::now();
+            let mut flash = flash.lock().await;
+            let lock_ms = asked.elapsed().as_millis();
             let result = async {
-                let mut flash = flash.lock().await;
-                flash.erase(page, page + 4096).await?;
-                flash.write(page + TARGET_OFFSET, &target.0).await?;
-                flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
-                flash.write(page + MEDIA_OFFSET, &media.0).await?;
-                flash.write(page + NAME_OFFSET, &name.0).await?;
-                flash.write(page + PN_CONFIG_OFFSET, &pn.0).await?;
-                flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0).await
+                use crate::flash::timed;
+                timed("erase", flash.erase(page, page + 4096)).await?;
+                timed("w-target", flash.write(page + TARGET_OFFSET, &target.0)).await?;
+                timed(
+                    "w-fixed",
+                    flash.write(page + FIXED_POSITION_OFFSET, &fixed.0),
+                )
+                .await?;
+                timed("w-media", flash.write(page + MEDIA_OFFSET, &media.0)).await?;
+                timed("w-name", flash.write(page + NAME_OFFSET, &name.0)).await?;
+                timed("w-pn", flash.write(page + PN_CONFIG_OFFSET, &pn.0)).await?;
+                timed("w-mgmt", flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0)).await?;
+                timed(
+                    "w-share",
+                    flash.write(page + POSITION_SHARE_OFFSET, &share.0),
+                )
+                .await
             }
             .await;
-            match save.after_attempt(result.is_ok()) {
+            // Released before the pause, so a retry loop never starves the
+            // other store tasks of the shared handle.
+            drop(flash);
+            let fault = result.err();
+            match save.after_attempt(fault.is_none()) {
                 SaveStep::Written => break true,
                 SaveStep::Failed {
                     attempt,
                     wait_ms,
                     gave_up,
                 } => {
-                    crate::log::log_fmt(
-                        "[TELEMETRY] ",
-                        format_args!("persist write failed, attempt {}/{}", attempt, SAVE_RETRIES),
-                    );
+                    if let Some(fault) = fault {
+                        crate::flash::log_step_fault(
+                            "[TELEMETRY] ",
+                            attempt,
+                            SAVE_RETRIES,
+                            fault,
+                            lock_ms,
+                        );
+                    }
                     embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
                     if gave_up {
                         break false;
@@ -760,25 +838,37 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 }
             }
         };
+        let took_ms = started.elapsed().as_millis();
 
         if written {
-            crate::log::log_fmt("[TELEMETRY] ", format_args!("persist saved {}", what));
+            crate::log::log_fmt(
+                "[TELEMETRY] ",
+                format_args!("persist saved {} took_ms={}", what, took_ms),
+            );
         } else {
             crate::log::log_fmt(
                 "[TELEMETRY] ",
-                format_args!("persist gave up after retries"),
+                format_args!("persist gave up after retries {}", what),
             );
         }
         // After the log line and on both paths: the requester is blocked
-        // on this, and what it is owed is the outcome, not silence.
-        slot.finish(
+        // on this, and what it is owed is the outcome, not silence. When
+        // the requester already answered "pending" (order 1626), the host
+        // it told is waiting for this line instead.
+        if slot.finish(
             ticket,
             if written {
                 Persisted::Durable
             } else {
                 Persisted::Lost
             },
-        );
+        ) && written
+        {
+            crate::log::log_fmt(
+                "[TELEMETRY] ",
+                format_args!("persist landed {} after {} ms", what, took_ms),
+            );
+        }
     }
 }
 
@@ -1289,7 +1379,12 @@ impl Reporter {
                 node.storage().get_identity(hash.as_bytes()).is_some()
             }
         };
-        self.policy.apply(command, key_known)
+        let outcome = self.policy.apply(command, key_known);
+        crate::position::note_target(
+            self.target.map(|t| t.dest_hash),
+            self.policy.profile() == Profile::Tracker,
+        );
+        outcome
     }
 
     /// Apply a fixed position from the host or from flash; `None` is the
@@ -1307,6 +1402,7 @@ impl Reporter {
     /// way: the state is recomputed here and stated on the next tick.
     pub fn apply_fixed_position(&mut self, position: Option<FixedPositionWire>) {
         self.fixed_position = position;
+        crate::position::note_fixed(position);
         note_fixed_position(position.is_some());
         self.policy.set_position_source(has_position_source());
         self.policy.note_position_config_changed();

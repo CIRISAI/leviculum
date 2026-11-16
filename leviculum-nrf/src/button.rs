@@ -11,6 +11,10 @@
 //! [`NrfButton`](crate::button::NrfButton),
 //! that folds the wiring into a pressed level.
 //!
+//! A very long press switches the board off (`crate::power`, order 1511):
+//! the task waits on the press handling and on its `POWER_OFF` signal, and
+//! the second ends the board's run.
+//!
 //! | Board | Pin | Wiring |
 //! |---|---|---|
 //! | WisMesh Pocket V2 | P0.09 (NFC1, freed by the RAK bootloader's UICR patch) | active low, internal pull-up |
@@ -29,20 +33,18 @@ use leviculum_firmware::seams::ButtonInput;
 pub struct ButtonWiring {
     /// The pin.
     pub pin: Peri<'static, AnyPin>,
-    /// `true` when a press pulls the pin high (the T1000-E), `false` when it
-    /// pulls it low (the others). The internal pull goes the other way.
-    pub active_high: bool,
+    /// Which level a press drives, the LED and the pins the board drives
+    /// before it switches off (`crate::power`). A press pulling the pin
+    /// high is the T1000-E's; the internal pull goes the other way.
+    pub power: &'static crate::power::PowerFacts,
     /// The `board=` token of the `BTN_PRESS` and `BTN_HOLD` lines.
     pub board: &'static str,
 }
 
 #[embassy_executor::task]
 pub async fn button_task(wiring: ButtonWiring) {
-    let ButtonWiring {
-        pin,
-        active_high,
-        board,
-    } = wiring;
+    let ButtonWiring { pin, power, board } = wiring;
+    let active_high = power.button_active_high;
     let (port, pin_no) = (pin.port() as u8, pin.pin());
     let pull = if active_high { Pull::Down } else { Pull::Up };
     let input = Input::new(pin, pull);
@@ -60,7 +62,26 @@ pub async fn button_task(wiring: ButtonWiring) {
             BUTTON_DEBOUNCE_MS
         ),
     );
-    leviculum_firmware::button::run(NrfButton { input, active_high }, EmbassyClock, board).await
+    let handling = async {
+        leviculum_firmware::button::run(NrfButton { input, active_high }, EmbassyClock, board).await
+    };
+    // The press handling never ends; a very long press's release raises
+    // `POWER_OFF` (order 1511). Selecting drops the handling, and with it
+    // the pin's `Input`, before `switch_off` writes the pin's wake
+    // configuration.
+    let _ = embassy_futures::select::select(handling, leviculum_firmware::button::POWER_OFF.wait())
+        .await;
+    leviculum_firmware::log::log_fmt_critical(
+        "",
+        format_args!(
+            "POWER_OFF board={} wake=button pin=P{}.{:02}",
+            board, port, pin_no
+        ),
+    );
+    // Let the `power-off` figure the 8 s mark started finish, and the line
+    // above reach a host still attached.
+    embassy_time::Timer::after_millis(u64::from(leviculum_feedback::power_off().total_ms())).await;
+    crate::power::switch_off((port, pin_no), power)
 }
 
 /// The board's button as the orchestration reads it: the GPIO input and

@@ -1,0 +1,171 @@
+> HCI Event: LE Meta Ev.. (0x3e) plen 67  #33 [hci0] 2026-11-10 20:30:00.318512
+      LE Extended Advertising Report (0x0d)
+        Num reports: 2
+        Entry 0
+          Event type: 0x0013
+            Props: 0x0013
+              Connectable
+              Scannable
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: ADV_IND (0x0013)
+          Address type: Random (0x01)
+          Address: E1:AC:9E:B3:F0:5D (Static)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -48 dBm (0xd0)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x11
+        02 01 06 0d 09 48 54 2d 6e 35 32 36 32 2d 4f 54  .....HT-n5262-OT
+        41                                               A               
+        Flags: 0x06
+          LE General Discoverable Mode
+          BR/EDR Not Supported
+        Name (complete): HT-n5262-OTA
+        Entry 1
+          Event type: 0x001b
+            Props: 0x001b
+              Connectable
+              Scannable
+              Scan response
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: SCAN_RSP to an ADV_SCAN_IND (0x001b)
+          Address type: Random (0x01)
+          Address: E1:AC:9E:B3:F0:5D (Static)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -48 dBm (0xd0)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x00
+@ MGMT Event: De.. (0x0012) plen 31  {0x0002} [hci0] 2026-11-10 20:30:00.318579
+        LE Address: E1:AC:9E:B3:F0:5D (Static)
+        RSSI: -48 dBm (0xd0)
+        Flags: 0x00000000
+        Data length: 17
+        Flags: 0x06
+          LE General Discoverable Mode
+          BR/EDR Not Supported
+        Name (complete): HT-n5262-OTA
+@ MGMT Event: De.. (0x0012) plen 31  {0x0001} [hci0] 2026-11-10 20:30:00.318579
+        LE Address: E1:AC:9E:B3:F0:5D (Static)
+        RSSI: -48 dBm (0xd0)
+        Flags: 0x00000000
+        Data length: 17
+        Flags: 0x06
+          LE General Discoverable Mode
+          BR/EDR Not Supported
+        Name (complete): HT-n5262-OTA
+> HCI Event: LE Meta E.. (0x3e) plen 190  #34 [hci0] 2026-11-10 20:30:00.353510
+      LE Extended Advertising Report (0x0d)
+        Num reports: 4
+        Entry 0
+          Event type: 0x0013
+            Props: 0x0013
+              Connectable
+              Scannable
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: ADV_IND (0x0013)
+          Address type: Random (0x01)
+          Address: D9:16:E2:92:3E:D2 (Static)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -58 dBm (0xc6)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x1f
+        02 01 06 11 07 e3 28 da c5 42 8f 7f 91 94 4a 2d  ......(..B....J-
+        44 00 5b 14 37 09 ff ff ff 03 1c e1 9b 2b 38     D.[.7........+8 
+        Flags: 0x06
+          LE General Discoverable Mode
+          BR/EDR Not Supported
+        128-bit Service UUIDs (complete): 1 entry
+          Vendor specific
+        Company: internal use (65535)
+          Data[6]: 031ce19b2b38
+        Entry 1
+          Event type: 0x001b
+            Props: 0x001b
+              Connectable
+              Scannable
+              Scan response
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: SCAN_RSP to an ADV_SCAN_IND (0x001b)
+          Address type: Random (0x01)
+          Address: D9:16:E2:92:3E:D2 (Static)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -58 dBm (0xc6)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x0d
+        0c 09 4c 4e 2d 65 31 39 62 32 62 33 38           ..LN-e19b2b38   
+        Name (complete): LN-e19b2b38
+        Entry 2
+          Event type: 0x0013
+            Props: 0x0013
+              Connectable
+              Scannable
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: ADV_IND (0x0013)
+          Address type: Public (0x00)
+          Address: 44:1B:F6:69:77:25 (Espressif Inc.)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -36 dBm (0xdc)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x1b
+        02 01 06 11 07 9e ca dc 24 0e e5 a9 e0 93 f3 a3  ........$.......
+        b5 01 00 40 6e 05 12 20 00 40 00                 ...@n.. .@.     
+        Flags: 0x06
+          LE General Discoverable Mode
+          BR/EDR Not Supported
+        128-bit Service UUIDs (complete): 1 entry
+          Nordic UART Service
+        Peripheral Conn. Interval: 0x0020 - 0x0040
+        Entry 3
+          Event type: 0x001b
+            Props: 0x001b
+              Connectable
+              Scannable
+              Scan response
+              Use legacy advertising PDUs
+            Data status: [0;32mComplete[0m
+          Legacy PDU Type: SCAN_RSP to an ADV_SCAN_IND (0x001b)
+          Address type: Public (0x00)
+          Address: 44:1B:F6:69:77:25 (Espressif Inc.)
+          Primary PHY: LE 1M
+          Secondary PHY: No packets
+          SID: no ADI field (0xff)
+          TX power: 127 dBm
+          RSSI: -36 dBm (0xdc)
+          Periodic advertising interval: 0.00 msec (0x0000)
+          Direct address type: Public (0x00)
+          Direct address: 00:00:00:00:00:00 (OUI 00-00-00)
+          Data length: 0x15
+        0b 09 52 4e 6f 64 65 20 39 41 30 31 02 0a 09 05  ..RNode 9A01....
+        12 20 00 40 00                                   . .@.           
+        Name (complete): RNode 9A01
+        TX power: 9 dBm
+        Peripheral Conn. Interval: 0x0020 - 0x0040

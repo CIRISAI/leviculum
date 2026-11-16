@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use clap::Parser;
 
+use leviculum_cli::remote_mgmt;
 use leviculum_std::config::Config;
-use leviculum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::remote_status;
-use leviculum_std::Identity;
 
 mod lnstatus_render;
 use lnstatus_render::StatusOptions;
@@ -141,6 +141,15 @@ struct Args {
     #[arg(long = "origin", default_value_t = false)]
     origin: bool,
 
+    /// show the log tag of every accepted TCP connection (with -a)
+    ///
+    /// Additive Leviculum extension (order 1678): lnsd logs a client by a
+    /// daily pseudonym, never by its address, and serves the pseudonym as
+    /// `src_tag` beside the address this table shows while the connection
+    /// lives. Off by default so the render stays rnstatus's.
+    #[arg(long = "src-tags", default_value_t = false)]
+    src_tags: bool,
+
     /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
@@ -173,6 +182,11 @@ struct Args {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
+
     /// only display interfaces with names including filter
     filter: Option<String>,
 
@@ -194,6 +208,7 @@ impl Args {
             reverse: self.reverse,
             name_filter: self.filter.clone(),
             origin: self.origin,
+            src_tags: self.src_tags,
             // We reach the daemon over the RPC socket only and never attach
             // as a shared-instance client, so none of the clients the daemon
             // counts is us. See `StatusOptions::observer_clients`.
@@ -286,10 +301,9 @@ async fn main() {
     let args = Args::parse();
 
     // --- Resolve config dir / instance name. ---
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
     let loaded_config: Option<Config> = daemon_rpc::load_config(&config_dir);
     let instance_name = args
         .instance_name
@@ -301,11 +315,32 @@ async fn main() {
         })
         .unwrap_or_else(|| "default".to_string());
 
+    // --- Find the shared instance, or start lnsd as our child (#471 step
+    // 4). Held to the end of `main`: a daemon it started goes with us, so a
+    // one-shot status shows a fresh daemon and `-m` keeps it while it
+    // watches. A started lnsd wrote its first-start file and its identity,
+    // so the config is read again before the authkey is derived. ---
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    ) {
+        Ok(instance) => instance,
+        Err(e) => {
+            eprintln!("No shared RNS instance available to get status from");
+            eprintln!("({e})");
+            eprintln!("{}", choice.hint_for(&instance_name));
+            std::process::exit(1);
+        }
+    };
+    let loaded_config = loaded_config.or_else(|| daemon_rpc::load_config(&config_dir));
+
     // --- Discovered interfaces (-d/-D): read the local registry over the
     // shared-instance RPC and render it. Matches rnstatus, which handles the
     // discovered block before remote management and exits. ---
     if args.discovered || args.discovered_details {
-        run_discovered(&args, &config_dir, loaded_config.as_ref(), &instance_name).await;
+        run_discovered(&args, &choice, loaded_config.as_ref(), &instance_name).await;
         return;
     }
 
@@ -317,16 +352,18 @@ async fn main() {
 
     // --- Identity listing (-N/--identities): its own mode, like -d. ---
     if args.identities {
-        run_identities(&args, &config_dir, loaded_config.as_ref(), &instance_name).await;
+        run_identities(&args, &choice, loaded_config.as_ref(), &instance_name).await;
         return;
     }
 
     // --- Local mode: resolve authkey and drive the shared-instance RPC. ---
+    let instance_name = instance_name.as_str();
     let authkey = match daemon_rpc::resolve_authkey(&config_dir, loaded_config.as_ref()) {
         Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
+            eprintln!("{}", choice.hint_for(instance_name));
             std::process::exit(1);
         }
     };
@@ -334,16 +371,16 @@ async fn main() {
     let opts = args.status_options();
 
     if args.monitor {
-        run_monitor(&instance_name, &authkey, &args, &opts).await;
+        run_monitor(instance_name, &authkey, &args, &opts).await;
         return;
     }
 
-    match fetch_status(&instance_name, &authkey, args.link_stats).await {
+    match fetch_status(instance_name, &authkey, args.link_stats).await {
         Ok((mut stats, link_count)) => {
             if args.json {
                 if args.tables {
                     let rows = requested_table_rows(&args.table_rows);
-                    let tables = fetch_transport_tables(&instance_name, &authkey, &rows).await;
+                    let tables = fetch_transport_tables(instance_name, &authkey, &rows).await;
                     lnstatus_render::merge_transport_tables(&mut stats, tables);
                 }
                 println!("{}", lnstatus_render::render_json(&stats));
@@ -357,8 +394,21 @@ async fn main() {
         Err(e) => {
             eprintln!("Could not get RNS status");
             eprintln!("({e})");
+            eprintln!("{}", failure_hint(&choice, instance_name, &authkey).await);
             std::process::exit(2);
         }
+    }
+}
+
+/// What `lnstatus` prints under a failed query (order 1675): which config
+/// directory it took and why, the socket, the other candidates holding a
+/// config, and, when the daemon refused the key, which of those
+/// candidates' keys it answers to. The refusal is asked of the daemon
+/// again rather than read out of the error text.
+async fn failure_hint(choice: &ConfigDirChoice, instance_name: &str, authkey: &[u8]) -> String {
+    match leviculum_std::rpc_authenticates(instance_name, authkey).await {
+        Ok(false) => daemon_rpc::auth_failure_hint(choice, instance_name).await,
+        _ => choice.hint_for(instance_name),
     }
 }
 
@@ -368,15 +418,16 @@ async fn main() {
 /// directly; we go through the RPC so the daemon owns the storage lifecycle.
 async fn run_discovered(
     args: &Args,
-    config_dir: &Path,
+    choice: &ConfigDirChoice,
     config: Option<&Config>,
     instance_name: &str,
 ) {
-    let authkey = match daemon_rpc::resolve_authkey(config_dir, config) {
+    let authkey = match daemon_rpc::resolve_authkey(&choice.dir, config) {
         Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
+            eprintln!("{}", choice.hint_for(instance_name));
             std::process::exit(1);
         }
     };
@@ -387,6 +438,7 @@ async fn run_discovered(
             Err(e) => {
                 eprintln!("Could not get RNS status");
                 eprintln!("({e})");
+                eprintln!("{}", failure_hint(choice, instance_name, &authkey).await);
                 std::process::exit(2);
             }
         };
@@ -416,15 +468,16 @@ async fn run_discovered(
 /// same exit the status query uses when the daemon cannot be reached.
 async fn run_identities(
     args: &Args,
-    config_dir: &Path,
+    choice: &ConfigDirChoice,
     config: Option<&Config>,
     instance_name: &str,
 ) {
-    let authkey = match daemon_rpc::resolve_authkey(config_dir, config) {
+    let authkey = match daemon_rpc::resolve_authkey(&choice.dir, config) {
         Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
+            eprintln!("{}", choice.hint_for(instance_name));
             std::process::exit(1);
         }
     };
@@ -434,6 +487,7 @@ async fn run_identities(
         Err(e) => {
             eprintln!("Could not get identity list from the daemon");
             eprintln!("({e})");
+            eprintln!("{}", failure_hint(choice, instance_name, &authkey).await);
             std::process::exit(2);
         }
     };
@@ -470,7 +524,7 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
     };
 
     // -R is a 16-byte (32 hex char) transport identity hash.
-    let identity_hash = match parse_identity_hash(remote_hex) {
+    let identity_hash = match remote_mgmt::parse_identity_hash(remote_hex) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("{e}");
@@ -478,18 +532,10 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
         }
     };
 
-    // Load the management identity from its RNS identity file (64 raw private
-    // key bytes), matching `RNS.Identity.from_file`.
-    let identity = match std::fs::read(identity_path)
-        .map_err(|e| e.to_string())
-        .and_then(|b| Identity::from_private_key_bytes(&b).map_err(|e| e.to_string()))
-    {
+    let identity = match remote_mgmt::load_management_identity(identity_path) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!(
-                "Could not load management identity from {}: {e}",
-                identity_path.display()
-            );
+            eprintln!("{e}");
             std::process::exit(20);
         }
     };
@@ -500,32 +546,18 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
             .unwrap_or(DEFAULT_REMOTE_TIMEOUT_SECS),
     );
 
-    // Connect to the shared instance for transport (no local authkey needed;
+    // Attach to the shared instance for transport (no local authkey needed;
     // this uses the shared-instance IPC socket, like `lncp`).
-    let mut node = match ReticulumNodeBuilder::new()
-        .enable_transport(false)
-        .connect_to_shared_instance(instance_name)
-        // The daemon's storage directory, which the config may place off the
-        // config directory (Codeberg #241).
-        .storage_path(daemon_rpc::resolve_storage_path(config_dir, config))
-        .build_sync()
+    let (mut node, mut events) = match remote_mgmt::attach_to_shared_instance(
+        instance_name,
+        daemon_rpc::resolve_storage_path(config_dir, config),
+    )
+    .await
     {
-        Ok(n) => n,
+        Ok(attached) => attached,
         Err(e) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("({e})");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = node.start().await {
-        eprintln!("No shared RNS instance available to get status from");
-        eprintln!("({e})");
-        std::process::exit(1);
-    }
-    let mut events = match node.take_event_receiver() {
-        Some(rx) => rx,
-        None => {
-            eprintln!("Internal error: event receiver unavailable");
             std::process::exit(1);
         }
     };
@@ -577,24 +609,6 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
     }
 }
 
-/// Parse a 32-hex-char transport identity hash into 16 bytes.
-fn parse_identity_hash(hex: &str) -> Result<[u8; 16], String> {
-    if hex.len() != 32 {
-        return Err(format!(
-            "Destination length is invalid, must be 32 hexadecimal characters (16 bytes), got {}.",
-            hex.len()
-        ));
-    }
-    let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s =
-            std::str::from_utf8(chunk).map_err(|_| "Invalid destination entered.".to_string())?;
-        out[i] =
-            u8::from_str_radix(s, 16).map_err(|_| "Invalid destination entered.".to_string())?;
-    }
-    Ok(out)
-}
-
 /// `-m/--monitor`: clear the screen and re-render on each interval. The redraw
 /// uses the same single-shot render as the one-off path (rnstatus buffers its
 /// output then clears + prints; this matches that behaviour).
@@ -643,6 +657,7 @@ mod cli_tests {
         assert!(!o.burst_filter && !o.totals && !o.reverse);
         assert!(o.sort.is_none() && o.name_filter.is_none());
         assert!(!o.origin, "rnstatus's render unless asked (#471)");
+        assert!(!o.src_tags, "rnstatus's render unless asked (1678)");
         assert!(!a.json && !a.monitor && !a.discovered);
         assert_eq!(a.monitor_interval, 1.0);
     }
@@ -672,6 +687,7 @@ mod cli_tests {
         assert!(parse(&["--burst"]).status_options().burst_filter);
         assert!(parse(&["--totals"]).status_options().totals);
         assert!(parse(&["--origin"]).status_options().origin);
+        assert!(parse(&["--src-tags"]).status_options().src_tags);
         assert!(parse(&["--reverse"]).status_options().reverse);
         assert!(parse(&["--json"]).json);
         assert!(parse(&["--monitor"]).monitor);
@@ -722,15 +738,6 @@ mod cli_tests {
             parse(&["--instance-name", "foo"]).instance_name.as_deref(),
             Some("foo")
         );
-    }
-
-    #[test]
-    fn identity_hash_parsing() {
-        let h = super::parse_identity_hash("000102030405060708090a0b0c0d0e0f").unwrap();
-        assert_eq!(h, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-        // Wrong length and non-hex are rejected.
-        assert!(super::parse_identity_hash("abcd").is_err());
-        assert!(super::parse_identity_hash(&"z".repeat(32)).is_err());
     }
 
     // Codeberg #174: --tables is additive. It is off unless asked for, it

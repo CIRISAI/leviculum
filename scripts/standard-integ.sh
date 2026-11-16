@@ -95,12 +95,17 @@ fi
 
 [ -n "$SELECTED" ] || die "nothing is selected; a gate that measures nothing reads green forever."
 
+# A selected target whose name a target left out here shares runs from its own
+# package below, or `--test <name>` would take the other along (1306,
+# scripts/integ-targets.sh).
+RUN_GROUPS="$(integ_run_groups "$ALL" "$SELECTED")"
+SPLIT="$(awk -F'\t' '$1 != "-" { print $1 "/" $2 }' <<<"$RUN_GROUPS")"
 ARGS=()
 while read -r name; do
     [ -n "$name" ] || continue
     ARGS+=(--test "$name")
 done <<EOF
-$(printf '%s\n' "$SELECTED" | sed 's|.*/||' | sort -u)
+$(awk -F'\t' '$1 == "-" { print $2 }' <<<"$RUN_GROUPS")
 EOF
 
 # Single tests whose prerequisite is absent, inside a target this run selects.
@@ -122,3 +127,17 @@ EOF
 say "$(printf '%s\n' "$ALL" | wc -l) integration-test targets in the tree, $(printf '%s\n' "$SELECTED" | wc -l) selected here"
 python3 scripts/run-with-manifest.py --gate standard-integ -- \
     cargo test --workspace --bins "${ARGS[@]}" --no-fail-fast -- --exact "${SKIP_ARGS[@]}"
+rc=$?
+while read -r target; do
+    [ -n "$target" ] || continue
+    pkg="$(integ_package "${target%/*}")"
+    [ -n "$pkg" ] || die "no package name in ${target%/*}/Cargo.toml, for $target."
+    say "per package: $target (a target left out here has its name)"
+    python3 scripts/run-with-manifest.py --gate "standard-integ-$pkg" -- \
+        cargo test -p "$pkg" --test "${target##*/}" --no-fail-fast -- --exact "${SKIP_ARGS[@]}"
+    split_rc=$?
+    [ "$split_rc" -eq 0 ] || rc="$split_rc"
+done <<EOF
+$SPLIT
+EOF
+exit "$rc"

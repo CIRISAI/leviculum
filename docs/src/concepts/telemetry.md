@@ -393,12 +393,14 @@ dropped, not queued. The request's timebase is read but does not change
 the answer: a node keeps no history, so the current reading is the
 answer to every timebase.
 
-Sideband's own source is not vendored under `reference/`, so the
-command id (0x01) and the value shape (a list of command maps,
-`[{0x01: <timebase>}]`) are a **documented assumption** — recorded at
-`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:678`) —
-to be verified against a captured Columba/Sideband request and then
-pinned as a fixture.
+The command id is 0x01 and the value is a list of command maps. Sideband
+reads it as `Commands.TELEMETRY_REQUEST` (`Sideband/sbapp/sideband/core.py:1357`),
+and Columba writes it the same way in its collector request,
+`[{0x01: [<timebase>, <is collector request>]}]` with the timebase in
+unix seconds (`columba/rns-backend-py/src/main/kotlin/network/columba/app/rns/backend/py/PythonRnsTelemetry.kt:134`).
+Neither source is vendored under `reference/`. The reader is
+`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:790`),
+which takes the timebase alone or as the first element of that list.
 
 On the host side, `lnsd` neither registers an `lxmf.delivery`
 destination nor runs a telemetry policy today, so there is nothing for
@@ -442,12 +444,13 @@ link plus a resource transfer, where a report is a single packet. Both
 figures belong in a port's own arithmetic; neither is a licence to skip
 it.
 
-There is no third shape. Reticulum has no multi-hop broadcast at all —
-see [Public channels over
-LXMF](public-channels.md#1-why-the-obvious-approach-does-not-work), which
-settles this at the protocol level rather than by what two apps happen to
-implement. LXMF's `FIELD_GROUP` is conversation metadata and not a
-delivery mechanism; it would not produce a broadcast even if every
+There is no third shape. Reticulum has no multi-hop broadcast at all: a
+GROUP or PLAIN destination can never be announced
+(`Destination.py:251-252`), and any receiving node drops such a packet once
+`hops > 1` (`Transport.py:1354-1373`), so its reach is one hop plus locally
+attached clients. That settles it at the protocol level rather than by what
+two apps happen to implement. LXMF's `FIELD_GROUP` is conversation metadata
+and not a delivery mechanism; it would not produce a broadcast even if every
 viewer read it.
 
 ### Relaying someone else's readings needs permission
@@ -456,8 +459,8 @@ A collector redistributes positions of people who are not asking for
 that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
-is (`leviculum-std/src/config.rs:161`, empty by default at
-`leviculum-std/src/config.rs:603`); on a firmware with no filesystem it
+is (`leviculum-std/src/config.rs:172`, empty by default at
+`leviculum-std/src/config.rs:630`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 
@@ -548,14 +551,14 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:4941`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:5144`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:5052`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:5262`) fails without a path entry.
   The primitive for obtaining one is `request_path_unthrottled`
-  (`leviculum-core/src/node/mod.rs:4038`), the application's request,
+  (`leviculum-core/src/node/mod.rs:4273`), the application's request,
   which always leaves; a node with the key but no path asks and waits
   rather than giving up.
 - **An out-of-band trust step at the receiver, in the operator's hands.**
@@ -663,6 +666,31 @@ climbs from the bottom and stops at the first rung that works.
    upstream in LXMF, proposed as such, and not shipped into one client
    ahead of that. A field number minted by us and understood by one app
    is a fork of the format with a friendlier name.
+
+**One extension in use: the share mark (Loquax 1273, Lew 2026-11-01).**
+A live position share has to say two things the seven location
+elements cannot: how long the next report may take, so a resting sharer
+stays live at the receiver, and that this report is the last, so the
+receiver turns from live to an age at once. It rides as an **eighth
+element of the `SID_LOCATION` array**, a msgpack map with string keys:
+`"every"` (an int, seconds, the longest gap to the next report while
+the share runs) and `"ended"` (`true` on the stop's report). The codec
+is `ShareMark` in `leviculum-lxmf/src/telemetry.rs`
+(`Telemetry::encode_marked`, `ShareMark::of_blob`); an empty mark writes
+the plain seven elements byte for byte. It sits below rung 1: it is no
+new sensor and no new field, but more of an existing sensor's value.
+Failure mode on a viewer that does not participate: Sideband's
+`Location.unpack` (`2000d81`) reads elements 0 to 6 and ignores the
+rest, as this tree's `parse_location` does, so such a viewer reads the
+same fix and sees the end report as one more, older position; the
+stream then goes stale by that viewer's own clock. Columba's own parser
+is not in this tree and was not read for this; whether it accepts an
+eighth element is the open check before the mark is offered beyond
+Loquax. Both ends are ours (the facade test
+`a_share_starts_lists_and_stops_with_its_end_report` and the store's
+bytes). Columba's `FIELD_CUSTOM_META` `expires` would tell a Columba
+viewer the same end; not built, and its `cease`, which deletes the track,
+is not what an end report means here.
 
 Two conditions apply at every rung. An extension must be **demonstrated
 between two implementations that are both ours** before it is offered to

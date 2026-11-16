@@ -51,6 +51,10 @@ pub struct StatusOptions {
     /// trailer line (#471). Ours, off by default, so the default render
     /// against lnsd stays byte-identical to rnstatus's.
     pub origin: bool,
+    /// `--src-tags`: print the `Log tag` line of every accepted TCP
+    /// connection, the daily pseudonym its log lines carry in place of the
+    /// address (order 1678). Ours, off by default, like `origin`.
+    pub src_tags: bool,
     /// How many of a shared instance's counted clients are the observing
     /// program itself — the footprint every Shared Instance figure has to be
     /// discounted by. Not a flag; a property of how the observer reached the
@@ -876,6 +880,15 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
 
     pln(out, &format!(" {name}"));
 
+    // Order 1678: the tag the daemon's log names this connection by, so a
+    // log line can be matched to the live connection the name above shows
+    // by address. Ours, so only behind `--src-tags`.
+    if opts.src_tags {
+        if let Some(tag) = js(ifstat, "src_tag") {
+            pln(out, &format!("    Log tag   : src={tag}"));
+        }
+    }
+
     if let Some(src) = js(ifstat, "autoconnect_source") {
         if not_null(ifstat, "autoconnect_source") {
             pln(out, &format!("    Source    : Auto-connect via <{src}>"));
@@ -918,8 +931,9 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
     }
 
     // noise_floor / cpu / mem / battery / airtime / channel_load / switch_id /
-    // endpoint / via / tunnelstate / i2p_b32: lnsd never emits these, but honour
-    // them if a stats source ever does (rnstatus.py:475-540).
+    // endpoint / via / tunnelstate / i2p_b32 (rnstatus.py:475-540). lnsd emits
+    // tunnelstate and i2p_b32 for its I2P rows since 1588; the rest only a
+    // reference stats source does.
     render_optional_hw_fields(out, ifstat);
 
     // ifac access line (rnstatus.py:535-537).
@@ -989,6 +1003,25 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         if not_null(ifstat, "tx_stale_drops") && stale > 0 {
             let word = if stale == 1 { "frame" } else { "frames" };
             pln(out, &format!("    TX stale  : {stale} {word}"));
+        }
+    }
+
+    // Admission (1190): a TCP server's connection counters, served as
+    // `connections`, `silent`, `capped` and `silent_closed`. Ours, and
+    // silent until the server has refused or closed a connection, on the same
+    // terms as the TX lines above: a server nobody floods renders as rnstatus
+    // renders it.
+    if let (Some(capped), Some(closed)) = (ji(ifstat, "capped"), ji(ifstat, "silent_closed")) {
+        if capped > 0 || closed > 0 {
+            let conns = ji(ifstat, "connections").unwrap_or(0);
+            let silent = ji(ifstat, "silent").unwrap_or(0);
+            pln(
+                out,
+                &format!(
+                    "    Admission : connections={conns} silent={silent} capped={capped} \
+                     silent_closed={closed} since start"
+                ),
+            );
         }
     }
 

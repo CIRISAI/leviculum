@@ -1,0 +1,1085 @@
+//! The map on the M9, on the host (slice seven, 1375,
+//! `handheld-messenger.md`, "Slice seven, host half"). The goldens of its
+//! two screens are pinned with the board's in `firmware.rs`; this holds
+//! what they rest on: every row of the map's key table runs the terminal's
+//! map command through the shared resolver, the pins are the model's from
+//! the three ways a position comes, the last key of each walk is in its
+//! frame, and one renderer walking into the map and out of it draws what a
+//! fresh one draws.
+
+use leviculum_ui::keymap::Ctx;
+use loquax::keys::{panes_of, resolve, Action};
+use loquax::ui::{update, Pane, UiEvent, UiModel};
+use loquax_m9::field::Field;
+use loquax_m9::fixture::{self, Screen, OWN};
+use loquax_m9::frame::{Frame, WIDTH};
+use loquax_m9::group;
+use loquax_m9::keys::{event, M9Key};
+use loquax_m9::map::{self, Map, CELL_PX, FIXTURE, PICTURE, ROWS};
+use loquax_m9::render::Renderer;
+use loquax_m9::screen::Look;
+
+mod support;
+
+fn drawn(model: &UiModel<Field>) -> Frame {
+    let mut frame = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    Renderer::new(&mut frame)
+        .expect("renderer")
+        .show(model, &Look::of(model), &mut map)
+        .expect("draw");
+    frame
+}
+
+/// Each row's key, made the terminal's by `map::key` on the open map,
+/// resolves to the row's map command through the shared table. The
+/// control: Space and Backspace off the map stay what they were.
+#[test]
+fn every_map_key_runs_the_terminals_map_command() {
+    let model = Screen::Map.model();
+    assert!(map::shown(&model), "the walk opens the map");
+    for (verb, key, cmd) in ROWS {
+        let as_terminal = map::key(&model, event(key));
+        let got = resolve(&as_terminal, panes_of(Pane::Map), Ctx::NONE);
+        assert_eq!(got, Some(Action::Map(cmd)), "{verb} ({key:?})");
+    }
+    let list = fixture::model();
+    for key in [M9Key::Char(' '), M9Key::Backspace] {
+        assert_eq!(
+            map::key(&list, event(key)),
+            event(key),
+            "{key:?} off the map"
+        );
+    }
+}
+
+/// The pins are the model's, from a share, a `lev.position` announce and
+/// the board's own fix: you, Jürgen, Mum, Zoë stale, Rifugio nearby. The
+/// control: without the GNSS fix the board has no pin of its own.
+#[test]
+fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
+    let model = Screen::Map.model();
+    let pins = model.map_pins();
+    let labels: Vec<&str> = pins.iter().map(|p| p.label.as_str()).collect();
+    assert_eq!(pins.len(), 5, "{labels:?}");
+    let own = pins.iter().find(|p| p.peer == OWN).expect("our pin");
+    assert_eq!(
+        own.label, "du",
+        "the catalogue's, in the board's German (1447)"
+    );
+    assert!(pins
+        .iter()
+        .any(|p| p.nearby && p.label.starts_with("Rifugio")));
+    assert_eq!(pins.iter().filter(|p| p.stale).count(), 1, "Zoë's is old");
+    let (_, placed) = map::view(&model).expect("the open map");
+    assert_eq!(placed.len(), 5, "every pin is in the fitted view");
+    for pin in &placed {
+        assert!(pin.row < PICTURE.bottom(), "{pin:?}");
+        assert!(pin.text.contains('*') || pin.text.contains('@'), "{pin:?}");
+    }
+    let mut without = Screen::Map.model();
+    update(&mut without, UiEvent::OwnFix(None));
+    assert!(without.map_pins().iter().all(|p| p.peer != OWN));
+}
+
+/// The model's view is the picture's pixels: 32 x 11 cells of 10 x 20
+/// (1531: no title row, no legend).
+#[test]
+fn the_view_is_the_picture_in_pixels() {
+    let model = Screen::Map.model();
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(
+        view.size(),
+        (
+            u32::from(PICTURE.width * CELL_PX.0),
+            u32::from(PICTURE.height * CELL_PX.1)
+        )
+    );
+    assert_eq!(model.map_area(), PICTURE);
+}
+
+/// Each map walk's last key changes the frame, and the map is not the
+/// list it opened from.
+#[test]
+fn the_last_key_of_every_map_walk_is_in_its_frame() {
+    for shown in [Screen::Map, Screen::Pan] {
+        let keys = shown.keys();
+        let (_, walk) = keys.split_last().expect("a walk");
+        let mut before = fixture::model();
+        let mut row = 0;
+        for key in walk {
+            group::press(&mut before, &mut row, &event(*key));
+        }
+        assert_ne!(
+            drawn(&shown.model()).pixels(),
+            drawn(&before).pixels(),
+            "{shown:?}"
+        );
+    }
+    // Every key of Pan moved something: the zoom, the chosen pin, the view.
+    let map = Screen::Map.model().map.expect("open");
+    let pan = Screen::Pan.model().map.expect("open");
+    assert_eq!(pan.zoom, map.zoom + 1);
+    assert_ne!(pan.selected, map.selected);
+    assert_ne!(pan.centre, map.centre);
+}
+
+/// The board's loop over the map: one renderer, a key, a draw, a flush
+/// of the band. Into the map, around it and out to the list again, what
+/// the panel shows after each key is what a fresh draw shows: leaving the
+/// map redraws every cell the pixels covered.
+#[test]
+fn a_map_redraw_is_the_frame_a_fresh_draw_gives() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut shown = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let flush = |renderer: &Renderer<'_, Frame>, shown: &mut Frame| {
+        support::flush_runs(renderer.panel(), shown)
+    };
+    renderer
+        .show(&model, &Look::of(&model), &mut map)
+        .expect("draw");
+    flush(&renderer, &mut shown);
+    let mut row = 0;
+    for key in [
+        M9Key::Char('M'),
+        M9Key::Char('+'),
+        M9Key::Char(' '),
+        M9Key::Right,
+        M9Key::Char('-'),
+        M9Key::Back,
+        M9Key::Back,
+        M9Key::Char('m'),
+        M9Key::Back,
+    ] {
+        group::press(&mut model, &mut row, &event(key));
+        renderer
+            .show(&model, &Look::of(&model), &mut map)
+            .expect("draw");
+        flush(&renderer, &mut shown);
+        assert_eq!(shown.pixels(), drawn(&model).pixels(), "after {key:?}");
+    }
+    assert!(!map::shown(&model), "the walk ends off the map");
+}
+
+/// The kept picture (1507): the same walk as above with the board's
+/// cache on draws every frame a fresh, uncached draw gives, and a switch
+/// from the map to the list and back to the same view draws the picture
+/// once and copies it back. The control: a zoom draws it again.
+#[test]
+fn a_kept_map_picture_is_copied_back_after_a_page_switch() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut shown = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    assert_eq!(map.keep_pictures(), 153_600);
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut row = 0;
+    let mut press = |key, model: &mut UiModel<Field>, renderer: &mut Renderer<'_, Frame>| {
+        group::press(model, &mut row, &event(key));
+        renderer
+            .show(model, &Look::of(model), &mut map)
+            .expect("draw");
+        support::flush_runs(renderer.panel(), &mut shown);
+        assert_eq!(shown.pixels(), drawn(model).pixels(), "after {key:?}");
+        let kept = map.kept.as_ref().expect("kept");
+        (kept.drawn, kept.copied, renderer.take_map_stats())
+    };
+    let (drawn_once, _, stats) = press(M9Key::Char('M'), &mut model, &mut renderer);
+    assert_eq!(drawn_once, 1, "the map opened: drawn");
+    assert!(!stats.expect("a map draw").kept);
+    // Out to the list and into the map again: no picture drawn.
+    press(M9Key::Back, &mut model, &mut renderer);
+    assert!(!map::shown(&model));
+    let (again, copied, stats) = press(M9Key::Char('M'), &mut model, &mut renderer);
+    assert!(map::shown(&model));
+    assert_eq!(again, 1, "back on the map: copied, not drawn");
+    assert_eq!(copied, 1, "the draw's own copy is not counted");
+    let stats = stats.expect("a map draw");
+    assert!(stats.kept);
+    assert_eq!(stats.picture_us, 0);
+    // The control: a zoom is a new view.
+    let (zoomed, _, stats) = press(M9Key::Char('+'), &mut model, &mut renderer);
+    assert_eq!(zoomed, 2, "the zoom draws it");
+    assert!(!stats.expect("a map draw").kept);
+}
+
+/// The kept picture's key is the view and the pins (1554): the key hint
+/// and the corner credit are words over it, so their going leaves the
+/// picture kept. Window 13 drew it three times on one open (at the open
+/// and each time a word over it went) and again on Map after Back. The
+/// board's walk with its chrome's clock ([`map::Chrome`]): open with the
+/// hint and the credit, the hint's second page, the hint and the credit
+/// gone, Back, Map (the hint again, the credit once a boot): one picture
+/// drawn, three copies, every frame the one a fresh, uncached draw with the same words
+/// gives. The control: a zoom draws it again.
+#[test]
+fn the_words_over_the_map_never_draw_its_picture_again() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut shown = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    map.keep_pictures();
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut chrome = map::Chrome::default();
+    let mut row = 0;
+    let fresh = |model: &UiModel<Field>, look: &Look| {
+        let mut frame = Frame::new();
+        let mut map = Map::new(FIXTURE).expect("region");
+        Renderer::new(&mut frame)
+            .expect("renderer")
+            .show(model, look, &mut map)
+            .expect("draw");
+        frame
+    };
+    let mut step = |key: Option<M9Key>,
+                    now: u64,
+                    model: &mut UiModel<Field>,
+                    renderer: &mut Renderer<'_, Frame>,
+                    chrome: &mut map::Chrome| {
+        if let Some(key) = key {
+            group::press(model, &mut row, &event(key));
+        }
+        chrome.seen(map::shown(model), now);
+        let overlay = chrome.overlay(now, || !model.map_pins().is_empty());
+        let look = Look {
+            map: overlay,
+            ..Look::of(model)
+        };
+        renderer.show(model, &look, &mut map).expect("draw");
+        support::flush_runs(renderer.panel(), &mut shown);
+        assert_eq!(
+            shown.pixels(),
+            fresh(model, &look).pixels(),
+            "at {now} ms after {key:?} under {overlay:?}"
+        );
+        let kept = map.kept.as_ref().expect("kept");
+        (overlay, kept.drawn, kept.copied)
+    };
+    let (open, ..) = step(
+        Some(M9Key::Char('M')),
+        0,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(open.hint.is_some() && open.credit, "{open:?}");
+    let (turned, ..) = step(None, 3_500, &mut model, &mut renderer, &mut chrome);
+    assert_ne!(turned.hint, open.hint, "the hint's second page: {turned:?}");
+    assert!(turned.credit);
+    let (bare, ..) = step(None, 6_500, &mut model, &mut renderer, &mut chrome);
+    assert_eq!(
+        bare,
+        map::Overlay::default(),
+        "the hint and the credit went"
+    );
+    step(
+        Some(M9Key::Back),
+        13_500,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(!map::shown(&model));
+    let (again, drawn, copied) = step(
+        Some(M9Key::Char('M')),
+        14_000,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(again.hint.is_some() && !again.credit, "{again:?}");
+    assert_eq!((drawn, copied), (1, 3), "draws 1, copies 3");
+    let stats = renderer.take_map_stats().expect("a map draw");
+    assert!(stats.kept);
+    // The control: a zoom is a new view, drawn.
+    let (_, zoomed, _) = step(
+        Some(M9Key::Char('+')),
+        14_500,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert_eq!(zoomed, 2, "the zoom draws it");
+}
+
+/// A redraw that changes nothing flushes nothing (1455): the board
+/// redraws on every pulled entry, ended send and word of its home, and
+/// the map's picture and the cells are drawn whole each time; the panel
+/// is sent only the rows whose pixels moved, which for the same model
+/// is none, on the list and on the map. The control: `+` zooms the map,
+/// and that redraw has rows to send.
+#[test]
+fn an_unchanged_redraw_flushes_nothing() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut row = 0;
+    for (key, name) in [(None, "list"), (Some(M9Key::Char('M')), "map")] {
+        if let Some(key) = key {
+            group::press(&mut model, &mut row, &event(key));
+        }
+        renderer
+            .show(&model, &Look::of(&model), &mut map)
+            .expect("draw");
+        assert!(renderer.panel().take_dirty().is_some(), "{name}: drawn");
+        renderer
+            .show(&model, &Look::of(&model), &mut map)
+            .expect("draw");
+        assert_eq!(renderer.panel().take_dirty(), None, "{name}: drawn again");
+    }
+    assert!(map::shown(&model));
+    group::press(&mut model, &mut row, &event(M9Key::Char('+')));
+    renderer
+        .show(&model, &Look::of(&model), &mut map)
+        .expect("draw");
+    assert!(renderer.panel().take_dirty().is_some(), "the zoom");
+}
+
+/// 1476, the grey map of Lew's photo, and 1477: a home's board opens the
+/// map where its own fix is, far from the detailed region the image
+/// carries. The picture is the world overview there (1477 §3): drawn, not
+/// grey, with "Nur Übersicht" over it and how a region gets onto the
+/// board. Past the overview's zooms the picture says "Keine Karte für
+/// diese Gegend" above the own pin and how a region gets onto the board in
+/// its last row, no row has a credit for data it does not show, and
+/// nothing of the map is drawn. Both pinned as goldens. The control: the
+/// fixture's own view over Florence draws the detailed region and says
+/// none of it.
+#[test]
+fn the_map_says_so_where_no_region_lies_under_the_view() {
+    use leviculum_lxmf::telemetry::Location;
+    use loquax::ui::strings::{StrId, Text};
+    use loquax_m9::frame::HEIGHT;
+    use loquax_m9::home;
+    use loquax_m9::screen::{COLS, ROWS as GRID};
+
+    let mut model = home::model([0x24; 16]);
+    // Frankfurt, a minute ago: the M9 on Lew's desk.
+    let fix = Location::saturating(50_110_900, 8_682_100, 5_000, 0, 0, 500, 1_762_000_000);
+    update(&mut model, UiEvent::OwnFix(Some(fix)));
+    let mut row = 0;
+    group::press(&mut model, &mut row, &event(M9Key::Char('M')));
+    assert!(map::shown(&model), "M opens the home's map");
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(
+        board.choose(&view),
+        map::Drawn::Overview,
+        "z{}",
+        view.zoom()
+    );
+
+    let top = (PICTURE.y * CELL_PX.1) as u32;
+    let bottom = (PICTURE.bottom() * CELL_PX.1) as u32;
+    let inks_of = |frame: &Frame| {
+        let mut inks = std::collections::BTreeSet::new();
+        for y in top..bottom.min(HEIGHT) {
+            for x in 0..WIDTH {
+                inks.insert(frame.pixel(x, y));
+            }
+        }
+        inks.len()
+    };
+    let overview = drawn_on_board(&model);
+    support::check("m9-map-overview.png", &overview);
+    assert!(inks_of(&overview) > 8, "the world is drawn");
+    // The names the board sets on that picture (1733), from the renderer's
+    // own inputs: the painted view, the own pin's cell and the overview's
+    // two rows of words. Three countries, and why no more (the reasons in
+    // the cells of the pass before 1565; the phone's pass at 1.6 times its
+    // sizes sets the same three, checked on the merge of 2026-11-13):
+    // - Deutschland's and Frankreich's boxes touch the own pin at Frankfurt
+    //   (the cell below), which is placed first and never covered.
+    // - Vereinigtes Königreich is 22 cells wide and its label point lies 9
+    //   cells from the left edge: the name does not fit the picture whole.
+    // - London gives way to Irland and Paris and Rom to Italien, which are
+    //   drawn: no name gives way to one that is not.
+    // - Spanien, Portugal, Griechenland, Madrid, Istanbul and the
+    //   Mittelmeer lie in the bottom row the words keep, Estland, Dänemark
+    //   and Stockholm in or beside the top one; Ukraine, Türkei and the
+    //   Schwarzes Meer do not fit the picture whole.
+    // - Belarus and Berlin give way to Polen, Rumänien, Österreich and the
+    //   Alpen to Italien (Österreich and Berlin to the pin as well).
+    let (view, pins) = map::view(&model).expect("map");
+    let painted = map::with_bottom(&view);
+    let mut taken = map::pin_cells(&pins);
+    assert!(taken.contains(&(16, 5, 1)), "the own pin: {taken:?}");
+    taken.extend(map::overview_rows());
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, stats) = map::names(&board.region, &painted, &taken, &mut glyphs, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(texts, ["Italien", "Irland", "Polen"], "{names:?}");
+    assert!(stats.found > texts.len(), "{stats:?}");
+    // The control: without the own pin, Deutschland is set, and Frankreich
+    // still gives way, now to Deutschland's box beside it.
+    let free = map::overview_rows().to_vec();
+    let (names, _) = map::names(&board.region, &painted, &free, &mut glyphs, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert!(texts.contains(&"Deutschland"), "{texts:?}");
+    assert!(!texts.contains(&"Frankreich"), "{texts:?}");
+
+    // Past the overview's zooms: no region at all.
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 14;
+    }
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Bare);
+    assert!(!map::covers(board.region.header(), &view));
+
+    let look = Look::of(&model);
+    let lines = map::lines(&look, true, COLS, GRID);
+    let text: Vec<String> = lines
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.ch).collect())
+        .collect();
+    let lang = model.lang;
+    let none = Text::key(StrId::MapNoRegion).resolve(lang);
+    let how = Text::key(StrId::MapRegionHow).resolve(lang);
+    assert_eq!(none, "Keine Karte für diese Gegend", "the 1447 §5 words");
+    let picture = usize::from(PICTURE.y)..usize::from(PICTURE.bottom());
+    let second = usize::from(PICTURE.y) + 1;
+    assert_eq!(text[second].trim(), none, "{text:#?}");
+    assert_eq!(text[picture.end - 1].trim(), how, "{text:#?}");
+    assert!(how.contains("lnflash"));
+    assert!(
+        !text[0].contains("OSM"),
+        "no credit over no data: {:?}",
+        text[0]
+    );
+    for line in &text {
+        assert_eq!(line.chars().count(), COLS, "{line:?}");
+    }
+
+    let frame = drawn_on_board(&model);
+    support::check("m9-map-no-region.png", &frame);
+    // The picture's rows hold the ground and the words' two inks only: no
+    // map was drawn.
+    assert!(
+        inks_of(&frame) <= 8,
+        "{} inks in a picture of words",
+        inks_of(&frame)
+    );
+
+    // The control: the fixture's view over Florence draws the region.
+    let florence = Screen::Map.model();
+    let (view, _) = map::view(&florence).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Detail(0));
+    let text: Vec<String> = map::lines(&Look::of(&florence), false, COLS, GRID)
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.ch).collect())
+        .collect();
+    assert!(text.iter().all(|l| !l.contains(&none)));
+    assert!(inks_of(&drawn(&florence)) > 8, "the region's picture");
+}
+
+/// 1477 §3: the world is on the board. A z2 view over Europe draws the
+/// world overview, coasts and land in the map's inks, with the overview's
+/// words; pinned as a golden. The control: at the same place at z2 with
+/// the fixture alone, as the board drew before 1477, the picture is the
+/// ground and nothing else.
+#[test]
+fn the_world_overview_draws_europe_at_z2() {
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 2;
+        state.selected = None;
+        state.centre = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+            50_000_000, 10_000_000,
+        ));
+    }
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Overview);
+    let frame = drawn_on_board(&model);
+    support::check("m9-map-world-z2.png", &frame);
+    let colours = |frame: &Frame| {
+        let mut inks = std::collections::BTreeSet::new();
+        for y in 0..HEIGHT_PICTURE {
+            for x in 0..WIDTH {
+                inks.insert(frame.pixel(x, y));
+            }
+        }
+        inks.len()
+    };
+    assert!(colours(&frame) > 8, "{} inks", colours(&frame));
+    assert!(
+        colours(&drawn(&model)) <= 8,
+        "control: no world, no picture"
+    );
+}
+
+/// The picture's pixel rows.
+const HEIGHT_PICTURE: u32 = (PICTURE.height as u32) * (CELL_PX.1 as u32);
+
+/// 1712: the world at z6 on the board, as the board draws it (1683's
+/// z6 golden came from the map core's own world drawer, which the board
+/// never calls). Central Germany at z6 is past the overview's z3 and
+/// inside its overzoom, so the board draws the overview region, strokes
+/// the world outline's borders over it (`outline::bounds`) and sets the
+/// world table's names with the region's. Deutschland is served first,
+/// but its label lies under the overview's words ("Nur Übersicht"), so
+/// the picture names Frankfurt am Main alone (1683, kept under the
+/// phone's label pass of 1565 and the chip rows of 1727). Pinned as a golden; the
+/// border ink is on the picture, and the control: the same view at z12,
+/// past the overzoom, draws no border.
+#[test]
+fn the_world_overview_draws_germany_at_z6() {
+    use embedded_graphics::pixelcolor::IntoStorage;
+    let at = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+        50_000_000, 10_000_000,
+    ));
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 6;
+        state.selected = None;
+        state.centre = at;
+    }
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Overview, "z6");
+    let frame = drawn_on_board(&model);
+    support::check("m9-map-world-z6.png", &frame);
+    let border = map::style().theme.palette().border.into_storage();
+    let top = u32::from(PICTURE.y) * u32::from(CELL_PX.1);
+    let inked = |frame: &Frame| {
+        (top..top + HEIGHT_PICTURE)
+            .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.pixel(x, y) == border)
+            .count()
+    };
+    assert!(inked(&frame) > 50, "{} border pixels", inked(&frame));
+    // The names as the board sets them: on the picture with its bottom
+    // row, the overview's two rows of words taken (`render.rs`). The view
+    // holds no pin.
+    let world = board.of(map::Drawn::Overview).expect("the overview");
+    let painted = map::with_bottom(&view);
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let words = map::overview_rows();
+    let (names, stats) = map::names(world, &painted, &words, &mut glyphs, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    // Both tables are read (1683): the region's Frankfurt am Main and the
+    // world table's Deutschland. On the board Frankfurt am Main is set:
+    // Deutschland is served first, but its label lies under the overview's
+    // words ("Nur Übersicht"), the overview's second row.
+    assert_eq!(texts, ["Frankfurt am Main"], "{names:?}");
+    assert_eq!(stats.found, 2, "{stats:?}");
+    // Without the words, Deutschland is served first: its label point lies
+    // on row 2, next to the top chip row, which keeps the name out of the
+    // row's cells and no further (1727).
+    let (free, _) = map::names(world, &painted, &[], &mut glyphs, true);
+    assert_eq!(
+        free.first().map(|n| (n.text.as_str(), n.kind)),
+        Some(("Deutschland", leviculum_map::labels::LabelKind::Country)),
+        "{:?}",
+        free.iter().map(|n| n.text.as_str()).collect::<Vec<_>>()
+    );
+    let span = |n: &loquax::mapnames::PlacedName| {
+        n.boxes
+            .iter()
+            .fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |s, b| {
+                (s.0.min(b.x0), s.1.min(b.y0), s.2.max(b.x1), s.3.max(b.y1))
+            })
+    };
+    // Measured, pinned here (the second audit of 1757), in the picture's
+    // pixels, x0, y0, x1, y1 over the name's boxes with their halo:
+    // - Frankfurt am Main is 213 px wide at SCALE 1.6, its point lies at
+    //   x 99, so centred on it the box would start at x -7, off the
+    //   320 px picture: it is set moved in by `nudged_in`, at x 1..214.
+    // - Deutschland's box is y 24..59. The overview's words own row 1,
+    //   y 20..40, so with them it is not set; without them it clears the
+    //   top chip row (y 0..20, `chip_boxes` 5..15 grown by the margin 5).
+    let mut found = Vec::new();
+    world
+        .view_labels(&painted, true, &mut found)
+        .expect("labels");
+    leviculum_map::outline::names(leviculum_map::outline::NAMES_M9, &painted, &mut found);
+    let point = found
+        .iter()
+        .find(|l| l.text == "Frankfurt am Main")
+        .map(|l| l.anchor.0 / leviculum_map::labels::SUBPIXEL);
+    assert_eq!(point, Some(99), "Frankfurt am Main's point, x");
+    let frankfurt = span(&names[0]);
+    assert_eq!(frankfurt, (1, 86, 214, 118));
+    let wide = frankfurt.2 - frankfurt.0;
+    assert_eq!(wide, 213);
+    assert!(99 - wide / 2 < 0 && frankfurt.2 <= WIDTH as i32);
+    let deutschland = span(&free[0]);
+    assert_eq!(deutschland, (67, 24, 223, 59));
+    let row = i32::from(CELL_PX.1);
+    let words = (
+        row * i32::from(words[0].1),
+        row * (i32::from(words[0].1) + 1),
+    );
+    assert_eq!(words, (20, 40), "the overview's words' row");
+    assert!(
+        deutschland.1 < words.1 && deutschland.3 > words.0,
+        "under the words"
+    );
+    let margin = libm::roundf(loquax::mapnames::MARGIN * map::SCALE) as i32;
+    let chip = map::chip_boxes(map::SCALE)[0];
+    assert_eq!(
+        (chip.y0 - margin, chip.y1 + margin),
+        (0, row),
+        "the top chip row"
+    );
+    assert!(deutschland.1 >= chip.y1 + margin, "clear of the chip row");
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 12;
+    }
+    let (deep, _) = map::view(&model).expect("map");
+    assert_ne!(board.choose(&deep), map::Drawn::Overview, "z12");
+    assert_eq!(inked(&drawn_on_board(&model)), 0, "control: z12");
+}
+
+/// What `model` shows on the board's map: the fixture and the world.
+fn drawn_on_board(model: &UiModel<Field>) -> Frame {
+    let mut frame = Frame::new();
+    let mut map = Map::board(FIXTURE, &[]).expect("regions");
+    Renderer::new(&mut frame)
+        .expect("renderer")
+        .show(model, &Look::of(model), &mut map)
+        .expect("draw");
+    frame
+}
+
+/// What `model` shows under `overlay`, drawn by a fresh renderer.
+fn drawn_with(model: &UiModel<Field>, overlay: map::Overlay) -> Frame {
+    let mut frame = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    Renderer::new(&mut frame)
+        .expect("renderer")
+        .show(
+            model,
+            &Look {
+                map: overlay,
+                ..Look::of(model)
+            },
+            &mut map,
+        )
+        .expect("draw");
+    frame
+}
+
+/// The fixture's map at `zoom`, its view and pins as the model has them.
+fn at_zoom(zoom: u8) -> UiModel<Field> {
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = zoom;
+    }
+    model
+}
+
+/// 1531, 1565: the M9's map carries names, set as the phone sets them.
+/// Whatever the phone's label pass sets lies inside the picture, off the
+/// bottom row, never on a pin's cells and never on another name. Over
+/// Florence at z16 it sets a street's name along the street, turned to
+/// it, in Fira Sans; at z15 it finds the streets' names and sets none at
+/// the board's size (no straight run of a street long enough for its name
+/// lies wholly in the 320 x 240 picture: the 1565 report's table); at
+/// z13 the fixture holds no name its zoom shows (its place points lie
+/// outside the cut, its streets start at z14), and the frame is the
+/// picture alone. All three pinned as goldens. The control: the z16
+/// picture drawn without its names differs from the one with them.
+#[test]
+fn the_map_carries_names_at_z13_z15_and_z16() {
+    let mut region = Map::new(FIXTURE).expect("region");
+    for (zoom, golden) in [
+        (13, "m9-map-z13.png"),
+        (15, "m9-map-z15.png"),
+        (16, "m9-map-z16.png"),
+    ] {
+        let model = at_zoom(zoom);
+        let (view, pins) = map::view(&model).expect("map");
+        let tall = map::with_bottom(&view);
+        let taken = map::pin_cells(&pins);
+        let (names, stats) = map::names(&region.region, &tall, &taken, &mut region.glyphs, false);
+        let texts: Vec<(&str, f64)> = names.iter().map(|n| (n.text.as_str(), n.angle)).collect();
+        println!("z{zoom}: {stats:?} {texts:?}");
+        assert_eq!(stats.drawn, names.len());
+        match zoom {
+            13 => assert_eq!(stats.found, 0, "{texts:?}"),
+            15 => assert!(stats.found > 0, "z15 finds the streets: {stats:?}"),
+            _ => {
+                assert!(
+                    names.iter().any(|n| n.angle != 0.0 && n.kind.is_line()),
+                    "z{zoom}: a street's name along it: {texts:?}"
+                );
+                assert!(stats.glyphs > 0, "z{zoom}: {stats:?}");
+            }
+        }
+        let (w, h) = tall.size();
+        let mut pins_px = map::taken_px(&taken);
+        pins_px.extend(map::taken_px(&[(0, map::BOTTOM, PICTURE.width)]));
+        let apart = |a: &leviculum_map::labels::Rect, b: &leviculum_map::labels::Rect| {
+            a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0
+        };
+        for (i, name) in names.iter().enumerate() {
+            for b in &name.boxes {
+                assert!(
+                    b.x0 >= 0 && b.y0 >= 0 && b.x1 as u32 <= w && b.y1 as u32 <= h,
+                    "{} leaves the picture: {b:?}",
+                    name.text
+                );
+                for p in &pins_px {
+                    assert!(apart(b, p), "{} over a pin at {p:?}", name.text);
+                }
+                for other in &names[i + 1..] {
+                    for o in &other.boxes {
+                        assert!(apart(b, o), "{} over {}", name.text, other.text);
+                    }
+                }
+            }
+        }
+        let frame = drawn_with(&model, map::Overlay::default());
+        support::check(golden, &frame);
+        if zoom == 16 {
+            let mut bare = Frame::new();
+            let mut painter = map::Painter::new();
+            painter
+                .picture(&region.region, &tall, &mut bare, false)
+                .expect("picture");
+            assert_ne!(
+                bare.pixels()[..(WIDTH * HEIGHT_PICTURE) as usize],
+                frame.pixels()[..(WIDTH * HEIGHT_PICTURE) as usize],
+                "the control: the names are in the frame"
+            );
+        }
+    }
+}
+
+/// 1565: the label pass is the phone's, one round by the map core's rule,
+/// which sets a city before what it names around it: over Berlin's Mitte
+/// (the map core's second fixture, which holds the city's point)
+/// "Berlin" is set wherever the region's ground holds it. Since 1727 a
+/// region's names stay on the ground it covers: the box is 0.01 degrees
+/// wide, 29 pixels at z12 and 58 at z13, too narrow for the name, so it
+/// is set from z14 to z16 and nothing at z12 and z13. The parks: no park
+/// name of the fixture lies on its region's own ground, so the control
+/// reads the names as the overview does, which keeps them anywhere on
+/// screen: at z15 a park's name (the Lustgarten), at z12, where the
+/// fixture holds no park's name, none.
+#[test]
+fn the_phones_rule_sets_berlin_on_its_ground() {
+    use leviculum_map::labels::LabelKind;
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::region::Region;
+    use leviculum_map::viewport::Viewport;
+
+    let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
+    let region = Region::from_bytes(bytes).expect("region");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let at = project(LatLon::from_e6(52_517_500, 13_395_000));
+    for zoom in 12..=13 {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, stats) = map::names(&region, &view, &[], &mut glyphs, false);
+        let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+        assert!(names.is_empty() && stats.found > 0, "z{zoom}: {texts:?}");
+    }
+    for zoom in 14..=16 {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, stats) = map::names(&region, &view, &[], &mut glyphs, false);
+        let texts: Vec<(&str, LabelKind)> =
+            names.iter().map(|n| (n.text.as_str(), n.kind)).collect();
+        println!("z{zoom}: {stats:?} {texts:?}");
+        assert!(
+            names
+                .iter()
+                .any(|n| n.kind == LabelKind::City && n.text == "Berlin"),
+            "z{zoom}: {texts:?}"
+        );
+    }
+    let mut parks = |zoom| {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, _) = map::names(&region, &view, &[], &mut glyphs, true);
+        names.iter().any(|n| n.kind == LabelKind::Park)
+    };
+    assert!(parks(15), "z15 sets a park");
+    assert!(!parks(12), "the control: z12 sets none");
+    // 1531: parks and waters from z15 on. With the Lustgarten 100 pixels
+    // left of the middle Berlin's point lies off the picture, so the park
+    // has room at z14 as at z15, and the rule alone keeps it off at z14.
+    let mut park_at = |zoom| {
+        let east = match zoom {
+            14 => 13_407_900,
+            _ => 13_403_600,
+        };
+        let view = Viewport::new(project(LatLon::from_e6(52_519_000, east)), zoom, 320, 240);
+        let (names, _) = map::names(&region, &view, &[], &mut glyphs, true);
+        let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+        println!("east z{zoom}: {texts:?}");
+        assert!(!texts.contains(&"Berlin"), "z{zoom}: {texts:?}");
+        names.iter().any(|n| n.kind == LabelKind::Park)
+    };
+    assert!(park_at(15), "the control: z15 sets the park there");
+    assert!(!park_at(14), "z14 sets no park (1531, parks from z15)");
+}
+
+/// 1531: the map's chrome. No title row and no legend: the picture
+/// covers the panel. The first open after a boot shows the key hint in
+/// the bottom row and "© OpenStreetMap" in the top right corner; a later
+/// open the hint alone; once the hint is gone the bottom row is the
+/// chosen pin's card with the credit. Each pinned as a golden, and each
+/// differs from the others.
+#[test]
+fn the_hint_the_credit_and_the_card_have_their_goldens() {
+    let model = Screen::Map.model();
+    let keys = map::Overlay {
+        hint: Some(loquax::ui::strings::StrId::MapKeys),
+        credit: false,
+        ..map::Overlay::default()
+    };
+    let open = map::Overlay {
+        credit: true,
+        ..keys
+    };
+    let frames = [
+        ("m9-map-open.png", drawn_with(&model, open)),
+        ("m9-map-hint.png", drawn_with(&model, keys)),
+        (
+            "m9-map-card.png",
+            drawn_with(&model, map::Overlay::default()),
+        ),
+    ];
+    for (name, frame) in &frames {
+        support::check(name, frame);
+    }
+    for i in 0..frames.len() {
+        for j in i + 1..frames.len() {
+            assert_ne!(
+                frames[i].1.pixels(),
+                frames[j].1.pixels(),
+                "{} {}",
+                frames[i].0,
+                frames[j].0
+            );
+        }
+    }
+    let lang = model.lang;
+    let card = map::bottom(
+        &model,
+        &map::Overlay::default(),
+        Some("© OpenStreetMap"),
+        lang,
+    )
+    .expect("a pin is chosen");
+    assert!(card.ends_with("© OpenStreetMap "), "{card:?}");
+    let hint = map::bottom(&model, &keys, Some("© OpenStreetMap"), lang).expect("the hint");
+    assert_eq!(hint, "T näher Y weiter Pfeile schieben");
+}
+
+/// 1531: a key the open map does not know brings the hint back; every
+/// key of the table is known. The control: off the map every key is.
+#[test]
+fn an_unknown_key_on_the_map_is_told_apart() {
+    let model = Screen::Map.model();
+    for (verb, key, _) in ROWS {
+        assert!(map::bound(&model, &event(key)), "{verb} ({key:?})");
+    }
+    // `z` is the time zone view's since 1684.
+    for c in ['q', 'x', 'v'] {
+        assert!(!map::bound(&model, &event(M9Key::Char(c))), "{c}");
+    }
+    let list = fixture::model();
+    assert!(map::bound(&list, &event(M9Key::Char('q'))));
+}
+
+/// 1684: the time zone view on the M9: `z` turns it on in the shared
+/// model, and once the board knows the time the names over the world are
+/// the zones' clocks by the board's own table, Paris's at its summer
+/// offset among them; without a clock the map stays as it was.
+#[test]
+fn the_time_zone_view_writes_the_boards_clocks() {
+    let mut model = Screen::Map.model();
+    assert_eq!(map::zones(&model), None, "off by default");
+    model.time_zones = true;
+    let fixture_now = model.now.take();
+    assert_eq!(map::zones(&model), None, "no clock, no clocks");
+    assert!(fixture_now.is_some(), "the fixture's board knows the time");
+    // 2026-07-01T12:00:30Z: the minute is what the clocks show.
+    model.now = Some(loquax::when::WallTime {
+        unix_secs: 1_782_907_230,
+        offset_secs: 0,
+    });
+    let unix = map::zones(&model).expect("on, with a clock");
+    assert_eq!(unix, 1_782_907_200);
+    let centre = leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0));
+    let view = leviculum_map::Viewport::new(centre, 3, 320, 240);
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, _) = map::zone_names(&view, &[], &mut glyphs, unix);
+    assert!(!names.is_empty());
+    assert!(
+        names
+            .iter()
+            .all(|n| n.text.len() == 5 && &n.text[2..3] == ":"),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.text == "14:00"), "{names:?}");
+}
+
+/// 1727 (the audit of 1707): no name in the chip rows, the picture's top
+/// row (the receiver's words and the credit) and its bottom row (the
+/// hint, the card), whose words would cut it; and no name of the region
+/// on ground the region does not cover, where it stood over blank paper
+/// ("Viale Giacomo Matteotti" in the top row, west of the Florence cut).
+/// Over the fixture at every zoom it names, with its pins and, at z15,
+/// without them; and over Berlin's Mitte (the map core's second fixture)
+/// from z14, where "Berlin" fits its ground.
+#[test]
+fn no_name_in_the_chip_rows_nor_off_the_region() {
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::region::Region;
+    use leviculum_map::viewport::Viewport;
+
+    let mut florence = Map::new(FIXTURE).expect("region");
+    let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
+    let berlin = Region::from_bytes(bytes).expect("region");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let ch = i32::from(CELL_PX.1);
+    let bottom = i32::from(map::BOTTOM) * ch;
+    // What, the view, the cells taken, whether it is over Florence.
+    type Seen = (String, Viewport, Vec<(u16, u16, u16)>, bool);
+    let mut views: Vec<Seen> = Vec::new();
+    for zoom in 13..=18 {
+        let model = at_zoom(zoom);
+        let (view, pins) = map::view(&model).expect("map");
+        views.push((
+            format!("florence z{zoom}"),
+            map::with_bottom(&view),
+            map::pin_cells(&pins),
+            true,
+        ));
+    }
+    let mut bare = at_zoom(15);
+    if let Some(state) = bare.map.as_mut() {
+        state.selected = None;
+    }
+    let (view, _) = map::view(&bare).expect("map");
+    views.push((
+        "florence z15, no pins".into(),
+        map::with_bottom(&view),
+        Vec::new(),
+        true,
+    ));
+    let at = project(LatLon::from_e6(52_517_500, 13_395_000));
+    for zoom in 14..=16 {
+        let view = map::with_bottom(&Viewport::new(at, zoom, 320, 220));
+        views.push((format!("berlin z{zoom}"), view, Vec::new(), false));
+    }
+    let mut checked = Vec::new();
+    for (what, tall, taken, in_florence) in &views {
+        let (region, glyphs) = match in_florence {
+            true => (&florence.region, &mut florence.glyphs),
+            false => (&berlin, &mut glyphs),
+        };
+        let (names, _) = map::names(region, tall, taken, glyphs, false);
+        let area = tall.area_of(&region.header().bounds);
+        let (ax, ay) = (area.top_left.x, area.top_left.y);
+        let (aw, ah) = (area.size.width as i32, area.size.height as i32);
+        for name in &names {
+            checked.push(format!("{what}: {}", name.text));
+            for b in &name.boxes {
+                assert!(
+                    b.y0 >= ch && b.y1 <= bottom,
+                    "{what}: {} {b:?} in a chip row",
+                    name.text
+                );
+                assert!(
+                    b.x0 >= ax && b.y0 >= ay && b.x1 <= ax + aw && b.y1 <= ay + ah,
+                    "{what}: {} {b:?} off the region drawn at {area:?}",
+                    name.text
+                );
+            }
+        }
+    }
+    println!("{checked:#?}");
+    assert!(
+        checked.len() >= 5,
+        "only {} names checked: {checked:?}",
+        checked.len()
+    );
+}
+
+/// 1683: the board reads both the world table and the overview region,
+/// and one name comes of a text both carry. Over Patagonia at z3 both hold
+/// "Punta Arenas" (found twice, the control), and the pass sets one.
+/// Here the two copies lie on almost the same point, so the label rule's
+/// overlap test alone drops the second: this pins that both tables are
+/// read and one name is set, not the core's once-a-view rule. That rule
+/// is `place_found`'s unit test `a_text_on_two_points_is_set_once`, whose
+/// copies stand apart (the audits of 1787).
+#[test]
+fn both_tables_are_read_and_one_shared_name_is_set() {
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::viewport::Viewport;
+
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let world = board.of(map::Drawn::Overview).expect("the overview");
+    let view = Viewport::new(
+        project(LatLon::from_e6(-55_000_000, -75_000_000)),
+        3,
+        320,
+        240,
+    );
+    let mut found = Vec::new();
+    world.view_labels(&view, true, &mut found).expect("labels");
+    leviculum_map::outline::names(leviculum_map::outline::NAMES_M9, &view, &mut found);
+    let twice = |t: &str| found.iter().filter(|l| l.text == t).count();
+    assert_eq!(twice("Punta Arenas"), 2, "the control: both tables hold it");
+    let mut glyphs = loquax_m9::glyphs::Glyphs::new().expect("font");
+    let (names, _) = map::names(world, &view, &[], &mut glyphs, true);
+    let texts: Vec<&str> = names.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(
+        texts.iter().filter(|&&t| t == "Punta Arenas").count(),
+        1,
+        "{texts:?}"
+    );
+}
+
+/// 1684: the time zone view draws its borders, through the kept picture
+/// (`Kept::draw`) and without it, in the zones' violet
+/// ([`map::ZONE_LINE`]), over the world overview at z3. The control: the
+/// same view with the time zone view off has no pixel of that violet.
+#[test]
+fn the_time_zone_view_draws_its_borders() {
+    use embedded_graphics::pixelcolor::IntoStorage;
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 3;
+        state.selected = None;
+        state.centre =
+            leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0));
+    }
+    assert!(model.now.is_some(), "the fixture's board knows the time");
+    let violet = map::ZONE_LINE.into_storage();
+    let lines = |model: &UiModel<Field>, keep: bool| {
+        let mut frame = Frame::new();
+        let mut map = Map::board(FIXTURE, &[]).expect("regions");
+        if keep {
+            map.keep_pictures();
+        }
+        Renderer::new(&mut frame)
+            .expect("renderer")
+            .show(model, &Look::of(model), &mut map)
+            .expect("draw");
+        if keep {
+            assert_eq!(map.kept.as_ref().map(|k| k.drawn), Some(1), "Kept::draw");
+        }
+        (0..HEIGHT_PICTURE)
+            .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.pixel(x, y) == violet)
+            .count()
+    };
+    for keep in [false, true] {
+        assert_eq!(lines(&model, keep), 0, "the control: off, kept {keep}");
+    }
+    model.time_zones = true;
+    assert!(map::zones(&model).is_some());
+    for keep in [false, true] {
+        let n = lines(&model, keep);
+        assert!(n > 50, "{n} zone border pixels, kept {keep}");
+    }
+}

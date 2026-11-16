@@ -20,7 +20,7 @@ use embassy_sync::mutex::Mutex;
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use leviculum_queue_budget::{
-    HoldVerdict, Outbound, QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS,
+    HoldVerdict, Outbound, QueueBudget, QueuedCopies, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS,
 };
 use static_cell::StaticCell;
 
@@ -48,6 +48,16 @@ static LORA_SETTLED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 /// Packets accepted so far, which is the number of the latest one.
 pub fn accepted_packets() -> u32 {
     LORA_ACCEPTED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether packet number `packet` (an [`accepted_packets`] reading) and
+/// every packet accepted before it have been settled: transmitted, or
+/// dropped by the queue's own age or mute rule. Wrapping, like both
+/// counters. The `/dfu` exit waits on this before the reset (#235): on LoRa
+/// "handed to the interface" is not "on the air".
+pub fn settled_through(packet: u32) -> bool {
+    let settled = LORA_SETTLED.load(core::sync::atomic::Ordering::Relaxed);
+    (settled.wrapping_sub(packet) as i32) >= 0
 }
 
 /// Settle the oldest unsettled packet; `keyed` is whether it went on the
@@ -336,7 +346,19 @@ pub static LORA_LT_CAP_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::A
 /// packet already handed to the transmitter is not counted against the queue.
 static OUTGOING_BUDGET: QueueBudget = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
 
-/// Take one packet out of the outgoing queue, releasing its budget.
+/// The frames in `LORA_OUTGOING`, so a byte-identical copy of one still
+/// waiting is not keyed a second time (1169, `leviculum_queue_budget::
+/// QueuedCopies`). Recorded with the budget's reservation by the producer,
+/// forgotten with its release by the consumer, at the same two places.
+static OUTGOING_COPIES: QueuedCopies = QueuedCopies::new();
+
+/// Cumulative count of outbound frames dropped because a byte-identical
+/// frame was still queued (1169). Each one is also a `[LORA_TX_DEDUP]` line.
+pub static LORA_TX_DEDUP_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Take one packet out of the outgoing queue, releasing its budget and its
+/// entry in `OUTGOING_COPIES`.
 ///
 /// Every dequeue goes through here or through the `Either3::Second` arm of
 /// the idle select; a dequeue that forgets to release would leak the budget
@@ -348,6 +370,7 @@ fn take_outgoing(
     match outgoing_rx.try_receive() {
         Ok(frame) => {
             OUTGOING_BUDGET.release(frame.data.len());
+            OUTGOING_COPIES.dequeued(&frame.data);
             Some(frame)
         }
         Err(_) => None,
@@ -451,7 +474,8 @@ impl Interface for LoRaInterface {
         match leviculum_queue_budget::outbound_verdict(
             crate::media::lora_active(),
             &OUTGOING_BUDGET,
-            data.len(),
+            &OUTGOING_COPIES,
+            data,
         ) {
             // The media profile, applied where the medium's quirks belong:
             // the interface knows its carrier is down, the core does not have
@@ -468,6 +492,27 @@ impl Interface for LoRaInterface {
                 if let Some(run) = self.drops.dropped(data.len()) {
                     leviculum_firmware::media::log_tx_drop(self.name(), run);
                 }
+                return Ok(());
+            }
+            // The core answers each fresh-tag path request with the same
+            // cached announce, rebuilt byte for byte, and has no memory of
+            // what still waits here; on 2026-10-31 three such copies keyed
+            // back to back held a link request 17 s off the air (1169).
+            // `Ok`: the queued original puts this very frame on the air.
+            Outbound::Duplicate => {
+                if let Some(run) = self.drops.resumed() {
+                    leviculum_firmware::media::log_tx_resumed(self.name(), run);
+                }
+                LORA_TX_DEDUP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::log::log_fmt(
+                    "[LORA_TX_DEDUP] ",
+                    format_args!(
+                        "iface={} len={} queued={}",
+                        self.name(),
+                        data.len(),
+                        OUTGOING_BUDGET.queued_slots(),
+                    ),
+                );
                 return Ok(());
             }
             Outbound::Refuse(bound) => {
@@ -522,6 +567,7 @@ impl Interface for LoRaInterface {
                 // close the queue permanently, and the line below says the two
                 // disagreed, which is the bug to see.
                 OUTGOING_BUDGET.channel_refused(data.len());
+                OUTGOING_COPIES.dequeued(data);
                 crate::log::log_fmt(
                     "[IFACE_FULL] ",
                     format_args!(
@@ -1401,7 +1447,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                 ),
             );
             leviculum_firmware::iface_bytes::note_rx(leviculum_firmware::iface_bytes::LORA, plen);
-            self.incoming_tx.send(data).await;
+            leviculum_firmware::thread_watch::send_watched(self.incoming_tx, data, "lora").await;
         } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
             crate::log::log_fmt(
                 "[LORA] ",
@@ -2674,6 +2720,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(frame.data.len());
+                OUTGOING_COPIES.dequeued(&frame.data);
                 // The same sink `rx_window` builds, so a frame the deferral
                 // catches reaches the core indistinguishably from any other.
                 // `rx_start` is taken here, before the wait, so the

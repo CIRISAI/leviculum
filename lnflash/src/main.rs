@@ -25,19 +25,31 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
     about = "Flash an LNode board from the bundle beside this binary",
     long_about = "Finds attached boards, brings each into its bootloader, confirms what it is \
                   from the bootloader itself, checks the SoftDevice precondition, and writes \
-                  our firmware.\n\n\
-                  Once a board is back up it is offered the eu868 radio defaults (ReticulumNet \
-                  consensus), a preset menu (eu868, us915, au915, custom), or the settings the \
-                  --radio-preset / --radio-* flags name. The board stores what it is given, so \
-                  it comes back up on that frequency after a reset and after the next flash.\n\n\
-                  It then asks whether the board should send telemetry. The default is no, and \
-                  a yes needs exactly one input: the LXMF address to report to. Telemetry is \
+                  our firmware. It asks nothing: starting it is the decision to flash every \
+                  board it recognises, and --dry-run shows what that would do.\n\n\
+                  Once a board is back up its radio is settled without a question: a board \
+                  that runs stored settings other than the shipped eu868 profile keeps them, \
+                  and otherwise it is sent the preset the host's time zone (or, without one, \
+                  its locale) names: eu868 in CEPT Europe, us915 in the US, Canada and Mexico, \
+                  au915 in Australia and New Zealand, the shipped eu868 anywhere else. The \
+                  --radio-preset / --radio-* flags name settings instead. The board stores \
+                  what it is given, so it comes back up on that frequency after a reset and \
+                  after the next flash.\n\n\
+                  Telemetry and remote management stay off. --ask puts every one of those \
+                  decisions as a question instead: the overwrite, the radio menu, telemetry \
+                  and remote management. The default is no for telemetry, and a yes needs \
+                  exactly one input: the LXMF address to report to. Telemetry is \
                   configuration rather than firmware, so --set-telemetry does the same thing \
                   later without reflashing.\n\n\
                   Needs root: the bootloader's drive is a root:disk block device and \
                   automounting assumes a desktop stack a headless host does not have.\n\n\
                   No network access, ever — everything it writes is in the bundle."
 )]
+#[command(group(
+    clap::ArgGroup::new("port_user")
+        .args(["home", "region", "regions", "management_identity", "clear_management", "wifi"])
+        .multiple(false)
+))]
 struct Cli {
     /// Where the bundle is. Otherwise: $LNFLASH_BUNDLE, then next to this
     /// binary, then /usr/share/lnflash.
@@ -68,6 +80,12 @@ struct Cli {
     /// rather than waits if a board needs a physical double-tap.
     #[arg(long)]
     yes: bool,
+
+    /// Ask instead of deciding: put the overwrite question for every board,
+    /// offer the radio menu, and ask about telemetry and remote management.
+    /// Without it a flash run asks nothing (#476).
+    #[arg(long)]
+    ask: bool,
 
     /// Print less.
     #[arg(long, short)]
@@ -186,6 +204,24 @@ struct Cli {
         conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
     )]
     peering_cost: Option<u8>,
+
+    /// Set whom every running LNode shares its position with in its
+    /// lev.position announce, then exit. No flashing; persisted, and in
+    /// force at once. owner: sealed to the owner, the identity the board's
+    /// telemetry goes to, so the owner's homes and devices read it and
+    /// nobody else. everyone: in the clear, to everyone in radio range
+    /// ("share my position with everyone nearby"). off: never. default: a
+    /// board reporting as a tracker shares with its owner, every other
+    /// board shares nothing.
+    #[arg(
+        long,
+        value_name = "WHOM",
+        value_parser = clap::builder::PossibleValuesParser::new(
+            leviculum_core::position_share_store::SETTING_NAMES
+        ),
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm", "stamp_cost", "peering_cost", "static_peer", "clear_static_peers", "auth_allowed", "clear_auth_allowed", "control_allowed", "clear_control_allowed"]
+    )]
+    share_position: Option<String>,
 
     /// Pin the board's propagation node to a peer (audit 2026-10-12 D4):
     /// that node's `lxmf.propagation` destination hash, 32 hex digits.
@@ -475,6 +511,56 @@ struct Cli {
     /// testing against a captured tree; no board is ever touched through it.
     #[arg(long, value_name = "DIR", hide = true)]
     sysfs: Option<PathBuf>,
+
+    /// Make the ThinkNode M9 on --port a device of a Loquax home, then
+    /// exit: the admission code `loquax mailbox admit` prints (or the
+    /// phone's Link a device screen shows), as one argument, quoted when
+    /// it carries spaces. The board writes it to flash and joins the home
+    /// over its node; its [HOME] lines on the same port say how it goes.
+    /// The port must be free, so stop lnsd on it first. No flashing.
+    #[arg(long, value_name = "CODE", requires = "port")]
+    home: Option<String>,
+
+    /// Write map regions (a .lmr each, as leviculum-map-tool cuts them)
+    /// into the map area of the ThinkNode M9 on --port, then exit. Give it
+    /// once per region; together they replace what the area held. Where a
+    /// region lies under the view the board draws it, elsewhere its world
+    /// overview. Written through the ROM loader by espflash, as the M9's
+    /// image is; the board resets and boots with them. Its [MAP] regions=
+    /// line names what it found.
+    #[arg(long, value_name = "FILE.lmr", requires = "port")]
+    region: Vec<PathBuf>,
+
+    /// List the regions in the map area of the ThinkNode M9 on --port,
+    /// then exit.
+    #[arg(long, requires = "port")]
+    regions: bool,
+
+    /// Tell the ThinkNode M9 on --port which WLAN to join, then exit: the
+    /// network's name. The board joins it at boot and speaks Reticulum's
+    /// AutoInterface over it, so lnsd and Loquax in the same network see
+    /// it with nothing configured. Written through the ROM loader by
+    /// espflash; the board resets. Without it the board's WiFi stays off.
+    #[arg(long, value_name = "SSID", requires = "port")]
+    wifi: Option<String>,
+
+    /// The passphrase of the --wifi network; leave it out for an open
+    /// network. lnflash never prints it.
+    #[arg(long, value_name = "PASS", requires = "wifi", default_value = "")]
+    wifi_pass: String,
+
+    /// The serial port of the board --home, --region, --regions or --wifi talks
+    /// to, such as /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the
+    /// M9's CH340K. Opening it resets the board; the session waits for its
+    /// boot.
+    ///
+    /// With --management-identity or --clear-management it narrows that
+    /// session to the one LNode owning this port (any of its CDC ports, a
+    /// by-id link works): `--management-identity --port P` lists that
+    /// board's allow-list, `--clear-management --port P` empties it, and
+    /// every other board on the bus is left untouched.
+    #[arg(long, value_name = "TTY", requires = "port_user")]
+    port: Option<PathBuf>,
 }
 
 /// Parse what `--store-storm` was given: `COUNT[,BYTES]` (#384).
@@ -576,7 +662,13 @@ fn radio_plan(cli: &Cli) -> Result<RadioPlan, Box<dyn std::error::Error>> {
         return Ok(RadioPlan::Fixed(RadioChoice::Preset(radio::preset(name)?)));
     }
     if !given.iter().any(|given| *given) {
-        return Ok(RadioPlan::Ask);
+        return Ok(if cli.ask {
+            RadioPlan::Ask
+        } else {
+            RadioPlan::Estimate(lnflash::region::estimate(
+                &lnflash::region::Place::from_host(),
+            ))
+        });
     }
     // Every field the flags did not name keeps its EU868 value. Ignoring a
     // --radio-sf given without --radio-freq would be worse than either
@@ -748,6 +840,33 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         &mut console
     };
 
+    if let (Some(code), Some(port)) = (&cli.home, &cli.port) {
+        let reply = lnflash::home::give(port, code, lnflash::home::BOOT_WITHIN)
+            .map_err(|err| format!("{}: {err}", port.display()))?;
+        ui.say(&lnflash::home::said(port, reply));
+        return Ok(if reply.took_it() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let (false, Some(port)) = (cli.region.is_empty(), &cli.port) {
+        let said = lnflash::maps::write(port, &cli.region)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let (Some(ssid), Some(port)) = (&cli.wifi, &cli.port) {
+        let said = lnflash::wifi::write(port, ssid, &cli.wifi_pass)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let (true, Some(port)) = (cli.regions, &cli.port) {
+        let said = lnflash::maps::list(port)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if let Some(file) = &cli.summarize {
         let text = std::fs::read_to_string(file)
             .map_err(|err| format!("reading {}: {err}", file.display()))?;
@@ -853,6 +972,23 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    if let Some(setting) = cli
+        .share_position
+        .as_deref()
+        .and_then(leviculum_core::position_share_store::parse_setting)
+    {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_position_share(&catalogue, &sysfs, ui, setting)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
     if cli.stamp_cost.is_some() || cli.peering_cost.is_some() {
         use leviculum_core::envelope::{PnConfigWire, PN_COST_KEEP};
         let wire = PnConfigWire {
@@ -932,7 +1068,13 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Some(path) => Sysfs::new(path),
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
-        let all_took_it = flow::set_mgmt(&catalogue, &sysfs, ui, allowed.as_deref())?;
+        let all_took_it = flow::set_mgmt(
+            &catalogue,
+            &sysfs,
+            ui,
+            allowed.as_deref(),
+            cli.port.as_deref(),
+        )?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -1027,14 +1169,23 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         boards: cli.board.clone(),
         dry_run: cli.dry_run,
         radio,
-        telemetry,
-        // The flags above exit before any flashing, so what reaches a flash
-        // run is the question or the refusal to ask it.
-        management: if cli.no_management {
-            lnflash::mgmt::MgmtPlan::Skip
-        } else {
-            lnflash::mgmt::MgmtPlan::Ask
+        // The question is put only under --ask, or when --telemetry-profile
+        // already said a cadence and only the address is missing. Without
+        // either a flash run sends nothing, the default answer (#476).
+        telemetry: match telemetry {
+            TelemetryPlan::Ask { .. } if !cli.ask && cli.telemetry_profile.is_none() => {
+                TelemetryPlan::Skip
+            }
+            other => other,
         },
+        // The flags above exit before any flashing, so what reaches a flash
+        // run is the question under --ask, or nothing sent.
+        management: if cli.ask && !cli.no_management {
+            lnflash::mgmt::MgmtPlan::Ask
+        } else {
+            lnflash::mgmt::MgmtPlan::Skip
+        },
+        ask: cli.ask,
         ..Options::default()
     };
 
@@ -1297,6 +1448,131 @@ mod tests {
         );
     }
 
+    /// 1415: `--home` names its port and `--port` serves only `--home`;
+    /// the code is one argument, spaces and all.
+    #[test]
+    fn the_home_code_needs_its_port_and_the_port_its_code() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--home", "lqxh1aaaaa"]).is_err());
+        assert!(parse(&["--port", "/dev/ttyUSB0"]).is_err());
+        let cli = parse(&["--home", "lqxh1 aaaaa bbbbb", "--port", "/dev/ttyUSB0"]).expect("both");
+        assert_eq!(cli.home.as_deref(), Some("lqxh1 aaaaa bbbbb"));
+        assert_eq!(
+            cli.port.as_deref(),
+            Some(std::path::Path::new("/dev/ttyUSB0"))
+        );
+    }
+
+    /// 1660: `--port` narrows the management session to one board, in
+    /// all three forms (list, set, clear), and does not combine with the
+    /// M9 sessions that also take it.
+    #[test]
+    fn the_management_flags_take_one_port() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        let port = "/dev/serial/by-id/usb-leviculum_T114_DEC9947-if02";
+        let cli = parse(&["--management-identity", "--port", port]).expect("list");
+        assert_eq!(cli.port.as_deref(), Some(std::path::Path::new(port)));
+        assert_eq!(cli.management_identity, vec![String::new()]);
+        let cli = parse(&["--clear-management", "--port", port]).expect("clear");
+        assert!(cli.clear_management);
+        parse(&["--management-identity", HASH_A, "--port", port]).expect("set");
+        assert!(parse(&["--management-identity", "--home", "lqxh1a", "--port", port]).is_err());
+        assert!(parse(&["--clear-management", "--regions", "--port", port]).is_err());
+    }
+
+    /// 1477: `--region` (once per file) and `--regions` name their port,
+    /// and neither goes with `--home` or the other.
+    #[test]
+    fn the_region_flags_need_their_port_and_go_alone() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--region", "a.lmr"]).is_err());
+        assert!(parse(&["--regions"]).is_err());
+        let cli = parse(&[
+            "--region",
+            "a.lmr",
+            "--region",
+            "b.lmr",
+            "--port",
+            "/dev/ttyUSB0",
+        ])
+        .expect("two regions");
+        assert_eq!(cli.region.len(), 2);
+        assert!(
+            parse(&["--regions", "--port", "/dev/ttyUSB0"])
+                .expect("list")
+                .regions
+        );
+        assert!(parse(&["--regions", "--region", "a.lmr", "--port", "/dev/ttyUSB0"]).is_err());
+        assert!(parse(&[
+            "--home",
+            "lqxh1",
+            "--region",
+            "a.lmr",
+            "--port",
+            "/dev/ttyUSB0"
+        ])
+        .is_err());
+    }
+
+    /// 1479: `--wifi` names its port, takes an optional passphrase, and
+    /// goes alone like the other M9 writes.
+    #[test]
+    fn the_wifi_flag_needs_its_port_and_goes_alone() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--wifi", "Heimnetz"]).is_err());
+        assert!(parse(&["--wifi-pass", "geheimgeheim", "--port", "/dev/ttyUSB0"]).is_err());
+        let cli = parse(&[
+            "--wifi",
+            "Heimnetz",
+            "--wifi-pass",
+            "geheimgeheim",
+            "--port",
+            "/dev/ttyUSB0",
+        ])
+        .expect("wifi with a passphrase");
+        assert_eq!(cli.wifi.as_deref(), Some("Heimnetz"));
+        assert_eq!(cli.wifi_pass, "geheimgeheim");
+        let open = parse(&["--wifi", "cafe", "--port", "/dev/ttyUSB0"]).expect("open");
+        assert_eq!(open.wifi_pass, "");
+        assert!(parse(&["--wifi", "a", "--regions", "--port", "/dev/ttyUSB0"]).is_err());
+    }
+
+    /// The audit of 1757 asked whether `--wifi` and the management flags go
+    /// together in one call. They are refused together, for a reason of the
+    /// boards, not of the flags: one call has one `--port`. `--wifi` needs it
+    /// to name the M9, and the management session narrows itself to the
+    /// LNode that owns it (`flow::set_mgmt`). The M9 keeps no management
+    /// allow-list (only the LNode firmware answers `TYPE_MGMT_ALLOW`,
+    /// `leviculum-nrf/src/usb.rs`), so both together would always name a
+    /// port no LNode owns. Each alone still parses.
+    #[test]
+    fn wifi_and_the_management_flags_name_different_boards() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        let port = "/dev/ttyUSB0";
+        for management in [
+            vec!["--management-identity", HASH_A],
+            vec!["--management-identity"],
+            vec!["--clear-management"],
+        ] {
+            let mut args = vec!["--wifi", "Heimnetz", "--port", port];
+            args.extend(&management);
+            assert!(parse(&args).is_err(), "{args:?}");
+            let mut alone = management.clone();
+            alone.extend(["--port", port]);
+            assert!(parse(&alone).is_ok(), "{alone:?}");
+        }
+    }
+
     fn plan(args: &[&str]) -> Result<RadioPlan, String> {
         let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
             .map_err(|err| err.to_string())?;
@@ -1304,9 +1580,12 @@ mod tests {
     }
 
     #[test]
-    fn no_radio_flag_leaves_the_choice_to_the_prompt() {
-        assert_eq!(plan(&[]).unwrap(), RadioPlan::Ask);
-        assert_eq!(plan(&["--yes"]).unwrap(), RadioPlan::Ask);
+    fn no_radio_flag_estimates_and_ask_brings_the_prompt_back() {
+        // #476: no flag is no question; the estimate is the host's.
+        assert!(matches!(plan(&[]).unwrap(), RadioPlan::Estimate(_)));
+        assert!(matches!(plan(&["--yes"]).unwrap(), RadioPlan::Estimate(_)));
+        assert_eq!(plan(&["--ask"]).unwrap(), RadioPlan::Ask);
+        assert_eq!(plan(&["--ask", "--yes"]).unwrap(), RadioPlan::Ask);
     }
 
     #[test]

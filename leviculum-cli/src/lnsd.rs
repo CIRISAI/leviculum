@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
-use tracing::info;
+use tracing::{info, warn};
 // (tracing-subscriber init goes through leviculum_std's
 // event_log::install_global_subscriber so the LEVICULUM_EVENT_LOG
 // env var is honoured for structured-event capture.  Codeberg #39
@@ -81,6 +81,16 @@ struct Args {
     /// and storage keeps only its long spelling (a Leviculum extension).
     #[arg(long)]
     storage: Option<PathBuf>,
+
+    /// Serve the shared instance under this name instead of the config's
+    /// `instance_name` (a Leviculum extension, rnsd has none).
+    ///
+    /// A client tool that starts lnsd for an instance its config does not
+    /// name passes it here (`leviculum_std::instance::find_or_start`), so the
+    /// daemon it started answers on the name it waits for. The file is not
+    /// rewritten.
+    #[arg(long, value_name = "NAME")]
+    instance_name: Option<String>,
 
     /// Running as a service (rnsd `-s/--service`). Recognised for drop-in
     /// compatibility with `rnsd -s`. lnsd keeps logging to stdout, which
@@ -188,13 +198,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load and configure Reticulum. Without a file lnsd runs the
     // configuration rnsd would write on its first start, from memory: one
-    // AutoInterface, a shared instance, transport off (#471 step 1). The
-    // directory is left as it was; `--writeconfig` is how a file appears.
+    // AutoInterface, a shared instance, transport off (#471 step 1).
     let (mut config, source) = Config::load_or_default(&config_file)?;
+    if let Some(name) = args.instance_name.as_ref().filter(|n| !n.is_empty()) {
+        info!("Instance name: {} (--instance-name)", name);
+        config.reticulum.instance_name = name.clone();
+    }
+    // And writes it, the way rnsd does (`Reticulum.py:336`), the bytes
+    // `--writeconfig` writes (#471, open question 1): a Python tool pointed
+    // at this directory afterwards finds a file and writes its own stock
+    // file nowhere, and the next start reads this one, every medium at its
+    // shipped default in `[auto]`. This start keeps running what it loaded,
+    // origin `default`. A directory lnsd may not write into is a warning,
+    // not a failed start.
+    let written = match source {
+        leviculum_std::config::ConfigSource::File => "no",
+        leviculum_std::config::ConfigSource::Default => match write_default_config(&config_file) {
+            Ok(()) => "yes",
+            Err(e) => {
+                warn!(
+                    "Could not write the first-start configuration to {}: {}",
+                    config_file.display(),
+                    e
+                );
+                "failed"
+            }
+        },
+    };
     info!(
         event = "CONFIG",
         source = %source.as_str(),
         path = %leviculum_std::event_log::Scalar(&config_file.display().to_string()),
+        written = written,
     );
     // The automatic layer (#471 step 2): the file's `[auto]` section, or the
     // shipped defaults without a file, unless the host marker or
@@ -213,16 +248,105 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .storage
         .unwrap_or_else(|| config.reticulum.resolve_storage_path(&config_dir));
     info!("Storage: {}", storage_path.display());
+    // One daemon per storage directory (1638): a second lnsd under another
+    // instance name would otherwise run on the same files. Held until exit.
+    let _storage_lock = leviculum_std::storage_lock::StorageLock::take(
+        &storage_path,
+        &config.reticulum.instance_name,
+    )?;
+    // The servers medium (#471 step 3) keeps its choice in the storage
+    // directory, so it is applied once that is known.
+    let env_servers = std::env::var(leviculum_std::auto_servers::ENV_SERVERS).ok();
+    leviculum_std::auto_servers::apply(
+        &mut config,
+        auto_layer,
+        env_servers.as_deref(),
+        Some(&storage_path),
+    )?;
     config.reticulum.storage_path = Some(storage_path);
+    // The serial medium (#471 step 5): the boards present now become
+    // sections before the node is built, so they are logged and reported
+    // like any other default section; a board plugged in later is found by
+    // the rescan below.
+    let mut auto_serial = leviculum_std::auto_serial::for_layer(auto_layer, &config);
+    if let Some(scanner) = auto_serial.as_mut() {
+        leviculum_std::auto_serial::apply(scanner, &mut config);
+    }
+    // The Bluetooth medium (#471 step 6): BlueZ is asked for an adapter
+    // now, so a present one is a section like any other default section;
+    // a missing or powered-off one is a warning, asked again below.
+    let mut auto_bluetooth = leviculum_std::auto_bluetooth::for_layer(auto_layer, &config);
+    if let Some(medium) = auto_bluetooth.as_mut() {
+        leviculum_std::auto_bluetooth::apply(medium, &mut config).await;
+    }
 
     // Resource receive-window policy (Codeberg #85): env var, not a config
     // key, because the config format is shared with Python rnsd.
     let window_policy = leviculum_std::resource_policy::resource_window_policy_from_env();
 
+    // The two shutdown signals are taken before the daemon opens its
+    // sockets: a client that connects the moment the shared instance
+    // listens and stops the daemon at once (Loquax does, when it started
+    // the daemon and then finds no terminal to draw in) must reach the
+    // shutdown below. Taken only after the start, a SIGTERM in between
+    // met the default action, which ended lnsd mid-start with no line in
+    // its log and nothing persisted (1684: the log of a red
+    // `with_an_lnsd_to_start_the_messenger...` ended at "Local server
+    // listening", before the "Out-of-band control" line the registration
+    // below prints). tokio holds a signal that arrives before the loop
+    // waits for it.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
     let mut rns = Reticulum::with_config_daemon(config, window_policy)?;
     rns.start().await?;
 
     info!("Reticulum daemon running");
+
+    // The automatic media's finds after the start, handed to the loop
+    // below, which attaches them.
+    let (serial_tx, mut serial_rx) =
+        tokio::sync::mpsc::channel::<leviculum_std::config::InterfaceConfig>(16);
+    // The Bluetooth rescan: a missing or powered-off adapter is asked for
+    // every `RESCAN` until one is taken; after that the BLE interface's own
+    // retry loop owns it.
+    if let Some(mut medium) = auto_bluetooth {
+        if medium.wants_probe() {
+            let tx = serial_tx.clone();
+            tokio::spawn(async move {
+                while medium.wants_probe() {
+                    tokio::time::sleep(leviculum_std::auto_bluetooth::RESCAN).await;
+                    if let Some(section) = leviculum_std::auto_bluetooth::check(&mut medium).await {
+                        let _ = tx.send(section).await;
+                        return;
+                    }
+                }
+            });
+        }
+    }
+    // The serial rescan: every `RESCAN` a blocking pass over the by-id
+    // directory.
+    if let Some(mut scanner) = auto_serial {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(leviculum_std::auto_serial::RESCAN).await;
+                let pass = tokio::task::spawn_blocking(move || {
+                    let found = scanner.scan();
+                    (scanner, found)
+                })
+                .await;
+                let Ok((back, found)) = pass else { return };
+                scanner = back;
+                for section in found {
+                    if serial_tx.send(section).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    } else {
+        drop(serial_tx);
+    }
 
     // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on
     // SIGUSR1, command a firmware reset on SIGUSR2, and command an
@@ -265,7 +389,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let announce_signal = leviculum_std::interfaces::FIRMWARE_ANNOUNCE_SIGNAL;
         let silence_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_SILENCE_SIGNAL;
         let restore_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_RESTORE_SIGNAL;
-        let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
         let mut announce = signal(SignalKind::from_raw(announce_signal))?;
@@ -278,8 +401,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => { info!("Received SIGINT"); break; }
+                _ = sigint.recv() => { info!("Received SIGINT"); break; }
                 _ = sigterm.recv() => { info!("Received SIGTERM"); break; }
+                Some(section) = serial_rx.recv() => {
+                    let name = section.name.clone();
+                    match rns.spawn_interface(section) {
+                        Ok(ids) => info!("Attached [[{}]] ({} interface(s))", name, ids.len()),
+                        Err(e) => warn!("Could not attach [[{}]]: {}", name, e),
+                    }
+                }
                 _ = sigusr1.recv() => {
                     let dump = rns.diagnostic_dump();
                     eprint!("{}", dump);
@@ -406,7 +536,14 @@ fn write_default_config(path: &std::path::Path) -> Result<(), Box<dyn std::error
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, LNSD_DEFAULT_CONFIG)?;
+    // `create_new`: a file that appeared since the check above, a Python
+    // tool's on a first start, is not replaced either.
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(LNSD_DEFAULT_CONFIG.as_bytes())?;
     Ok(())
 }
 

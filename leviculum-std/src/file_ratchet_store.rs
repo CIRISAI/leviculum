@@ -60,6 +60,21 @@ fn decode_known_ratchet(data: &[u8]) -> Option<([u8; RATCHET_SIZE], f64)> {
     Some((ratchet?, received?))
 }
 
+/// Where a storage directory keeps the private ratchet keys of its own
+/// destination `dest_hash`: Python's signed msgpack
+/// (`RNS/Destination.py:210-220`), read once when the storage opens and
+/// handed to the destination when it registers with ratchets on. A program
+/// that brings ratchets over from another one writes this file before its
+/// node starts (loquax's import, leviculum 1185).
+pub fn dest_ratchet_keys_path(
+    storage_dir: &Path,
+    dest_hash: &[u8; TRUNCATED_HASHBYTES],
+) -> PathBuf {
+    storage_dir
+        .join(RATCHETKEYS_DIR)
+        .join(hex_encode(dest_hash))
+}
+
 pub(crate) struct FileRatchetStore {
     ratchets_dir: PathBuf,
     ratchetkeys_dir: PathBuf,
@@ -240,6 +255,22 @@ mod tests {
     /// store did not write — a four-byte character has an even length, so
     /// the length check let it through and the slice landed inside it.
     /// Skip it, keep the entries that are ours, and stay up.
+    /// The path a program writes ratchets to before its node starts is the
+    /// one the store reads them from.
+    #[test]
+    fn the_published_path_is_where_the_store_keeps_a_destinations_keys() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FileRatchetStore::new(dir.path());
+        let dest = [0x5Cu8; TRUNCATED_HASHBYTES];
+        store
+            .save_dest_ratchet_keys(&dest, b"signed")
+            .expect("save keys");
+        assert_eq!(
+            std::fs::read(dest_ratchet_keys_path(dir.path(), &dest)).expect("read"),
+            b"signed"
+        );
+    }
+
     // Non-UTF-8 file names are a Unix notion; the test builds one with
     // std::os::unix (CIRIS fork: the Windows lane).
     #[cfg(unix)]

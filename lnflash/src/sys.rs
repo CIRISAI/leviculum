@@ -290,7 +290,7 @@ impl Mount {
     pub fn vfat(device: &Path, target: &Path) -> io::Result<Self> {
         let c_device = cstring(device)?;
         let c_target = cstring(target)?;
-        let fstype = CString::new("vfat").expect("no NUL in a literal");
+        let fstype: &std::ffi::CStr = c"vfat";
         let rc = unsafe {
             libc::mount(
                 c_device.as_ptr(),

@@ -17,10 +17,17 @@ Phases, in the order an operator asks the questions:
 
   1. Volume and span      -- how much log, over what window, what is in it
   2. Uploads              -- accepted and rejected, rejections by reason
-  3. Store                -- utilisation against the limit, and evictions
+  3. Store                -- utilisation against the limit, evictions, and
+                             where the accepted messages went (accepted,
+                             delivered to clients, forwarded to peers,
+                             evicted; the same four `lnpnd --status` prints),
+                             departures by reason, /lev/status queries
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
-  6. Liveness             -- gaps in the PN_STORE heartbeat
+  6. Liveness             -- gaps in the PN_STORE heartbeat, and the
+                             PN_CENSUS heap tables from first to last line,
+                             and the node's transport tables (PN_TRANSPORT)
+                             against their ceilings
   7. Format health        -- lines that do not parse, events not in the list
 
 The log format is `NAME key=value ... t=<ms>` (docs/src/structured-event-logs.md),
@@ -38,13 +45,35 @@ KNOWN = {
     "PN_ACCEPT",
     "PN_REJECT",
     "PN_EVICT",
+    "PN_DEPART",
+    "PN_STATUS",
     "PN_GET",
     "PN_PEER",
     "PN_OFFER",
     "PN_SYNC",
     "PN_MAILBOX",
     "PN_STORE",
+    "PN_STORE_FULL",
+    "PN_CENSUS",
+    "PN_STORE_LIMIT",
+    "PN_TRANSPORT",
 }
+
+# The PN_CENSUS columns, heap bytes per table (lnpnd/src/census.rs), in the
+# order the line prints them.
+CENSUS_COLUMNS = (
+    "peers",
+    "store_index",
+    "store_writer",
+    "sync_out",
+    "sync_in",
+    "dup",
+    "links",
+    "mailbox",
+    "config",
+    "eventbuf",
+    "tables",
+)
 
 # A heartbeat gap worth naming. PN_STORE fires every STORE_MAINTENANCE_SECS
 # (480 s, lnpnd/src/engine.rs:69), so anything past twice that is either a
@@ -77,6 +106,7 @@ class Stats:
         # Phase 2
         self.accepted = 0
         self.accepted_dup = 0
+        self.accepted_local_only = 0
         self.accepted_bytes = 0
         self.accepted_via = defaultdict(int)
         self.rejected_by_reason = defaultdict(int)
@@ -91,6 +121,15 @@ class Stats:
         self.store_used_max = 0
         self.evicted = defaultdict(int)
         self.evicted_bytes = 0
+        # Why messages left, by reason (PN_DEPART), and the /lev/status
+        # queries by result (PN_STATUS); counters, never per-id state.
+        self.departed = defaultdict(int)
+        self.status_queries = defaultdict(int)
+        self.status_ids = 0
+        self.store_full_rounds = 0
+        self.store_full_dropped = 0
+        # The last start's PN_STORE_LIMIT line (order 1548), as read.
+        self.limit_line = None
 
         # Phase 4: capped at MAX_TRACKED_PEERS, never by traffic.
         self.peer_offers = defaultdict(lambda: defaultdict(int))
@@ -101,6 +140,7 @@ class Stats:
         self.peers_untracked = 0
         self.offered = 0
         self.wanted = 0
+        self.forwarded = 0
 
         # Phase 5
         self.get_forms = defaultdict(int)
@@ -114,6 +154,15 @@ class Stats:
         self.last_heartbeat_t = None
         self.heartbeat_gaps = 0
         self.heartbeat_gap_max = 0
+        # The first and last heap census and the resident peak; two lines,
+        # never a series.
+        self.census_first = None
+        self.census_last = None
+        self.census_rss_max = 0
+        # The first and last PN_TRANSPORT (order 1586): the node's transport
+        # tables as {name: (entries, ceiling or None)}, two lines, no series.
+        self.transport_first = None
+        self.transport_last = None
 
     def track(self, peer):
         """Whether this peer is one of the tracked ones; counts it if not."""
@@ -178,6 +227,8 @@ def consume(stats, line):
         else:
             stats.accepted += 1
             stats.accepted_bytes += as_int(values, "bytes")
+            if values.get("local_only") == "true":
+                stats.accepted_local_only += 1
         stats.accepted_via[values.get("via", "?")] += 1
         value = as_int(values, "value", -1)
         if value >= 0:
@@ -190,9 +241,28 @@ def consume(stats, line):
         stats.rejected_by_reason[values.get("reason", "?")] += 1
         stats.rejected_via[values.get("via", "?")] += 1
 
+    elif name == "PN_STORE_LIMIT":
+        stats.limit_line = (
+            as_int(values, "bytes"),
+            values.get("source", "?").strip('"'),
+            as_int(values, "ram_mb"),
+            as_int(values, "index_mb"),
+        )
+
+    elif name == "PN_STORE_FULL":
+        stats.store_full_rounds += 1
+        stats.store_full_dropped += as_int(values, "dropped")
+
     elif name == "PN_EVICT":
         stats.evicted[values.get("reason", "?")] += 1
         stats.evicted_bytes += as_int(values, "bytes")
+
+    elif name == "PN_DEPART":
+        stats.departed[values.get("reason", "?")] += 1
+
+    elif name == "PN_STATUS":
+        stats.status_queries[values.get("result", "?")] += 1
+        stats.status_ids += as_int(values, "ids")
 
     elif name == "PN_STORE":
         stats.store_used = as_int(values, "used")
@@ -207,6 +277,28 @@ def consume(stats, line):
                     stats.heartbeat_gap_max = max(stats.heartbeat_gap_max, gap)
             stats.last_heartbeat_t = t
 
+    elif name == "PN_CENSUS":
+        census = {key: as_int(values, key) for key in CENSUS_COLUMNS}
+        census["rss_kb"] = as_int(values, "rss_kb")
+        census["stored"] = as_int(values, "stored")
+        census["t"] = t
+        if stats.census_first is None:
+            stats.census_first = census
+        stats.census_last = census
+        stats.census_rss_max = max(stats.census_rss_max, census["rss_kb"])
+
+    elif name == "PN_TRANSPORT":
+        tables = {}
+        for item in values.get("tables", "").split(","):
+            table, _, fill = item.partition(":")
+            entries, _, cap = fill.partition("/")
+            if table and entries.isdigit():
+                tables[table] = (int(entries), int(cap) if cap.isdigit() else None)
+        transport = {"t": t, "bytes": as_int(values, "bytes"), "tables": tables}
+        if stats.transport_first is None:
+            stats.transport_first = transport
+        stats.transport_last = transport
+
     elif name == "PN_OFFER":
         # The totals are counted for every peer; only the per-peer
         # breakdown is capped.
@@ -217,6 +309,9 @@ def consume(stats, line):
             stats.peer_offers[peer][values.get("dir", "?")] += 1
 
     elif name == "PN_SYNC":
+        # Counted for every peer, as the offer totals are.
+        if values.get("dir") == "out" and values.get("result") == "ok":
+            stats.forwarded += as_int(values, "transferred")
         peer = values.get("peer", "?")
         if stats.track(peer):
             direction = values.get("dir", "?")
@@ -278,6 +373,7 @@ def report(stats):
     out("\n== 2. Uploads ==\n")
     out(f"accepted         {stats.accepted} ({human_bytes(stats.accepted_bytes)})\n")
     out(f"  duplicates     {stats.accepted_dup} (re-proven, not re-stored)\n")
+    out(f"  local only     {stats.accepted_local_only} (above the transfer limit, offered to no peer)\n")
     for via, count in sorted(stats.accepted_via.items()):
         out(f"  via {via:<10} {count}\n")
     if stats.stamp_value_min is not None:
@@ -306,10 +402,36 @@ def report(stats):
         )
     else:
         out("no PN_STORE line in this log -- store utilisation unknown\n")
+    if stats.limit_line is not None:
+        limit, source, ram_mb, index_mb = stats.limit_line
+        out(
+            f"limit at start   {human_bytes(limit)} ({source}), index {index_mb} MB "
+            f"when full, host RAM {ram_mb} MB\n"
+        )
     evicted = sum(stats.evicted.values())
+    out(
+        f"flow             {stats.accepted} accepted, {stats.get_served} delivered to clients, "
+        f"{stats.forwarded} forwarded to peers, {evicted} evicted\n"
+    )
     out(f"evicted          {evicted} ({human_bytes(stats.evicted_bytes)})\n")
     for reason, count in sorted(stats.evicted.items(), key=lambda kv: -kv[1]):
         out(f"  {reason:<14} {count}\n")
+    if stats.departed:
+        out(f"departed         {sum(stats.departed.values())}\n")
+        for reason, count in sorted(stats.departed.items(), key=lambda kv: -kv[1]):
+            out(f"  {reason:<14} {count}\n")
+    if stats.status_queries:
+        out(
+            f"status queries   {sum(stats.status_queries.values())} "
+            f"({stats.status_ids} id(s) answered)\n"
+        )
+        for result, count in sorted(stats.status_queries.items(), key=lambda kv: -kv[1]):
+            out(f"  {result:<14} {count}\n")
+    if stats.store_full_rounds:
+        out(
+            f"store full       {stats.store_full_rounds} sync round(s) lost "
+            f"{stats.store_full_dropped} message(s) the store could not hold\n"
+        )
     if stats.evicted.get("displaced"):
         out("  note: 'displaced' means the store was full and made room -- if this\n")
         out("        is not near zero the limit is too small for the offered load\n")
@@ -372,6 +494,30 @@ def report(stats):
             out("  cross-check against the journal for a restart\n")
     else:
         out("no PN_STORE line -- liveness cannot be distinguished from a quiet node\n")
+    if stats.census_first is not None:
+        first, last = stats.census_first, stats.census_last
+        span_min = max(last["t"] - first["t"], 0) / 60_000
+        out(f"heap census      {stats.by_event['PN_CENSUS']} PN_CENSUS line(s) over {span_min:.1f} min, "
+            f"rss {first['rss_kb']} -> {last['rss_kb']} kB (peak {stats.census_rss_max} kB), "
+            f"stored {first['stored']} -> {last['stored']}\n")
+        for key in CENSUS_COLUMNS:
+            delta_kb = (last[key] - first[key]) / 1000
+            slope = f"{delta_kb / span_min:+.1f} kB/min" if span_min > 0 else "n/a"
+            out(f"  {key:<14} {first[key] / 1000:>10.1f} -> {last[key] / 1000:>10.1f} kB  {slope}\n")
+        out("  a restart in the span resets every column; read the journal before a slope\n")
+    else:
+        out("no PN_CENSUS line -- the heap tables are unknown (lnpnd before order 1515)\n")
+    if stats.transport_first is not None:
+        first, last = stats.transport_first, stats.transport_last
+        out(f"transport tables {stats.by_event['PN_TRANSPORT']} PN_TRANSPORT line(s), "
+            f"{first['bytes'] / 1000:.1f} -> {last['bytes'] / 1000:.1f} kB est\n")
+        for table, (entries, cap) in sorted(last["tables"].items()):
+            before = first["tables"].get(table, (0, cap))[0]
+            bound = "NO CEILING" if cap is None else f"of {cap}"
+            flag = "  OVER" if cap is not None and entries > cap else ""
+            out(f"  {table:<26} {before:>8} -> {entries:>8} {bound}{flag}\n")
+    else:
+        out("no PN_TRANSPORT line -- the transport tables are unknown (lnpnd before order 1586)\n")
 
     out("\n== 7. Format health ==\n")
     out(f"unparsed lines   {stats.unparsed}\n")

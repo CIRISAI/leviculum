@@ -199,6 +199,13 @@ impl Telemetry {
     /// consumes. Sensors are emitted in ascending SID order; a sensor
     /// without a reading contributes no key.
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_marked(ShareMark::default())
+    }
+
+    /// [`encode`](Self::encode), with `mark` as the location's eighth
+    /// element where it says anything ([`ShareMark`]); the plain encoding
+    /// where it says nothing, or there is no location to carry it.
+    pub fn encode_marked(&self, mark: ShareMark) -> Vec<u8> {
         let mut o = Vec::new();
         let count = self.time.is_some() as usize
             + self.location.is_some() as usize
@@ -213,7 +220,7 @@ impl Telemetry {
         }
         if let Some(location) = &self.location {
             msgpack::int(&mut o, SID_LOCATION);
-            msgpack::array(&mut o, 7);
+            msgpack::array(&mut o, 7 + !mark.is_empty() as usize);
             msgpack::bin(&mut o, &location.latitude_e6.to_be_bytes());
             msgpack::bin(&mut o, &location.longitude_e6.to_be_bytes());
             msgpack::bin(&mut o, &location.altitude_e2.to_be_bytes());
@@ -221,6 +228,9 @@ impl Telemetry {
             msgpack::bin(&mut o, &location.bearing_e2.to_be_bytes());
             msgpack::bin(&mut o, &location.accuracy_e2.to_be_bytes());
             msgpack::int(&mut o, location.last_update);
+            if !mark.is_empty() {
+                mark.encode(&mut o);
+            }
         }
         if let Some(battery) = &self.battery {
             msgpack::int(&mut o, SID_BATTERY);
@@ -269,7 +279,13 @@ impl Telemetry {
     /// bytes in the field (`lxm.fields[FIELD_TELEMETRY] = telemeter.packed()`),
     /// so inside the fields map the value is a bin, not a nested map.
     pub fn encode_field_value(&self) -> Vec<u8> {
-        let blob = self.encode();
+        self.encode_field_value_marked(ShareMark::default())
+    }
+
+    /// [`encode_field_value`](Self::encode_field_value) over
+    /// [`encode_marked`](Self::encode_marked).
+    pub fn encode_field_value_marked(&self, mark: ShareMark) -> Vec<u8> {
+        let blob = self.encode_marked(mark);
         let mut o = Vec::new();
         msgpack::bin(&mut o, &blob);
         o
@@ -325,6 +341,102 @@ impl Telemetry {
     pub fn decode_field_value(d: &[u8]) -> Result<Self, msgpack::Error> {
         let mut p = 0;
         Self::decode(msgpack::read_bin(d, &mut p)?)
+    }
+}
+
+/// What a live position share says about one reading beyond the
+/// reference's seven location elements (Loquax 1273): an eighth element
+/// of the `SID_LOCATION` array, a msgpack map with string keys, written
+/// only where it says something.
+///
+/// - `"every"`: an int, the longest the sender waits before its next
+///   report while the share runs, in seconds. A receiver keeps the stream
+///   live for twice that, whatever cadence it learned.
+/// - `"ended"`: `true` on the share's last report: the stream stopped on
+///   purpose, so the receiver says how old it is instead of "live".
+///
+/// Wire compatible by the reference's own reading: `Location.unpack`
+/// (Sideband `2000d81`) indexes elements 0 to 6 and ignores anything
+/// beyond, as `parse_location` does here, so a receiver that does not
+/// know the element reads the same fix without it. Unknown keys inside
+/// the map are skipped, a malformed element is no mark: the fix stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShareMark {
+    /// `"every"`: the longest gap to the next report, seconds.
+    pub every: Option<u32>,
+    /// `"ended"`: the share's last report.
+    pub ended: bool,
+}
+
+/// The [`ShareMark`] keys.
+pub const MARK_EVERY: &str = "every";
+pub const MARK_ENDED: &str = "ended";
+
+impl ShareMark {
+    /// Whether it says nothing, and so is not written.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn encode(&self, o: &mut Vec<u8>) {
+        msgpack::map(o, self.every.is_some() as usize + self.ended as usize);
+        if let Some(every) = self.every {
+            msgpack::string(o, MARK_EVERY);
+            msgpack::uint(o, every as u64);
+        }
+        if self.ended {
+            msgpack::string(o, MARK_ENDED);
+            msgpack::bool(o, true);
+        }
+    }
+
+    /// The mark of a Telemeter blob (the *unwrapped* packed bytes): the
+    /// default where it carries none, or it does not decode.
+    pub fn of_blob(d: &[u8]) -> Self {
+        Self::parse(d).unwrap_or_default()
+    }
+
+    fn parse(d: &[u8]) -> Option<Self> {
+        let mut p = 0;
+        let entries = msgpack::map_len(d, &mut p).ok()?;
+        let mut location = None;
+        for _ in 0..entries {
+            let key = msgpack::raw(d, &mut p).ok()?;
+            let value = msgpack::raw(d, &mut p).ok()?;
+            let mut kp = 0;
+            if msgpack::read_int(key, &mut kp) == Ok(SID_LOCATION) {
+                location = Some(value);
+            }
+        }
+        let v = location?;
+        let mut p = 0;
+        if msgpack::array_len(v, &mut p).ok()? < 8 {
+            return None;
+        }
+        for _ in 0..7 {
+            msgpack::skip(v, &mut p).ok()?;
+        }
+        let pairs = msgpack::map_len(v, &mut p).ok()?;
+        let mut mark = Self::default();
+        for _ in 0..pairs {
+            let key = msgpack::raw(v, &mut p).ok()?;
+            let value = msgpack::raw(v, &mut p).ok()?;
+            let mut kp = 0;
+            let Ok(key) = msgpack::read_str(key, &mut kp) else {
+                continue;
+            };
+            let mut vp = 0;
+            match key {
+                MARK_EVERY => {
+                    mark.every = msgpack::read_uint(value, &mut vp)
+                        .ok()
+                        .and_then(|n| u32::try_from(n).ok())
+                }
+                MARK_ENDED => mark.ended = msgpack::read_bool(value, &mut vp) == Ok(true),
+                _ => {}
+            }
+        }
+        Some(mark)
     }
 }
 

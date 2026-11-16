@@ -137,6 +137,11 @@ async fn announce_crosses_i2p_loopback() {
         ingress_control: false,
         ifac: None,
         outbound_socket_hook: None,
+        endpoint: Arc::new(I2pEndpoint::new(true)),
+        section: "srv".to_string(),
+        parent_id: 0,
+        inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+        mode: leviculum_core::traits::InterfaceMode::default(),
     });
 
     let mut client = spawn_i2p_client(I2pClientConfig {
@@ -151,6 +156,7 @@ async fn announce_crosses_i2p_loopback() {
         reconnect_notify: None,
         ingress_control: false,
         outbound_socket_hook: None,
+        tunnel: Arc::new(I2pTunnelState::default()),
     });
 
     // The server accept loop spawns an interface once the client connects.
@@ -210,6 +216,11 @@ async fn hdlc_escaping_survives_i2p_stream() {
         ingress_control: false,
         ifac: None,
         outbound_socket_hook: None,
+        endpoint: Arc::new(I2pEndpoint::new(true)),
+        section: "srv".to_string(),
+        parent_id: 0,
+        inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+        mode: leviculum_core::traits::InterfaceMode::default(),
     });
     let client = spawn_i2p_client(I2pClientConfig {
         id: InterfaceId(1),
@@ -223,6 +234,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         reconnect_notify: None,
         ingress_control: false,
         outbound_socket_hook: None,
+        tunnel: Arc::new(I2pTunnelState::default()),
     });
 
     let mut server_iface = tokio::time::timeout(Duration::from_secs(5), new_rx.recv())
@@ -266,6 +278,7 @@ async fn socket_hook_covers_every_sam_dial() {
         reconnect_notify: None,
         ingress_control: false,
         outbound_socket_hook: Some(hook),
+        tunnel: Arc::new(I2pTunnelState::default()),
     });
     handle
         .ready
@@ -344,11 +357,14 @@ async fn a_silent_sam_bridge_does_not_wedge_the_client() {
         timeouts: I2pTimeouts {
             sam_command: Duration::from_millis(200),
             read_idle: Duration::from_secs(60),
+            stale_after: Duration::from_secs(60),
+            ..I2pTimeouts::default()
         },
         ifac: None,
         reconnect_notify: None,
         ingress_control: false,
         outbound_socket_hook: None,
+        tunnel: Arc::new(I2pTunnelState::default()),
     });
 
     let retried = wait_until(Duration::from_secs(10), || {
@@ -399,7 +415,13 @@ async fn read_watchdog_tears_down_a_silent_stream() {
             incoming_tx,
             outgoing_rx,
             Arc::new(InterfaceCounters::new()),
-            Duration::from_millis(300),
+            I2pTimeouts {
+                sam_command: Duration::from_secs(2),
+                read_idle: Duration::from_millis(300),
+                stale_after: Duration::from_millis(300),
+                ..I2pTimeouts::default()
+            },
+            Arc::new(I2pTunnelState::default()),
         ),
     )
     .await
@@ -475,11 +497,14 @@ async fn a_dead_tunnel_behind_a_live_socket_is_rebuilt() {
         timeouts: I2pTimeouts {
             sam_command: Duration::from_secs(2),
             read_idle: Duration::from_millis(300),
+            stale_after: Duration::from_millis(300),
+            ..I2pTimeouts::default()
         },
         ifac: None,
         reconnect_notify: None,
         ingress_control: false,
         outbound_socket_hook: None,
+        tunnel: Arc::new(I2pTunnelState::default()),
     });
 
     handle
@@ -517,4 +542,598 @@ fn the_i2p_keyfile_is_owner_only() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
     assert_eq!(load_keyfile(&path).as_deref(), Some("a2V5"));
     assert_eq!(mode(&path), 0o600);
+}
+
+// --- 1576: the reference's signature type and key file name ------------------
+
+/// The node identity hash the key file tests run with, and the two names the
+/// reference derives from it for a section called `I2P`. Computed with the
+/// reference's own `RNS.Identity.full_hash` and `RNS.hexrep` over
+/// `server_tunnel`'s expressions
+/// (`reference/Reticulum/RNS/Interfaces/I2PInterface.py:269-273`), so the
+/// names are the ones an rnsd on the same storage directory reads and writes.
+const KEY_ID_HASH: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const KEY_SECTION: &str = "I2P";
+const REFERENCE_OLD_FORMAT: &str =
+    "1773daac0b85211719376f2e5c589ff25b351b46012d5c39635f260b494853c6.i2p";
+const REFERENCE_NEW_FORMAT: &str =
+    "42e8ea23de56f4915ab1dd48967906591e9d8f7dd553aebdb9d66c9c5bc5f5e2.i2p";
+
+/// A SAM bridge that records every command line and answers it without ever
+/// connecting a stream: `SESSION CREATE` with the golden key, the session
+/// socket held open, `STREAM ACCEPT` and `STREAM CONNECT` with `OK` and then
+/// silence. Enough to watch what a session asks SAM for.
+async fn start_recording_sam(seen: Arc<std::sync::Mutex<Vec<String>>>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                match sam::read_line(&mut sock).await {
+                    Ok(l) if l.starts_with("HELLO") => {}
+                    _ => return,
+                }
+                let _ = sock.write_all(b"HELLO REPLY RESULT=OK VERSION=3.1\n").await;
+                let Ok(cmd) = sam::read_line(&mut sock).await else {
+                    return;
+                };
+                seen.lock().unwrap().push(cmd.clone());
+                let reply = if cmd.starts_with("SESSION CREATE") {
+                    format!("SESSION STATUS RESULT=OK DESTINATION={GOLDEN_PRIV}\n")
+                } else if cmd.starts_with("NAMING LOOKUP") {
+                    format!("NAMING REPLY RESULT=OK NAME=x VALUE={GOLDEN_PUB}\n")
+                } else {
+                    "STREAM STATUS RESULT=OK\n".to_string()
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+                let mut scratch = [0u8; 256];
+                while let Ok(n) = sock.read(&mut scratch).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn server_config(
+    sam: SocketAddr,
+    keyfile: PathBuf,
+) -> (I2pServerConfig, mpsc::Receiver<InterfaceHandle>) {
+    let (new_tx, new_rx) = mpsc::channel::<InterfaceHandle>(8);
+    (
+        I2pServerConfig {
+            sam_address: sam.to_string(),
+            keyfile,
+            buffer_size: 32,
+            name_prefix: "srv".to_string(),
+            reconnect_wait: Duration::from_millis(200),
+            timeouts: I2pTimeouts::default(),
+            next_id: Arc::new(AtomicUsize::new(100)),
+            new_interface_tx: new_tx,
+            ifac: None,
+            ingress_control: false,
+            outbound_socket_hook: None,
+            endpoint: Arc::new(I2pEndpoint::new(true)),
+            section: "srv".to_string(),
+            parent_id: 0,
+            inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            mode: leviculum_core::traits::InterfaceMode::default(),
+        },
+        new_rx,
+    )
+}
+
+fn session_creates(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.starts_with("SESSION CREATE"))
+        .cloned()
+        .collect()
+}
+
+/// A peer's session asks SAM for an Ed25519 destination, as the reference's
+/// `DEST GENERATE SIGNATURE_TYPE=7` does; without the option i2pd made lnsd a
+/// DSA-SHA1 one (1568).
+#[tokio::test]
+async fn a_peer_session_asks_for_an_ed25519_destination() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let _client = spawn_i2p_client(I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: sam_addr.to_string(),
+        peer: "somepeer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
+        ifac: None,
+        reconnect_notify: None,
+        ingress_control: false,
+        outbound_socket_hook: None,
+        tunnel: Arc::new(I2pTunnelState::default()),
+    });
+    assert!(
+        wait_until(Duration::from_secs(5), || !session_creates(&seen)
+            .is_empty())
+        .await,
+        "the client never created a session"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains("DESTINATION=TRANSIENT SIGNATURE_TYPE=7"),
+        "{create}"
+    );
+}
+
+/// rnsd first, then lnsd, on one storage directory: lnsd finds the key the
+/// reference wrote under the reference's name and opens its session with it,
+/// so the node keeps rnsd's address. A stored key is sent with no signature
+/// type, so a DSA key an older lnsd made stays the key it is.
+#[tokio::test]
+async fn lnsd_takes_over_the_key_rnsd_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path().join("i2p");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    // The reference writes the bare base64 private key, no newline
+    // (I2PInterface.py:285-287).
+    std::fs::write(key_dir.join(REFERENCE_NEW_FORMAT), GOLDEN_PRIV).unwrap();
+
+    let keyfile = resolve_keyfile(&key_dir, KEY_SECTION, &KEY_ID_HASH, 0);
+    assert_eq!(keyfile, key_dir.join(REFERENCE_NEW_FORMAT));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let (mut config, _rx) = server_config(sam_addr, keyfile);
+    // The hold for a stored key is its own test below.
+    config.timeouts.stored_key_hold = Duration::ZERO;
+    spawn_i2p_server(config);
+    assert!(
+        wait_until(Duration::from_secs(5), || !session_creates(&seen)
+            .is_empty())
+        .await,
+        "the endpoint never created a session"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains(&format!("DESTINATION={GOLDEN_PRIV} ")),
+        "the endpoint must open its session with rnsd's key: {create}"
+    );
+    assert!(!create.contains("SIGNATURE_TYPE"), "{create}");
+}
+
+/// lnsd first, then rnsd: lnsd on a fresh directory asks for an Ed25519 key
+/// and stores what SAM made under the reference's new-format name, which is
+/// the file rnsd opens for the same section and transport identity.
+#[tokio::test]
+async fn rnsd_finds_the_key_lnsd_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path().join("i2p");
+    let keyfile = resolve_keyfile(&key_dir, KEY_SECTION, &KEY_ID_HASH, 0);
+    assert_eq!(keyfile, key_dir.join(REFERENCE_NEW_FORMAT));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let (config, _rx) = server_config(sam_addr, keyfile.clone());
+    spawn_i2p_server(config);
+    assert!(
+        wait_until(Duration::from_secs(5), || keyfile.is_file()).await,
+        "the endpoint stored no key"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains("DESTINATION=TRANSIENT SIGNATURE_TYPE=7"),
+        "{create}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&keyfile).unwrap().trim(),
+        GOLDEN_PRIV
+    );
+}
+
+/// The reference prefers its old `sha256(sha256(name))` file when present
+/// (I2PInterface.py:276-279), over a new-format one.
+#[test]
+fn the_old_format_key_is_preferred_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path();
+    std::fs::write(key_dir.join(REFERENCE_OLD_FORMAT), GOLDEN_PRIV).unwrap();
+    std::fs::write(key_dir.join(REFERENCE_NEW_FORMAT), "other").unwrap();
+    assert_eq!(
+        resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 0),
+        key_dir.join(REFERENCE_OLD_FORMAT)
+    );
+}
+
+/// An lnsd before 1576 kept its key as `i2p_iface_<index>.i2p`. That file is
+/// renamed to the reference's name once, with its content, so the node keeps
+/// its address; the next start finds the new name and renames nothing.
+#[test]
+fn an_index_named_key_is_adopted_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path();
+    let legacy = key_dir.join("i2p_iface_3.i2p");
+    std::fs::write(&legacy, GOLDEN_PRIV).unwrap();
+
+    let adopted = resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 3);
+    assert_eq!(adopted, key_dir.join(REFERENCE_NEW_FORMAT));
+    assert!(!legacy.exists(), "the old name must be gone");
+    assert_eq!(std::fs::read_to_string(&adopted).unwrap(), GOLDEN_PRIV);
+
+    // A second section's index-named file is not taken by this one.
+    let other = key_dir.join("i2p_iface_4.i2p");
+    std::fs::write(&other, "other").unwrap();
+    assert_eq!(
+        resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 4),
+        key_dir.join(REFERENCE_NEW_FORMAT)
+    );
+    assert!(other.exists(), "the name is taken, so nothing is adopted");
+}
+
+// ---------------------------------------------------------------------------
+// 1588: the reference's status surface (tunnel state, endpoint b32 and state,
+// the accepted peer's row) and the SAM refusals that must each end in a retry.
+// ---------------------------------------------------------------------------
+
+use crate::interfaces::inventory::TunnelState;
+
+fn client_config(
+    sam: SocketAddr,
+    timeouts: I2pTimeouts,
+    tunnel: Arc<I2pTunnelState>,
+) -> I2pClientConfig {
+    I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: sam.to_string(),
+        peer: "somepeer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_millis(50),
+        timeouts,
+        ifac: None,
+        reconnect_notify: None,
+        ingress_control: false,
+        outbound_socket_hook: None,
+        tunnel,
+    }
+}
+
+/// The tunnel state follows the read clock as the reference's read watchdog
+/// sets it (I2PInterface.py:681-687): `Init` before any stream, `Active` once
+/// one runs, `Stale` once nothing arrived for longer than the stale threshold,
+/// and `Active` again on the next byte. The stale mark tears nothing down: the
+/// packet after it arrives over the same accepted stream, not a rebuilt one.
+#[tokio::test]
+async fn the_tunnel_state_follows_the_read_clock() {
+    let mock = start_mock_sam().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, mut new_rx) = server_config(mock, tmp.path().join("srv.i2p"));
+    spawn_i2p_server(config);
+
+    let tunnel = Arc::new(I2pTunnelState::default());
+    assert_eq!(tunnel.get(), TunnelState::Init);
+    assert_eq!(tunnel.get().description(), "Creating Tunnel");
+    let mut client = spawn_i2p_client(client_config(
+        mock,
+        I2pTimeouts {
+            sam_command: Duration::from_secs(2),
+            read_idle: Duration::from_secs(60),
+            stale_after: Duration::from_secs(2),
+            ..I2pTimeouts::default()
+        },
+        Arc::clone(&tunnel),
+    ));
+
+    let server_iface = tokio::time::timeout(Duration::from_secs(5), new_rx.recv())
+        .await
+        .expect("timeout waiting for accepted I2P interface")
+        .expect("new-interface channel closed");
+    assert!(
+        wait_until(Duration::from_secs(5), || tunnel.get()
+            == TunnelState::Active)
+        .await,
+        "a running stream reads active"
+    );
+    assert_eq!(tunnel.get().description(), "Tunnel Active");
+
+    // Nothing crosses (the keepalive is 10 s away): stale after 2 s.
+    assert!(
+        wait_until(Duration::from_secs(6), || tunnel.get()
+            == TunnelState::Stale)
+        .await,
+        "a silent stream reads stale"
+    );
+    assert_eq!(tunnel.get().description(), "Tunnel Unresponsive");
+
+    server_iface
+        .outgoing
+        .send(out(b"after-stale"))
+        .await
+        .unwrap();
+    let pkt = tokio::time::timeout(Duration::from_secs(5), client.incoming.recv())
+        .await
+        .expect("timeout: the stream was torn down at the stale mark")
+        .expect("client incoming closed");
+    assert_eq!(pkt.data, b"after-stale");
+    assert!(
+        wait_until(Duration::from_secs(5), || tunnel.get()
+            == TunnelState::Active)
+        .await,
+        "a byte after the stale mark reads active again"
+    );
+    assert!(
+        new_rx.try_recv().is_err(),
+        "no second stream was accepted: the stale mark rebuilt nothing"
+    );
+}
+
+/// A fresh endpoint knows its b32 and is up once its session is, and the
+/// connection it accepts is registered as the reference names it,
+/// `I2PInterfacePeer[Connected peer on <section>]`, counted toward its parent,
+/// with a tunnel state of its own, and takes the section's mode
+/// (I2PInterface.py:992; on 1588's bed rnsd's accepted peers read `Gateway`
+/// under a discoverable section where lnsd's read `Full`).
+#[tokio::test]
+async fn the_endpoint_publishes_its_b32_and_registers_what_it_accepts() {
+    let mock = start_mock_sam().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut config, mut new_rx) = server_config(mock, tmp.path().join("srv.i2p"));
+    config.mode = leviculum_core::traits::InterfaceMode::Gateway;
+    let endpoint = Arc::clone(&config.endpoint);
+    let inventory = Arc::clone(&config.inventory);
+    assert_eq!(endpoint.b32(), None);
+    assert!(!endpoint.is_online());
+    spawn_i2p_server(config);
+
+    assert!(wait_until(Duration::from_secs(5), || endpoint.is_online()).await);
+    assert_eq!(endpoint.b32().as_deref(), Some(GOLDEN_B32));
+
+    let _client = spawn_i2p_client(client_config(
+        mock,
+        I2pTimeouts::default(),
+        Arc::new(I2pTunnelState::default()),
+    ));
+    let accepted = tokio::time::timeout(Duration::from_secs(5), new_rx.recv())
+        .await
+        .expect("timeout waiting for accepted I2P interface")
+        .expect("new-interface channel closed");
+    assert_eq!(
+        accepted.info.mode,
+        leviculum_core::traits::InterfaceMode::Gateway
+    );
+    let id = accepted.info.id.0;
+    let inv = inventory.lock_recover();
+    let identity = inv.identity(id).expect("accepted peer registered");
+    assert_eq!(identity.name, "I2PInterfacePeer[Connected peer on srv]");
+    assert_eq!(identity.short_name, "Connected peer on srv");
+    assert_eq!(identity.type_name, "I2PInterfacePeer");
+    assert_eq!(identity.parent, Some(0));
+    assert!(inv.counts_toward_parent(id));
+    assert_eq!(inv.i2p_tunnel(id), Some(TunnelState::Active));
+}
+
+/// A stored key names the b32 before any session exists, so a node whose
+/// router is down still reports the address it will be reachable at, as the
+/// reference sets `owner.b32` from the key first (I2PInterface.py:295-296).
+/// The endpoint is not up.
+#[tokio::test]
+async fn a_stored_key_names_the_b32_before_any_session() {
+    // A port nothing listens on: bind, learn it, close.
+    let closed = {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let keyfile = tmp.path().join("srv.i2p");
+    save_keyfile(&keyfile, GOLDEN_PRIV);
+    let (config, _rx) = server_config(closed, keyfile);
+    let endpoint = Arc::clone(&config.endpoint);
+    spawn_i2p_server(config);
+
+    assert!(
+        wait_until(Duration::from_secs(5), || endpoint.b32().is_some()).await,
+        "the stored key's b32 is known without a router"
+    );
+    assert_eq!(endpoint.b32().as_deref(), Some(GOLDEN_B32));
+    assert!(!endpoint.is_online());
+}
+
+/// Where a refusing SAM bridge says no.
+#[derive(Clone, Copy)]
+enum Refusal {
+    /// `HELLO REPLY RESULT=NOVERSION` to every HELLO.
+    Hello,
+    /// `SESSION STATUS RESULT=<code>` to every SESSION CREATE.
+    Session(&'static str),
+    /// `NAMING REPLY RESULT=INVALID_KEY` to every NAMING LOOKUP.
+    Naming,
+}
+
+/// A SAM bridge that refuses at one step and answers every other step as the
+/// mock does, counting how often the refused step was asked.
+async fn start_refusing_sam(refusal: Refusal, asked: Arc<AtomicUsize>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let asked = Arc::clone(&asked);
+            tokio::spawn(async move {
+                match sam::read_line(&mut sock).await {
+                    Ok(l) if l.starts_with("HELLO") => {}
+                    _ => return,
+                }
+                if matches!(refusal, Refusal::Hello) {
+                    asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = sock.write_all(b"HELLO REPLY RESULT=NOVERSION\n").await;
+                    return;
+                }
+                let _ = sock.write_all(b"HELLO REPLY RESULT=OK VERSION=3.1\n").await;
+                let Ok(cmd) = sam::read_line(&mut sock).await else {
+                    return;
+                };
+                let reply = match refusal {
+                    Refusal::Session(code) if cmd.starts_with("SESSION CREATE") => {
+                        asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        format!("SESSION STATUS RESULT={code} MESSAGE=\"refused\"\n")
+                    }
+                    Refusal::Naming if cmd.starts_with("NAMING LOOKUP") => {
+                        asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        "NAMING REPLY RESULT=INVALID_KEY NAME=somepeer.b32.i2p\n".to_string()
+                    }
+                    _ if cmd.starts_with("SESSION CREATE") => {
+                        format!("SESSION STATUS RESULT=OK DESTINATION={GOLDEN_PRIV}\n")
+                    }
+                    _ if cmd.starts_with("NAMING LOOKUP") => {
+                        format!("NAMING REPLY RESULT=OK NAME=x VALUE={GOLDEN_PUB}\n")
+                    }
+                    _ => "STREAM STATUS RESULT=OK\n".to_string(),
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+                let mut scratch = [0u8; 256];
+                while let Ok(n) = sock.read(&mut scratch).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Ask a client and (where the step is the endpoint's too) an endpoint
+/// through a bridge that refuses at `refusal`, and require that each asks
+/// again: no SAM error is terminal (the reference retries on every one of
+/// them, "Retrying tunnel setup later"), and the client's interface stays
+/// alive and never reads a tunnel it does not have.
+async fn sam_refusal_is_retried(refusal: Refusal, endpoint_too: bool) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let sam_addr = start_refusing_sam(refusal, Arc::clone(&asked)).await;
+    let tunnel = Arc::new(I2pTunnelState::default());
+    let client = spawn_i2p_client(client_config(
+        sam_addr,
+        I2pTimeouts::default(),
+        Arc::clone(&tunnel),
+    ));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            asked.load(std::sync::atomic::Ordering::Relaxed) >= 3
+        })
+        .await,
+        "the client asked again after the refusal (asked {} times)",
+        asked.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(
+        !client.outgoing.is_closed(),
+        "the client interface is alive"
+    );
+    assert!(!client.counters.is_online());
+    assert_eq!(tunnel.get(), TunnelState::Init);
+    drop(client);
+
+    if endpoint_too {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let sam_addr = start_refusing_sam(refusal, Arc::clone(&asked)).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut config, _rx) = server_config(sam_addr, tmp.path().join("srv.i2p"));
+        config.reconnect_wait = Duration::from_millis(50);
+        let endpoint = Arc::clone(&config.endpoint);
+        spawn_i2p_server(config);
+        assert!(
+            wait_until(Duration::from_secs(5), || {
+                asked.load(std::sync::atomic::Ordering::Relaxed) >= 3
+            })
+            .await,
+            "the endpoint asked again after the refusal (asked {} times)",
+            asked.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(!endpoint.is_online());
+    }
+}
+
+/// `i2p_sam_refuses` (docs/src/concepts/i2p-interface.md, the cells): a
+/// SESSION CREATE answered `I2P_ERROR` is retried by peer and endpoint.
+#[tokio::test]
+async fn i2p_sam_refuses_i2p_error() {
+    sam_refusal_is_retried(Refusal::Session("I2P_ERROR"), true).await;
+}
+
+/// `i2p_sam_refuses`: a SESSION CREATE answered `DUPLICATED_ID` (a nick
+/// still taken on the bridge) is retried by peer and endpoint.
+#[tokio::test]
+async fn i2p_sam_refuses_duplicated_id() {
+    sam_refusal_is_retried(Refusal::Session("DUPLICATED_ID"), true).await;
+}
+
+/// `i2p_sam_refuses`: a NAMING LOOKUP answered `INVALID_KEY` (the peer's
+/// LeaseSet not yet spread, as measured on the bed) is retried by the peer;
+/// an endpoint looks nothing up.
+#[tokio::test]
+async fn i2p_sam_refuses_invalid_key() {
+    sam_refusal_is_retried(Refusal::Naming, false).await;
+}
+
+/// `i2p_sam_refuses`: a HELLO answered `NOVERSION` is retried by peer and
+/// endpoint.
+#[tokio::test]
+async fn i2p_sam_refuses_hello_noversion() {
+    sam_refusal_is_retried(Refusal::Hello, true).await;
+}
+
+/// 1654: the first SESSION CREATE on a stored key waits out the destination
+/// a previous process may have left in i2pd, whose postponed destructor
+/// would otherwise stop it under the new session five seconds later
+/// (`I2P_STORED_KEY_HOLD`). Only the first session is held: a rebuild inside
+/// the process asks again after `reconnect_wait` alone. A fresh key is not
+/// held at all; the `i2p_sam_refuses_*` endpoints run on a fresh key with the
+/// default hold and ask three times within five seconds.
+#[tokio::test]
+async fn a_stored_key_holds_the_first_session_only() {
+    assert!(
+        I2pTimeouts::default().stored_key_hold > Duration::from_secs(5),
+        "the default hold must outlast i2pd's five-second session linger"
+    );
+    let hold = Duration::from_secs(2);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let sam_addr = start_refusing_sam(Refusal::Session("I2P_ERROR"), Arc::clone(&asked)).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let keyfile = tmp.path().join("srv.i2p");
+    save_keyfile(&keyfile, GOLDEN_PRIV);
+    let (mut config, _rx) = server_config(sam_addr, keyfile);
+    config.reconnect_wait = Duration::from_millis(50);
+    config.timeouts.stored_key_hold = hold;
+    let endpoint = Arc::clone(&config.endpoint);
+    let started = std::time::Instant::now();
+    spawn_i2p_server(config);
+
+    // The address is known during the hold, from the key alone.
+    assert!(
+        wait_until(Duration::from_secs(1), || endpoint.b32().is_some()).await,
+        "the stored key's b32 is known while the session is held"
+    );
+    let count = || asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(10), || count() >= 1).await,
+        "the endpoint never created its session"
+    );
+    let first_ask = started.elapsed();
+    assert!(
+        first_ask >= hold,
+        "the first SESSION CREATE on a stored key came {first_ask:?} after the start, inside the {hold:?} hold"
+    );
+    let after_first = std::time::Instant::now();
+    assert!(
+        wait_until(Duration::from_secs(10), || count() >= 3).await,
+        "the endpoint asked again after the refusal (asked {} times)",
+        count()
+    );
+    let rebuilds = after_first.elapsed();
+    assert!(
+        rebuilds < hold,
+        "two rebuilds took {rebuilds:?}: a rebuild must wait reconnect_wait, not the {hold:?} hold"
+    );
 }

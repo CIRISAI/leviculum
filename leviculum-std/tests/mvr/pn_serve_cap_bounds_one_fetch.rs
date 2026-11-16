@@ -167,6 +167,7 @@ fn mailbox_node(
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(256 * 1024),
         PropagationNodeConfig {
+            transfer_limit_kb: leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB,
             sync_limit_kb: BOARD_SYNC_LIMIT_KB,
             serve_limit_bytes: Some(serve_limit_bytes),
             serve_cap_bytes: Some(cap),
@@ -495,7 +496,7 @@ fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
     let plan = fetch_all(&mut live, &stored);
 
     // The firmware's own line, at the board's own numbers
-    // (`SERVE_CAP`, `Engine::read_serve_cap`, `leviculum-nrf/src/pn.rs`).
+    // (`SERVE_CAP`, `Engine::answer_get_under_live_heap`, `leviculum-nrf/src/pn.rs`).
     eprintln!(
         "SERVE_CAP boot_cap={BOOT_CAP} live_cap={live_cap} \
 margin={BOARD_SERVE_MARGIN_BYTES} largest={LARGEST_AT_PANIC} free={FREE_AT_PANIC} \

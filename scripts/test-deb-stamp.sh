@@ -190,6 +190,18 @@ if command -v dpkg >/dev/null 2>&1; then
     # A release version is untouched and still upgrades out of its nightlies.
     dpkg --compare-versions "1.2.3~nightly.${date_u}.${sha7}" lt "1.2.3" \
         || fail "a release nightly no longer sorts below its release"
+    # 1226: the window's moving number is the dev counter
+    # (scripts/bump-touched.py), 0.10.0-dev.2 packaging as 0.10.0~dev.2. It
+    # has to upgrade a host that holds the window's first spelling, count
+    # numerically past 9, and still sort below the release it leads to.
+    dpkg --compare-versions "0.10.0~dev.2" gt "0.10.0~dev" \
+        || fail "0.10.0~dev.2 does not sort above an installed 0.10.0~dev"
+    dpkg --compare-versions "0.10.0~dev.2~nightly.${date_u}.${sha7}" gt "0.10.0~dev~nightly.${date_u}.${sha7}" \
+        || fail "a dev.2 nightly does not sort above a plain dev nightly"
+    dpkg --compare-versions "0.10.0~dev.10" gt "0.10.0~dev.9" \
+        || fail "the dev counter does not compare numerically"
+    dpkg --compare-versions "0.10.0~dev.2" lt "0.10.0" \
+        || fail "0.10.0~dev.2 does not sort below the release 0.10.0"
 else
     echo "  skip: dpkg not installed"
 fi

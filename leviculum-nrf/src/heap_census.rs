@@ -26,7 +26,7 @@
 //!   res=… events=… req=… dest=… transport=… storage=… ble_defrag=…
 //!   ble_sessions=… ble_s0=… ble_s1=… ble_s2=… ble_s3=…
 //!   pn_peers=… n_peers=… pn_work=… pn_batch=… pn_out=… pn_links=…
-//!   pn_role=… pn_flush=… held=… hold_refused=… other=…
+//!   pn_role=… pn_flush=… held=… hold_refused=… pn_dial_held=… other=…
 //! ```
 //!
 //! (one line on the wire; wrapped here for the page).
@@ -56,6 +56,11 @@
 //! `hold_refused=` counts the
 //! announces refused at that cap since boot (#598).
 //!
+//! `pn_dial_held=` counts the propagation role's peering dials held since
+//! boot so a client's link request keeps a slot (order 1666,
+//! [`leviculum_heap_budget::CLIENT_RESERVED_LINKS`]); each one is also a
+//! `PN_SYNC … action=defer reason=client_pending|client_reserve` line.
+//!
 //! `other` is the
 //! honesty term: `used` minus everything the census attributes — the
 //! log ring's boxes, packets in the static channels, anything not yet
@@ -63,7 +68,10 @@
 //! that the heap is fine.
 //!
 //! Cadence: every [`PERIOD`](crate::heap_census::PERIOD) (4× the `[HEAP]`
-//! line's 30 s), riding the
+//! line's 30 s), and out of turn, at most once a
+//! [`LOW_PERIOD`](crate::heap_census::LOW_PERIOD), when free heap is below
+//! [`LOW_FREE_BYTES`](crate::heap_census::LOW_FREE_BYTES), preceded by a
+//! critical `[HEAP_LOW] free=… threshold=… phase=…` line; riding the
 //! main loop the way `[TRANSPORT]` does — the census walks state only
 //! the loop owns. On demand: the byte `c` on the debug CDC port
 //! ([`request`](crate::heap_census::request)) makes the next loop wake-up
@@ -83,6 +91,19 @@ use rand_core::CryptoRngCore;
 /// carried by `[HEAP]` — the census names the holders along it.
 pub const PERIOD: Duration = Duration::from_secs(120);
 
+/// Free heap below which the census is emitted out of turn (order 1641).
+/// The periodic line comes every two minutes, and on 2026-11-10 the T114's
+/// last census before each of four `memory allocation ... failed` panics
+/// showed 16 to 22 KB free and was up to two minutes old: the census that
+/// names the holder of the heap at the moment it ran out was never taken.
+/// 24 KiB is above every one of those readings, so a board on its way to
+/// that failure crosses it first.
+pub const LOW_FREE_BYTES: usize = 24 * 1024;
+
+/// At most one low-heap census per this period: a board hovering at the
+/// threshold must not spend its loop walking its own tables.
+pub const LOW_PERIOD: Duration = Duration::from_secs(60);
+
 /// One-shot request flag, set by the debug-port byte `c`.
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -97,6 +118,8 @@ pub fn request() {
 /// exclusively.
 pub struct Ticker {
     next: Instant,
+    /// The earliest instant a low-heap census may run again.
+    low_next: Instant,
 }
 
 impl Ticker {
@@ -104,6 +127,7 @@ impl Ticker {
     pub fn new() -> Self {
         Self {
             next: Instant::now() + PERIOD,
+            low_next: Instant::from_ticks(0),
         }
     }
 
@@ -123,8 +147,25 @@ impl Ticker {
         S: Storage,
     {
         let now = Instant::now();
-        if now < self.next && !REQUESTED.swap(false, Ordering::Relaxed) {
+        let (_, free) = leviculum_firmware::heap::heap_stats();
+        let low = free < LOW_FREE_BYTES && now >= self.low_next;
+        if now < self.next && !REQUESTED.swap(false, Ordering::Relaxed) && !low {
             return;
+        }
+        if low {
+            self.low_next = now + LOW_PERIOD;
+            // Critical, so it reaches the persistent tail the next boot
+            // replays; the phase is the work thread mode did last, which is
+            // the work that left the heap this low.
+            crate::log::log_fmt_critical(
+                "[HEAP_LOW] ",
+                format_args!(
+                    "free={} threshold={} phase={}",
+                    free,
+                    LOW_FREE_BYTES,
+                    leviculum_firmware::thread_watch::current_phase().name()
+                ),
+            );
         }
         // Re-arm from now, as [TRANSPORT] does: no catch-up bursts.
         self.next = now + PERIOD;
@@ -197,19 +238,32 @@ const _: () =
 /// * `slack` — [`budget_slack`], what the sum leaves unclaimed;
 /// * `serve` — [`crate::pn::SERVE_PEAK_BYTES`], the peak transient one
 ///   outbound `/get` serve costs at the announced cap. It is NOT in
-///   `total`, and when it exceeds `slack` a second critical line follows:
+///   `total`, by decision (Lead, 2026-11-11, order 1676), and a second
+///   line says so at every boot:
 ///
 /// ```text
-/// HEAP_BUDGET_UNFUNDED serve=<b> slack=<b> deficit=<b>
+/// HEAP_BUDGET_SERVE mode=live_gated reserve=<b> need=<b> free_at_boot=<b>
 /// ```
 ///
-///   This is the #384 finding, on the wire at every boot rather than in
-///   a post-mortem: the board announces a serve limit its heap plan does
-///   not fund, and a peer that collects its mail is what makes it fail.
+///   `reserve` is [`leviculum_heap_budget::SERVE_RESERVE_BYTES`] (0),
+///   `need` the transient above, `free_at_boot` the free heap as this
+///   line is printed. The serve is protected live, not reserved: every
+///   `/get` reads the free heap and serves only what it funds after
+///   [`leviculum_heap_budget::SERVE_MARGIN_BYTES`], and a heap that funds
+///   nothing turns the `/get` into a refusal the client retries
+///   (`PN_REJECT reason=heap_low via=get`,
+///   [`leviculum_pn_store::board_answer_get`]). Reserving `need` would
+///   come out of the links: the plan has 16 B of slack, so the 17 248 B
+///   short are three of the four links with their BLE sessions
+///   ([`budget_per_link`] + `ble_session` = 6 644 B each), and a board
+///   PN with one link is no PN (`docs/src/firmware/heap-budget.md`,
+///   "The serve transient").
+///   Until order 1676 this line was `HEAP_BUDGET_UNFUNDED serve= slack=
+///   deficit=`, which read as a defect for what is a decision.
 /// * `serve_cap` — [`budget_serve_cap`], the largest fetch response the
-///   plan DOES fund, and the bound the role serves to. The deficit line
-///   says the announced cap is unaffordable; this one says what is
-///   affordable instead, and a `serve_cap` below one stored message
+///   plan DOES fund, and the floor the role serves to. `need` above
+///   says what the announced cap costs; this one says what the boot plan
+///   alone affords, and a `serve_cap` below one stored message
 ///   (0 B at the T114's 64 B of slack, #661, #662) means the BOOT plan alone
 ///   would have the board list mail it will not serve. It is a floor:
 ///   [`live_serve_cap`] raises it to what the heap actually has at
@@ -243,17 +297,16 @@ pub fn log_budget_and_assert(node_box: usize) {
             links, ble_links, per_link, ble_session, role, reserve, total, slack, serve, serve_cap
         ),
     );
-    if serve > slack {
-        crate::log::log_fmt_critical(
-            "[HEAP] ",
-            format_args!(
-                "HEAP_BUDGET_UNFUNDED serve={} slack={} deficit={}",
-                serve,
-                slack,
-                serve - slack
-            ),
-        );
-    }
+    let (_, free_at_boot) = leviculum_firmware::heap::heap_stats();
+    crate::log::log_fmt_critical(
+        "[HEAP] ",
+        format_args!(
+            "HEAP_BUDGET_SERVE mode=live_gated reserve={} need={} free_at_boot={}",
+            leviculum_heap_budget::SERVE_RESERVE_BYTES,
+            serve,
+            free_at_boot
+        ),
+    );
     assert!(
         total <= leviculum_heap_budget::HEAP_SIZE,
         "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
@@ -303,6 +356,9 @@ where
     C: Clock,
     S: Storage,
 {
+    let _phase = leviculum_firmware::thread_watch::phase_scope(
+        leviculum_firmware::thread_watch::Phase::Census,
+    );
     let (used, _free, _watermark) = leviculum_firmware::heap::heap_watermark_sample();
     let largest = largest_free_block();
     // Re-read free after the probe: the probe cannot change it (every
@@ -326,10 +382,34 @@ where
         .unwrap_or_default();
     let attributed = census.total() + ble + ble_sessions + pn.total();
     let other = used_now.max(used).saturating_sub(attributed);
+    // Kept for the panic record (order 1665): an allocation failure before
+    // the next census replays these words as `[PANIC_CENSUS]` on the next
+    // boot, in `leviculum_firmware::heap::CENSUS_KEYS` order.
+    leviculum_firmware::heap::note_census(
+        [
+            used_now,
+            free_now,
+            largest,
+            census.node_struct,
+            census.links,
+            census.events,
+            census.requests,
+            census.destinations,
+            census.transport,
+            census.storage,
+            ble_sessions,
+            pn.peers,
+            pn.work,
+            pn.link_maps,
+            pn.flush,
+            other,
+        ],
+        Instant::now().as_millis(),
+    );
     crate::log::log_fmt(
         "[HEAP_CENSUS] ",
         format_args!(
-            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} held={} hold_refused={} other={}",
+            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} held={} hold_refused={} pn_dial_held={} other={}",
             used_now,
             free_now,
             largest,
@@ -358,6 +438,7 @@ where
             pn.flush,
             census.held_announces,
             census.announces_hold_refused,
+            pn.dials_held,
             other,
         ),
     );

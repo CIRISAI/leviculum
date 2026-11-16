@@ -157,21 +157,19 @@ impl Image {
                 // A page already opened by an earlier span is filled further
                 // rather than duplicated: two spans separated by a gap smaller
                 // than a page still share one block.
-                let block = match blocks.last_mut() {
-                    Some(last) if last.target_addr == page => last,
-                    _ => {
-                        blocks.push(Block {
-                            flags: FLAG_FAMILY_ID,
-                            target_addr: page,
-                            block_no: 0,
-                            num_blocks: 0,
-                            family_id,
-                            data: vec![0u8; PAGE as usize],
-                        });
-                        blocks.last_mut().expect("just pushed")
-                    }
-                };
-                block.data[at..at + src.len()].copy_from_slice(&span.data[src]);
+                if blocks.last().map(|last| last.target_addr) != Some(page) {
+                    blocks.push(Block {
+                        flags: FLAG_FAMILY_ID,
+                        target_addr: page,
+                        block_no: 0,
+                        num_blocks: 0,
+                        family_id,
+                        data: vec![0u8; PAGE as usize],
+                    });
+                }
+                if let Some(block) = blocks.last_mut() {
+                    block.data[at..at + src.len()].copy_from_slice(&span.data[src]);
+                }
                 page += PAGE;
             }
         }

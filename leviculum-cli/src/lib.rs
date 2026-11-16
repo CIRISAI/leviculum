@@ -17,11 +17,15 @@
 //! calls [`selftest::run_selftest`] itself rather than re-implementing the
 //! phase. [`daemon_rpc`] comes with it — that is where `selftest` asks the
 //! daemon for the link its windows are sized from.
+//!
+//! [`remote_mgmt`] is shared by two binaries, `lnstatus -R` and `lnmgmt`:
+//! the `-R` and `-i` readers and the shared-instance attach.
 
 use std::fmt::Write;
 
 pub mod cp;
 pub mod daemon_rpc;
+pub mod remote_mgmt;
 pub mod selftest;
 
 /// Lowercase hex of `bytes`, the form every destination and identity hash is

@@ -6,7 +6,7 @@ an `EXTERNAL_FLASH_DEVICES` line that is a template default on both
 vendors, and three units answered nothing to a JEDEC read (081522b2; the
 evidence sits in the board files, `CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:188` and `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:182`). So the store went where there
+`leviculum-nrf/src/boards/rak4631.rs:208`). So the store went where there
 is flash: **16 pages of the nRF52840's own flash between the firmware
 image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:93`,
 landed in 81fcb46e; the log format chosen in 59c36129). Every capacity,
@@ -64,6 +64,13 @@ carries the operator verbs `/pn/get/stats`, `/pn/peer/sync` and
 `SYNC_REQUEST_PATH`, `LXMRouter.py:90`; `UNPEER_REQUEST_PATH`,
 `LXMRouter.py:91`) and is behind an allow-list, so it is not part of
 what a stranger can drive.
+
+A propagation node is no traffic oracle: it never answers a question about
+an arbitrary destination hash. Peer sync puts every foreign mailbox entry in
+its store, so an endpoint that told a stranger what it holds for a named
+address would reveal per-address volume and timing for the whole mesh; the
+only read path stays the identity-bound `/get`, which serves a client
+nothing but its own destination's entries.
 
 Messages move in three shapes, and only three:
 
@@ -467,7 +474,7 @@ given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
 `leviculum-nrf/firmware/src/record_store.rs:78`); `lnflash --store-storm
-COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:157`).
+COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:175`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
 
@@ -503,6 +510,17 @@ statement is "unnecessary", not "impossible". What remains impossible is
 the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
 
+The host daemon is the other way round. lnpnd keeps its store index in
+RAM, 289 bytes a message (`INDEX_BYTES_PER_MESSAGE`,
+`lnpnd/src/store_limit.rs`) against the field's mean message of 330
+bytes (`MEAN_MESSAGE_BYTES`), so a full store costs about 0.88 bytes of
+heap per byte of limit. Its sizing rule therefore follows the host: the
+default limit, lxmd's 500 MB, is lowered at start until a full store's
+index takes at most a quarter of `MemTotal`, which leaves 500 MB on any
+host from 1.75 GB up and gives a 1 GB host 285 MB. A configured limit
+is honoured and warned about when it breaks the rule (lnpnd(1),
+CONFIGURATION). The board has no index, so no such rule.
+
 **What a full scan costs.** `for_each`
 (`leviculum-nrf/record-log/src/lib.rs:555`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`
@@ -531,7 +549,7 @@ firmware reported `op=tx duration_ms=903..905` for 13 of the 15 such
 transmissions in the run (SF8, BW 125 kHz, CR 4:5, 18-symbol preamble).
 Our airtime model agrees: computed 543 ms for the 184-byte frame the
 same log reports as `airtime_ms=544` (`airtime_ms_with_preamble`,
-`leviculum-core/src/rnode.rs:1107`; preamble from
+`leviculum-core/src/rnode.rs:1096`; preamble from
 `derive_preamble_symbols`, `leviculum-core/src/rnode.rs:963`, which
 floors at 18, `LORA_PREAMBLE_SYMBOLS_MIN`,
 `leviculum-core/src/rnode.rs:898`).
@@ -551,7 +569,7 @@ usable way for two boards to meet rather than a consolation prize.
 
 **BLE.** The negotiated MTU is bounded by measurement rather than
 assumed: the SoftDevice is configured with an ATT MTU ceiling of 256
-(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:415`), but the field log
+(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:416`), but the field log
 shows a 183-byte packet fragmenting into 2 and a 275-byte packet also
 into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default
@@ -595,7 +613,7 @@ remains.
 
 **At an advertised cost of 0 the cost is not incurred at all.** Our
 validator short-circuits before the workblock when the cost is zero
-(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:373`). The firmware ran
+(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:382`). The firmware ran
 this way for delivery stamps until the role landed, with the LXMF
 dependency pulled without `pow`; the role brought `pow` in, because the
 board announces stamp cost 13 and has to validate what it accepts, through
@@ -845,6 +863,11 @@ somebody sends a message.
   `LXMRouter.py:45`). B assumes a cap we enforce ourselves keeps the
   peer-set arithmetic survivable; three Python routers in range would
   show whether it does.
+- **What full peer participation costs inbound.** A node in the peer
+  network receives the entire LXMF propagation traffic of the reachable
+  mesh, not only what its own users send. The storage and bandwidth that
+  takes has not been measured on a real node, and it sets the hardware
+  floor.
 - **Whether 16 pages is the right size.** 68 would buy 38 years and cost
   the image 212 KiB of headroom. The number lives in `memory.x` and the
   trade is argued there; changing it later is a reformat, which `mount`
@@ -860,7 +883,7 @@ default under a comment denying one. Neither board answered a JEDEC read
 on any unit we own; both sets of pin aliases are gone and the reasons
 are in the board files (`CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:188`; `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:182`).
+`leviculum-nrf/src/boards/rak4631.rs:208`).
 
 The larger correction was this page's own premise. It costed a store on
 two parts that do not exist, and the recommendation rested on figures
@@ -958,8 +981,11 @@ and one request names ten ids; a link with a larger negotiated MTU
 uses more, up to the ceiling. Both engines therefore plan the offer
 when the link is up, not when the round is scheduled — until then
 there is no MDU to size against, and the plan made at scheduling time
-answers only "is anything above the cursor offerable at all". **Board cap: 16 peers**
-still holds, now with less margin; **host config default: 20**, the
+answers only "is anything above the cursor offerable at all". **Board cap: 7 peers**
+since order 1641 (it was 16 until a T114 bench with sixteen peers measured
+the table at 7 152 B against a 5 KiB structural term and ran out of heap;
+seven is one B-tree node, the arithmetic is at the end of
+`leviculum-nrf/heap-budget/src/lib.rs`); **host config default: 20**, the
 reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable as
 `max_peers`. The full-table policy is deterministic and documented on
 `DeclineReason::TableFull`: first heard wins, a full table declines
@@ -1023,12 +1049,27 @@ Three cursor semantics the build pinned down, tested in
   conformance cells drive this path explicitly (`lxmf_pn_reoffer`).
 
 What a Python peer observes: offers that may include ids it already
-holds — including messages it itself sent us, since a cursor cannot
-encode the reference's `from_peer` exclusion
-(`flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
-wire-legal and self-limiting: `offer_request` answers out of its own
-store membership (`:2317-2318`) and declines them, and the cost is
-offer-list bytes, not message bodies. The round-robin page reclaim
+holds. A cursor alone cannot encode the reference's `from_peer`
+exclusion (`flush_peer_distribution_queue`, `LXMRouter.py:2484`), and
+offering a message back to the peer it came from cost more than
+offer-list bytes: `offer_request` answers out of its own store
+membership (`:2317-2318`), so a peer that had delivered and purged the
+message wanted it back and the bodies crossed again, to be dropped at
+ingest as duplicates (LV-1003, measured by the periculum cell
+`lnpnd_delivered_not_wanted_back` on both stacks). Two changes on the
+host close it. lnpnd records, for every message a peer's sync stores,
+which peer it came from (`Origins` in `lnpnd/src/peering.rs`, about 47
+bytes a stored message in RAM, dropped when the message leaves) and
+steps the offer toward that peer past it for good, as a permanent skip
+(`OfferBuilder::skip_held_by_peer`). The record lives in lnpnd, not in
+the role: in the role it cost the rak4631 3.5 KiB of flash for code the
+board never runs. And lnpnd's own `/offer` answer
+asks `PropagationNode::knows`: the store, the processed-id cache and
+the store's departures, so a message it delivered and let go is not
+wanted back from anyone. The second is a deviation from the reference's
+store-only answer with no wire effect; an unwanted id is one the peer
+keeps. The board records no origin and still offers back; its peer
+declines what it knows. The round-robin page reclaim
 also means a cursor's page can be erased and reused while the cursor
 still names the old sequence; page sequences are monotone, so a
 cursor pointing into a reclaimed page simply reads as "older than
@@ -1117,3 +1158,35 @@ reference and both ours to route around:
   to sync to it announces at least 1, which is what the conformance
   chain cells do and why. Upstream is not told (standing policy);
   the workaround is a one-bit cost.
+
+## 6. The board keeps lnpnd's rules
+
+Orders 1294 and 1295 gave `lnpnd` the reference's acceptance rules;
+order 1355 brought the board's role to the same ones. Where the board
+cannot hold what `lnpnd` holds, the limit is its own and named here.
+
+| Rule | `lnpnd` | Board |
+|---|---|---|
+| Stamp floor | cost 13, flexibility 0: a stamp worth 12 is refused with `ERROR_INVALID_STAMP`, 13 is stored | the same, from the same role default; announce field 5 reads `[13, 0, 1]` |
+| Transfer limit (field 3) | 256 KB, lxmd's | 4 KB (`BOARD_TRANSFER_LIMIT_KB`, `leviculum-nrf/heap-budget`): two phones' queued uploads are held in the 96 KiB heap |
+| Sync limit (field 4) | 10 MB, lxmd's | derived from what the board can answer (`BOARD_SYNC_LIMIT_KB`, 5 KB today) |
+| Largest client upload | lxmd's 1 MB delivery limit; above it `PN_REJECT reason=too_large` | what one record-log page holds, `MAX_UPLOAD_RESOURCE_BYTES` (4 048 B, `leviculum-nrf/pn-store`); above it `PN_REJECT reason=too_large via=resource bytes= limit=` at the advertisement, with the reference's RCL |
+| Local only | above 256 KB, up to 1 MB: stored, never offered | above 4 KB, up to the 4 042 B a record holds: stored, never offered (`board_offer_builder`), `PN_ACCEPT ... local_only=1` |
+| Departed ids across a restart | written to `<data>/departures`, held 30 days | read off the purged record the departure left on flash, held until the ring reclaims its page: one lap, about eight hours at the field's 22.4 messages an hour |
+| A sync message the store did not keep | `PN_STORE_FULL offered= dropped=`, sweep at the next tick, `/offer` answered `ERROR_THROTTLED` and peer batches refused `store_full` until then | the same; the ring never refuses for room, so on the board it means the flash refused a write |
+| Expiry sweep | reads only the expired range of a receive-time index | skips the region while the oldest receive time it measured is not expired; a walk that runs is one scan (0.4 ms on the host over a full 16-page region, 8 to 33 ms on the board, §2) |
+
+What that means for a voice message (order 1663): Loquax sends Opus at
+1.2 KB/s ([voice](loquax-voice.md)), so a board takes about three
+seconds, where `lnpnd` and lxmd carry about three and a half minutes on
+to their peers and keep up to 1000 KB local only. The board's 4 KB is
+not a default to align with the host's: it is what its heap holds while
+two phones' uploads are in flight (`BOARD_TRANSFER_LIMIT_KB`, above),
+and an upload past one record-log page is refused at its advertisement.
+A longer voice message for an offline peer goes through a host node.
+
+A client learns none of the board's limits before it uploads: only a
+peer reads fields 3 and 4 (`reference/LXMF/LXMF/LXMRouter.py:2367-2375`),
+and no stock client consults a propagation node's limits. An upload
+above them is refused at its advertisement, which the sender sees as a
+rejected resource.

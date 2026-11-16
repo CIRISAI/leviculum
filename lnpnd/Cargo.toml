@@ -3,7 +3,7 @@ name = "lnpnd"
 # Versioned independently of the leviculum stack, like loquax and lnomad: a
 # mailbox daemon's releases track its own storage format and operator
 # surface, not the protocol core it is built from.
-version = "0.1.0"
+version = "0.1.7"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -134,15 +134,27 @@ package; installing either one swaps the other out.
 #
 #   cargo build --release -p lnpnd --features heap-accounting
 [features]
-# `ble` and `serial` forward leviculum-std's interface families (#463). They
+# `ble`, `serial` and `i2p` forward leviculum-std's interface families (#463). They
 # are lnpnd's defaults so a config with a BLE or serial section behaves as it
 # did before the split; they are forwarded rather than left to leviculum-std's
 # own defaults so that leviculum-std, which takes lnpnd as a dev-dependency,
 # can test its minimal set without this edge switching both back on.
-default = ["ble", "serial"]
+#
+# `alloc-mimalloc` is default for the reason it is lnsd's (#437, 766;
+# leviculum-cli/Cargo.toml): the lnpnd on miauhaus (902bc129, LV-1000) grew
+# its resident set by about 70 MB an hour in fresh mid-size anonymous
+# mappings while every table its census knows stayed flat, the retention
+# musl's mallocng showed under lnsd before lnsd moved to mimalloc (order
+# 1592). `--no-default-features --features ble,serial,i2p` builds lnpnd on
+# the libc allocator; scripts/build-deb.sh does so under
+# LEVICULUM_ALLOC=system. With `heap-accounting` as well, the counting shim
+# wraps mimalloc, so the census still reports live bytes.
+default = ["alloc-mimalloc", "ble", "serial", "i2p"]
 ble = ["leviculum-std/ble"]
 serial = ["leviculum-std/serial"]
+i2p = ["leviculum-std/i2p"]
 heap-accounting = ["leviculum-std/heap-accounting"]
+alloc-mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # The propagation-node role, the store trait, and the wire codecs.
@@ -164,6 +176,9 @@ rand_core = { version = "0.6", features = ["std", "getrandom"] }
 # `block_on` for stamp validation inside the hook; see engine.rs for the
 # budget note.
 futures = "0.3"
+# `alloc-mimalloc` only, which is a default feature; see it. The same line
+# as lnsd's, so the workspace links one mimalloc.
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

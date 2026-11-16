@@ -32,6 +32,8 @@ src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
+src/led.rs: feedback::led_task doc x1
+src/led.rs: feedback::spawn_activity_led_with_boot_blink x1
 src/led.rs: feedback::spawn_led x1
 src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1
@@ -76,6 +78,9 @@ src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
 src/pn.rs: record_store::region x1
 src/pn.rs: usb doc x1
+src/power.rs: boards::BoardConfig x1
+src/power.rs: button doc x1
+src/power.rs: usb::softdevice_enabled x1
 src/radio.rs: boards doc x1
 src/radio.rs: boards::BoardConfig::lora_tcxo_voltage_reg doc x1
 src/radio.rs: sx1262 doc x1
@@ -85,17 +90,23 @@ src/radio.rs: sx1262::RxStatus x1
 src/radio.rs: sx1262::Sx1262 x1
 src/radio_store.rs: boards::BoardConfig::radio_config_flash_page doc x1
 src/radio_store.rs: flash::SharedFlash x2
+src/radio_store.rs: flash::log_step_fault x1
 src/radio_store.rs: flash::shared_flash doc x1
+src/radio_store.rs: flash::timed x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
+src/remote_dfu.rs: usb::outgoing_drained x1
+src/remote_dfu.rs: usb::write_gpregret x1 doc x1
 src/st7789.rs: log_stack x2
 src/st7789.rs: vext::wait_ready x1 doc x1
 src/store_spike.rs: flash::SharedFlash x1
 src/store_spike.rs: record_store::region x1 doc x1
 src/telemetry.rs: ble::init doc x1
 src/telemetry.rs: flash::SharedFlash x2
+src/telemetry.rs: flash::log_step_fault x1
 src/telemetry.rs: flash::shared_flash doc x1
+src/telemetry.rs: flash::timed x1
 src/telemetry.rs: radio_store doc x1
 src/time_floor.rs: flash::SharedFlash x2 doc x1
 src/time_floor.rs: radio_store doc x1

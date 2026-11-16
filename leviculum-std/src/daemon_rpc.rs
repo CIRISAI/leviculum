@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::config_dir::ConfigDirChoice;
 
 /// Load the config file under `config_dir`, if there is a readable one, and
 /// point this process's shared-instance dial where that config puts the
@@ -107,6 +108,49 @@ pub fn resolve_authkey(
         }
     }
     Err(errors.join("; "))
+}
+
+/// Which of `dirs` holds the RPC key the daemon on `rns/{instance_name}`
+/// answers to, probed in order, read-only (order 1675). Each directory's
+/// key is derived as [`resolve_authkey`] derives it; a directory whose key
+/// cannot be read is skipped. The config is read without
+/// [`load_config`]'s dial side effect: the probe asks the socket this
+/// process already dials, the one the failed query went to.
+pub async fn probe_authkeys(dirs: &[PathBuf], instance_name: &str) -> Option<PathBuf> {
+    for dir in dirs {
+        let config = Config::load(dir.join("config")).ok();
+        let Ok((key, _)) = resolve_authkey(dir, config.as_ref()) else {
+            continue;
+        };
+        if let Ok(true) = crate::rpc_authenticates(instance_name, &key).await {
+            return Some(dir.clone());
+        }
+    }
+    None
+}
+
+/// The lines `lnstatus` prints under an RPC authentication failure: the
+/// [`ConfigDirChoice::hint_for`] block, then which other candidate's key
+/// the daemon answers to, or that none does. Other tools print the hint
+/// alone; this one probes (order 1675 step 2).
+pub async fn auth_failure_hint(choice: &ConfigDirChoice, instance_name: &str) -> String {
+    let mut out = choice.hint_for(instance_name);
+    let socket =
+        crate::interfaces::shared_instance_transport().describe(&format!("rns/{instance_name}"));
+    if choice.others.is_empty() {
+        return out;
+    }
+    match probe_authkeys(&choice.others, instance_name).await {
+        Some(dir) => out.push_str(&format!(
+            "\nthe daemon on {socket} answers to {}'s key; pass --config {}",
+            choice.short(&dir),
+            dir.display()
+        )),
+        None => out.push_str(&format!(
+            "\nthe daemon on {socket} answers to none of the other directories' keys either"
+        )),
+    }
+    out
 }
 
 /// Everything needed to issue a shared-instance query, resolved from a config

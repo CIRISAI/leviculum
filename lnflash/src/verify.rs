@@ -28,8 +28,8 @@
 //! **A line the firmware replays is not a line the firmware claims**
 //! (Codeberg #372). At boot our firmware re-emits the last ~2 KiB of the
 //! previous boot's log out of retained RAM, each line wrapped in
-//! `[PERSISTENT_LOG]` (`leviculum-nrf/src/node_loop.rs:196`,
-//! `rak4631.rs:185`, `solarnode.rs:190`). Those lines include the *previous*
+//! `[PERSISTENT_LOG]` (`leviculum-nrf/src/node_loop.rs:196`, which the
+//! T114 and the RAK4631 run, and `solarnode.rs:190`). Those lines include the *previous*
 //! firmware's own `[FW_BUILD]` banner, so a board that has just booted into
 //! a new image says the old image's sha within milliseconds of the port
 //! opening — after the reset, after the flush, and still not about itself.

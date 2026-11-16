@@ -346,11 +346,16 @@ impl Drop for Daemon {
     }
 }
 
-/// The next frame the board saw, or a named failure.
-fn expect_frame(rx: &Receiver<BoardFrame>, what: &str) -> BoardFrame {
+/// The next frame the board saw, or a named failure carrying the daemon's
+/// log: a frame that never came is either a request that never reached the
+/// io task or a daemon that is gone, and only the log tells the two apart.
+fn expect_frame(rx: &Receiver<BoardFrame>, what: &str, daemon: &Daemon) -> BoardFrame {
     match rx.recv_timeout(FRAME_WAIT) {
         Ok(f) => f,
-        Err(e) => panic!("the board saw no {what} within {FRAME_WAIT:?}: {e:?}"),
+        Err(e) => panic!(
+            "the board saw no {what} within {FRAME_WAIT:?}: {e:?}; daemon logs:\n{}",
+            daemon.logs()
+        ),
     }
 }
 
@@ -418,12 +423,12 @@ fn the_media_signals_silence_a_board_and_put_back_the_profile_it_had() {
     // ---- The silence: query first, then both carriers clear. ----
     daemon.signal(FIRMWARE_MEDIA_SILENCE_SIGNAL);
     assert_eq!(
-        expect_frame(&board, "media query"),
+        expect_frame(&board, "media query", &daemon),
         BoardFrame::Query,
         "the daemon must read the board's profile before it overwrites it"
     );
     assert_eq!(
-        expect_frame(&board, "silencing profile"),
+        expect_frame(&board, "silencing profile", &daemon),
         BoardFrame::Profile(0x00),
         "silence is both carrier flags clear"
     );
@@ -450,7 +455,7 @@ fn the_media_signals_silence_a_board_and_put_back_the_profile_it_had() {
     // ---- The restore: the profile that was there, not the default. ----
     daemon.signal(FIRMWARE_MEDIA_RESTORE_SIGNAL);
     assert_eq!(
-        expect_frame(&board, "restoring profile"),
+        expect_frame(&board, "restoring profile", &daemon),
         BoardFrame::Profile(MEDIA_FLAG_LORA),
         "the restore must write back the LoRa-only profile the board had, \
          not the both-on default (0x{:02x})",
@@ -545,7 +550,7 @@ fn a_board_that_does_not_report_is_not_silenced() {
 
     daemon.signal(FIRMWARE_MEDIA_SILENCE_SIGNAL);
     assert_eq!(
-        expect_frame(&board, "media query"),
+        expect_frame(&board, "media query", &daemon),
         BoardFrame::Query,
         "the query is still asked; it is the answer that never comes"
     );
@@ -599,4 +604,54 @@ fn the_attach_asks_the_board_once_and_then_nothing() {
     // The daemon is still up, so the silence above is not a dead process.
     daemon.signal(FIRMWARE_MEDIA_RESTORE_SIGNAL);
     daemon.wait_for_log("outcome=nothing-remembered", FRAME_WAIT);
+}
+
+/// A verb sent once the daemon has said the board is online is served,
+/// even while the attach is still being brought up.
+///
+/// "online on" is logged the moment the port opens, and the bring-up that
+/// follows (`serial_mux::bring_up`, then the attach query) takes two
+/// seconds against a board that does not answer the capability query, as
+/// this stand-in does not. The io task used to subscribe to the request
+/// channel only after all of that, so a signal in between met no receiver
+/// and was logged "on 0 serial interface(s)": the gate on aaaa26f8 lost
+/// [`a_board_that_does_not_report_is_not_silenced`] to the last few
+/// microseconds of that window, between the attach query leaving the port
+/// and the subscription, on a host at load 20-40 (1769). This test sends
+/// the signal inside the two seconds, where the window is wide enough to
+/// hit every time, so the subscription has to be in place before the port
+/// is announced online for it to pass.
+#[test]
+fn a_verb_sent_while_the_board_is_brought_up_is_served() {
+    let pty = PtyPair::spawn();
+    let board = spawn_board(
+        &pty.board_end,
+        MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        },
+    );
+    let daemon = Daemon::spawn(&pty.daemon_end, "mvr-media-bring-up");
+    daemon.wait_for_log("online on", Duration::from_secs(10));
+    daemon.wait_for_log("Out-of-band control:", Duration::from_secs(10));
+
+    // Normally well inside the bring-up's two seconds. On a host slow
+    // enough to be past them the signal lands on a running io task, which
+    // must serve it just the same, so the claim below holds either way.
+    daemon.signal(FIRMWARE_MEDIA_SILENCE_SIGNAL);
+    daemon.wait_for_log(
+        "commanded media silence on 1 serial interface(s)",
+        FRAME_WAIT,
+    );
+    drain_attach(&board);
+    assert_eq!(
+        expect_frame(&board, "media query", &daemon),
+        BoardFrame::Query,
+        "the verb's own query follows the attach handshake"
+    );
+    assert_eq!(
+        expect_frame(&board, "silencing profile", &daemon),
+        BoardFrame::Profile(0x00),
+        "the silence is served, not dropped"
+    );
 }

@@ -56,14 +56,46 @@ if [ ${#MISSING[@]} -gt 0 ]; then
     exit 1
 fi
 
-# Optional test dependency: i2pd provides the SAM bridge (127.0.0.1:7656) the
-# I2PInterface live tests need. The default suite covers I2PInterface with an
-# in-process mock SAM bridge, so i2pd is not required to go green; it only gates
-# the `#[ignore]`d live tests in leviculum-std (interfaces::i2p::i2pd_live). Warn
-# rather than fail when it is absent.
+# Optional test dependency: i2pd provides the SAM bridges the I2PInterface
+# live tests need. `just i2p-live` runs them on a private I2P network of five
+# i2pd on loopback (scripts/i2p-privnet.sh, 1576), so no internet either. The
+# default suite covers I2PInterface with an in-process mock SAM bridge, so
+# i2pd is not required to go green; it only gates the `#[ignore]`d live tests
+# in leviculum-std (interfaces::i2p::i2pd_live). Warn rather than fail when it
+# is absent.
 if ! command -v i2pd >/dev/null 2>&1; then
     echo "[install-ci] Note: optional test dependency 'i2pd' not found"
-    echo "[install-ci] Hint: sudo apt install i2pd (needed only for the ignored I2P live tests)"
+    echo "[install-ci] Hint: sudo apt install i2pd (needed only for just i2p-live and the I2P bed)"
+fi
+
+# Test dependency: the reference codecs the voice message round trip makes
+# and judges its sounds with (1222, loquax-android's facade test
+# a_voice_message_travels_both_ways_with_python_lxmf): opusenc and opusdec
+# from opus-tools, c2enc and c2dec from codec2. A runner without them
+# leaves that one test out (scripts/integ-prerequisites.txt); run directly,
+# it fails naming this hint.
+for cmd in opusenc opusdec c2enc c2dec; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: test dependency '$cmd' not found"
+        echo "[install-ci] Hint: sudo apt install opus-tools codec2 (the voice message round trip)"
+        break
+    fi
+done
+
+# Walk dependency: zbarimg reads the QR codes of the first start and the
+# profile off the phone's screenshots (1263, loquax-android/scripts/
+# device-walk.py step first_start_qr); without it that step fails naming
+# this hint.
+if ! command -v zbarimg >/dev/null 2>&1; then
+    echo "[install-ci] Note: device walk dependency 'zbarimg' not found"
+    echo "[install-ci] Hint: sudo apt install zbar-tools (the device walk's QR step)"
+fi
+
+# Icon dependency: resvg renders the Loquax icon to PNG (1289, 1336,
+# loquax-android/scripts/render-icon.py); only that script needs it.
+if ! command -v resvg >/dev/null 2>&1; then
+    echo "[install-ci] Note: icon dependency 'resvg' not found"
+    echo "[install-ci] Hint: sudo apt install resvg (renders the Loquax icon)"
 fi
 
 # Optional test dependency: lintian is the Debian-policy authority
@@ -75,15 +107,24 @@ if ! command -v lintian >/dev/null 2>&1; then
     echo "[install-ci] Hint: sudo apt install lintian (needed for the just verify-deb policy checks)"
 fi
 
+# Optional test dependency: xvfb-run gives scripts/verify-deb-packaging.sh a
+# display to open the packaged loquax window on (`loquax gui
+# --exit-after-first-frame`, 1342); without it that one check is skipped.
+if ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'xvfb-run' not found"
+    echo "[install-ci] Hint: sudo apt install xvfb (the packaged loquax window's start check)"
+fi
+
 # Optional test dependency: cargo-fuzz plus the nightly toolchain run the
 # wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
 # fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290 and #23).
 #
-# WHERE THE TARGETS ARE: nine of them, in three crates. Seven under
+# WHERE THE TARGETS ARE: ten of them, in four crates. Seven under
 # leviculum-core/fuzz (packet_unpack, announce_from_packet, discovery_announce,
 # kiss_deframe, hdlc_deframe, ifac_verify, resource_advertisement_unpack), one
 # under leviculum-std/fuzz (sam_parse, the I2P SAM bridge) and one under
-# leviculum-micron/fuzz (micron_parse, the page markup lnomad renders). One
+# leviculum-micron/fuzz (micron_parse, the page markup lnomad renders), one
+# under leviculum-rrc/fuzz (rrc_envelope, a chat hub's packets, 1379). One
 # binary and one toolchain serve every directory, so they get ONE note here: until
 # 2026-09-27 #290 and #23 each carried their own `command -v cargo-fuzz`
 # block, and a host without the tool printed the same missing dependency twice
@@ -121,8 +162,8 @@ if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
     echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
     echo "[install-ci]       (no Debian package; needed for 'just fuzz' over"
-    echo "[install-ci]        leviculum-core/fuzz, leviculum-std/fuzz and"
-    echo "[install-ci]        leviculum-micron/fuzz, and"
+    echo "[install-ci]        leviculum-core/fuzz, leviculum-std/fuzz,"
+    echo "[install-ci]        leviculum-micron/fuzz and leviculum-rrc/fuzz, and"
     echo "[install-ci]        'just fuzz-selftest' / 'just fuzz-regress' skip"
     echo "[install-ci]        without it -- see docs/src/development-testing.md)"
 fi
@@ -343,10 +384,12 @@ echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
 #     and publishes the nightly on the tier-2 nightly host, so the forge's
 #     build steps' tools live here now: both musl targets, cargo-deb for
 #     the packages, and cargo-zigbuild with a pip-installed ziglang as the
-#     arm64 and armhf cross linker (scripts/build-deb.sh). musl-gcc, which
-#     links the amd64 build, is the apt package musl-tools.
+#     arm64 and armhf cross linker (scripts/build-deb.sh), and the linker of
+#     loquax's glibc build on amd64 and arm64 (1342), whose two gnu targets
+#     are added here too. musl-gcc, which links the amd64 build, is the apt
+#     package musl-tools.
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-    armv7-unknown-linux-musleabihf
+    armv7-unknown-linux-musleabihf x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 cargo install --locked cargo-deb
 cargo install --locked cargo-zigbuild
 python3 -c 'import ziglang' 2>/dev/null ||
@@ -354,6 +397,17 @@ python3 -c 'import ziglang' 2>/dev/null ||
 command -v musl-gcc >/dev/null 2>&1 ||
     echo "[install-ci] Hint: sudo apt install musl-tools (needed for the musl .deb builds)"
 echo "[install-ci] nightly packaging: musl targets + cargo-deb + cargo-zigbuild + ziglang (just nightly-publish)"
+
+# 6b4. The nightly's Android APKs (1267, scripts/build-nightly-apk.sh): the
+#     JDK, the three Android rustup targets, and the SDK pieces and NDK
+#     loquax-android/install-toolchain.sh fetches (2.3 GB, checked against
+#     Google's SHA-1s). `just nightly-publish` refuses without them, one line
+#     per missing piece.
+command -v javac >/dev/null 2>&1 ||
+    echo "[install-ci] Hint: sudo apt install default-jdk-headless unzip (the nightly's APK build)"
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+bash "$REPO_DIR/loquax-android/install-toolchain.sh"
+echo "[install-ci] nightly APKs: Android rustup targets + SDK and NDK (scripts/build-nightly-apk.sh)"
 
 # 6c. ESP32-S3 (Xtensa) firmware toolchain.  ESP32-S3 is an Xtensa part,
 #     not RISC-V, so stock rustc cannot target it at all: there is no
@@ -546,8 +600,9 @@ fi
 #     package carries the S3 stub (step 6d's venv does; Debian's 4.7.0 does
 #     not and dies on stub_flasher_32s3.json without --no-stub). Steps 6c
 #     and 6d install both, so this only fires when one of them failed or
-#     was skipped; lnflash's esp transport searches the same places
-#     (lnflash/src/esp.rs, find_flasher).
+#     was skipped. lnflash does not flash ESP32 boards (#476 removed its
+#     unreached ROM-loader transport; commit 39071420 holds it), so these
+#     tools serve the recipes and hand flashing.
 ESP_STUB_CHECK='import esptool, os, sys
 want = {"stub_flasher_32s3.json", "esp32s3.json"}
 root = os.path.join(os.path.dirname(esptool.__file__), "targets", "stub_flasher")

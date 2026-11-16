@@ -302,7 +302,7 @@ fn history_verifies_what_it_can_and_keeps_the_source_verdict_as_the_sources() {
     // Ours, signed with the tree's identity: checked, and it holds.
     assert!(messages[0].outbound);
     assert_eq!(messages[0].signature, Signature::Verified);
-    assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+    assert_eq!(messages[0].delivery, Some(DeliveryState::Arrived));
     // Intact from a sender whose key loquax does not have: unverified, its
     // bytes kept for the check when the key comes.
     assert_eq!(messages[1].signature, Signature::Unverified);
@@ -652,9 +652,17 @@ fn the_export_round_trips_through_the_import() {
         .keep_unverified(&held.message_id, &them, &held.pack())
         .expect("keep");
     drop(store);
+    // The delivery destination's ratchets, as the node keeps them (1185).
+    let ratchet = [0x5au8; 32];
+    loquax::import::ratchets::take_over(&a, &own, &[ratchet], false).expect("ratchets");
 
     let out = dir.path().join("export");
     let done = loquax::export::export(&a, &out).expect("export");
+    assert!(
+        out.join(format!("storage/lxmf/ratchets/{}.ratchets", hex(&me)))
+            .is_file(),
+        "the ratchets go where NomadNet's router loads them"
+    );
     assert_eq!(
         (done.messages, done.conversations, done.contacts),
         (3, 1, 1)
@@ -680,8 +688,31 @@ fn the_export_round_trips_through_the_import() {
         identity: true,
         ..ALL
     };
-    import::import(&source, &b, choices, false).expect("import");
+    let report = import::import(&source, &b, choices, false).expect("import");
     assert_eq!(import::current_address(&b), Some(me));
+    // The ratchets came back with the identity.
+    assert!(
+        report
+            .ratchets
+            .as_deref()
+            .is_some_and(|l| l.starts_with("ratchets: 1 ")),
+        "{:?}",
+        report.ratchets
+    );
+    let kept_ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+        &b.join("storage"),
+        &me,
+    ))
+    .expect("the ratchets in the new home");
+    let mut destination = leviculum_lxmf::node::LxmfNode::delivery_destination(
+        loquax::identity::load_or_create(&b.join("identity")).expect("identity"),
+    )
+    .expect("destination");
+    assert_eq!(destination.load_ratchets_signed(&kept_ratchets), Ok(1));
+    assert_eq!(
+        destination.current_ratchet_public(),
+        Some(leviculum_core::Destination::ratchet_public_key(&ratchet))
+    );
     let back = conversation(&b, me, them);
     let summary: Vec<(bool, &str, Option<[u8; 32]>, Signature)> = back
         .iter()
@@ -1097,7 +1128,7 @@ fn ratspeak_history_comes_over_unsigned_in_utc_and_deleted_stays_deleted() {
         ]
     );
     assert!(messages[0].outbound && !messages[1].outbound);
-    assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+    assert_eq!(messages[0].delivery, Some(DeliveryState::Arrived));
     for message in &messages {
         assert_eq!(message.signature, Signature::Unverified);
         let ledger: Vec<&str> = message.ledger.iter().map(|e| e.what.as_str()).collect();
@@ -1776,7 +1807,7 @@ fn ratspeak_schema_33_is_read_with_its_replies_and_reactions() {
             .find(|m| m.id == Some(id))
             .expect("imported")
     };
-    assert_eq!(by_id(rat.ids[0]).delivery, Some(DeliveryState::Delivered));
+    assert_eq!(by_id(rat.ids[0]).delivery, Some(DeliveryState::Arrived));
     assert_eq!(by_id(rat.ids[3]).delivery, Some(DeliveryState::InMailbox));
     // Half a second of the received time is Ratspeak's, kept as whole seconds.
     assert_eq!(

@@ -28,6 +28,11 @@ NRF="$PWD"
 # shellcheck source-path=SCRIPTDIR/../..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$NRF/../scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$NRF/../scripts/nrf-rustflags.sh"
 elfdir="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 
 build=1
@@ -48,8 +53,8 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$build" -eq 1 ]; then
-    cargo build --release --bin t114 --features bsp-t114 --quiet
-    cargo build --release --bin rak4631 --features bsp-rak4631,rak-baseboard --quiet
+    nrf_cargo build --release --bin t114 --features bsp-t114 --quiet
+    nrf_cargo build --release --bin rak4631 --features bsp-rak4631,rak-baseboard --quiet
 fi
 
 image_bytes() { # PT_LOAD file bytes below the 1 MiB flash line, like the store gate

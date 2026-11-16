@@ -154,7 +154,7 @@ impl PeerAdmission {
         tracing::warn!(
             event = "AUTO_PEER_REFUSED",
             reason = reason.as_str(),
-            src = %src_addr,
+            src = %crate::peer_tag::show_ip(src_addr.into()),
             port = port,
             nic = nic,
             peers = peers,
@@ -693,20 +693,20 @@ where
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             tracing::debug!(
                                 "AutoInterface: incoming channel full for {}, dropping packet",
-                                src_ip
+                                crate::peer_tag::show_ip(src_ip.into())
                             );
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             tracing::warn!(
                                 "AutoInterface: incoming channel closed for {}",
-                                src_ip
+                                crate::peer_tag::show_ip(src_ip.into())
                             );
                         }
                     }
                 } else {
                     tracing::debug!(
                         "AutoInterface: data from unknown peer {}, dropping (no discovery yet)",
-                        src_ip
+                        crate::peer_tag::show_ip(src_ip.into())
                     );
                 }
             }
@@ -739,8 +739,8 @@ where
                 for key in &timed_out {
                     if let Some(peer) = peers.remove(key) {
                         tracing::info!(
-                            "AutoInterface: peer {}:{} on {} timed out",
-                            key.0,
+                            "AutoInterface: peer {} port {} on {} timed out",
+                            crate::peer_tag::show_ip(key.0.into()),
                             key.1,
                             peer.nic_name,
                         );
@@ -774,7 +774,7 @@ where
                             if let Err(e) = nic.mcast.send_to(&pkt, dest).await {
                                 tracing::debug!(
                                     "AutoInterface: reverse peering send to {} failed: {}",
-                                    peer_ip,
+                                    crate::peer_tag::show_ip((*peer_ip).into()),
                                     e
                                 );
                             }
@@ -846,7 +846,7 @@ fn handle_discovery_packet(
             tracing::debug!(
                 "AutoInterface: malformed discovery packet ({} bytes) from {} on {}: {:02x?}",
                 data.len(),
-                src_addr,
+                crate::peer_tag::show_ip(src_addr.into()),
                 nic.name,
                 &data[..data.len().min(64)]
             );
@@ -859,14 +859,13 @@ fn handle_discovery_packet(
     if !verify_discovery_token(&parsed.token, &config.group_id, &src_str) {
         let expected = make_discovery_token(&config.group_id, &src_str);
         tracing::debug!(
-            "AutoInterface: invalid discovery token from {} on {} (len={}, token={:02x?}, expected={:02x?}, group={:?}, src_str={:?})",
-            src_addr,
+            "AutoInterface: invalid discovery token from {} on {} (len={}, token={:02x?}, expected={:02x?}, group={:?})",
+            crate::peer_tag::show_ip(src_addr.into()),
             nic.name,
             data.len(),
             &parsed.token[..8],
             &expected[..8],
             String::from_utf8_lossy(&config.group_id),
-            src_str
         );
         return;
     }
@@ -928,8 +927,19 @@ fn handle_discovery_packet(
     // Format interface name: IP suffix + port (to distinguish same-IP peers),
     // plus a per-group tag so the same peer discovered in two groups does not
     // collide (empty for the default group).
-    let o = src_addr.octets();
-    let addr_short = format!("{:02x}{:02x}{:02x}{:02x}", o[12], o[13], o[14], o[15]);
+    // The peer part is its daily pseudonym (order 1678): the name is in every
+    // log line about the peer, and the address's low half is the host's MAC
+    // on an EUI-64 link-local address. `log_addresses = full` keeps the
+    // address's last four bytes, the name it had before.
+    let addr_short = match crate::peer_tag::mode() {
+        crate::peer_tag::LogAddresses::Pseudonym => {
+            crate::peer_tag::tag(src_addr.into()).to_string()
+        }
+        crate::peer_tag::LogAddresses::Full => {
+            let o = src_addr.octets();
+            format!("{:02x}{:02x}{:02x}{:02x}", o[12], o[13], o[14], o[15])
+        }
+    };
     let base_name = if peer_data_port == config.data_port {
         format!("auto/{}/{}", nic.name, addr_short)
     } else {
@@ -958,6 +968,7 @@ fn handle_discovery_packet(
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Auto,
             ingress_control: None,
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -988,8 +999,8 @@ fn handle_discovery_packet(
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
-                "AutoInterface: new-interface channel full, cannot register peer {}:{}",
-                src_addr,
+                "AutoInterface: new-interface channel full, cannot register peer {} port {}",
+                crate::peer_tag::show_ip(src_addr.into()),
                 peer_data_port,
             );
             peers.remove(&peer_key);
@@ -1005,8 +1016,8 @@ fn handle_discovery_packet(
     }
 
     tracing::info!(
-        "AutoInterface: new peer {}:{} on {} (id={}, name={})",
-        src_addr,
+        "AutoInterface: new peer {} port {} on {} (id={}, name={})",
+        crate::peer_tag::show_ip(src_addr.into()),
         peer_data_port,
         nic.name,
         id,
@@ -1033,12 +1044,19 @@ async fn peer_send_task(
                     .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => {
-                tracing::debug!("AutoInterface: send to {} failed: {}", peer_addr.ip(), e);
+                tracing::debug!(
+                    "AutoInterface: send to {} failed: {}",
+                    crate::peer_tag::show_ip((*peer_addr.ip()).into()),
+                    e
+                );
                 // Don't break, send errors are transient for UDP
             }
         }
     }
-    tracing::debug!("AutoInterface: send task for {} exiting", peer_addr.ip());
+    tracing::debug!(
+        "AutoInterface: send task for {} exiting",
+        crate::peer_tag::show_ip((*peer_addr.ip()).into())
+    );
 }
 
 #[cfg(test)]
@@ -1631,9 +1649,12 @@ mod tests {
             "36 refusals inside one event interval are one line\n{logs}"
         );
         let line = lines[0];
+        // The source is named by its daily tag, never by its address (1678).
+        let tag = crate::peer_tag::tag("fe80::204".parse().unwrap());
+        assert!(!line.contains("fe80::204"), "an address in {line}");
         for want in [
             "reason=\"cap\"",
-            "src=fe80::204",
+            &format!("src={tag}"),
             "port=42671",
             "nic=\"eth0\"",
             "peers=4",

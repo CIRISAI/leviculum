@@ -2,9 +2,13 @@
 //! shell, and the pure queries over them (which links are on screen, where the
 //! hints go).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::path::PathBuf;
 
-use tui_input::Input;
 use unicode_width::UnicodeWidthChar;
 
 use leviculum_micron::{FieldKind, MicronDocument};
@@ -13,9 +17,11 @@ use crate::bookmarks::Bookmarks;
 use crate::color::{ColorDepth, Tier};
 use crate::discovery::NomadNodeRegistry;
 use crate::image::{ImageSlot, SlotState};
+use crate::names::{PinStore, SearchHit};
 use crate::page_cache::PageCache;
 use crate::render::{
-    insert_image_rows, layout_blocks, FieldValue, RLine, RenderedField, RenderedLink,
+    insert_image_rows, layout_blocks, layout_blocks_wrapping, FieldValue, RLine, RenderedField,
+    RenderedLink,
 };
 use crate::theme::Theme;
 use crate::url::Target;
@@ -25,6 +31,8 @@ use leviculum_ui::tokens::{tokens, Tokens};
 use super::chrome::*;
 use super::event::*;
 use super::geometry::{regions, Rect};
+use super::input::{field_with, visual_scroll, Field, InputBuffer};
+use super::strings::{Lang, Text};
 
 /// The number of columns reserved on the right for the scrollbar.
 pub(crate) const SCROLLBAR_COLS: u16 = 1;
@@ -63,9 +71,6 @@ pub(crate) const CACHED_GLYPH: &str = "⚡";
 /// session identifies to the current page's node. An ordinary wide emoji (no
 /// VS16), so `UnicodeWidthStr` scores it 2 columns like the terminal draws it.
 pub(crate) const IDENTIFY_GLYPH: &str = "\u{1F511}";
-
-/// The instructional sentence shown in the footer while hint mode is active.
-pub(crate) const HINT_SENTENCE: &str = "type a hint label or link text";
 
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 pub(crate) const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -151,7 +156,7 @@ pub struct FieldEdit {
     /// The field kind.
     pub kind: FieldKind,
     /// The text editor for a text field (unused for checkbox/radio).
-    pub input: Input,
+    pub input: Field,
     /// The current checked state of a checkbox/radio (unused for text).
     pub checked: bool,
     /// The submit value of a checkbox/radio: its explicit value, or its label
@@ -432,6 +437,8 @@ pub enum Effect {
     Copy(String),
     /// Persist the model's bookmarks to disk (the IO shell writes the TOML).
     SaveBookmarks,
+    /// Persist the model's pins to disk (the IO shell writes the TOML).
+    SavePins,
     /// Turn identifying to `dest` on or off (the IO shell calls
     /// [`Session::set_identify`](crate::fetch::Session::set_identify), which
     /// persists the decision and closes the reused link). Always emitted
@@ -443,6 +450,10 @@ pub enum Effect {
         /// `true` to identify, `false` to go anonymous.
         on: bool,
     },
+    /// Write to this `lxmf@` address (32 lowercase hex): a page's link to
+    /// its operator, followed where a messenger hosts the browser
+    /// ([`Model::hosted`]). The standalone browser copies it instead.
+    Write(String),
     /// Quit the UI.
     Quit,
 }
@@ -488,9 +499,9 @@ pub struct Model {
     /// The current interaction mode (browse, address entry, hint, or search).
     pub mode: Mode,
     /// The address-bar editor.
-    pub input: Input,
+    pub input: Field,
     /// The in-page search query editor (`/`).
-    pub search_input: Input,
+    pub search_input: Field,
     /// The current query's matches over the laid-out page, highlighted while set.
     pub matches: Vec<Match>,
     /// Index into `matches` of the current match (the one scrolled to and drawn
@@ -521,6 +532,23 @@ pub struct Model {
     pub footer_hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
     pub hint_input: String,
+    /// Whether a messenger hosts the browser (the Browse tab of Loquax on
+    /// the phone and the M9): an `lxmf@` link then asks the host to write
+    /// ([`Effect::Write`]) rather than copying the address.
+    pub hosted: bool,
+    /// A host's name for the page the browser shows or loads (1621, the
+    /// name Loquax's Explore lists it by): set, the bar's title, the
+    /// address field while it is not edited and the loading line say it
+    /// instead of the page's own title, its hash and its path. `None` in
+    /// lnomad's own windows.
+    pub label: Option<String>,
+    /// The language the browser speaks: its catalogue's
+    /// ([`super::strings`]) English unless the shell names another.
+    pub lang: Lang,
+    /// What the active toast says, as the catalogue's words: the scene's
+    /// toast. [`toast`](Model::toast) holds the same words resolved in
+    /// [`lang`](Model::lang), which is what the terminal draws.
+    pub toast_text: Option<Text>,
     /// The active transient toast (fetch error, "copied", "bookmarked", ...), or
     /// `None`. Rendered as a floating overlay, not in the status bar; auto-expires
     /// and is cleared on the next key event. See [`Model::set_toast`].
@@ -555,7 +583,22 @@ pub struct Model {
     pub bookmarks: Bookmarks,
     /// Where the bookmarks are persisted, or `None` when no config dir is
     /// resolvable (the browser then runs without persistence).
+    #[cfg(feature = "std")]
     pub bookmarks_path: Option<PathBuf>,
+    /// The pinned `name -> hash` pairs ([`crate::names`]), loaded at startup
+    /// and saved on change.
+    pub pins: PinStore,
+    /// Where the pins are persisted, or `None` when no config dir is
+    /// resolvable (pins then last for the session only).
+    #[cfg(feature = "std")]
+    pub pins_path: Option<PathBuf>,
+    /// The open name-search result list, or `None`. Modal like the places
+    /// panel: it owns the keys until closed.
+    pub names: Option<NameResults>,
+    /// A fixed wall clock in Unix seconds for tests and for a board's own
+    /// clock; `None` reads the system clock ([`Model::wall_now`]). Only pins
+    /// and the result list's "last seen" read it.
+    pub clock: Option<u64>,
     /// Whether the places panel (bookmarks + discovered nodes) overlay is shown.
     pub show_places: bool,
     /// The selected row in the places panel, an index into [`places`].
@@ -584,6 +627,10 @@ pub struct Model {
     /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
     /// the next fresh load.
     pub cached_view: bool,
+    /// The page on screen is a hosted browser's word that this target did
+    /// not come (1669, [`crate::app::event`]'s failure page): its retry
+    /// replaces the entry rather than pushing a second one.
+    pub failed: Option<Target>,
     /// lnomad's own identity fingerprint as lowercase hex. Stable for the whole
     /// session, so the IO shell sets it ONCE at model construction from
     /// [`Session::fingerprint_hex`](crate::fetch::Session::fingerprint_hex).
@@ -602,7 +649,23 @@ pub struct Model {
     /// asks the session nothing) reads [`identifying`](Model::identifying) from
     /// here; the page cache only holds pages fetched this run, so the answer was
     /// always learned first.
-    pub identify_known: std::collections::BTreeSet<[u8; 16]>,
+    pub identify_known: alloc::collections::BTreeSet<[u8; 16]>,
+    /// A host that has said once what identifying means (1650): the first
+    /// switch-on in a hosted browser says the sentence a reader without the
+    /// help screen needs, every later one the usual toast.
+    pub identify_explained: bool,
+    /// The lines the scene carries for a host that scrolls the page itself
+    /// (1650, the phone's native scroll): the whole page while it has no
+    /// more lines than this, else a window this tall around
+    /// [`scroll`](Model::scroll). `None`, the terminal's rule: the
+    /// viewport's lines from `scroll`. [`scroll`](Model::scroll) keeps its
+    /// meaning either way, the top line the reader sees.
+    pub window: Option<usize>,
+    /// A host that scrolls the page sideways as well (1667, the phone): a
+    /// line of art without a space stays whole past the width instead of
+    /// breaking into pieces. `false`, the terminal's rule: every line
+    /// fits the width.
+    pub sideways: bool,
     /// The current page's inline images, one slot per standalone image link,
     /// in link order. Rebuilt on every page load; drives both the rows the
     /// relayout reserves and what is drawn into them.
@@ -617,7 +680,34 @@ pub struct Model {
     pub quit: bool,
 }
 
+/// A name search's result list ([`crate::names::search`]): what was typed,
+/// the hits in display order, the selected row, and whether the selected hit's
+/// "same name, other key" question is being asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameResults {
+    /// The query as typed.
+    pub query: String,
+    /// The hits, pinned first and conflicting last.
+    pub hits: Vec<SearchHit>,
+    /// The selected row, an index into `hits`.
+    pub sel: usize,
+    /// Whether the overlay is asking to confirm opening (and pinning) the
+    /// selected hit, whose name is pinned to another hash.
+    pub confirm: bool,
+}
+
 impl Model {
+    /// The wall clock in Unix seconds: [`clock`](Model::clock) when set, else
+    /// the system time. Without `std` there is no system time: a board sets
+    /// the clock from its own, and until it does pins read the epoch.
+    pub fn wall_now(&self) -> u64 {
+        #[cfg(feature = "std")]
+        let now = self.clock.unwrap_or_else(crate::discovery::now_unix_secs);
+        #[cfg(not(feature = "std"))]
+        let now = self.clock.unwrap_or(0);
+        now
+    }
+
     /// Lay a parsed document out at `width` and build a model from it, keeping
     /// the document so a later resize can re-wrap it.
     pub fn from_document(
@@ -655,7 +745,7 @@ impl Model {
             .map(|f| FieldEdit {
                 name: f.name.clone(),
                 kind: f.kind,
-                input: Input::new(f.value.clone()),
+                input: field_with(&f.value),
                 checked: f.checked,
                 value: f.value.clone(),
             })
@@ -676,9 +766,9 @@ impl Model {
                 // relayouts, so reading them here is sound.
                 let w = self.field_defs.get(i).map_or(1, |d| d.width.max(1));
                 FieldValue {
-                    text: fe.input.value().to_string(),
+                    text: InputBuffer::value(&fe.input).to_string(),
                     checked: fe.checked,
-                    scroll: fe.input.visual_scroll(w.saturating_sub(1)),
+                    scroll: visual_scroll(&fe.input, w.saturating_sub(1)),
                 }
             })
             .collect()
@@ -691,7 +781,7 @@ impl Model {
         self.width = width;
         let values = self.field_values();
         let (mut page, mut links, mut block_lines, mut field_defs) =
-            layout_blocks(&self.doc, width, self.theme, &values);
+            layout_blocks_wrapping(&self.doc, width, self.theme, &values, self.sideways);
         // Inline pictures are reserved AFTER the text is laid out: their height
         // is not known until the image has arrived and been decoded, which is
         // long after the page first appeared.
@@ -762,16 +852,24 @@ impl Model {
     /// Show a transient toast, stamped with the current tick so it can expire.
     /// Every transient message routes through here instead of the status bar.
     pub fn set_toast(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.say(kind, Text::Raw(text.into()));
+    }
+
+    /// Show a toast in the catalogue's words, resolved in the model's
+    /// language for the terminal and kept as keys for the scene.
+    pub fn say(&mut self, kind: ToastKind, text: Text) {
         self.toast = Some(Toast {
             kind,
-            text: text.into(),
+            text: text.resolve(self.lang),
             shown_at: self.now_tick,
         });
+        self.toast_text = Some(text);
     }
 
     /// Dismiss any active toast (a navigation or key event clears it early).
     pub fn dismiss_toast(&mut self) {
         self.toast = None;
+        self.toast_text = None;
     }
 
     /// Record whether the session identifies to `dest`: fold it into
@@ -794,7 +892,7 @@ impl Model {
     pub(crate) fn expire_toast(&mut self) {
         if let Some(toast) = &self.toast {
             if self.now_tick.saturating_sub(toast.shown_at) >= TOAST_TICKS {
-                self.toast = None;
+                self.dismiss_toast();
             }
         }
     }

@@ -1,0 +1,24 @@
+┌  Loquax────────────────┐┌● ReticulumNet NL · Gruppe über Relais──── no relay ┐
+│▌ReticulumNet NL  08:55 ││                                                    │
+│▌Anna: Schön, dass du … ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ Anna: Hallo zusammen  08:40                        │
+│                        ││                                                    │
+│                        ││ Ben: Moin Anna  08:45                              │
+│                        ││                                                    │
+│                        ││ Ben: hat mit 👍  auf eine Nachricht                 │
+│                        ││ reagiert, die hier nicht liegt  08:46              │
+│                        ││                                                    │
+│                        ││                          Ich bin auch da  08:50 ◷  │
+│                        ││                                                    │
+│                        ││▌Anna: Schön, dass du da bist  08:55                │
+│                        │├  to ReticulumNet NL Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

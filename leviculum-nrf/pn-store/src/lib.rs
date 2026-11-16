@@ -84,6 +84,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::ops::ControlFlow;
 
 use leviculum_lxmf::constants::DESTINATION_LENGTH;
@@ -200,7 +201,20 @@ impl RawRecord<'_> {
 /// record still reads flags `0xFF` (the commit word is written last) and
 /// the walk stops before it; a half-erased page fails its header CRC and
 /// is skipped whole.
+///
+/// One walk in the image, not one per caller: the generic face hands its
+/// closure to [`scan_dyn`], which is compiled once. Twelve callers each
+/// carried their own inlined copy of this loop until order 1355, which
+/// needed the bytes back on the RAK4631 (an indirect call per record, at
+/// most a few hundred a walk, costs nothing a scan of 64 KiB notices).
+#[inline]
 pub fn scan(region: &[u8], mut visit: impl FnMut(&RawRecord<'_>)) {
+    scan_dyn(region, &mut visit);
+}
+
+/// [`scan`]'s one compiled body.
+#[inline(never)]
+pub fn scan_dyn(region: &[u8], visit: &mut dyn FnMut(&RawRecord<'_>)) {
     let pages = region.len() / SECTOR_SIZE as usize;
     for page in 0..pages {
         let base = page * SECTOR_SIZE as usize;
@@ -434,6 +448,55 @@ pub fn board_role_config(
     }
 }
 
+/// The `PN_REJECT` reason word of a `/get` the board refused because the
+/// heap it stood on funded no answer (order 1676, LV-1006).
+pub const HEAP_LOW: &str = "heap_low";
+
+/// One `/get` as the board answers it: the cap it was served to and
+/// whether the answer is the board's heap refusal.
+#[derive(Debug)]
+pub struct BoardGet {
+    /// What the role answered.
+    pub outcome: leviculum_lxmf::GetOutcome,
+    /// The cap this round was held to, `live_cap=` of the `SERVE_CAP` line.
+    pub live_cap: usize,
+    /// The answer is a refusal the heap alone caused
+    /// ([`PropagationNode::refused_for_heap`]): the board logs it as
+    /// `PN_REJECT reason=heap_low via=get`.
+    pub heap_low: bool,
+}
+
+/// Answer one `/get` the way the board does: re-read the serve cap from
+/// the heap it has now (`free`, `largest`, the census's two figures), hold
+/// the role to it, answer, and say whether the answer is a heap refusal.
+///
+/// This is the serve transient's whole protection (Lead, 2026-11-11, order
+/// 1676): the boot plan reserves nothing for it (`SERVE_RESERVE_BYTES` is
+/// 0, `HEAP_BUDGET_SERVE mode=live_gated`), so the gate is live. A heap
+/// that funds no message after [`leviculum_heap_budget::SERVE_MARGIN_BYTES`]
+/// turns the `/get` into the refusal a stock client retries on its next
+/// sync, never into an allocation the board cannot make. The refusal
+/// allocates nothing the funded serve would not.
+pub fn board_answer_get<S: PropagationStore>(
+    role: &mut PropagationNode<S>,
+    boot_cap: usize,
+    free: usize,
+    largest: usize,
+    request: &[u8],
+    mailbox: &[u8; DESTINATION_LENGTH],
+    now_secs: u64,
+) -> Result<BoardGet, leviculum_lxmf::GetError> {
+    let live_cap = leviculum_heap_budget::live_serve_cap(boot_cap, free, largest);
+    role.set_serve_cap_bytes(Some(live_cap));
+    let outcome = role.handle_get(request, mailbox, now_secs)?;
+    let heap_low = role.refused_for_heap(&outcome);
+    Ok(BoardGet {
+        outcome,
+        live_cap,
+        heap_low,
+    })
+}
+
 /// The fewest bytes an upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`)
 /// can wrap a body of more than 255 B in: a fixarray, the timestamp as a
 /// one-byte fixint, a fixarray, and a `bin 16` header. A reference client
@@ -481,55 +544,99 @@ pub fn board_accepts_resource_of<S: PropagationStore>(
     data_size: u64,
     from_validated_peer: bool,
 ) -> bool {
-    board_oversize_refusal(role, data_size, from_validated_peer).is_none()
+    board_resource_refusal(role, data_size, from_validated_peer, false).is_none()
 }
 
-/// Why [`board_accepts_resource_of`] refuses a resource, as the line the
-/// board prints for it, or `None` when it takes it.
+/// Why the board refuses a resource at its advertisement, as the line it
+/// prints for it, or `None` when it takes it: the same reasons, in the same
+/// order and with the same keys, as `lnpnd`'s gate
+/// (`lnpnd/src/engine.rs`, the `ResourceAdvertised` arm).
 ///
-/// `cap` is the tightest limit the resource is held to: the announced
-/// per-sync limit, and for a client's upload also
-/// [`MAX_UPLOAD_RESOURCE_BYTES`]. Until 867 this refusal was the one
-/// refusing arm of the board's role with no `PN_REJECT` line: a 122 953 B
-/// upload to a board on 2026-10-20 was refused correctly, with the RCL the
-/// reference sends, and left nothing on the capture to say so.
-pub fn board_oversize_refusal<S: PropagationStore>(
+/// * A client's upload above what the store can keep is `too_large`, its
+///   limit [`MAX_UPLOAD_RESOURCE_BYTES`]. That is the board's own delivery
+///   limit: `lnpnd` stores up to lxmd's 1 MB and the record log one page,
+///   so where `lnpnd` stores a 300 KB upload local only, the board refuses
+///   it here (order 1355). The client is not told the number; no stock
+///   client reads a propagation node's limits before it uploads (only a
+///   peer does, from announce fields 3 and 4,
+///   `reference/LXMF/LXMF/LXMRouter.py:2367-2375`), and the refusal on the
+///   wire is the RCL the reference sends, with no reason.
+/// * A peer's batch above the announced per-sync limit is
+///   `over_sync_limit`, the reference's own gate
+///   (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
+/// * A peer's batch while `store_full` (a sync message the store could not
+///   hold since the last sweep) is `store_full`, so the peer keeps its
+///   messages for a later round instead of moving its cursor past them.
+///
+/// Until 867 the size refusal was the one refusing arm of the board's role
+/// with no `PN_REJECT` line: a 122 953 B upload to a board on 2026-10-20
+/// was refused correctly, with the RCL the reference sends, and left
+/// nothing on the capture to say so. Until 1355 it read `reason=oversize`
+/// with `size=` and `cap=`, a word and keys of its own.
+pub fn board_resource_refusal<S: PropagationStore>(
     role: &PropagationNode<S>,
     data_size: u64,
     from_validated_peer: bool,
-) -> Option<OversizeRefusal> {
+    store_full: bool,
+) -> Option<ResourceRefusal> {
     let sync_limit = role.resource_limit_bytes();
-    let cap = if from_validated_peer {
-        sync_limit
+    let (reason, limit) = if !from_validated_peer {
+        ("too_large", sync_limit.min(MAX_UPLOAD_RESOURCE_BYTES))
+    } else if data_size > sync_limit {
+        ("over_sync_limit", sync_limit)
+    } else if store_full {
+        return Some(ResourceRefusal {
+            reason: "store_full",
+            bytes: data_size,
+            limit: 0,
+        });
     } else {
-        sync_limit.min(MAX_UPLOAD_RESOURCE_BYTES)
+        return None;
     };
-    (data_size > cap).then_some(OversizeRefusal {
-        size: data_size,
-        cap,
+    (data_size > limit).then_some(ResourceRefusal {
+        reason,
+        bytes: data_size,
+        limit,
     })
 }
 
-/// A resource refused at its advertisement for its size: the body of
-/// `PN_REJECT reason=oversize via=resource size=<bytes> cap=<bytes>`, keys
-/// in the shape of every other `PN_REJECT` line, so a capture counts them
-/// with the rest and reads how far over the limit the sender was.
+/// A resource refused at its advertisement: the body of
+/// `PN_REJECT reason=<word> via=resource bytes=<bytes> limit=<bytes>`, the
+/// keys `lnpnd` prints for the same refusal (`log_reject_sized`), so one
+/// analysis reads both. `limit=0` for `store_full`, as on `lnpnd`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OversizeRefusal {
-    /// The advertised (uncompressed) size, bytes.
-    pub size: u64,
+pub struct ResourceRefusal {
+    /// `too_large`, `over_sync_limit` or `store_full`.
+    pub reason: &'static str,
+    /// The advertised (uncompressed) size.
+    pub bytes: u64,
     /// The limit it failed, bytes.
-    pub cap: u64,
+    pub limit: u64,
 }
 
-impl core::fmt::Display for OversizeRefusal {
+impl core::fmt::Display for ResourceRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "reason=oversize via=resource size={} cap={}",
-            self.size, self.cap
+            "reason={} via=resource bytes={} limit={}",
+            self.reason, self.bytes, self.limit
         )
     }
+}
+
+/// The offer the board builds toward `peer`: held to the peer's limits and
+/// to our own announced transfer limit, so a message above ours (a client
+/// upload stored local only, [`PropagationNode::is_local_only`]) is skipped
+/// for good and only its recipient collecting here takes it away, as on
+/// `lnpnd` (1295's rule; `lnpnd/src/peering.rs`). Both of the board's
+/// offer sites build through this.
+pub fn board_offer_builder<S: PropagationStore>(
+    role: &PropagationNode<S>,
+    peer: &leviculum_lxmf::peering::Peer,
+    offer_budget: usize,
+) -> leviculum_lxmf::peering::OfferBuilder {
+    leviculum_lxmf::peering::OfferBuilder::new(peer, offer_budget)
+        .with_own_transfer_limit(role.transfer_limit_bytes())
 }
 
 /// A verdict the role reached that the node then refused: the body of
@@ -651,6 +758,13 @@ pub struct PnStore<R> {
     /// Pages in the region, for [`PropagationStore::capacity`].
     pages: u32,
     queue: VecDeque<FlushOp>,
+    /// A receive time no message record, durable or queued, is older than;
+    /// `None` until the first expiry walk has measured one. What lets the
+    /// sweep skip the region when nothing can have expired
+    /// ([`PropagationStore::for_each_received_before`]): every append
+    /// lowers it to its own time, and nothing else can make it wrong,
+    /// since a purge and a page reclaim only take records away.
+    oldest_live: Cell<Option<u32>>,
 }
 
 impl<R: Region> PnStore<R> {
@@ -660,6 +774,7 @@ impl<R: Region> PnStore<R> {
             region,
             pages,
             queue: VecDeque::new(),
+            oldest_live: Cell::new(None),
         }
     }
 
@@ -911,13 +1026,104 @@ impl<R: Region> PropagationStore for PnStore<R> {
             // limit (field 3 = 4 kB) keeps conforming peers below this.
             return Err(StorageError::Full);
         }
+        let time = received_at.min(u32::MAX as u64) as u32;
+        if let Some(oldest) = self.oldest_live.get() {
+            self.oldest_live.set(Some(oldest.min(time)));
+        }
         self.queue.push_back(FlushOp::Append {
             key: *transient_id,
-            time: received_at.min(u32::MAX as u64) as u32,
+            time,
             tag: stamp_value.min(MESSAGE_TAG_MAX),
             body: body.to_vec(),
         });
         Ok(())
+    }
+
+    /// The expiry sweep's walk, which reads the region only when something
+    /// in it can have expired: while the oldest receive time the last walk
+    /// measured is not below `before`, nothing is, and the call costs no
+    /// scan at all (order 1355, the board's half of 1295's rule). A walk
+    /// that does run measures the oldest time again over every message
+    /// record it passes and every queued append, so the tick after an
+    /// expiry walks once more and then rests.
+    ///
+    /// The record log has no receive-time index and the board has no heap
+    /// for one, so a walk that runs is still one [`scan`]: 8 to 33 ms for
+    /// the full 64 KiB on the board (concept page §Scan). What the hint
+    /// takes away is the walk on the ticks where nothing expired, which is
+    /// every tick of a store younger than the expiry window.
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        if self
+            .oldest_live
+            .get()
+            .is_some_and(|oldest| u64::from(oldest) >= before)
+        {
+            return Ok(());
+        }
+        let mut oldest = self
+            .queue
+            .iter()
+            .filter_map(|op| match op {
+                FlushOp::Append { time, tag, .. } if *tag <= MESSAGE_TAG_MAX => Some(*time),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(u32::MAX);
+        let mut done = false;
+        self.scan_messages(|record| {
+            if record.body.len() < MIN_BODY_LEN {
+                return;
+            }
+            oldest = oldest.min(record.time);
+            if done || u64::from(record.time) >= before {
+                return;
+            }
+            let mut destination_hash = [0u8; DESTINATION_LENGTH];
+            destination_hash.copy_from_slice(&record.body[..DESTINATION_LENGTH]);
+            done = visit(&StoredMessage {
+                transient_id: *record.key,
+                destination_hash,
+                size: record.body.len() as u32,
+                received_at: record.time as u64,
+                stamp_value: record.tag,
+                sequence: record.sequence(),
+            })
+            .is_break();
+        });
+        self.oldest_live.set(Some(oldest));
+        Ok(())
+    }
+
+    /// A message record of `transient_id` received at or after
+    /// `received_since` that is purged on flash, or whose purge is queued:
+    /// the message left this store before it expired, and the record says
+    /// so until the round-robin reclaim erases its page. That is how a
+    /// collected, delivered or re-priced id stays a duplicate across a
+    /// restart (1294 item 4 on the board, order 1355) without a byte of
+    /// new flash format or of heap: the purge already writes it.
+    ///
+    /// How long it holds is one lap of the ring, the same lap a message
+    /// stored with it lives: on the 16-page store at the field's 22.4
+    /// messages an hour, about eight hours (16 pages of 11 field-sized
+    /// records). After it the board accepts a re-offered copy again, as it
+    /// did for every departed id before.
+    ///
+    /// Cost: one [`scan`], beside the one `contains` already makes.
+    fn departed(&self, transient_id: &[u8; 32], received_since: u64) -> Result<bool, StorageError> {
+        let mut found = false;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                found |= record.tag <= MESSAGE_TAG_MAX
+                    && record.key == transient_id
+                    && u64::from(record.time) >= received_since
+                    && (!record.live || self.is_purge_masked(record.offset));
+            })
+        });
+        Ok(found)
     }
 
     /// Durable records only — a queued append is deliberately absent (see
@@ -1201,8 +1407,10 @@ pub fn decode_peer_record(body: &[u8]) -> Option<PeerRecord> {
         last_heard: le64(87),
         cursor: le64(95),
         is_static: flags & PEER_FLAG_STATIC != 0,
-        // The board does not rotate its table, so the log does not keep
-        // the host's traffic statistics (`PeerRecord::traffic`).
+        // The board holds its table to the cap by cursor
+        // (`PeerTable::trim_to_cap`), not by the host's traffic-ranked
+        // rotation, so the log does not keep those statistics
+        // (`PeerRecord::traffic`).
         traffic: Default::default(),
     })
 }
@@ -1301,6 +1509,98 @@ impl<R: Region> PnPeerStore<R> {
             })
         });
         newest
+    }
+}
+
+impl<R: Region> PnPeerStore<R> {
+    /// Re-save every peer record whose newest copy has aged into the older
+    /// half of the region, unchanged, and return whose. The queued writes
+    /// drain with the engine's next flush like any other save.
+    ///
+    /// The peer records live in the message log, whose round-robin reclaim
+    /// erases its oldest page whole (`leviculum-record-log`, `advance`). A
+    /// peer is saved when it is added, refreshed by an announce or moved by
+    /// a sync; a stored peer that does none of these for a lap of the region
+    /// was erased with its page, and the next boot restored the table
+    /// without it and without any `PN_PEER action=drop`. That is how the
+    /// T114 went from 15 to 14 to 13 peers across the panic reboots of
+    /// 2026-11-10 (order 1651, LV-1006): its four announcing peers were
+    /// re-saved on every announce and survived, the quiet ones were reclaimed
+    /// one by one, and the loss only showed at the next restore. The same
+    /// half-lap rule keeps the recalled announces
+    /// ([`Self::remember_announce`]) and the operator lists
+    /// ([`board_list_refresh_ops`]).
+    ///
+    /// A destination with a queued save or remove is skipped: the queue
+    /// already carries its newest state.
+    pub fn refresh_ageing_peers(&mut self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let mut newest_page = 0u32;
+        let mut pages = 0u32;
+        // Per destination: the newest copy's sequence and page, and how many
+        // live copies there are (an interrupted save leaves two).
+        let mut held: Vec<([u8; DESTINATION_LENGTH], u64, u32, usize, PeerRecord)> = Vec::new();
+        self.region.with_bytes(|bytes| {
+            pages = (bytes.len() / SECTOR_SIZE as usize) as u32;
+            scan(bytes, |record| {
+                newest_page = newest_page.max(record.page_seq);
+                if !record.live || record.tag != TAG_PEER || self.is_purge_masked(record.offset) {
+                    return;
+                }
+                let Some(decoded) = decode_peer_record(record.body) else {
+                    return;
+                };
+                let seq = record.sequence();
+                match held
+                    .iter_mut()
+                    .find(|entry| entry.0 == decoded.destination_hash)
+                {
+                    Some(entry) => {
+                        entry.3 += 1;
+                        if entry.1 < seq {
+                            entry.1 = seq;
+                            entry.2 = record.page_seq;
+                            entry.4 = decoded;
+                        }
+                    }
+                    None => held.push((decoded.destination_hash, seq, record.page_seq, 1, decoded)),
+                }
+            })
+        });
+        let mut refreshed = Vec::new();
+        for (destination_hash, _, page, copies, record) in held {
+            let ageing = newest_page - page >= pages / 2;
+            if !(ageing || copies > 1)
+                || self.removed.contains(&destination_hash)
+                || self
+                    .pending
+                    .iter()
+                    .any(|queued| queued.destination_hash == destination_hash)
+            {
+                continue;
+            }
+            let _ = self.save(&record);
+            refreshed.push(destination_hash);
+        }
+        refreshed
+    }
+
+    /// Live peer records whose body no longer decodes: [`PeerStore::load_all`]
+    /// leaves them out, so a restore without them is a table that lost a
+    /// peer without a drop. The engine counts them at boot and says so.
+    pub fn undecodable_peer_records(&self) -> usize {
+        let mut count = 0;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                if record.live
+                    && record.tag == TAG_PEER
+                    && !self.is_purge_masked(record.offset)
+                    && decode_peer_record(record.body).is_none()
+                {
+                    count += 1;
+                }
+            })
+        });
+        count
     }
 }
 
@@ -1642,11 +1942,12 @@ pub fn board_peering_config(
     }
 }
 
-/// The most hashes one operator list holds: the peer table's cap, which
-/// bounds the static list by what the table can hold, and the same for the
-/// two allow lists so one frame shape and one bound serve all three
-/// (256 B of body, well inside a page).
-pub const BOARD_LIST_MAX: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
+/// The most hashes one operator list holds, the same for the static list
+/// and the two allow lists so one frame shape and one bound serve all three
+/// (256 B of body, well inside a page). It was the peer table's cap until
+/// order 1641 lowered that to seven for the heap; the lists live in flash and
+/// in the envelope (`PN_LIST_MAX_HASHES`), so they keep their sixteen.
+pub const BOARD_LIST_MAX: usize = 16;
 
 /// One of the operator's lists, set at flash time (`lnflash --static-peer`,
 /// `--auth-allowed`, `--control-allowed`) and read at boot. Each is one

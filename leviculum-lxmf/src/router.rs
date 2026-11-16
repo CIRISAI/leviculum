@@ -1,10 +1,8 @@
 //! Long-lived, sans-I/O LXMF router.
 
-#[cfg(feature = "pow")]
-use alloc::collections::VecDeque;
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec,
     vec::Vec,
 };
@@ -20,8 +18,8 @@ use crate::{
     message::{DeliveryMethod, Field, Message, MessageError, Verification},
     msgpack,
     node::{
-        DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
-        LxmfNodeError, LxmfNodeEvent, LxmfResourceSendParams, PreparedLxmfSend, APP_NAME,
+        DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundProof, InboundRejection,
+        LxmfNode, LxmfNodeError, LxmfNodeEvent, LxmfResourceSendParams, PreparedLxmfSend, APP_NAME,
         DELIVERY_ASPECT,
     },
     propagation::PropagationError,
@@ -97,6 +95,23 @@ pub enum MessageState {
     Rejected = 0xfd,
     Cancelled = 0xfe,
     Failed = 0xff,
+}
+
+/// Why one delivery attempt failed ([`RouterEvent::AttemptFailed`]): to the
+/// recipient, or an upload to a propagation node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptFailure {
+    Delivery(DeliveryFailure),
+    Upload(crate::propagation_client::PropagationUploadFailure),
+}
+
+impl core::fmt::Display for AttemptFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Delivery(failure) => failure.fmt(f),
+            Self::Upload(failure) => failure.fmt(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -300,7 +315,27 @@ pub enum RouterEvent {
         message_id: [u8; 32],
         state: MessageState,
     },
+    /// One delivery attempt of a queued message failed, and the router will
+    /// try it again or, with its attempts run out, fail it. `Failed` itself
+    /// carries no reason (Python's `LXMessage.FAILED` neither); this is the
+    /// only place the transport's says why, so an application that wants to
+    /// tell a link that died mid-transfer from one that never came keeps
+    /// the last one it saw.
+    AttemptFailed {
+        message_id: [u8; 32],
+        reason: AttemptFailure,
+    },
     MessageReceived(Box<Message>),
+    /// A propagation node proved the upload of a queued message: its
+    /// `transient_id`, the id the node stores it under, which only the
+    /// sender and the nodes holding it know
+    /// (`reference/LXMF/LXMF/LXMessage.py:433-434`). A sender asks the node
+    /// by it what became of the message (`/lev/status`, 1394/1395). Comes
+    /// before the message's `AwaitingCollection` state.
+    PropagationUploaded {
+        message_id: [u8; 32],
+        transient_id: [u8; 32],
+    },
     InboundRejected {
         method: DeliveryMethod,
         reason: InboundRejection,
@@ -327,9 +362,15 @@ pub enum RouterEvent {
     /// [`DeliveryAnnounce::decode`] on the app data. Emitting the result is
     /// what keeps every client from re-implementing both, and it is the only
     /// path on which a peer's display name reaches an application.
+    ///
+    /// `path_response` is Python's `is_path_response`
+    /// ([`leviculum_core::ReceivedAnnounce::is_path_response`]): the announce
+    /// answered a path request, as a rule from a transport node's cache, and
+    /// says only that the peer announced once, not that it is there now.
     PeerAnnounced {
         destination: DestinationHash,
         announce: DeliveryAnnounce,
+        path_response: bool,
     },
     InvalidSignature([u8; 32]),
     InvalidStamp([u8; 32]),
@@ -509,7 +550,25 @@ pub struct LxmfRouter {
     #[cfg(feature = "pow")]
     pending_inbound_stamps: VecDeque<(Message, f64)>,
     propagation: Option<PropagationRuntime>,
+    /// Proofs of accepted messages held until the integration says each
+    /// message is kept ([`Self::hold_proofs_until_kept`]), oldest first and
+    /// at most [`MAX_HELD_PROOFS`].
+    held_proofs: VecDeque<([u8; 32], InboundProof)>,
+    /// What the router made of the last single delivery packet: the ID of
+    /// the message it accepted, `None` for anything else. Its proof request
+    /// comes right behind it.
+    last_packet: Option<[u8; 32]>,
+    /// A link packet's proof request, which the core emits right before the
+    /// packet's data: it waits here for what the router makes of the data.
+    pending_link_proof: Option<InboundProof>,
 }
+
+/// How many proofs [`LxmfRouter::hold_proofs_until_kept`] holds at once. One
+/// beyond it drops the oldest unproven: its sender retries, as it does for a
+/// message that never arrived. Proofs are released within a pump of the
+/// integration, so the bound is only reached by an integration that stopped
+/// keeping.
+pub const MAX_HELD_PROOFS: usize = 64;
 
 struct RestoredRouterState {
     outbound: BTreeMap<[u8; 32], OutboundEntry>,
@@ -574,6 +633,21 @@ where
 }
 
 impl LxmfRouter {
+    /// Estimated heap bytes of the router's id tables and queues, for a
+    /// host daemon's census (lnpnd's `PN_CENSUS mailbox=`, order 1515): the
+    /// map spines by the census's B-tree model, the held proofs' ring. The
+    /// messages behind the outbound entries are not followed.
+    pub fn heap_bytes(&self) -> usize {
+        use leviculum_core::heap_census::{btree_map_bytes, btree_set_bytes, vec_deque_bytes};
+        btree_map_bytes(&self.outbound)
+            + btree_set_bytes(&self.builds_outstanding)
+            + btree_map_bytes(&self.delivered_ids)
+            + btree_map_bytes(&self.processed_ids)
+            + btree_set_bytes(&self.ignored)
+            + btree_set_bytes(&self.preemptive_path_requests)
+            + vec_deque_bytes(&self.held_proofs)
+    }
+
     pub fn new(node: LxmfNode, identity_hash: [u8; 16], config: RouterConfig) -> Self {
         Self {
             node,
@@ -596,6 +670,91 @@ impl LxmfRouter {
             #[cfg(feature = "pow")]
             pending_inbound_stamps: VecDeque::new(),
             propagation: None,
+            held_proofs: VecDeque::new(),
+            last_packet: None,
+            pending_link_proof: None,
+        }
+    }
+
+    /// Prove an accepted message only once the integration kept it: a home
+    /// node archives every received message, and a sender told DELIVERED
+    /// for one it then lost has lost it for good, since it will not try
+    /// again (leviculum 1239). The proof of every message the router accepts
+    /// waits for [`Self::release_proofs`] with its ID, which the integration
+    /// calls once the message is stored. Whatever the router does not
+    /// accept (a duplicate, a rejection, a stamp still being checked) is
+    /// proven at once, as before. See [`LxmfNode::hold_proofs`] for what is
+    /// not held.
+    pub fn hold_proofs_until_kept<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+    ) -> Result<(), RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        self.node.hold_proofs(node)?;
+        Ok(())
+    }
+
+    /// Send the held proofs of `message_id`: the integration kept it. An ID
+    /// with no proof held (a message from a propagation node, one proven at
+    /// once, one already released) sends nothing, nor does one whose link
+    /// closed meanwhile, and the other held proofs stay held (1412).
+    pub fn release_proofs<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        message_id: &[u8; 32],
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let mut output = RouterOutput {
+            core: TickOutput::default(),
+            events: Vec::new(),
+        };
+        let mut kept = VecDeque::with_capacity(self.held_proofs.len());
+        for (id, proof) in core::mem::take(&mut self.held_proofs) {
+            if id == *message_id {
+                output.core.merge(prove_or_drop(node, &proof, Some(&id)));
+            } else {
+                kept.push_back((id, proof));
+            }
+        }
+        self.held_proofs = kept;
+        Ok(output)
+    }
+
+    /// One proof request, paired with what the router made of its packet:
+    /// held under the ID of a message it accepted, sent at once otherwise.
+    fn settle_proof<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        proof: InboundProof,
+        accepted: Option<[u8; 32]>,
+        core: &mut TickOutput,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        match accepted {
+            Some(message_id) => {
+                if self.held_proofs.len() >= MAX_HELD_PROOFS {
+                    if let Some((_dropped, _)) = self.held_proofs.pop_front() {
+                        crate::tracing::debug!(
+                            "LXMF_PROOF_HELD_DROPPED message={}",
+                            crate::tracing::Short(&_dropped)
+                        );
+                    }
+                }
+                self.held_proofs.push_back((message_id, proof));
+            }
+            // At once, or dropped when it cannot go: no fault of ours (1412).
+            None => core.merge(prove_or_drop(node, &proof, None)),
         }
     }
 
@@ -1249,9 +1408,14 @@ impl LxmfRouter {
             core: node_output.core,
             events: Vec::new(),
         };
+        let mut proofs = Vec::new();
         for event in node_output.events {
-            self.handle_node_event(event, node.now_ms(), now_unix, &mut output.events);
+            match event {
+                LxmfNodeEvent::ProofRequested(proof) => proofs.push(proof),
+                event => self.handle_node_event(event, node.now_ms(), now_unix, &mut output.events),
+            }
         }
+        self.pair_proofs(node, event, proofs, &mut output)?;
         if let NodeEvent::LinkClosed {
             destination_hash,
             is_initiator: true,
@@ -1292,6 +1456,7 @@ impl LxmfRouter {
                     output.events.push(RouterEvent::PeerAnnounced {
                         destination: *announce.destination_hash(),
                         announce: decoded,
+                        path_response: announce.is_path_response(),
                     });
                 }
             }
@@ -1303,6 +1468,59 @@ impl LxmfRouter {
         }
         self.apply_deadline(&mut output.core);
         Ok(self.finish_output(output))
+    }
+
+    /// Pair held proof requests with the verdict on their packet. The core
+    /// emits a single packet's `PacketReceived` and then its proof request,
+    /// a link packet's proof request and then its `LinkDataReceived`, each
+    /// pair back to back, so the verdict in between is that packet's.
+    fn pair_proofs<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        event: &NodeEvent,
+        proofs: Vec<InboundProof>,
+        output: &mut RouterOutput,
+    ) -> Result<(), RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let accepted = output.events.iter().find_map(|event| match event {
+            RouterEvent::MessageReceived(message) => Some(message.message_id),
+            _ => None,
+        });
+        match event {
+            NodeEvent::PacketReceived { destination, .. }
+                if *destination == self.node.delivery_destination_hash() =>
+            {
+                self.last_packet = accepted;
+            }
+            NodeEvent::LinkDataReceived { link_id, .. } => {
+                if let Some(proof) = self.pending_link_proof.take_if(
+                    |proof| matches!(proof, InboundProof::Link { link_id: l, .. } if l == link_id),
+                ) {
+                    self.settle_proof(node, proof, accepted, &mut output.core);
+                }
+            }
+            _ => {}
+        }
+        for proof in proofs {
+            match proof {
+                InboundProof::Packet { .. } => {
+                    let accepted = self.last_packet.take();
+                    self.settle_proof(node, proof, accepted, &mut output.core);
+                }
+                InboundProof::Link { .. } => {
+                    // A request whose data never came is proven, as it was
+                    // before proofs were held.
+                    if let Some(stale) = self.pending_link_proof.replace(proof) {
+                        self.settle_proof(node, stale, None, &mut output.core);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Make queued direct deliveries immediately eligible when their Link
@@ -1387,9 +1605,13 @@ impl LxmfRouter {
                     });
                 }
             }
-            LxmfNodeEvent::DeliveryFailed { message_id, .. } => {
+            LxmfNodeEvent::DeliveryFailed { message_id, reason } => {
                 let mut changed = false;
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
+                    out.push(RouterEvent::AttemptFailed {
+                        message_id,
+                        reason: AttemptFailure::Delivery(reason),
+                    });
                     let next_attempt_ms =
                         entry.next_attempt_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     changed = entry.set_state(MessageState::Outbound, &mut self.build_epochs)
@@ -1530,6 +1752,12 @@ impl LxmfRouter {
         let Some((_, raw)) = message.fields.iter().find(|(key, _)| *key == FIELD_TICKET) else {
             return;
         };
+        // A relay's copy of another writer's message (1482) carries the
+        // writer's ticket for the relay, passed through: the relay never
+        // issued it, so it is no ticket of the relay's to send with.
+        if crate::relay::passed_through(&message.content, &message.fields, &message.source_hash) {
+            return;
+        }
         let Ok(ticket) = Ticket::from_field_value(raw) else {
             return;
         };
@@ -2658,6 +2886,36 @@ fn verification_from(value: u64) -> Result<Verification, RouterError> {
     }
 }
 
+/// Send one proof, or drop it when it cannot go: its link closed while the
+/// message waited to be kept, or its destination is gone. The sender
+/// retries as for any message that drew no proof, and a duplicate of a kept
+/// message is proven at once. Until 1412 one such proof made
+/// [`LxmfRouter::release_proofs`] fail after it had drained every other held
+/// proof, and a home under a one-message-a-second sender (miauhaus,
+/// 2026-11-04) logged its engine as broken.
+fn prove_or_drop<R, C, S>(
+    node: &mut NodeCore<R, C, S>,
+    proof: &InboundProof,
+    _message_id: Option<&[u8; 32]>,
+) -> TickOutput
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    match LxmfNode::prove(node, proof) {
+        Ok(output) => output,
+        Err(_) => {
+            crate::tracing::debug!(
+                "LXMF_PROOF_UNSENT message={} link={}",
+                crate::tracing::Short(_message_id.map_or(&[][..], |id| &id[..])),
+                matches!(proof, InboundProof::Link { .. })
+            );
+            TickOutput::default()
+        }
+    }
+}
+
 impl From<msgpack::Error> for RouterError {
     fn from(_: msgpack::Error) -> Self {
         Self::CorruptSnapshot
@@ -3131,6 +3389,7 @@ mod persistence_tests {
                 RouterEvent::PeerAnnounced {
                     destination,
                     announce,
+                    ..
                 } => Some((*destination, announce.clone())),
                 _ => None,
             })
@@ -3847,6 +4106,56 @@ mod persistence_tests {
         assert_eq!(persistence_request_count(&progress), 1);
     }
 
+    /// 1330: a link that dies mid-transfer fails the attempt, and the
+    /// router says why beside the retry, since `Failed` carries no reason:
+    /// the home node's "direct failed" line read `reason=failed` and could
+    /// not tell this from a link that never came.
+    #[test]
+    fn a_failed_attempt_says_why() {
+        let (mut router, node) = router_and_node(RouterConfig::default());
+        let queued = message(87);
+        let id = queued.message_id;
+        let _ = router.enqueue(&node, queued).unwrap();
+        let entry = router.outbound.get_mut(&id).unwrap();
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
+        let reason = DeliveryFailure::LinkClosed(leviculum_core::LinkCloseReason::Stale);
+
+        let mut events = Vec::new();
+        router.handle_node_event(
+            LxmfNodeEvent::DeliveryFailed {
+                message_id: id,
+                reason,
+            },
+            5_000,
+            wall(1.0),
+            &mut events,
+        );
+
+        assert_eq!(
+            events,
+            vec![RouterEvent::AttemptFailed {
+                message_id: id,
+                reason: AttemptFailure::Delivery(reason)
+            }]
+        );
+        assert_eq!(
+            router.outbound.get(&id).unwrap().state(),
+            MessageState::Outbound
+        );
+        // Control: a message the router no longer holds says nothing.
+        let mut events = Vec::new();
+        router.handle_node_event(
+            LxmfNodeEvent::DeliveryFailed {
+                message_id: [0xee; 32],
+                reason,
+            },
+            5_000,
+            wall(1.0),
+            &mut events,
+        );
+        assert!(events.is_empty(), "{events:?}");
+    }
+
     /// Both values the RCL arm has carried are terminal here.
     /// `RejectedByRemote` is the live one (`273c259b` moved the core's RCL arm
     /// onto it); `Cancelled` is the local cancel, and neither goes out again.
@@ -4282,6 +4591,50 @@ mod persistence_tests {
             event,
             RouterEvent::StampPending(_) | RouterEvent::InvalidStamp(_)
         )));
+    }
+
+    /// 1482: a relay's copy of another writer's message carries that
+    /// writer's ticket for the relay, passed through; it is not remembered
+    /// as the relay's. The same ticket on the relay's own message is.
+    #[test]
+    fn a_ticket_a_relay_passes_through_is_not_the_relays() {
+        let (mut router, _node) = router_and_node(RouterConfig::default());
+        let relay_hash = [0x63; 16];
+        let relay = identity_from(92);
+        let ticket = Ticket {
+            expires_unix: TEST_WALL_UNIX as f64 + 100_000.0,
+            secret: [0x74; 16],
+        };
+        let incoming = |body: &[u8]| {
+            let mut message = Message::create(
+                router.node.delivery_destination_hash().into_bytes(),
+                relay_hash,
+                &relay,
+                wall(1.0),
+                Vec::new(),
+                body.to_vec(),
+                alloc::vec![(FIELD_TICKET, ticket.field_value())],
+                DeliveryMethod::Direct,
+            )
+            .expect("signed incoming message");
+            message.verification = Verification::Valid;
+            message
+        };
+        let copy = incoming(b"Anna\n<a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1>\nHallo");
+        let own = incoming(b"Welcome to the group");
+        let mut events = Vec::new();
+
+        router.handle_inbound_message(copy, wall(1.0), &mut events);
+        assert!(
+            !router.tickets.outbound_entries().contains_key(&relay_hash),
+            "the writer's ticket, passed through"
+        );
+        router.handle_inbound_message(own, wall(2.0), &mut events);
+        assert_eq!(
+            router.tickets.outbound_entries().get(&relay_hash),
+            Some(&ticket),
+            "the relay's own message: its own ticket"
+        );
     }
 
     #[test]

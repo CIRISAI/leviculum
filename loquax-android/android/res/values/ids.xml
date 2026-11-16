@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The ids of views made in code: the Friends sheet's (MapPane, 1200),
+     the settings' entries and the Maps and Privacy pages' rows (1201),
+     which the device walk finds by them, and the profile's (1187). -->
+<resources>
+    <!-- A delivery mark's id is its rung of the ladder (1232), set as it is
+         drawn; the walk asserts them, the code finds the view by its tag. -->
+    <item name="state_clock" type="id" />
+    <item name="state_tick" type="id" />
+    <item name="state_ticks" type="id" />
+    <item name="state_ticks_read" type="id" />
+    <item name="state_failed" type="id" />
+    <item name="friends_sheet" type="id" />
+    <!-- The contact screen's Advanced fold (1283), which the walk opens. -->
+    <item name="contact_scroll" type="id" />
+    <item name="contact_advanced" type="id" />
+    <item name="contact_advanced_body" type="id" />
+    <!-- The recording bar (1276), by the scene's ids (NodeId::resource and
+         recording::Verb::word); rec_dot is the pulsing dot, selected while
+         it pulses, rec_held the microphone under the finger. -->
+    <item name="rec_bar" type="id" />
+    <item name="rec_dot" type="id" />
+    <item name="rec_timer" type="id" />
+    <item name="rec_wave" type="id" />
+    <item name="rec_cancel" type="id" />
+    <item name="rec_held" type="id" />
+    <item name="rec_lock" type="id" />
+    <item name="rec_discard" type="id" />
+    <item name="rec_pause" type="id" />
+    <item name="rec_resume" type="id" />
+    <item name="rec_play" type="id" />
+    <item name="rec_stop_play" type="id" />
+    <item name="rec_send" type="id" />
+    <item name="rec_notice" type="id" />
+    <item name="rec_allow" type="id" />
+    <!-- The compose bar's sheet (1270) and its rows, by the scene's ids
+         (NodeId::SheetRow::resource). -->
+    <item name="sheet" type="id" />
+    <item name="sheet_map" type="id" />
+    <item name="sheet_fix_words" type="id" />
+    <item name="sheet_gallery" type="id" />
+    <item name="sheet_file" type="id" />
+    <item name="sheet_position" type="id" />
+    <item name="sheet_share_now" type="id" />
+    <item name="sheet_location_on" type="id" />
+    <item name="friend_row" type="id" />
+    <item name="friend_name" type="id" />
+    <item name="friend_age" type="id" />
+    <item name="friends_older" type="id" />
+    <item name="friends_empty" type="id" />
+    <item name="settings_entry" type="id" />
+    <item name="settings_entry_title" type="id" />
+    <item name="settings_entry_summary" type="id" />
+    <item name="connection_notice" type="id" />
+    <item name="maps_auto" type="id" />
+    <item name="map_fling" type="id" />
+    <item name="maps_region" type="id" />
+    <item name="maps_region_name" type="id" />
+    <item name="maps_region_line" type="id" />
+    <item name="maps_delete_all" type="id" />
+    <item name="maps_used" type="id" />
+    <item name="privacy_receipts" type="id" />
+    <item name="photo_full" type="id" />
+    <item name="photo_size_small" type="id" />
+    <item name="photo_size_phone" type="id" />
+    <item name="photo_size_original" type="id" />
+    <item name="privacy_shared_row" type="id" />
+    <item name="profile_avatar" type="id" />
+    <item name="profile_name" type="id" />
+    <item name="profile_address" type="id" />
+    <item name="profile_fours" type="id" />
+    <item name="profile_state" type="id" />
+    <item name="profile_devices" type="id" />
+    <item name="profile_title" type="id" />
+    <item name="profile_copy" type="id" />
+    <item name="profile_qr" type="id" />
+    <item name="welcome_qr" type="id" />
+    <item name="welcome_share" type="id" />
+    <item name="welcome_name" type="id" />
+    <item name="join_retry" type="id" />
+    <item name="join_details_toggle" type="id" />
+    <item name="join_details" type="id" />
+    <item name="profile_share" type="id" />
+    <item name="profile_share_picture" type="id" />
+    <item name="profile_copy_address" type="id" />
+    <item name="profile_scan" type="id" />
+    <item name="profile_mailbox" type="id" />
+    <item name="profile_mailbox_change" type="id" />
+    <item name="profile_link_device" type="id" />
+    <item name="link_qr" type="id" />
+    <item name="link_code" type="id" />
+    <item name="link_text" type="id" />
+    <item name="link_status" type="id" />
+    <item name="link_share" type="id" />
+    <item name="where_join" type="id" />
+    <item name="profile_move_phone" type="id" />
+    <item name="move_qr" type="id" />
+    <item name="move_code" type="id" />
+    <item name="move_status" type="id" />
+    <item name="where_move" type="id" />
+    <!-- The first start's primary button and the computer's link and command (1448). -->
+    <item name="where_next" type="id" />
+    <item name="computer_link" type="id" />
+    <item name="computer_command" type="id" />
+    <item name="move_paste" type="id" />
+    <item name="move_go" type="id" />
+    <item name="take_back" type="id" />
+    <item name="profile_advanced" type="id" />
+    <item name="profile_advanced_body" type="id" />
+    <!-- Explore (1578): what the device walk finds the tab's list by. -->
+    <item name="explore_search" type="id" />
+    <item name="explore_sort" type="id" />
+    <item name="explore_list" type="id" />
+    <item name="explore_address" type="id" />
+</resources>

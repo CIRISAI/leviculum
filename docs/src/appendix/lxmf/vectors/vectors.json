@@ -236,6 +236,217 @@
       "recovered_reply_to_hex": "9aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b"
     },
     {
+      "id": "VEC-MSG-LEV-MARK",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "48656c6c6f",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "810001",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03ca78c23da72d23c81e2fd8726d0086f96feaf11d79eaee2a74aa65158c6a71ceea94906d5bb210c1a333e14bfece190abb1272c58a7a2c2f6c901338e0a8eb30394cb41d954fc40000000c400c40548656c6c6f82ccfbc4036c6576ccfc810001",
+      "message_id_hex": "de35336bad77178f386d7d4d5c025aa500c094e63b1622029919939e8b04d705",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "810001",
+      "recovered_capabilities": 1,
+      "signature_validated": true
+    },
+    {
+      "id": "VEC-MSG-LEV-RECEIPT",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03ca4797eed1c29b4ecd8ebe417de8f390ee9d8c368096e43a64bad5d6aa8c6b871fe75ba90afa36eb082b8ae6588c8e35174ce3ca8062d358061c31d07853f2b0794cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "message_id_hex": "238e02fd0a5f786c0f854fce301cb860423f5db889466a971af0f642b814254b",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "recovered_capabilities": 1,
+      "signature_validated": true,
+      "recovered_read_at": 1700000100,
+      "recovered_ids_hex": [
+        "9aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b"
+      ]
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-COPY",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "42696e20676c656963682064612c206272696e67652042726f74206d69742e",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030293c41011111111111111111111111111111111cf0000018bcfe5687b01",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c400687ca649a2d71c58f89cae800efd6c56c0383c32ae36842d4261bbf65cae5cfb87772c9cde73ba2660c3869f0206d9412ace1ba22fadba05ca2828592c90e94cb41d954fc40000000c400c41f42696e20676c656963682064612c206272696e67652042726f74206d69742e82ccfbc4036c6576ccfc8200030293c41011111111111111111111111111111111cf0000018bcfe5687b01",
+      "message_id_hex": "569c77070c2d991d79755dae700d8bd5a8bf89d110186b8ca8f822c936168eba",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030293c41011111111111111111111111111111111cf0000018bcfe5687b01",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_sender_hex": "11111111111111111111111111111111",
+      "recovered_sent_ms": 1700000000123,
+      "recovered_epoch": 1
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-INVITE",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "4c657720696e766974656420796f7520746f2046616d696c6965",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030495c41022222222222222222222222222222222c440808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfa746616d696c6965a34c657701",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cb941bc376240ed450e538937027dc755e94ed634863cc7657164769278c721421759f5c4c038f761fed34e6680cb006bc21a2e7efdd6726506dafd3d596dc30394cb41d954fc40000000c400c41a4c657720696e766974656420796f7520746f2046616d696c696582ccfbc4036c6576ccfc8200030495c41022222222222222222222222222222222c440808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfa746616d696c6965a34c657701",
+      "message_id_hex": "f7807411547ebe923d56cdea284834a5cced7655fd55de256b9fd937c2e47aba",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030495c41022222222222222222222222222222222c440808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfa746616d696c6965a34c657701",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_group_hex": "22222222222222222222222222222222",
+      "recovered_group_key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "recovered_group_name": "Familie",
+      "recovered_admin_name": "Lew",
+      "recovered_epoch": 1
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-MEMBERS",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030592019293c41011111111111111111111111111111111a34c65770293c41055555555555555555555555555555555a4416e6e6100",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cc76613391603cbc5377a4539f8ffc5fcbd4009f67a315a1c8a9ef266f83ae53863b46c127513d3ccef54ea5ea2972817b6efed223a9b11d78084b7c485a1580d94cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200030592019293c41011111111111111111111111111111111a34c65770293c41055555555555555555555555555555555a4416e6e6100",
+      "message_id_hex": "e5d31d87d3f60ce645235c9116c6cfb1f91bae7599fb9ccf389006940de886a4",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030592019293c41011111111111111111111111111111111a34c65770293c41055555555555555555555555555555555a4416e6e6100",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_epoch": 1,
+      "recovered_members": [
+        [
+          "11111111111111111111111111111111",
+          "Lew",
+          2
+        ],
+        [
+          "55555555555555555555555555555555",
+          "Anna",
+          0
+        ]
+      ]
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-LEAVE",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030592019193c41055555555555555555555555555555555a4416e6e6101",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c19b603279f4828bfee4f36bc21d218c4fd8104822ff763170e61e61ba56175d635beb117ebc7d6f0b9b9236756a217c9436b85372a1dc29e0286fa1f2aceeb0b94cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200030592019193c41055555555555555555555555555555555a4416e6e6101",
+      "message_id_hex": "38dd19e7e68f5d10e6f0383fe7175f4d9398b4b51060a2ce195b8733c1788eb0",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030592019193c41055555555555555555555555555555555a4416e6e6101",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_epoch": 1,
+      "recovered_members": [
+        [
+          "55555555555555555555555555555555",
+          "Anna",
+          1
+        ]
+      ]
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-DIGEST",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "4c65773a2042726f74206973742064610a416e6e613a2044616e6b65",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cd1d18df6838d6e7e54d26f6d7f65e5963f2759223343c25c4636d5ee91fac8f2156e32f5a7def021a548694aae2d7c59b6e341293e293646e9e953f3b7ee490194cb41d954fc40000000c400c41c4c65773a2042726f74206973742064610a416e6e613a2044616e6b6582ccfbc4036c6576ccfc820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "message_id_hex": "eddfc5dc4c005078ad967cad1d4162992f65ee291381d8ffedbb06f201284564",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_digest": [
+        [
+          "11111111111111111111111111111111",
+          1700000000123,
+          "Brot ist da"
+        ],
+        [
+          "55555555555555555555555555555555",
+          1700000001123,
+          "Danke"
+        ]
+      ]
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-STATUS",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030395c420777777777777777777777777777777777777777777777777777777777777777702010201",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cf34fb4a9b5c1048dcb89c4cfdd8e96da517f698e637c55c4d1d7b05300bea4d60da30a6e045ca2037f5063ee0fffb50795d2a609b869df6a7db756fbce88760294cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200030395c420777777777777777777777777777777777777777777777777777777777777777702010201",
+      "message_id_hex": "181826d3e1e0c4c6f3a47d0f3361233b331c35d775e786526b5d3db24dbf999f",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030395c420777777777777777777777777777777777777777777777777777777777777777702010201",
+      "recovered_capabilities": 3,
+      "signature_validated": true
+    },
+    {
+      "id": "VEC-MSG-LEV-GROUP-ENDED",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200030593029293c41011111111111111111111111111111111a34c65770393c41055555555555555555555555555555555a4416e6e610501",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c8f218aa8124aaaef9071bb8d6f4ac81574826a8138a85fbc09604645980610a3a3334dc3c03d27f13b5181295f81d3f0bfda87c77bd0f238478abadac7df3d0494cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200030593029293c41011111111111111111111111111111111a34c65770393c41055555555555555555555555555555555a4416e6e610501",
+      "message_id_hex": "98a659a194792ab5fa4508d96f33c8c9ad86907ca688ba8e580907653836a72f",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200030593029293c41011111111111111111111111111111111a34c65770393c41055555555555555555555555555555555a4416e6e610501",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_epoch": 2,
+      "recovered_members": [
+        [
+          "11111111111111111111111111111111",
+          "Lew",
+          3
+        ],
+        [
+          "55555555555555555555555555555555",
+          "Anna",
+          5
+        ]
+      ]
+    },
+    {
       "id": "VEC-MSG-FOREIGN-UINT32",
       "title": "Foreign writer: payload[0] as MessagePack uint32",
       "kind": "frozen",

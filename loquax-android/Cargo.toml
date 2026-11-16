@@ -2,7 +2,7 @@
 name = "loquax-android"
 # The app's own version, like loquax's: it tracks the Android frontend, not
 # the protocol core underneath.
-version = "0.1.0"
+version = "0.1.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -10,6 +10,13 @@ repository.workspace = true
 homepage.workspace = true
 description = "loquax on Android: the JNI library the app's Java calls"
 publish = false
+
+# The APK's versionCode. Android refuses an update whose code did not grow,
+# so scripts/bump-touched.py raises it by one whenever this crate or loquax
+# moves; the Makefile stamps it into the manifest with loquax's version as
+# the versionName, the version the app shows (1667).
+[package.metadata.android]
+version-code = 9
 
 # A cdylib for the app (`make` in this directory builds it for Android and
 # puts it in the APK), an rlib so the host's `cargo test` runs its tests.
@@ -28,8 +35,11 @@ crate-type = ["cdylib", "rlib"]
 # drawn here and hosted by Java as a bitmap, and the autoload into the
 # app's maps directory. One renderer for the terminal's pictures, the
 # window and the phone.
-# With `qr` for the contact screen's address code (1146).
-loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr"] }
+# With `qr` for the contact screen's address code (1146), and `photos`
+# for the paperclip's photo and the bubbles' thumbnails (1220), `voice`
+# for the microphone's voice messages and their player (1222), `scan`
+# for the scanner's QR decoder (1152), shared with the desktop (1341).
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice", "browse"] }
 # The map's types the screen's call passes to loquax's.
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
@@ -38,16 +48,22 @@ leviculum-mapfill = { path = "../leviculum-mapfill" }
 leviculum-core = { path = "../leviculum-core" }
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
 leviculum-std = { path = "../leviculum-std" }
+# The Browse tab (1337): lnomad's browser core, which loquax hosts, and
+# with `std` its fetch session, which runs over the phone's own node
+# (pass two, `loquax::browse_fetch`, shared with the desktop since 1369).
+lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The Rooms tab (1384): the kind of a room's line the schema words, from
+# Reticulum Relay Chat's client state that loquax's model carries.
+leviculum-rrc = { path = "../leviculum-rrc" }
 # The admission token the phone's own mailbox issues its screens (1152).
 rand_core = { workspace = true, features = ["getrandom"] }
-# The scanner's decoder (1152): a pure-Rust port of quirc, without its
-# `image` default, reading the camera's luminance plane. Brings g2p; lru
-# is already in the lock. MIT or Apache-2.0, and ISC for quirc's part.
-rqrr = { version = "0.11", default-features = false }
 # The runtime the leaf node and the session's runners run on.
 tokio.workspace = true
 tracing.workspace = true
+# The session's lock (1496): fair handoff between the pump's thread and a
+# screen's call, no poisoning. Already in the lock.
+parking_lot = "0.12"
 # The JNI payloads (src/schema.rs): msgpack maps, as the study chose.
 serde.workspace = true
 rmp-serde.workspace = true
@@ -61,9 +77,27 @@ jni = { version = "0.22.4", default-features = false }
 tokio = { workspace = true, features = ["full"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
-# The Python LXMF peer's JSON-RPC (loquax/tests/support/python_peer.rs).
+# The Python LXMF peer's JSON-RPC (loquax/tests/support/python_peer.rs),
+# and the Rooms' facade golden (tests/rooms.rs).
 serde_json = "1"
+# The fake RRC hub's recorded envelopes (loquax/tests/support/rrc_hub.rs).
+hex = "0.4"
 # The map's golden is a PNG, and its test turns loquax's Rgb565 picture
 # into RGBA as the window does (1128); both in the lock through loquax.
 png = "0.18"
 embedded-graphics = "0.8"
+# The schema's property tests (1173), the workspace's version; in the
+# lock already, through leviculum-core.
+proptest.workspace = true
+# The map's source for a region arriving over a slow link (1291): the
+# loopback server of the map tests, throttled.
+leviculum-mapcut = { path = "../leviculum-mapcut" }
+# The M9's renderer, whose heap and stack the M9 census counts beside the
+# scenes' (tests/m9_scene_census.rs).
+loquax-m9 = { path = "../loquax-m9" }
+# The M9's one-UART rules (1414): tests/m9_board_client.rs writes its line
+# as the board writes it, frames with their flow bytes escaped.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
+# The test's propagation node (1409, loquax/tests/support/lnpnd.rs): lnpnd's
+# engine on the home's instance, which answers `/lev/status`.
+lnpnd = { path = "../lnpnd" }

@@ -8,7 +8,11 @@
 #
 #   1. a link that appears while readers_back waits gets its reader, and the
 #      log says after how long;
-#   2. a link that never appears is named as NOT back, and no reader starts.
+#   2. a link that never appears is named as NOT back, and no reader starts;
+#   3. a started reader inherits no open fd of its caller above 2: a caller
+#      holding a flock on fd 9 (erase.sh did, 2026-11-08, and the reader kept
+#      the rig lock for 42 minutes) has the lock free the moment it lets go,
+#      while the reader is still running.
 #
 # The reader is a stub that records its argv: what is under test is the
 # runner's decision, and the real reader has its own test
@@ -16,7 +20,8 @@
 #
 # Positive control, built in: claim 1 is run a second time against a copy of
 # rig-cell.sh whose wait is cut to zero, and has to FAIL there. A test that
-# passed both ways would not be testing the wait.
+# passed both ways would not be testing the wait. Claim 3 likewise runs
+# against a copy with the fd closer taken out, and has to fail there.
 #
 # Usage: bash scripts/test-rig-cell.sh
 
@@ -66,6 +71,7 @@ run_readers_back() {
     local script="$1" dir="$2" wait="$3"
     mkdir -p "$dir/by-id" "$dir/rig-run"
     (
+        # shellcheck disable=SC2030,SC2031  # scoped to this subshell on purpose
         export LEV_RIG_RUN="$dir/rig-run" LEV_RIG_TOML="$WORK/rig.toml" \
             LEV_RIG_BY_ID="$dir/by-id" LEV_RIG_RUNLOG="$dir/runner.log" \
             LEV_RIG_READER="$WORK/stub-reader.py" LEV_RIG_READER_WAIT="$wait" \
@@ -132,6 +138,71 @@ elif late_link_case "$WORK/rig-cell-nowait.sh" "$WORK/control"; then
     bad "control: with the wait cut to zero the late-link case must fail"
 else
     ok "control: with the wait cut to zero the late-link case fails"
+fi
+
+# A reader stub that stays up, as the real one does.
+cat >"$WORK/sleep-reader.py" <<'PY'
+import time
+time.sleep(60)
+PY
+
+# Claim 3 against <script>: a caller holds a flock on fd 9 (and a plain fd on
+# 12, past the single digits an explicit close list would name), starts a
+# reader through rig_reader_start and exits. Returns 0 iff the reader is alive
+# as the pidfile's pid and holds neither file.
+# Args: $1 = script, $2 = case dir
+inherited_fd_case() {
+    local script="$1" dir="$2" pid holders rc=0
+    mkdir -p "$dir/rig-run/readers"
+    : >"$dir/rig.lock"
+    : >"$dir/other"
+    (
+        # Both cases scope their bench to a subshell on purpose.
+        # shellcheck disable=SC2030,SC2031
+        export LEV_RIG_RUN="$dir/rig-run" LEV_RIG_TOML="$WORK/rig.toml" \
+            LEV_RIG_RUNLOG="$dir/runner.log" LEV_RIG_READER="$WORK/sleep-reader.py"
+        # shellcheck source=scripts/rig-cell.sh
+        . "$script"
+        exec 9>"$dir/rig.lock" 12>"$dir/other"
+        flock -n 9 || exit 1
+        rig_reader_start board-x XXXX000000000009 /dev/null
+    ) || return 1
+    pid="$(cat "$dir/rig-run/readers/board-x.pid" 2>/dev/null)"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        grep -qF sleep-reader.py "/proc/$pid/cmdline" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ! grep -qF sleep-reader.py "/proc/$pid/cmdline" 2>/dev/null; then
+        echo "        reader not running as the pidfile's pid ($pid)"
+        rc=1
+    fi
+    holders="$(fuser "$dir/rig.lock" "$dir/other" 2>/dev/null)"
+    if [ -n "${holders// /}" ]; then
+        echo "        still held by pid(s):$holders"
+        rc=1
+    fi
+    if ! flock -n "$dir/rig.lock" true; then
+        echo "        the lock is still taken"
+        rc=1
+    fi
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    return "$rc"
+}
+
+if inherited_fd_case "$RIG_CELL" "$WORK/fds"; then
+    ok "a reader inherits no fd of its caller, a held lock included"
+else
+    bad "a reader inherits no fd of its caller, a held lock included"
+fi
+
+# The control: without the closer the reader keeps the caller's fd 9 lock.
+grep -vxF '        rig_close_inherited_fds' "$RIG_CELL" >"$WORK/rig-cell-noclose.sh"
+if cmp -s "$RIG_CELL" "$WORK/rig-cell-noclose.sh"; then
+    bad "the control could not take the fd closer out: its call moved"
+elif inherited_fd_case "$WORK/rig-cell-noclose.sh" "$WORK/fds-control" >/dev/null; then
+    bad "control: without the fd closer the inherited-fd case must fail"
+else
+    ok "control: without the fd closer the inherited-fd case fails"
 fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

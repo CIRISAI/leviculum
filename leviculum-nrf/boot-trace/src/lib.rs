@@ -290,6 +290,55 @@ impl ResetReasons {
     }
 }
 
+/// Why the board is running, as the user sees it: the `WAKE reason=` of
+/// the boot banner (order 1511). The `[RESET_REASON]` line beside it keeps
+/// every bit; this is the one word a reader of a switched-off board asks
+/// for, "did the button wake it, or did it get power".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WakeReason {
+    /// Woken from System OFF by a GPIO DETECT. The only pin the firmware
+    /// arms a sense on before it switches off is the user button's, so a
+    /// DETECT wake is a press.
+    Button,
+    /// Woken from System OFF by VBUS rising: a USB cable plugged into a
+    /// board that was off.
+    Usb,
+    /// No bit latched: a power-on (a pack inserted, a switch closed) or a
+    /// brownout, which the chip does not tell apart.
+    Power,
+    /// Any other latched cause: the reset pin, the watchdog, a soft reset
+    /// (a flash, a commanded reset), a lockup.
+    Reset,
+}
+
+impl WakeReason {
+    /// The `reason=` token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WakeReason::Button => "button",
+            WakeReason::Usb => "usb",
+            WakeReason::Power => "power",
+            WakeReason::Reset => "reset",
+        }
+    }
+}
+
+impl ResetReasons {
+    /// The one word for the banner. A DETECT wake wins over a VBUS one that
+    /// latched with it: the press is what the user did.
+    pub fn wake(&self) -> WakeReason {
+        if self.off {
+            WakeReason::Button
+        } else if self.vbus {
+            WakeReason::Usb
+        } else if self.raw == 0 {
+            WakeReason::Power
+        } else {
+            WakeReason::Reset
+        }
+    }
+}
+
 /// Body of the `[RESET_REASON]` line both bins emit at boot. The shape
 /// predates this crate (captures grep it); only the decode moved here so
 /// it could be host-asserted.
@@ -485,6 +534,19 @@ mod tests {
         // Combined: button press while VBUS latched.
         let combo = ResetReasons::decode(0x0010_0001);
         assert!(combo.resetpin && combo.vbus && !combo.sreq);
+    }
+
+    #[test]
+    fn the_wake_reason_names_the_button_usb_power_or_a_reset() {
+        assert_eq!(ResetReasons::decode(0x0001_0000).wake(), WakeReason::Button);
+        assert_eq!(ResetReasons::decode(0x0011_0000).wake(), WakeReason::Button);
+        assert_eq!(ResetReasons::decode(0x0010_0000).wake(), WakeReason::Usb);
+        assert_eq!(ResetReasons::decode(0).wake(), WakeReason::Power);
+        for raw in [0x1, 0x2, 0x4, 0x8, 0x0002_0000, 0x0008_0000] {
+            assert_eq!(ResetReasons::decode(raw).wake(), WakeReason::Reset);
+        }
+        assert_eq!(WakeReason::Button.as_str(), "button");
+        assert_eq!(WakeReason::Power.as_str(), "power");
     }
 
     #[test]

@@ -43,12 +43,59 @@ INTEG_PREREQUISITES="scripts/integ-prerequisites.txt"
 
 # One line per declared prerequisite that is ABSENT on this host:
 # `<dir>/<target><TAB><exact test name, or ->><TAB><missing path>`.
-# Format and reasons: scripts/integ-prerequisites.txt.
+# A prerequisite written `command:<name>` is a program looked up on PATH
+# rather than a path in the tree (1256: javac). Format and reasons:
+# scripts/integ-prerequisites.txt.
 integ_unmet_prerequisites() {
     local path target test
     while read -r path target test; do
-        case "$path" in '' | '#'*) continue ;; esac
-        [ -e "$path" ] && continue
+        case "$path" in
+            '' | '#'*) continue ;;
+            command:*) command -v "${path#command:}" >/dev/null 2>&1 && continue ;;
+            *) [ -e "$path" ] && continue ;;
+        esac
         printf '%s\t%s\t%s\n' "$target" "${test:--}" "$path"
     done <"$INTEG_PREREQUISITES"
+}
+
+# The cargo invocations that run the targets in $2 (`<dir>/<name>` lines, a
+# subset of $1, every target in the tree) and no other target, one line each:
+# `-<TAB><name>` for a name to pass to the workspace-wide run, and
+# `<dir><TAB><name>` for a target to run from its own package.
+#
+# `cargo test --workspace --test <name>` selects EVERY package's target of that
+# name. Two packages may share a name (lnomad and loquax both have
+# `scene_golden` since 1255), and when one of them is left out, by a
+# prerequisite or because a recipe with its features runs it, the name cannot
+# go to the workspace run without taking it along: that one goes to `-p` of
+# the package the other lives in. A name all of whose targets are selected
+# stays in the workspace run (two `cli` targets, one flag). Before 1306 the
+# forge refused the shared name outright, and the land gate on ee9541af went
+# red on it.
+integ_run_groups() {
+    local all="$1" selected="$2" target name dir left
+    while read -r target; do
+        [ -n "$target" ] || continue
+        name="${target##*/}"
+        dir="${target%/*}"
+        # Two steps and no `grep | grep -q`: under a caller's `pipefail` the
+        # first grep can die of SIGPIPE when -q exits early (#843).
+        left="$(grep "/${name}\$" <<<"$all" | grep -vxF -f <(printf '%s\n' "$selected") || true)"
+        if [ -n "$left" ]; then
+            printf '%s\t%s\n' "$dir" "$name"
+        else
+            printf -- '-\t%s\n' "$name"
+        fi
+    done <<<"$selected" | sort -u
+}
+
+# The package name of the workspace member in directory $1: the first `name`
+# of its manifest's `[package]` table, which is what `cargo test -p` takes.
+integ_package() {
+    awk '
+        /^\[/ { in_pkg = ($0 == "[package]"); next }
+        in_pkg && /^name[[:space:]]*=/ {
+            sub(/^name[[:space:]]*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
+        }
+    ' "$1/Cargo.toml"
 }

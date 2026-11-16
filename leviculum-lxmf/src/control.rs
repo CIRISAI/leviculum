@@ -115,6 +115,12 @@ pub struct ControlNodeStats {
     pub messagestore_count: u64,
     pub messagestore_bytes: u64,
     pub messagestore_limit_bytes: Option<u64>,
+    /// Messages the store expired or displaced since start: our extension,
+    /// sent as `messagestore.evicted` and only by lnpnd. `None` from a
+    /// reference node, whose printer reads only the three keys it knows
+    /// (`reference/LXMF/LXMF/Utilities/lxmd.py:700,733,736`), so the extra key
+    /// costs it nothing.
+    pub messagestore_evicted: Option<u64>,
     pub client_propagation_messages_received: u64,
     pub client_propagation_messages_served: u64,
     pub unpeered_propagation_incoming: u64,
@@ -354,13 +360,20 @@ impl ControlNodeStats {
         msgpack::string(&mut out, "from_static_only");
         msgpack::bool(&mut out, self.from_static_only);
         msgpack::string(&mut out, "messagestore");
-        msgpack::map(&mut out, 3);
+        msgpack::map(
+            &mut out,
+            3 + usize::from(self.messagestore_evicted.is_some()),
+        );
         msgpack::string(&mut out, "count");
         msgpack::uint(&mut out, self.messagestore_count);
         msgpack::string(&mut out, "bytes");
         msgpack::uint(&mut out, self.messagestore_bytes);
         msgpack::string(&mut out, "limit");
         opt_uint(&mut out, self.messagestore_limit_bytes);
+        if let Some(evicted) = self.messagestore_evicted {
+            msgpack::string(&mut out, "evicted");
+            msgpack::uint(&mut out, evicted);
+        }
         msgpack::string(&mut out, "clients");
         msgpack::map(&mut out, 2);
         msgpack::string(&mut out, "client_propagation_messages_received");
@@ -414,6 +427,7 @@ impl ControlNodeStats {
             messagestore_count: 0,
             messagestore_bytes: 0,
             messagestore_limit_bytes: None,
+            messagestore_evicted: None,
             client_propagation_messages_received: 0,
             client_propagation_messages_served: 0,
             unpeered_propagation_incoming: 0,
@@ -465,6 +479,10 @@ impl ControlNodeStats {
                             }
                             "limit" => {
                                 stats.messagestore_limit_bytes = read_opt_uint(bytes, position)?
+                            }
+                            "evicted" => {
+                                stats.messagestore_evicted =
+                                    Some(read_uint_tolerant(bytes, position)?)
                             }
                             _ => msgpack::skip(bytes, position)?,
                         }
@@ -589,6 +607,7 @@ mod tests {
             messagestore_count: 2,
             messagestore_bytes: 4096,
             messagestore_limit_bytes: Some(500_000_000),
+            messagestore_evicted: None,
             client_propagation_messages_received: 5,
             client_propagation_messages_served: 3,
             unpeered_propagation_incoming: 1,
@@ -637,6 +656,18 @@ mod tests {
         let encoded = stats.encode();
         let decoded = ControlNodeStats::decode(&encoded).expect("decode");
         assert_eq!(decoded, stats);
+        assert!(
+            !encoded.windows(7).any(|window| window == b"evicted"),
+            "a node without the count sends the reference's three keys"
+        );
+
+        // Order 1295: lnpnd's eviction count rides in the messagestore map.
+        let ours = ControlNodeStats {
+            messagestore_evicted: Some(40_895),
+            ..sample()
+        };
+        let decoded = ControlNodeStats::decode(&ours.encode()).expect("decode");
+        assert_eq!(decoded, ours);
     }
 
     #[test]

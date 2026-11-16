@@ -122,7 +122,10 @@ impl Mesh {
     ) -> Sent {
         let instance = self.instance.clone();
         let config_dir = self.config_dir.path().to_path_buf();
-        let log = home.join(format!("events-{subcommand}-{}.log", args.join("-")));
+        // A path among the arguments (`--photo FILE`) is no directory of
+        // the log's name, and a long one no longer than a name may be.
+        let named: String = args.join("-").replace('/', "_").chars().take(160).collect();
+        let log = home.join(format!("events-{subcommand}-{named}.log"));
         let read_log = log.clone();
         let sent = tokio::task::spawn_blocking(move || {
             let mut command = Command::new(LNMSG);
@@ -178,9 +181,12 @@ impl Sent {
     /// line. Since 2026-08-21 the id is not on stdout, and this is the
     /// documented way to get it back out of a run.
     pub fn enqueued_id(&self) -> String {
+        // The event log of a home is appended to by every run in it: this
+        // run's line is the last one.
         let line = self
             .log
             .lines()
+            .rev()
             .find(|line| line.starts_with("LNMSG_ENQUEUED "))
             .unwrap_or_else(|| panic!("no LNMSG_ENQUEUED line in this run: {self}"));
         let id = line

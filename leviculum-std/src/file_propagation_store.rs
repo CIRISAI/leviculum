@@ -67,23 +67,97 @@
 //! Purges and the removal of a replaced file go through the same queue, in
 //! order, so a purge of a queued message runs after its write.
 //!
+//! # The sequence index
+//!
+//! Beside the directory index keyed by transient ID the store keeps the same
+//! entries ordered by sequence, so [`PropagationStore::for_each_above`] reads
+//! only what an offer reads and [`PropagationStore::newest_sequence`] is the
+//! last key, and [`PropagationStore::meta`] is a lookup. Without it every
+//! outbound sync tick walked the whole store: 170 ms a tick on the field
+//! node's Odroid at 300 000 messages (leviculum#478).
+//! A third copy ordered by receive time serves the expiry sweep
+//! ([`PropagationStore::for_each_received_before`]): it reads what expired,
+//! where it walked the whole store every maintenance tick, 24.6 ms on the
+//! Odroid at about 300 000 messages (order 1171's field profile,
+//! leviculum#478). A fourth counts, by sequence, the entries a peer may be
+//! offered ([`PropagationStore::count_above_cursors`], `SequenceCounts`):
+//! a peer's unhandled count is a prefix sum, where it walked the store once
+//! per peer per `--status` request, 94 ms a request at 320 000 messages and
+//! 20 peers on the coder host (order 1370). All four indexes change
+//! together, through `index_insert` and `index_remove` only.
+//!
+//! # What the index costs
+//!
+//! The index is the store's whole RAM, and it grows with every message the
+//! store holds, up to the store limit. An entry held its file's full path
+//! until LV-1000 (order 1515): 457 bytes resident a message at 326 000
+//! messages, 149 MB, and the largest table by far in lnpnd's growth soak
+//! at that size (miauhaus holds 326 000, and the OOM killer took lnpnd
+//! there at 398 MB). The path is the entry's name under the store's
+//! directory (`entry_name`, the module docs' first section), so it is now
+//! derived where a file is opened, renamed or removed, and only a file under
+//! another name keeps its path, in `odd_names`: a legacy name whose rename
+//! at open failed. 289 bytes resident a message at the same count, 94 MB.
+//!
+//! The census ([`FilePropagationStore::heap_census`]) prices the four
+//! indexes as `alloc` lays them out, the live entries and the room the
+//! containers hold beyond them named apart (order 1648). How full a
+//! B-tree's nodes run depends on how it was built: the id-keyed map fills
+//! as random inserts do, about 8 entries a node of 11, but the sequence and
+//! receive-time sets are collected full from a sorted run at the open and
+//! then grow at their right end, 7 a node. A store just opened costs 254
+//! bytes a message, one appended to from empty 334 (20 000 messages,
+//! `lnpnd/tests/store_index_census.rs`). The census before priced every
+//! tree at 7 a node, which overstated a reopened store by a fifth.
+//!
+//! # The index file, and why a start reads no message
+//!
+//! The reference re-indexes its store at every start by listing the
+//! directory and opening every file for its size and destination hash
+//! (`enable_propagation`, `reference/LXMF/LXMF/LXMRouter.py:565-592`), and
+//! so did this store: 130 s on the field node's Odroid at 323 597 messages,
+//! during which the daemon answered nothing (order 1376). 36 s of it on the
+//! coder host's cold cache at 320 000, 2.1 s warm: the cost is the two
+//! system calls a file, `stat` and `open`+`read`, each a random read on a
+//! cold disk, and not the listing or the indexes built from it.
+//!
+//! So the store keeps what those calls return in [`INDEX_FILE`] inside the
+//! directory, one record per message under the name it was read for, and a
+//! start lists the directory and reads only the files the record does not
+//! name: the ones `lxmd` or a crash left behind since the record was
+//! written. A name carries the transient ID, the receive time, the stamp
+//! value and the sequence, and a file under a given name is never rewritten
+//! (an append writes a new name, a re-pricing renames), so a record for the
+//! same name is the file's own size and destination. A record whose file is
+//! gone is dropped by the listing. The record is not trusted beyond that:
+//! it ends in a SHA-256 over everything before it, and a file that fails it
+//! is ignored and rebuilt by the walk it replaces. It is written when the
+//! start found it out of date, and when the store is dropped; a crash in
+//! between costs the next start a read of what arrived since.
+//!
 //! [`write_behind`]: FilePropagationStore::write_behind
 //! [`writes_issued`]: FilePropagationStore::writes_issued
 //! [`settle_writes`]: FilePropagationStore::settle_writes
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Bound, ControlFlow};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use leviculum_lxmf::propagation_store::{
-    copy_from, PropagationBodyStore, PropagationStore, StoredMessage, MIN_BODY_LEN,
+    copy_from, count_above_cursors_by_walk, PropagationBodyStore, PropagationStore, StoredMessage,
+    MIN_BODY_LEN,
 };
 use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::TransientId;
 
+use sha2::{Digest, Sha256};
+
 use crate::durable::{device_fsync, write_durably, Fsync};
+use crate::sequence_counts::{Inserted, SequenceCounts};
 use crate::storage::{hex_decode, hex_encode, note_unreadable_entry};
 
 /// A directory of propagation-store messages with a hard byte capacity.
@@ -96,17 +170,161 @@ pub struct FilePropagationStore {
     capacity: u64,
     used: u64,
     index: BTreeMap<TransientId, IndexEntry>,
+    /// The files whose name is not the one [`Self::entry_name`] gives their
+    /// entry: a legacy name whose rename at open failed, or a name in
+    /// another spelling. Every other file's path is derived from its entry
+    /// ([`Self::path_of`]), so the index holds no path of its own (module
+    /// docs, "What the index costs").
+    odd_names: BTreeMap<TransientId, PathBuf>,
+    /// `index` ordered by `(sequence, transient_id)` (module docs, "The
+    /// sequence index").
+    by_sequence: BTreeSet<(u64, TransientId)>,
+    /// `index` ordered by `(received_at, transient_id)`, what the expiry
+    /// sweep reads (module docs, "The sequence index").
+    by_received: BTreeSet<(u64, TransientId)>,
+    /// `index`'s entries of at most the counted size, counted by sequence
+    /// (module docs, "The sequence index").
+    counts: SequenceCounts,
     /// Last assigned append sequence; recovered as the maximum on disk.
     last_sequence: u64,
     fsync: Arc<dyn Fsync>,
     /// `Some` once [`Self::write_behind`] switched the store to its writer.
     writer: Option<Writer>,
+    /// The index moved since [`INDEX_FILE`] was last written (module docs,
+    /// "The index file").
+    index_dirty: bool,
+    opened: OpenProfile,
+    /// The last sequence the open indexed: `by_sequence` and `by_received`
+    /// were built from a sorted run at the open, which fills their nodes,
+    /// and an entry inserted since goes in one by one (module docs, "What
+    /// the index costs").
+    bulk_through: u64,
+    /// Entries of the bulk-built run still in the store.
+    bulk_live: usize,
+}
+
+/// [`FilePropagationStore::heap_census`]: what the store holds in RAM.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoreHeapCensus {
+    /// Messages indexed.
+    pub messages: usize,
+    /// The four indexes (module docs, "The sequence index" and "What the
+    /// index costs"): `index_entry_bytes` plus `index_spare_bytes`.
+    pub index_bytes: usize,
+    /// The live entries' own sizes across the four indexes, an odd name's
+    /// path included: what the index would cost in containers with no
+    /// room to spare.
+    pub index_entry_bytes: usize,
+    /// What the containers allocate beyond their live entries: the B-tree
+    /// nodes' empty slots and headers and the inner nodes' edges, and the
+    /// counting index's vectors' capacity beyond their length.
+    pub index_spare_bytes: usize,
+    /// Appends and purges the writer has not confirmed, bodies included.
+    pub writer_bytes: usize,
+}
+
+/// How full a B-tree's nodes run, by how the tree was built (order 1648).
+///
+/// Entries a node, the separator above it counted with it, fitted to a
+/// counting allocator over 200 000 entries of each kind: random inserts 8.4, ascending inserts 7 (a full node splits six to the
+/// left, four and the new entry to the right, and the left one is never
+/// touched again), a sorted run collected at once 12 (`collect` fills every
+/// node). `lnpnd/tests/store_index_census.rs` holds the store's sum to the
+/// bytes a counting allocator sees it give back.
+#[derive(Debug, Clone, Copy)]
+enum NodeFill {
+    Random,
+    Ascending,
+    Bulk,
+}
+
+impl NodeFill {
+    /// Entries a node, in tenths.
+    fn tenths(self) -> usize {
+        match self {
+            NodeFill::Random => 84,
+            NodeFill::Ascending => 70,
+            NodeFill::Bulk => 120,
+        }
+    }
+}
+
+/// Bytes `alloc`'s B-tree allocates for `len` entries of `K` to `V` filled
+/// as `fill` says: its leaves (a parent pointer, two `u16`, eleven key and
+/// eleven value slots) and the level above them (a leaf's layout and twelve
+/// edges). The levels above that are under one part in fifty and left out.
+fn btree_allocated<K, V>(len: usize, fill: NodeFill) -> usize {
+    use std::mem::{align_of, size_of};
+    if len == 0 {
+        return 0;
+    }
+    let align = align_of::<usize>()
+        .max(align_of::<K>())
+        .max(align_of::<V>());
+    let leaf =
+        (size_of::<usize>() + 4 + 11 * (size_of::<K>() + size_of::<V>())).next_multiple_of(align);
+    let inner = leaf + 12 * size_of::<usize>();
+    let tenths = fill.tenths();
+    let leaves = (len * 10).div_ceil(tenths);
+    let inners = (leaves * 10).div_ceil(tenths);
+    leaves * leaf + inners * inner
+}
+
+/// What [`FilePropagationStore::open`] found and spent its time on (module
+/// docs, "The index file").
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OpenProfile {
+    /// What became of [`INDEX_FILE`].
+    pub index_file: IndexFileState,
+    /// Messages indexed.
+    pub messages: usize,
+    /// Of those, the ones whose size and destination came from the index
+    /// file.
+    pub from_index_file: usize,
+    /// The ones whose file was read for them, the walk's per-file cost.
+    pub files_read: usize,
+    /// Reading and checking the index file.
+    pub load_index_us: u64,
+    /// The directory listing and the name parse, file reads excluded.
+    pub list_us: u64,
+    /// `stat` of the files read.
+    pub stat_us: u64,
+    /// `open` and the 16-byte destination read of the files read.
+    pub read_us: u64,
+    /// The sequence, receive-time and count indexes.
+    pub build_us: u64,
+    /// Writing the index file afresh; 0 when it was current.
+    pub save_index_us: u64,
+    /// The whole open.
+    pub total_us: u64,
+}
+
+/// What [`FilePropagationStore::open`] made of [`INDEX_FILE`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum IndexFileState {
+    /// Read and checked.
+    Loaded,
+    /// Not there: a first start, or a store written before the index file.
+    #[default]
+    Missing,
+    /// There, but cut short or failing its checksum; ignored, and rebuilt.
+    Corrupt,
+}
+
+impl IndexFileState {
+    /// The word a start line prints for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndexFileState::Loaded => "loaded",
+            IndexFileState::Missing => "missing",
+            IndexFileState::Corrupt => "corrupt",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct IndexEntry {
     meta: StoredMessage,
-    path: PathBuf,
 }
 
 /// How far the writer has got, as [`FilePropagationStore::settle_writes`]
@@ -207,9 +425,17 @@ impl FilePropagationStore {
         capacity: u64,
         fsync: Arc<dyn Fsync>,
     ) -> Result<Self, StorageError> {
+        let started = Instant::now();
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|_| StorageError::Io)?;
+        let mut opened = OpenProfile::default();
+        let (recorded, index_file) = load_index(&dir.join(INDEX_FILE));
+        opened.index_file = index_file;
+        opened.load_index_us = micros(started);
+        let listed = Instant::now();
+        let mut file_us = 0u64;
         let mut index = BTreeMap::new();
+        let mut odd_names: BTreeMap<TransientId, PathBuf> = BTreeMap::new();
         let mut used = 0u64;
         let entries = std::fs::read_dir(&dir).map_err(|_| StorageError::Io)?;
         for entry in entries.flatten() {
@@ -219,7 +445,7 @@ impl FilePropagationStore {
             };
             // An interrupted append's temp file: not a message, not noise
             // worth a warning either.
-            if name.starts_with(TEMP_PREFIX) || name == STAMP_VALUES_MARKER {
+            if name.starts_with(TEMP_PREFIX) || name == STAMP_VALUES_MARKER || name == INDEX_FILE {
                 continue;
             }
             let Some((transient_id, received_at, stamp_value, sequence)) = parse_name(&name) else {
@@ -227,20 +453,57 @@ impl FilePropagationStore {
                 continue;
             };
             let path = entry.path();
-            let Ok(metadata) = std::fs::metadata(&path) else {
-                note_unreadable_entry(&dir, &entry.file_name());
-                continue;
+            // Whether the file has a name other than the one this store
+            // writes for it.
+            let odd = match sequence {
+                Some(sequence) => {
+                    name != Self::entry_name(&transient_id, received_at, stamp_value, sequence)
+                }
+                None => true,
             };
-            let size = metadata.len();
-            if size < MIN_BODY_LEN as u64 || size > u32::MAX as u64 {
-                note_unreadable_entry(&dir, &entry.file_name());
-                continue;
-            }
-            // The destination hash lives in the first 16 bytes of the body,
-            // as the reference reads it back (`LXMRouter.py:578`).
-            let Some(destination_hash) = read_destination(&path) else {
-                note_unreadable_entry(&dir, &entry.file_name());
-                continue;
+            // The record for this very name, if the index file has one: a
+            // legacy name has no sequence and is never recorded under it.
+            let record = recorded.get(&transient_id).filter(|record| {
+                record.received_at == received_at
+                    && record.stamp_value == stamp_value
+                    && Some(record.sequence) == sequence
+            });
+            let (size, destination_hash) = match record {
+                Some(record) => {
+                    opened.from_index_file += 1;
+                    (record.size as u64, record.destination_hash)
+                }
+                None => {
+                    opened.files_read += 1;
+                    let stat = Instant::now();
+                    let metadata = std::fs::metadata(&path);
+                    let stat_us = micros(stat);
+                    opened.stat_us += stat_us;
+                    let Ok(metadata) = metadata else {
+                        file_us += stat_us;
+                        note_unreadable_entry(&dir, &entry.file_name());
+                        continue;
+                    };
+                    let size = metadata.len();
+                    if size < MIN_BODY_LEN as u64 || size > u32::MAX as u64 {
+                        file_us += stat_us;
+                        note_unreadable_entry(&dir, &entry.file_name());
+                        continue;
+                    }
+                    // The destination hash lives in the first 16 bytes of
+                    // the body, as the reference reads it back
+                    // (`LXMRouter.py:578`).
+                    let read = Instant::now();
+                    let destination_hash = read_destination(&path);
+                    let read_us = micros(read);
+                    opened.read_us += read_us;
+                    file_us += stat_us + read_us;
+                    let Some(destination_hash) = destination_hash else {
+                        note_unreadable_entry(&dir, &entry.file_name());
+                        continue;
+                    };
+                    (size, destination_hash)
+                }
             };
             used += size;
             index.insert(
@@ -256,10 +519,18 @@ impl FilePropagationStore {
                         // reference's) get a real one after the scan, below.
                         sequence: sequence.unwrap_or(0),
                     },
-                    path,
                 },
             );
+            // The last file listed for an id is the one indexed, so its
+            // name decides whether the id has an odd one.
+            if odd {
+                odd_names.insert(transient_id, path);
+            } else {
+                odd_names.remove(&transient_id);
+            }
         }
+        opened.list_us = micros(listed).saturating_sub(file_us);
+        let built = Instant::now();
         let mut last_sequence = index
             .values()
             .map(|entry| entry.meta.sequence)
@@ -289,20 +560,147 @@ impl FilePropagationStore {
                     entry.meta.stamp_value,
                     last_sequence,
                 ));
-                if std::fs::rename(&entry.path, &renamed).is_ok() {
-                    entry.path = renamed;
+                // A failed rename leaves the old name in `odd_names`, where
+                // the scan put it; the next open tries again.
+                let renamed_ok = odd_names
+                    .get(&id)
+                    .is_some_and(|old| std::fs::rename(old, &renamed).is_ok());
+                if renamed_ok {
+                    odd_names.remove(&id);
                 }
             }
         }
-        Ok(Self {
+        let by_sequence = index
+            .values()
+            .map(|entry| (entry.meta.sequence, entry.meta.transient_id))
+            .collect();
+        let by_received = index
+            .values()
+            .map(|entry| (entry.meta.received_at, entry.meta.transient_id))
+            .collect();
+        opened.messages = index.len();
+        // Out of date when anything was read past it, or it names a file
+        // the listing no longer has.
+        let index_dirty = index_file != IndexFileState::Loaded
+            || opened.files_read > 0
+            || opened.from_index_file != recorded.len();
+        let mut store = Self {
             dir,
             capacity,
             used,
             index,
+            odd_names,
+            by_sequence,
+            by_received,
+            counts: SequenceCounts::new(u64::MAX),
             last_sequence,
             fsync,
             writer: None,
-        })
+            index_dirty,
+            opened: OpenProfile::default(),
+            bulk_through: last_sequence,
+            bulk_live: opened.messages,
+        };
+        store.rebuild_counts(u64::MAX);
+        opened.build_us = micros(built);
+        if store.index_dirty {
+            let saved = Instant::now();
+            store.save_index();
+            opened.save_index_us = micros(saved);
+        }
+        opened.total_us = micros(started);
+        store.opened = opened;
+        Ok(store)
+    }
+
+    /// Heap bytes the store pins in RAM, for lnpnd's `PN_CENSUS` line
+    /// (order 1515): the four indexes over the stored messages, and what the
+    /// writer still holds. Walks the index once for the paths' own heap, so
+    /// it is a census call, not a per-hook one.
+    pub fn heap_census(&self) -> StoreHeapCensus {
+        use leviculum_core::heap_census::btree_map_bytes;
+        use std::mem::size_of;
+        let len = self.index.len();
+        let odd = self.odd_names.len();
+        let odd_paths: usize = self.odd_names.values().map(PathBuf::capacity).sum();
+        // Every transient id is a hash, so the id-keyed maps fill as random
+        // inserts do. The sequence and receive-time sets are a sorted run
+        // from the open plus what was appended since, in ascending order.
+        let appended = len.saturating_sub(self.bulk_live);
+        let ordered = |fill: NodeFill, n: usize| btree_allocated::<(u64, TransientId), ()>(n, fill);
+        let index_alloc = btree_allocated::<TransientId, IndexEntry>(len, NodeFill::Random)
+            + btree_allocated::<TransientId, PathBuf>(odd, NodeFill::Random)
+            + odd_paths
+            + 2 * (ordered(NodeFill::Bulk, self.bulk_live)
+                + ordered(NodeFill::Ascending, appended));
+        let (counts_live, counts_alloc) = self.counts.heap_bytes_live_and_allocated();
+        let index_entry_bytes = len
+            * (size_of::<TransientId>()
+                + size_of::<IndexEntry>()
+                + 2 * size_of::<(u64, TransientId)>())
+            + odd * (size_of::<TransientId>() + size_of::<PathBuf>())
+            + odd_paths
+            + counts_live;
+        let index_bytes = index_alloc + counts_alloc;
+        let writer_bytes = self.writer.as_ref().map_or(0, |writer| {
+            btree_map_bytes(&writer.tickets)
+                + btree_map_bytes(&writer.queued)
+                + writer
+                    .queued
+                    .values()
+                    .map(|queued| queued.body.len())
+                    .sum::<usize>()
+                + writer.failed.capacity() * std::mem::size_of::<TransientId>()
+        });
+        StoreHeapCensus {
+            messages: len,
+            index_bytes,
+            index_entry_bytes,
+            index_spare_bytes: index_bytes.saturating_sub(index_entry_bytes),
+            writer_bytes,
+        }
+    }
+
+    /// What the open found and what it cost (module docs, "The index
+    /// file").
+    pub fn open_profile(&self) -> &OpenProfile {
+        &self.opened
+    }
+
+    /// Write [`INDEX_FILE`] from the index, if the index moved since it was
+    /// last written or the file is gone. A failure is a warning: the file is
+    /// a cache, and the next start reads what it is missing.
+    pub fn save_index(&mut self) {
+        if !self.index_dirty && self.dir.join(INDEX_FILE).exists() {
+            return;
+        }
+        let mut bytes =
+            Vec::with_capacity(INDEX_HEADER_LEN + self.index.len() * INDEX_RECORD_LEN + 32);
+        bytes.extend_from_slice(INDEX_MAGIC);
+        bytes.extend_from_slice(&(self.index.len() as u64).to_le_bytes());
+        for entry in self.index.values() {
+            let meta = &entry.meta;
+            bytes.extend_from_slice(&meta.transient_id);
+            bytes.extend_from_slice(&meta.received_at.to_le_bytes());
+            bytes.push(meta.stamp_value);
+            bytes.extend_from_slice(&meta.sequence.to_le_bytes());
+            bytes.extend_from_slice(&meta.size.to_le_bytes());
+            bytes.extend_from_slice(&meta.destination_hash);
+        }
+        let checksum = Sha256::digest(&bytes);
+        bytes.extend_from_slice(&checksum);
+        let path = self.dir.join(INDEX_FILE);
+        let temp = temp_path(&path);
+        // No fsync: a torn or lost file fails its checksum or is missing,
+        // and either costs one walk, never a wrong answer.
+        let written = std::fs::write(&temp, &bytes).and_then(|()| std::fs::rename(&temp, &path));
+        match written {
+            Ok(()) => self.index_dirty = false,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                tracing::warn!("message store index {}: {error}", path.display());
+            }
+        }
     }
 
     /// Hand every filesystem change from here on to a writer thread, so an
@@ -423,11 +821,84 @@ impl FilePropagationStore {
             return;
         };
         if ok {
-            self.index.insert(transient_id, queued.entry);
+            self.index_insert(transient_id, queued.entry);
         } else {
             self.used -= queued.entry.meta.size as u64;
             writer.failed.push(transient_id);
         }
+    }
+
+    /// Put one entry in all four indexes, replacing whatever the ID held.
+    fn index_insert(&mut self, transient_id: TransientId, entry: IndexEntry) {
+        let sequence = entry.meta.sequence;
+        let received_at = entry.meta.received_at;
+        let size = entry.meta.size;
+        let mut rebuild = false;
+        self.index_dirty = true;
+        // Every entry inserted after the open is under the name this store
+        // writes; an odd name it replaces is gone with the old file.
+        self.odd_names.remove(&transient_id);
+        if let Some(previous) = self.index.insert(transient_id, entry) {
+            self.left_bulk(previous.meta.sequence);
+            self.by_sequence
+                .remove(&(previous.meta.sequence, transient_id));
+            self.by_received
+                .remove(&(previous.meta.received_at, transient_id));
+            rebuild |= self.counts.remove(previous.meta.sequence);
+        }
+        self.by_sequence.insert((sequence, transient_id));
+        self.by_received.insert((received_at, transient_id));
+        rebuild |= self.counts.insert(sequence, size) == Inserted::Rebuild;
+        if rebuild {
+            self.rebuild_counts(self.counts.largest_size());
+        }
+    }
+
+    /// An entry left the sequence and receive-time indexes: one fewer of
+    /// the run the open built, if it was one of them.
+    fn left_bulk(&mut self, sequence: u64) {
+        if sequence <= self.bulk_through {
+            self.bulk_live = self.bulk_live.saturating_sub(1);
+        }
+    }
+
+    /// Take one entry out of all four indexes.
+    fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
+        let entry = self.index.remove(transient_id)?;
+        self.left_bulk(entry.meta.sequence);
+        self.odd_names.remove(transient_id);
+        self.index_dirty = true;
+        self.by_sequence
+            .remove(&(entry.meta.sequence, *transient_id));
+        self.by_received
+            .remove(&(entry.meta.received_at, *transient_id));
+        if self.counts.remove(entry.meta.sequence) {
+            self.rebuild_counts(self.counts.largest_size());
+        }
+        Some(entry)
+    }
+
+    /// The counting index afresh from the sequence index, weighing entries
+    /// of at most `largest_size`: at open, when the role names its size,
+    /// and when dead slots outnumber live ones (`SequenceCounts`).
+    fn rebuild_counts(&mut self, largest_size: u64) {
+        let index = &self.index;
+        self.counts = SequenceCounts::rebuilt(
+            largest_size,
+            index.len(),
+            self.by_sequence
+                .iter()
+                .filter_map(|(sequence, transient_id)| {
+                    index
+                        .get(transient_id)
+                        .map(|entry| (*sequence, entry.meta.size))
+                }),
+        );
+    }
+
+    /// Heap bytes of the counting index (`SequenceCounts`).
+    pub fn count_index_bytes(&self) -> usize {
+        self.counts.heap_bytes()
     }
 
     /// Queue a removal behind the writes before it, or remove now when no
@@ -473,21 +944,25 @@ impl FilePropagationStore {
     ) -> Result<bool, StorageError> {
         // A rename of a file the writer has not placed yet would fail.
         let _ = self.flush_writes();
-        let Some(entry) = self.index.get_mut(transient_id) else {
+        let Some(meta) = self.index.get(transient_id).map(|entry| entry.meta) else {
             return Ok(false);
         };
         let renamed = self.dir.join(Self::entry_name(
             transient_id,
-            entry.meta.received_at,
+            meta.received_at,
             stamp_value,
-            entry.meta.sequence,
+            meta.sequence,
         ));
-        std::fs::rename(&entry.path, &renamed).map_err(|_| StorageError::Io)?;
+        std::fs::rename(self.path_of(&meta), &renamed).map_err(|_| StorageError::Io)?;
         if let Ok(dir_handle) = std::fs::File::open(&self.dir) {
             let _ = self.fsync.sync(&dir_handle);
         }
-        entry.path = renamed;
+        self.odd_names.remove(transient_id);
+        let Some(entry) = self.index.get_mut(transient_id) else {
+            return Ok(false);
+        };
         entry.meta.stamp_value = stamp_value;
+        self.index_dirty = true;
         Ok(true)
     }
 
@@ -498,6 +973,25 @@ impl FilePropagationStore {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Where the file of an indexed message is: its odd name if it has one,
+    /// else the name its entry gives it ([`Self::entry_name`]).
+    fn path_of(&self, meta: &StoredMessage) -> PathBuf {
+        match self.odd_names.get(&meta.transient_id) {
+            Some(path) => path.clone(),
+            None => self.canonical_path(meta),
+        }
+    }
+
+    /// The path this store writes `meta` under.
+    fn canonical_path(&self, meta: &StoredMessage) -> PathBuf {
+        self.dir.join(Self::entry_name(
+            &meta.transient_id,
+            meta.received_at,
+            meta.stamp_value,
+            meta.sequence,
+        ))
     }
 
     fn entry_name(
@@ -571,6 +1065,99 @@ fn read_destination(path: &Path) -> Option<[u8; 16]> {
     Some(head)
 }
 
+/// The index file's name inside the store directory (module docs, "The
+/// index file"). A dot name with no `_`, so `lxmd`'s indexer
+/// (`reference/LXMF/LXMF/LXMRouter.py:566-569`) never reads it as a
+/// message.
+pub const INDEX_FILE: &str = ".index";
+
+/// The index file's first eight bytes; the last names the layout.
+const INDEX_MAGIC: &[u8; 8] = b"LVPNIDX\x01";
+
+/// Magic and record count.
+const INDEX_HEADER_LEN: usize = 16;
+
+/// Transient ID, receive time, stamp value, sequence, size, destination.
+const INDEX_RECORD_LEN: usize = 32 + 8 + 1 + 8 + 4 + 16;
+
+/// One record of the index file.
+struct Recorded {
+    received_at: u64,
+    stamp_value: u8,
+    sequence: u64,
+    size: u32,
+    destination_hash: [u8; 16],
+}
+
+/// The index file's records by transient ID, and what became of the file.
+/// Anything short of a whole file with a matching checksum is no records.
+fn load_index(
+    path: &Path,
+) -> (
+    std::collections::HashMap<TransientId, Recorded>,
+    IndexFileState,
+) {
+    let mut records = std::collections::HashMap::new();
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (records, IndexFileState::Missing)
+        }
+        Err(_) => return (records, IndexFileState::Corrupt),
+    };
+    let Some((body, checksum)) = bytes.split_at_checked(bytes.len().saturating_sub(32)) else {
+        return (records, IndexFileState::Corrupt);
+    };
+    let count = body
+        .get(8..INDEX_HEADER_LEN)
+        .and_then(|count| <[u8; 8]>::try_from(count).ok())
+        .map(u64::from_le_bytes);
+    let whole = body.len() >= INDEX_HEADER_LEN
+        && &body[..8] == INDEX_MAGIC
+        && count.is_some_and(|count| {
+            (count as u128) * INDEX_RECORD_LEN as u128 == (body.len() - INDEX_HEADER_LEN) as u128
+        })
+        && checksum.len() == 32
+        && Sha256::digest(body).as_slice() == checksum;
+    if !whole {
+        return (records, IndexFileState::Corrupt);
+    }
+    records.reserve(count.unwrap_or(0) as usize);
+    for record in body[INDEX_HEADER_LEN..].chunks_exact(INDEX_RECORD_LEN) {
+        let (id, rest) = record.split_at(32);
+        let (received, rest) = rest.split_at(8);
+        let (stamp, rest) = rest.split_at(1);
+        let (sequence, rest) = rest.split_at(8);
+        let (size, destination) = rest.split_at(4);
+        let mut transient_id = [0u8; 32];
+        transient_id.copy_from_slice(id);
+        let mut destination_hash = [0u8; 16];
+        destination_hash.copy_from_slice(destination);
+        let mut u64_of = [0u8; 8];
+        u64_of.copy_from_slice(received);
+        let received_at = u64::from_le_bytes(u64_of);
+        u64_of.copy_from_slice(sequence);
+        let sequence = u64::from_le_bytes(u64_of);
+        let mut u32_of = [0u8; 4];
+        u32_of.copy_from_slice(size);
+        records.insert(
+            transient_id,
+            Recorded {
+                received_at,
+                stamp_value: stamp[0],
+                sequence,
+                size: u32::from_le_bytes(u32_of),
+                destination_hash,
+            },
+        );
+    }
+    (records, IndexFileState::Loaded)
+}
+
+fn micros(since: Instant) -> u64 {
+    since.elapsed().as_micros() as u64
+}
+
 /// Prefix of the temp file an append writes before the rename.
 const TEMP_PREFIX: &str = ".tmp-";
 
@@ -595,7 +1182,8 @@ fn temp_path(path: &Path) -> PathBuf {
 
 impl Drop for FilePropagationStore {
     /// Close the writer's queue and wait for it: what was handed over is
-    /// written before the store is gone.
+    /// written before the store is gone. Then the index file, so the next
+    /// start reads no message (module docs, "The index file").
     fn drop(&mut self) {
         if let Some(writer) = self.writer.as_mut() {
             writer.jobs = None;
@@ -603,6 +1191,9 @@ impl Drop for FilePropagationStore {
                 let _ = thread.join();
             }
         }
+        // What the writer confirmed joins the index, so the file names it.
+        self.collect(false);
+        self.save_index();
     }
 }
 
@@ -620,14 +1211,19 @@ impl PropagationStore for FilePropagationStore {
         // Free what the writer finished, so the queued bodies held in memory
         // stay bounded by what is actually outstanding.
         self.collect(false);
-        let previous = self
+        let queued_previous = self
             .writer
             .as_ref()
             .and_then(|writer| writer.queued.get(transient_id))
-            .map(|queued| &queued.entry)
-            .or_else(|| self.index.get(transient_id));
-        let replaced = previous.map_or(0, |entry| entry.meta.size as u64);
-        let supersedes = previous.map(|entry| entry.path.clone());
+            .map(|queued| queued.entry.meta);
+        let (replaced, supersedes) = match queued_previous {
+            // A queued append is always under the name this store writes.
+            Some(meta) => (meta.size as u64, Some(self.canonical_path(&meta))),
+            None => match self.index.get(transient_id) {
+                Some(entry) => (entry.meta.size as u64, Some(self.path_of(&entry.meta))),
+                None => (0, None),
+            },
+        };
         let next = self.used - replaced + body.len() as u64;
         if next > self.capacity {
             return Err(StorageError::Full);
@@ -650,7 +1246,6 @@ impl PropagationStore for FilePropagationStore {
                 stamp_value,
                 sequence,
             },
-            path: path.clone(),
         };
         if let Some(writer) = self.writer.as_mut() {
             let Some(jobs) = writer.jobs.as_ref() else {
@@ -658,11 +1253,12 @@ impl PropagationStore for FilePropagationStore {
             };
             let ticket = writer.issued + 1;
             let body: Arc<[u8]> = Arc::from(body);
+            let supersedes = supersedes.filter(|previous| previous != &path);
             jobs.send(Job::Write {
                 ticket,
                 path,
                 body: Arc::clone(&body),
-                supersedes: supersedes.filter(|previous| previous != &entry.path),
+                supersedes,
             })
             .map_err(|_| StorageError::Io)?;
             writer.issued = ticket;
@@ -675,7 +1271,7 @@ impl PropagationStore for FilePropagationStore {
                     body,
                 },
             );
-            self.index.remove(transient_id);
+            self.index_remove(transient_id);
             self.last_sequence = sequence;
             self.used = next;
             return Ok(());
@@ -684,12 +1280,10 @@ impl PropagationStore for FilePropagationStore {
         self.last_sequence = sequence;
         // Replacing an entry under a different timestamp leaves the old
         // file behind; remove it after the new one is durable.
-        if let Some(previous) = self.index.get(transient_id) {
-            if previous.path != path {
-                let _ = std::fs::remove_file(&previous.path);
-            }
+        if let Some(previous) = supersedes.filter(|previous| previous != &path) {
+            let _ = std::fs::remove_file(previous);
         }
-        self.index.insert(*transient_id, entry);
+        self.index_insert(*transient_id, entry);
         self.used = next;
         Ok(())
     }
@@ -701,17 +1295,103 @@ impl PropagationStore for FilePropagationStore {
         Ok(())
     }
 
+    /// The sequence index from just above `cursor`: what the visitor reads,
+    /// not the store (module docs, "The sequence index"). Ties come in
+    /// transient ID order, as the default's stable sort of `for_each` leaves
+    /// them.
+    fn for_each_above(
+        &self,
+        cursor: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        let above = (Bound::Excluded((cursor, [0xff; 32])), Bound::Unbounded);
+        for (_, transient_id) in self.by_sequence.range(above) {
+            let Some(entry) = self.index.get(transient_id) else {
+                continue;
+            };
+            if visit(&entry.meta).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// The receive-time index below `before`, oldest first: what expired,
+    /// not the store (module docs, "The sequence index"). Queued, unconfirmed appends are
+    /// not visited, as `for_each` does not visit them.
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        for (_, transient_id) in self.by_received.range(..(before, [0u8; 32])) {
+            let Some(entry) = self.index.get(transient_id) else {
+                continue;
+            };
+            if visit(&entry.meta).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// One index lookup; the default walks the store, once per wanted ID of
+    /// an outbound sync batch (`plan_sync_batch`, leviculum#478).
+    fn meta(&self, transient_id: &TransientId) -> Result<Option<StoredMessage>, StorageError> {
+        Ok(self.index.get(transient_id).map(|entry| entry.meta))
+    }
+
+    fn count(&self) -> Result<usize, StorageError> {
+        Ok(self.index.len())
+    }
+
+    /// A prefix sum of the counting index a cursor, `O(log n)`, when asked
+    /// for the size it weighs; the walk otherwise (module docs, "The
+    /// sequence index"). Queued, unconfirmed appends are not counted, as
+    /// `for_each` does not visit them.
+    fn count_above_cursors(
+        &self,
+        cursors: &[u64],
+        largest_size: u64,
+    ) -> Result<Vec<u64>, StorageError> {
+        if largest_size != self.counts.largest_size() {
+            return count_above_cursors_by_walk(self, cursors, largest_size);
+        }
+        Ok(cursors
+            .iter()
+            .map(|cursor| self.counts.above(*cursor))
+            .collect())
+    }
+
+    fn count_sizes_up_to(&mut self, largest_size: u64) {
+        if largest_size != self.counts.largest_size() {
+            self.rebuild_counts(largest_size);
+        }
+    }
+
+    fn newest_sequence(&self) -> Result<u64, StorageError> {
+        Ok(self.by_sequence.last().map_or(0, |(sequence, _)| *sequence))
+    }
+
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
         let queued = self
             .writer
             .as_mut()
             .and_then(|writer| writer.queued.remove(transient_id))
-            .map(|queued| queued.entry);
-        let Some(entry) = queued.or_else(|| self.index.remove(transient_id)) else {
-            return Ok(false);
+            .map(|queued| queued.entry.meta);
+        let (meta, path) = match queued {
+            Some(meta) => (meta, self.canonical_path(&meta)),
+            None => {
+                let Some(meta) = self.index.get(transient_id).map(|entry| entry.meta) else {
+                    return Ok(false);
+                };
+                let path = self.path_of(&meta);
+                self.index_remove(transient_id);
+                (meta, path)
+            }
         };
-        self.used -= entry.meta.size as u64;
-        match self.remove_file(entry.path) {
+        self.used -= meta.size as u64;
+        match self.remove_file(path) {
             Ok(()) => Ok(true),
             // Already gone is still gone.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
@@ -757,7 +1437,7 @@ impl PropagationBodyStore for FilePropagationStore {
         let Some(entry) = self.index.get(transient_id) else {
             return Ok(None);
         };
-        match std::fs::read(&entry.path) {
+        match std::fs::read(self.path_of(&entry.meta)) {
             Ok(body) => Ok(Some(body)),
             Err(_) => Err(StorageError::Io),
         }
@@ -779,7 +1459,8 @@ impl PropagationBodyStore for FilePropagationStore {
         let Some(entry) = self.index.get(transient_id) else {
             return Ok(None);
         };
-        let mut file = std::fs::File::open(&entry.path).map_err(|_| StorageError::Io)?;
+        let mut file =
+            std::fs::File::open(self.path_of(&entry.meta)).map_err(|_| StorageError::Io)?;
         let len = file.metadata().map_err(|_| StorageError::Io)?.len();
         let offset = offset as u64;
         if offset >= len || buf.is_empty() {
@@ -883,6 +1564,221 @@ mod tests {
         );
     }
 
+    /// A store of `count` messages appended without a writer, ids `1..`.
+    fn filled(dir: &Path, count: u8) -> FilePropagationStore {
+        let mut store = FilePropagationStore::open(dir, 1_000_000).expect("open");
+        for n in 1..=count {
+            store
+                .append(
+                    &[n; 32],
+                    1_789_000_000 + n as u64,
+                    n % 20,
+                    &body_for(n, 80 + n as usize),
+                )
+                .expect("append");
+        }
+        store
+    }
+
+    fn metas(store: &FilePropagationStore) -> Vec<StoredMessage> {
+        let mut seen = Vec::new();
+        store.for_each(&mut |meta| seen.push(*meta)).unwrap();
+        seen.sort_by_key(|meta| meta.transient_id);
+        seen
+    }
+
+    /// Order 1376: a start over a store that was closed reads no message
+    /// file, and indexes exactly what the walk did.
+    #[test]
+    fn a_reopen_reads_no_file_the_index_file_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = filled(dir.path(), 12);
+        let before = metas(&store);
+        drop(store);
+
+        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        let opened = store.open_profile();
+        assert_eq!(opened.index_file, IndexFileState::Loaded);
+        assert_eq!((opened.from_index_file, opened.files_read), (12, 0));
+        assert_eq!(
+            opened.save_index_us, 0,
+            "a current index file is not rewritten"
+        );
+        assert_eq!(metas(&store), before);
+        assert_eq!(
+            store.free_space(),
+            1_000_000 - before.iter().map(|m| m.size as u64).sum::<u64>()
+        );
+        assert_eq!(store.read_body(&[3; 32]).unwrap(), Some(body_for(3, 83)));
+    }
+
+    /// A damaged index file is no index file: ignored, the walk rebuilds the
+    /// index, and the next start finds a good one again.
+    #[test]
+    fn a_corrupt_index_file_is_ignored_and_rebuilt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = filled(dir.path(), 9);
+        let before = metas(&store);
+        drop(store);
+        let path = dir.path().join(INDEX_FILE);
+        let good = std::fs::read(&path).expect("the index file is written");
+
+        // One flipped bit in a record, and the file cut short.
+        let mut flipped = good.clone();
+        flipped[INDEX_HEADER_LEN + 40] ^= 0x01;
+        let torn = good[..good.len() - 7].to_vec();
+        for damaged in [flipped, torn, b"LVPN".to_vec()] {
+            std::fs::write(&path, &damaged).unwrap();
+            let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+            let opened = store.open_profile();
+            assert_eq!(opened.index_file, IndexFileState::Corrupt);
+            assert_eq!((opened.from_index_file, opened.files_read), (0, 9));
+            assert_eq!(metas(&store), before);
+            drop(store);
+            assert_eq!(std::fs::read(&path).unwrap(), good, "the start rewrote it");
+            let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+            assert_eq!(store.open_profile().index_file, IndexFileState::Loaded);
+            assert_eq!(store.open_profile().files_read, 0);
+        }
+    }
+
+    /// The listing decides what is in the store, the index file only what a
+    /// listed name holds: a file added behind its back is read, a removed one
+    /// is gone, and a renamed one is read under its new name.
+    #[test]
+    fn the_listing_corrects_what_the_index_file_says() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        drop(filled(dir.path(), 6));
+        // lxmd's name for a seventh message, one removed, one re-priced.
+        let added = format!("{}_1789000100.5_9", hex_encode(&[7u8; 32]));
+        std::fs::write(dir.path().join(&added), body_for(7, 77)).unwrap();
+        let name = |n: u8, stamp: u8| {
+            dir.path().join(FilePropagationStore::entry_name(
+                &[n; 32],
+                1_789_000_000 + n as u64,
+                stamp,
+                n as u64,
+            ))
+        };
+        std::fs::remove_file(name(2, 2)).unwrap();
+        std::fs::rename(name(4, 4), name(4, 19)).unwrap();
+
+        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        let opened = store.open_profile().clone();
+        assert_eq!(opened.index_file, IndexFileState::Loaded);
+        assert_eq!((opened.from_index_file, opened.files_read), (4, 2));
+        let seen = metas(&store);
+        let ids: Vec<u8> = seen.iter().map(|meta| meta.transient_id[0]).collect();
+        assert_eq!(ids, vec![1, 3, 4, 5, 6, 7]);
+        assert_eq!(seen[2].stamp_value, 19);
+        assert_eq!((seen[5].destination_hash, seen[5].size), ([7; 16], 77));
+        assert_eq!(
+            seen[5].sequence, 7,
+            "the legacy name is sequenced above the rest"
+        );
+        drop(store);
+
+        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        assert_eq!(
+            store.open_profile().files_read,
+            0,
+            "the start wrote what it read"
+        );
+        assert_eq!(metas(&store), seen);
+    }
+
+    /// What the writer confirms before the store is dropped is in the index
+    /// file, and a crash, which writes none, costs the next start only what
+    /// arrived since the last one was written.
+    #[test]
+    fn the_index_file_follows_the_writer_and_a_crash_costs_only_the_new() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = filled(dir.path(), 5).write_behind().expect("writer");
+        store
+            .append(&[6; 32], 1_789_000_006, 6, &body_for(6, 86))
+            .unwrap();
+        store.purge(&[1; 32]).unwrap();
+        drop(store);
+
+        let mut store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        assert_eq!(store.open_profile().files_read, 0);
+        assert_eq!(store.len(), 5);
+        store
+            .append(&[7; 32], 1_789_000_007, 7, &body_for(7, 87))
+            .unwrap();
+        let before = metas(&store);
+        // The process dies: no drop, no index file.
+        std::mem::forget(store);
+
+        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        let opened = store.open_profile();
+        assert_eq!((opened.from_index_file, opened.files_read), (5, 1));
+        assert_eq!(metas(&store), before);
+    }
+
+    /// What [`FilePropagationStore::open`] costs over a store of field size
+    /// (order 1376: miauhaus took 130 s to start at 323 597 messages).
+    /// `LEVICULUM_OPEN_BENCH_DIR` names the disk, `LEVICULUM_OPEN_BENCH_MESSAGES`
+    /// the size (320 000). The fixture is written once, plain writes at the
+    /// field's mean of 330 bytes over 2 000 destinations, and reused for
+    /// a few weeks; drop the page cache between runs for the cold figure.
+    #[test]
+    #[ignore = "a measurement over a 320 000-file store on a disk named by env"]
+    fn open_cost_at_field_scale() {
+        use std::time::Instant;
+
+        let messages: usize = std::env::var("LEVICULUM_OPEN_BENCH_MESSAGES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(320_000);
+        let base = std::env::var("LEVICULUM_OPEN_BENCH_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("LEVICULUM_OPEN_BENCH_DIR names a real disk");
+        let dir = base.join(format!("store-{messages}"));
+        // Received over the last days, so a daemon started on the fixture
+        // (`lnpnd/tests/store_index_at_start.rs`) expires none of it.
+        let complete = base.join(format!("store-{messages}.recent"));
+        let first_received = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_secs()
+            - 5 * 24 * 60 * 60;
+        if !complete.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("fixture directory");
+            let written = Instant::now();
+            for index in 0..messages {
+                let mut transient_id = [0u8; 32];
+                transient_id[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                transient_id[8..16].copy_from_slice(&(index as u64 ^ 0x5a5a).to_le_bytes());
+                let mut body = vec![0xCD; 330];
+                body[..2].copy_from_slice(&((index % 2000) as u16).to_be_bytes());
+                let name = FilePropagationStore::entry_name(
+                    &transient_id,
+                    first_received + index as u64,
+                    13,
+                    index as u64 + 1,
+                );
+                std::fs::write(dir.join(name), &body).expect("fixture file");
+            }
+            std::fs::write(&complete, b"").expect("fixture marker");
+            println!(
+                "OPEN_FIXTURE n={messages} write_ms={}",
+                written.elapsed().as_millis()
+            );
+        }
+        for round in 0..2 {
+            let opened = Instant::now();
+            let store = FilePropagationStore::open(&dir, u64::MAX).expect("open");
+            let open_ms = opened.elapsed().as_millis();
+            assert_eq!(store.len(), messages);
+            println!(
+                "OPEN round={round} n={messages} open_ms={open_ms} {:?}",
+                store.open_profile()
+            );
+        }
+    }
+
     fn body_for(destination: u8, len: usize) -> Vec<u8> {
         let mut body = vec![destination; len];
         body[16..].fill(0xCD);
@@ -946,7 +1842,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut store = FilePropagationStore::open(dir.path(), 4096).expect("open");
         store.append(&[1; 32], 1234, 0, &body_for(7, 100)).unwrap();
-        std::fs::remove_file(&store.index.get(&[1; 32]).unwrap().path).unwrap();
+        let meta = store.index.get(&[1; 32]).unwrap().meta;
+        std::fs::remove_file(store.path_of(&meta)).unwrap();
 
         assert_eq!(store.read_body(&[1; 32]), Err(StorageError::Io));
         assert_eq!(
@@ -1018,6 +1915,74 @@ mod tests {
         assert!(store.contains(&[1; 32]).unwrap());
         assert!(!store.contains(&[2; 32]).unwrap());
         assert!(!store.contains(&[3; 32]).unwrap());
+    }
+
+    /// LV-1000 (order 1515): the index held each message's full path, so
+    /// a store under a longer directory cost more RAM a message, and the
+    /// path was most of an entry (630 B a message at 304 000 messages in
+    /// the growth soak, `lnpnd/tests/pn_growth_soak.rs`). A path is derived
+    /// from the entry now, so the index costs the same under any directory.
+    #[test]
+    fn the_index_holds_no_path_per_message() {
+        let short = tempfile::tempdir().expect("temp dir");
+        let long_base = tempfile::tempdir().expect("temp dir");
+        let long = long_base.path().join("a".repeat(200)).join("b".repeat(200));
+        std::fs::create_dir_all(&long).expect("long dir");
+        let census = |dir: &Path| {
+            let mut store = FilePropagationStore::open(dir, 1_000_000).expect("open");
+            for n in 1..=40u8 {
+                store
+                    .append(&[n; 32], 1_789_000_000, 13, &body_for(n, 100))
+                    .unwrap();
+            }
+            store.heap_census()
+        };
+        let (short, long) = (census(short.path()), census(&long));
+        assert_eq!(short.messages, 40);
+        assert_eq!(
+            short.index_bytes, long.index_bytes,
+            "the index must not cost more under a longer directory"
+        );
+    }
+
+    /// A legacy name the open cannot rename stays the file's name, and the
+    /// store still finds the file under it: the one case where a path is
+    /// not derived from the entry.
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_name_the_open_cannot_rename_is_still_served_and_purged() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let legacy = dir.path().join(format!("{}_50_0", hex_encode(&[3u8; 32])));
+        std::fs::write(&legacy, body_for(9, 100)).unwrap();
+        let read_only = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(dir.path(), read_only).unwrap();
+        let store = FilePropagationStore::open(dir.path(), 8192).expect("open");
+        // Root renames anyway; then there is no odd name to test.
+        let renamed = !legacy.exists();
+        assert_eq!(
+            store.odd_names.contains_key(&[3; 32]),
+            !renamed,
+            "a failed rename keeps the old name"
+        );
+        assert_eq!(
+            store.read_body(&[3; 32]).unwrap(),
+            Some(body_for(9, 100)),
+            "the file is served under the name it has"
+        );
+        drop(store);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut store = FilePropagationStore::open(dir.path(), 8192).expect("reopen");
+        assert!(store.odd_names.is_empty(), "the next open renames it");
+        assert_eq!(store.read_body(&[3; 32]).unwrap(), Some(body_for(9, 100)));
+        assert!(store.purge(&[3; 32]).unwrap());
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(&hex_encode(&[3u8; 32])))
+            .collect();
+        assert!(left.is_empty(), "the purge removed the file: {left:?}");
     }
 
     #[test]
@@ -1116,9 +2081,11 @@ mod tests {
         assert_eq!(store.read_body(&[5; 32]).unwrap(), Some(body_for(9, 100)));
         drop(store);
 
+        // The index file beside them is ours and no message (`INDEX_FILE`).
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != INDEX_FILE)
             .collect();
         names.sort();
         assert_eq!(
@@ -1322,6 +2289,176 @@ mod tests {
         );
         assert!(!store.contains(&[1; 32]).unwrap());
         assert_eq!(store.free_space(), 4096);
-        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0);
+        assert_eq!(files_in(dir.path()), 0);
+    }
+
+    /// The answers the sequence index gives, recomputed by the trait's own
+    /// defaults from `for_each`: what the store said before leviculum#478.
+    fn by_walk(store: &FilePropagationStore, cursor: u64) -> (Vec<StoredMessage>, u64, usize) {
+        let mut above = Vec::new();
+        let mut newest = 0;
+        let mut count = 0;
+        store
+            .for_each(&mut |meta| {
+                count += 1;
+                newest = newest.max(meta.sequence);
+                if meta.sequence > cursor {
+                    above.push(*meta);
+                }
+            })
+            .unwrap();
+        above.sort_by_key(|meta| meta.sequence);
+        (above, newest, count)
+    }
+
+    fn by_index(store: &FilePropagationStore, cursor: u64) -> (Vec<StoredMessage>, u64, usize) {
+        let mut above = Vec::new();
+        store
+            .for_each_above(cursor, &mut |meta| {
+                above.push(*meta);
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        (
+            above,
+            store.newest_sequence().unwrap(),
+            store.count().unwrap(),
+        )
+    }
+
+    fn assert_index_matches_walk(store: &FilePropagationStore, ids: &[TransientId], step: usize) {
+        let (_, newest, _) = by_walk(store, 0);
+        let cursors = [
+            0,
+            newest / 3,
+            newest / 2,
+            newest.saturating_sub(1),
+            newest,
+            newest + 1,
+        ];
+        for cursor in cursors {
+            assert_eq!(
+                by_index(store, cursor),
+                by_walk(store, cursor),
+                "step {step}, cursor {cursor}"
+            );
+        }
+        for largest in [store.counts.largest_size(), 120, u64::MAX] {
+            let counted = store.count_above_cursors(&cursors, largest).unwrap();
+            let walked: Vec<u64> = cursors
+                .iter()
+                .map(|cursor| {
+                    by_walk(store, *cursor)
+                        .0
+                        .iter()
+                        .filter(|meta| u64::from(meta.size) <= largest)
+                        .count() as u64
+                })
+                .collect();
+            assert_eq!(counted, walked, "step {step}, sizes up to {largest}");
+        }
+        for id in ids {
+            let mut walked = None;
+            store
+                .for_each(&mut |meta| {
+                    if meta.transient_id == *id {
+                        walked = Some(*meta);
+                    }
+                })
+                .unwrap();
+            assert_eq!(store.meta(id).unwrap(), walked, "step {step}");
+        }
+        let mut received: Vec<u64> = Vec::new();
+        store
+            .for_each(&mut |meta| received.push(meta.received_at))
+            .unwrap();
+        received.sort_unstable();
+        let middle = received.get(received.len() / 2).copied().unwrap_or(0);
+        for before in [0, middle, middle + 1, u64::MAX] {
+            let mut walked = Vec::new();
+            store
+                .for_each(&mut |meta| {
+                    if meta.received_at < before {
+                        walked.push(*meta);
+                    }
+                })
+                .unwrap();
+            let mut indexed = Vec::new();
+            store
+                .for_each_received_before(before, &mut |meta| {
+                    indexed.push(*meta);
+                    ControlFlow::Continue(())
+                })
+                .unwrap();
+            walked.sort_by_key(|meta| meta.transient_id);
+            indexed.sort_by_key(|meta| meta.transient_id);
+            assert_eq!(indexed, walked, "step {step}, received before {before}");
+        }
+    }
+
+    /// leviculum#478: the sequence, receive-time and counting indexes
+    /// answer `for_each_above`, `for_each_received_before`,
+    /// `count_above_cursors`, `newest_sequence`, `count` and `meta` exactly
+    /// as the whole-store walk did, through appends, re-appends of a stored
+    /// ID, purges, queued writes the writer has not confirmed, and a reopen;
+    /// and an ordered walk that breaks visits no further.
+    #[test]
+    fn the_sequence_index_answers_as_the_store_walk_does() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 1_000_000)
+            .expect("open")
+            .write_behind()
+            .expect("writer");
+        store.count_sizes_up_to(120);
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let ids: Vec<TransientId> = (0..24u8).map(|n| [n; 32]).collect();
+        for step in 0..400 {
+            let id = ids[(next() % ids.len() as u64) as usize];
+            match next() % 4 {
+                0 => {
+                    store.purge(&id).unwrap();
+                }
+                3 => {
+                    store.flush_writes();
+                }
+                _ => {
+                    let len = 80 + (next() % 80) as usize;
+                    store
+                        .append(&id, 1_789_000_000 + step as u64, 13, &body_for(3, len))
+                        .unwrap();
+                }
+            }
+            assert_index_matches_walk(&store, &ids, step);
+        }
+        store.flush_writes();
+        assert_index_matches_walk(&store, &ids, 400);
+
+        let (above, _, count) = by_walk(&store, 0);
+        assert!(count > 3, "the walk left {count} entries to break over");
+        let mut visited = Vec::new();
+        store
+            .for_each_above(0, &mut |meta| {
+                visited.push(meta.sequence);
+                if visited.len() == 3 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+        let first: Vec<u64> = above.iter().take(3).map(|meta| meta.sequence).collect();
+        assert_eq!(visited, first, "a break ends the walk");
+
+        drop(store);
+        let mut store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        assert_index_matches_walk(&store, &ids, 401);
+        store.count_sizes_up_to(120);
+        assert_index_matches_walk(&store, &ids, 402);
     }
 }

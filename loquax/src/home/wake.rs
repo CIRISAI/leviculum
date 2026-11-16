@@ -55,6 +55,15 @@ impl<K> Default for Wakes<K> {
 }
 
 impl<K: Ord + Copy> Wakes<K> {
+    /// Watching links held and their estimated heap bytes, for the
+    /// mailbox's census (order 1585).
+    pub fn census(&self) -> (usize, usize) {
+        (
+            self.watchers.len(),
+            leviculum_core::heap_census::btree_map_bytes(&self.watchers),
+        )
+    }
+
     /// `link`, identified as `device`, asked `/watch` and was answered with
     /// `told`, the newest sequence then. The same link asking again
     /// replaces what it had.

@@ -40,9 +40,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use super::inventory::{
+    self as inventory_names, I2pEndpoint, I2pTunnelState, InterfaceIdentity, SharedInventory,
+    TunnelState,
+};
 use super::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, ReadySignal,
 };
+use crate::event_log::Scalar;
+use crate::sync_ext::MutexRecover as _;
 use sam::{Destination, SamError};
 
 /// Default channel buffer size for I2P sub-interfaces. Matches the TCP default;
@@ -52,7 +58,7 @@ pub(crate) const I2P_DEFAULT_BUFFER_SIZE: usize = 256;
 /// I2P link MTU advertised for link-MTU negotiation. Matches Python
 /// `I2PInterface.HW_MTU = 1064`, so MTU negotiation with an rnsd I2P peer
 /// agrees.
-const I2P_HW_MTU: u32 = 1064;
+pub(crate) const I2P_HW_MTU: u32 = 1064;
 
 /// Wait between tunnel-rebuild attempts (Python `I2PInterfacePeer.RECONNECT_WAIT`).
 pub(crate) const I2P_DEFAULT_RECONNECT_WAIT: Duration = Duration::from_secs(15);
@@ -80,6 +86,50 @@ const I2P_KEEPALIVE: Duration = Duration::from_secs(10);
 /// on a merely quiet link.
 const I2P_READ_TIMEOUT: Duration = Duration::from_secs((9 * 5 + 10) * 2);
 
+/// Tunnel-stale threshold: no byte for longer than this marks the tunnel
+/// unresponsive in the status, two keepalive periods. The reference's
+/// `I2P_PROBE_AFTER*2` (I2PInterface.py:681), same value, same comparison.
+///
+/// The mark is a report, not an action: the teardown still waits for
+/// [`I2P_READ_TIMEOUT`], as in the reference, so nothing on the wire changes
+/// at 20 s. What the mark buys is visibility: a tunnel that carried traffic
+/// and then went silent (1568's 6/10 run) shows from its twentieth second,
+/// in `rnstatus` and as `I2P_TUNNEL_STALE`, instead of only at the teardown
+/// 90 s later.
+const I2P_STALE_AFTER: Duration = Duration::from_secs(2 * 10);
+
+/// How long the endpoint holds its first `SESSION CREATE` on a stored key
+/// after the process starts (1654).
+///
+/// i2pd 2.56 (tag 2.56.0) destroys a closed SAM session five seconds after
+/// its control socket closes (`SAMBridge::CloseSession`,
+/// i2pd/libi2pd_client/SAM.cpp:1484-1491, with the default
+/// `sam.singlethread = true`), and the destructor deletes and stops the
+/// session's local destination (`~SAMSingleSession`,
+/// i2pd/libi2pd_client/SAM.cpp:1261-1264). A `SESSION CREATE` with the same
+/// key inside those five seconds is handed that old destination
+/// (`Local destination ... exists`,
+/// i2pd/libi2pd_client/ClientContext.cpp:402-411) and answered OK; five
+/// seconds later the old session's destructor stops it under the new
+/// session. The new session then has no tunnel pool: the pending
+/// `STREAM ACCEPT` is reset without its socket closing ("I2P acceptor has
+/// been reset", i2pd/libi2pd_client/SAM.cpp:1136), and the router logs
+/// "Can't publish LeasetSet because destination is not ready" every 1.8 s,
+/// for as long as the session lives. A fast restart of the daemon on a
+/// running i2pd lands exactly there: on the private bed 0 of 4 clients
+/// reached the restarted endpoint in 150 s with a 2 s gap, and lnsd's
+/// clients reached it again with a 60 s gap.
+///
+/// The reference has the same exposure (its endpoint creates the session as
+/// soon as the transport identity exists, I2PInterface.py:264-310). Holding
+/// the first session on a stored key past i2pd's five seconds, plus two of
+/// margin, changes nothing on the wire and costs a cold start seven seconds
+/// against a tunnel build of 9 to 39 s. A fresh key cannot collide
+/// (TRANSIENT makes a new destination), and a rebuild inside the process
+/// already waits [`I2P_DEFAULT_RECONNECT_WAIT`], so only the first session
+/// is held.
+pub(crate) const I2P_STORED_KEY_HOLD: Duration = Duration::from_secs(5 + 2);
+
 /// Upper bound on the read-watchdog polling period. At the production
 /// threshold this puts the check on a one-second cadence, as in Python.
 const WATCHDOG_MAX_PERIOD: Duration = Duration::from_secs(1);
@@ -98,6 +148,11 @@ pub(crate) struct I2pTimeouts {
     /// How long an established stream may go without a single received byte
     /// before it is torn down so the tunnel is rebuilt.
     pub read_idle: Duration,
+    /// How long it may go without one before its tunnel state reads stale.
+    pub stale_after: Duration,
+    /// How long the endpoint holds its first session on a stored key
+    /// ([`I2P_STORED_KEY_HOLD`]). Unused by a client.
+    pub stored_key_hold: Duration,
 }
 
 impl Default for I2pTimeouts {
@@ -105,6 +160,8 @@ impl Default for I2pTimeouts {
         Self {
             sam_command: sam::SAM_COMMAND_TIMEOUT,
             read_idle: I2P_READ_TIMEOUT,
+            stale_after: I2P_STALE_AFTER,
+            stored_key_hold: I2P_STORED_KEY_HOLD,
         }
     }
 }
@@ -139,6 +196,9 @@ pub(crate) struct I2pClientConfig {
     /// Applied to every TCP socket this sub-interface dials toward the SAM
     /// bridge, before it connects. See [`crate::socket_hook::OutboundSocketHook`].
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// The peer's tunnel state, which its stream task keeps and the status
+    /// reports.
+    pub tunnel: Arc<I2pTunnelState>,
 }
 
 /// Configuration for the `connectable` server endpoint of an I2P interface.
@@ -159,6 +219,21 @@ pub(crate) struct I2pServerConfig {
     /// Applied to every TCP socket the server endpoint dials toward the SAM
     /// bridge (control and accept sockets), before it connects.
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// The parent row's I2P state: the b32 once the key is known, and whether
+    /// the endpoint is up.
+    pub endpoint: Arc<I2pEndpoint>,
+    /// The section's name, which every accepted connection's reported name
+    /// carries (`Connected peer on <section>`, I2PInterface.py:946).
+    pub section: String,
+    /// The parent row's inventory id; each accepted connection is registered
+    /// under it.
+    pub parent_id: usize,
+    /// The reporting inventory the accepted connections are registered in.
+    pub inventory: SharedInventory,
+    /// The section's propagation mode, which every accepted connection takes
+    /// (`spawned_interface.mode = self.mode`, I2PInterface.py:992), as a TCP
+    /// server's accepted connections take theirs (#104).
+    pub mode: leviculum_core::traits::InterfaceMode,
 }
 
 /// Spawn an outbound I2P client sub-interface.
@@ -194,6 +269,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             config.reconnect_notify,
             task_ready,
             config.outbound_socket_hook,
+            config.tunnel,
         )
         .await;
     });
@@ -220,6 +296,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             // spawned interface takes `self.ingress_control` from the one
             // parent interface (I2PInterface.py:951).
             ingress_control: Some(config.ingress_control),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -250,6 +327,7 @@ async fn i2p_client_task(
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    tunnel: Arc<I2pTunnelState>,
 ) {
     let nick = generate_session_id();
     let mut has_connected_before = false;
@@ -285,7 +363,8 @@ async fn i2p_client_task(
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
-                    timeouts.read_idle,
+                    timeouts,
+                    Arc::clone(&tunnel),
                 )
                 .await;
                 drop(ctrl);
@@ -377,8 +456,12 @@ async fn resolve_destination(
 /// peer via `new_interface_tx`. Returns immediately; all work is async.
 pub(crate) fn spawn_i2p_server(config: I2pServerConfig) {
     tokio::spawn(async move {
+        let mut first = true;
         loop {
-            match run_server_session(&config).await {
+            let result = run_server_session(&config, first).await;
+            first = false;
+            config.endpoint.set_online(false);
+            match result {
                 Ok(()) => {
                     tracing::debug!(
                         "{}: I2P server session ended, restarting",
@@ -404,9 +487,29 @@ pub(crate) fn spawn_i2p_server(config: I2pServerConfig) {
 /// One server session lifecycle: create the persistent-destination session,
 /// then loop accepting inbound streams. Returns `Ok(())` when the event loop
 /// shuts down; returns `Err` when the session/bridge fails so the caller
-/// rebuilds it.
-async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
+/// rebuilds it. `first` is the process's first session, which on a stored
+/// key waits out a destination the previous process may have left in i2pd
+/// ([`I2P_STORED_KEY_HOLD`]).
+async fn run_server_session(config: &I2pServerConfig, first: bool) -> Result<(), SamError> {
     let nick = generate_session_id();
+    let stored_key = load_keyfile(&config.keyfile);
+    // A stored key names the address before any session exists, as the
+    // reference sets `owner.b32` from the key before it brings the tunnel up
+    // (I2PInterface.py:295-296); status and discovery can carry it at once.
+    if let Some(dest) = stored_key
+        .as_deref()
+        .and_then(|k| Destination::from_private_base64(k).ok())
+    {
+        config.endpoint.set_b32(&dest.base32());
+    }
+    if first && stored_key.is_some() && !config.timeouts.stored_key_hold.is_zero() {
+        tracing::info!(
+            "{}: holding the I2P endpoint {} ms so i2pd drops a destination a previous session left on this key",
+            config.name_prefix,
+            config.timeouts.stored_key_hold.as_millis()
+        );
+        tokio::time::sleep(config.timeouts.stored_key_hold).await;
+    }
 
     // Control socket for the session; kept open for its whole lifetime.
     let mut ctrl = crate::socket_hook::connect_hooked_host(
@@ -419,7 +522,6 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
     // Persistent destination: reuse the stored private key if present, else ask
     // SAM for a fresh one (TRANSIENT) and persist what it generates so the
     // `.b32.i2p` address is stable across restarts.
-    let stored_key = load_keyfile(&config.keyfile);
     let dest_arg = stored_key
         .clone()
         .unwrap_or_else(|| sam::TRANSIENT_DESTINATION.to_string());
@@ -447,10 +549,14 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
     };
 
     let dest = Destination::from_private_base64(&priv_key)?;
+    config.endpoint.set_b32(&dest.base32());
+    config.endpoint.set_online(true);
     tracing::info!(
-        "{}: I2P endpoint reachable at {}.b32.i2p",
+        "{}: I2P endpoint reachable at {}.b32.i2p (signature type {}, key {})",
         config.name_prefix,
-        dest.base32()
+        dest.base32(),
+        dest.sig_type(),
+        config.keyfile.display()
     );
 
     // Accept loop. Each STREAM ACCEPT socket handles exactly one inbound
@@ -486,15 +592,20 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
         let name = format!("{}/{}.b32.i2p", config.name_prefix, peer_b32);
         tracing::info!("{}: accepted I2P connection ({})", config.name_prefix, id);
 
-        let handle = spawn_i2p_accepted(
-            id,
-            name,
-            accept_sock,
-            config.buffer_size,
-            config.ifac.clone(),
-            config.ingress_control,
-            config.timeouts.read_idle,
+        let tunnel = Arc::new(I2pTunnelState::default());
+        let short_name = inventory_names::i2p_accepted_short_name(&config.section);
+        config.inventory.lock_recover().add_i2p_peer(
+            id.0,
+            InterfaceIdentity {
+                name: inventory_names::i2p_peer_name(&short_name),
+                short_name,
+                type_name: "I2PInterfacePeer",
+                parent: Some(config.parent_id),
+            },
+            Arc::clone(&tunnel),
+            true,
         );
+        let handle = spawn_i2p_accepted(id, name, accept_sock, config, tunnel);
         if config.new_interface_tx.send(handle).await.is_err() {
             return Ok(()); // event loop shut down
         }
@@ -503,18 +614,19 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
 
 /// Build an `InterfaceHandle` around an already-accepted I2P stream socket. The
 /// peer-destination line has already been consumed, so the socket now carries
-/// pure HDLC. Pre-signaled ready, like a TCP-server-accepted connection.
+/// pure HDLC. Pre-signaled ready, like a TCP-server-accepted connection. Takes
+/// its buffer, IFAC, ingress control, time bounds and mode from the endpoint
+/// that accepted it.
 fn spawn_i2p_accepted(
     id: InterfaceId,
     name: String,
     stream: TcpStream,
-    buffer_size: usize,
-    ifac: Option<leviculum_core::ifac::IfacConfig>,
-    ingress_control: bool,
-    read_idle: Duration,
+    config: &I2pServerConfig,
+    tunnel: Arc<I2pTunnelState>,
 ) -> InterfaceHandle {
-    let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
-    let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
+    let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
+    let timeouts = config.timeouts;
     let counters = Arc::new(InterfaceCounters::new());
 
     let task_name = name.clone();
@@ -526,7 +638,8 @@ fn spawn_i2p_accepted(
             incoming_tx,
             outgoing_rx,
             task_counters,
-            read_idle,
+            timeouts,
+            tunnel,
         )
         .await;
     });
@@ -545,12 +658,14 @@ fn spawn_i2p_accepted(
             tx_hold_spread_max_ms: None,
             acquisition: None,
             frame_turnaround_ms: None,
-            ifac,
-            mode: leviculum_core::traits::InterfaceMode::default(),
+            ifac: config.ifac.clone(),
+            // I2PInterface.py:992, `spawned_interface.mode = self.mode`.
+            mode: config.mode,
             kind: leviculum_core::traits::InterfaceKind::I2p,
             // Codeberg #189, I2PInterface.py:951: inherited from the endpoint
             // that accepted this connection.
-            ingress_control: Some(ingress_control),
+            ingress_control: Some(config.ingress_control),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -567,6 +682,11 @@ fn spawn_i2p_accepted(
 /// Write path: HDLC-frame outgoing packets and write them to the socket.
 /// Keepalive: on a 10 s idle cadence, emit an empty HDLC frame (`FLAG FLAG`) to
 /// keep the tunnel warm.
+/// Tunnel state: `Active` from the start, `Stale` once `stale_after` passes
+/// without a received byte and `Active` again on the next one, logged as
+/// `I2P_TUNNEL_STALE` and `I2P_TUNNEL_ACTIVE` at each transition. Left as it
+/// is when the stream ends, as the reference leaves `i2p_tunnel_state`, so a
+/// torn-down tunnel reads stale until its rebuild carries a byte.
 /// Watchdog: if `read_idle` passes without a single received byte, return, which
 /// tears the stream down and lets the caller rebuild the tunnel.
 ///
@@ -578,9 +698,16 @@ async fn i2p_stream_task(
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
-    read_idle: Duration,
+    timeouts: I2pTimeouts,
+    tunnel: Arc<I2pTunnelState>,
 ) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
+    let read_idle = timeouts.read_idle;
+    let stale_after = timeouts.stale_after;
+    // The reference's read loop starts its clock at the connect and its
+    // watchdog reads active a second later (I2PInterface.py:681-687, 720).
+    tunnel.set(TunnelState::Active);
+    let mut stale_since: Option<tokio::time::Instant> = None;
 
     let mut deframer = Deframer::with_max_frame(I2P_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
@@ -595,7 +722,7 @@ async fn i2p_stream_task(
     // threshold, I2PInterface.py:672). The resolution only sets how late the
     // teardown is, never whether it happens.
     let mut watchdog = tokio::time::interval(
-        (read_idle / 10)
+        (read_idle.min(stale_after) / 10)
             .min(WATCHDOG_MAX_PERIOD)
             .max(Duration::from_millis(1)),
     );
@@ -667,6 +794,24 @@ async fn i2p_stream_task(
                 // there is. Returning here drops the stream, which is what
                 // makes the rebuild path reachable at all (Codeberg #284).
                 let idle = last_read.elapsed();
+                if idle > stale_after {
+                    if stale_since.is_none() {
+                        tunnel.set(TunnelState::Stale);
+                        stale_since = Some(tokio::time::Instant::now());
+                        tracing::warn!(
+                            event = "I2P_TUNNEL_STALE",
+                            iface = %Scalar(&name),
+                            idle_ms = idle.as_millis() as u64,
+                        );
+                    }
+                } else if let Some(since) = stale_since.take() {
+                    tunnel.set(TunnelState::Active);
+                    tracing::info!(
+                        event = "I2P_TUNNEL_ACTIVE",
+                        iface = %Scalar(&name),
+                        stale_ms = since.elapsed().as_millis() as u64,
+                    );
+                }
                 if idle >= read_idle {
                     tracing::warn!(
                         "I2P interface {}: nothing received for {:?}, tearing down the stream so the tunnel is rebuilt",
@@ -687,6 +832,69 @@ async fn i2p_stream_task(
             }
         }
     }
+}
+
+/// The key file of a `connectable` I2P interface, named as the reference names
+/// it so an rnsd and an lnsd on one config directory publish one address.
+///
+/// The reference keeps the key in `<storage>/i2p/<hex>.i2p`, where `<hex>` is
+/// `sha256(sha256(name) + sha256(transport_identity.hash))` and `name` the
+/// config section's name; an older `sha256(sha256(name))` file is preferred
+/// when present (`server_tunnel`,
+/// `reference/Reticulum/RNS/Interfaces/I2PInterface.py:269-279`). Both are
+/// looked for here in that order.
+///
+/// lnsd before 1576 kept the key as `i2p_iface_<legacy_index>.i2p`, keyed by
+/// the section's position in the file. Such a file, when neither reference
+/// name exists, is renamed to the new-format name once and the rename logged,
+/// so a running lnsd keeps its address. A rename that fails leaves the old
+/// file in use: the address is worth more than the name.
+pub(crate) fn resolve_keyfile(
+    key_dir: &std::path::Path,
+    name: &str,
+    transport_identity_hash: &[u8; 16],
+    legacy_index: usize,
+) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let name_hash = Sha256::digest(name.as_bytes());
+    let old_format = Sha256::digest(name_hash);
+    let mut new_input = name_hash.to_vec();
+    new_input.extend_from_slice(&Sha256::digest(transport_identity_hash));
+    let new_format = Sha256::digest(&new_input);
+    let named = |hash: &[u8]| key_dir.join(format!("{}.i2p", crate::storage::hex_encode(hash)));
+    let old_path = named(&old_format);
+    let new_path = named(&new_format);
+
+    if old_path.is_file() {
+        return old_path;
+    }
+    if new_path.is_file() {
+        return new_path;
+    }
+    let legacy = key_dir.join(format!("i2p_iface_{legacy_index}.i2p"));
+    if legacy.is_file() {
+        return match std::fs::rename(&legacy, &new_path) {
+            Ok(()) => {
+                tracing::info!(
+                    "I2P key adopted: {} renamed to {} (interface '{}'), the address is unchanged",
+                    legacy.display(),
+                    new_path.display(),
+                    name
+                );
+                new_path
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "I2P key {} could not be renamed to {}: {}; keeping the old name",
+                    legacy.display(),
+                    new_path.display(),
+                    e
+                );
+                legacy
+            }
+        };
+    }
+    new_path
 }
 
 /// Load a persisted base64 private key, trimming whitespace. Returns `None` if

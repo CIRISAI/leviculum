@@ -264,7 +264,10 @@ rm -rf "$d"; mkbuild "$d" "$ID2"
 ln -s /etc/passwd "$d/leviculum-nightly-secrets.deb"
 (cd "$d" && sha256sum leviculum-nightly-secrets.deb >leviculum-nightly-secrets.deb.sha256)
 (cd "$d" && tar -cf "$WORK/link.tar" -- *)
-tar -tvf "$WORK/link.tar" 2>/dev/null | grep -q '^l' ||
+# grep reads the whole listing: tar writes it a line at a time, and under
+# pipefail a `grep -q` that leaves at the link's line would turn the
+# secrets file's .sha256 line after it into a SIGPIPE and this check red.
+tar -tvf "$WORK/link.tar" 2>/dev/null | grep '^l' >/dev/null ||
     fail "symlink: the fixture archive holds no symlink member"
 receive "$WORK/link.tar"
 assert_refused symlink "$ID1" "$ID1 "
@@ -540,8 +543,10 @@ new_root sender-layout
 TREE="$WORK/sender-layout/tree"
 mkdir -p "$TREE/scripts" "$TREE/dist"
 cp "$SENDER" "$TREE/scripts/publish-site.sh"
+# With an APK (1267): scripts/build-nightly-apk.sh stages the Android app
+# into the same dist/, and the site is the one target that carries it.
 for n in leviculum-nightly-amd64.deb lnomad-nightly-arm64.tar.gz \
-    leviculum-nightly-source.tar.gz; do
+    leviculum-nightly-source.tar.gz loquax-nightly-android.apk; do
     echo "built $n" >"$TREE/dist/$n"
     (cd "$TREE/dist" && sha256sum "$n" >"$n.sha256")
 done
@@ -553,7 +558,9 @@ if ! ( cd "$TREE" && bash scripts/publish-site.sh --tar-only "$WORK/sent.tar" ) 
 fi
 grep -q '^BUILD_ID$' <(tar -tf "$WORK/sent.tar") ||
     fail "sender-layout: the tar carries no flat BUILD_ID member"
-tar -tf "$WORK/sent.tar" | grep -q '/' &&
+# All of the listing read, as for the symlink case: an early `grep -q`
+# could SIGPIPE tar and hide the very match this looks for.
+tar -tf "$WORK/sent.tar" | grep '/' >/dev/null &&
     fail "sender-layout: the tar holds a member with a path separator"
 receive "$WORK/sent.tar"
 [ "$RC" -eq 0 ] || { fail "sender-layout: the receiver refused the sender's tar"; dump; }
@@ -561,8 +568,12 @@ receive "$WORK/sent.tar"
     fail "sender-layout: latest is '$(latest_id)', expected '$ID3'"
 [ "$(cat "$ROOT/nightly/latest/lnomad-nightly-arm64.tar.gz" 2>/dev/null)" = "built lnomad-nightly-arm64.tar.gz" ] ||
     fail "sender-layout: a dist/ file did not arrive intact"
-[ "$(count_matching "$ROOT/nightly/$ID3"/*)" -eq 7 ] ||
-    fail "sender-layout: published $(count_matching "$ROOT/nightly/$ID3"/*) entries, expected 6 dist files + BUILD_ID"
+[ "$(cat "$ROOT/nightly/latest/loquax-nightly-android.apk" 2>/dev/null)" = "built loquax-nightly-android.apk" ] ||
+    fail "sender-layout: the APK did not arrive intact"
+[ -f "$ROOT/nightly/latest/loquax-nightly-android.apk.sha256" ] ||
+    fail "sender-layout: the APK's .sha256 did not arrive"
+[ "$(count_matching "$ROOT/nightly/$ID3"/*)" -eq 9 ] ||
+    fail "sender-layout: published $(count_matching "$ROOT/nightly/$ID3"/*) entries, expected 8 dist files + BUILD_ID"
 [ "$failures" -eq "$before" ] || dump
 
 # The sender refuses an empty dist/ rather than uploading a build with

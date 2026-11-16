@@ -396,6 +396,15 @@ impl ProxyLog {
         rcl.checked_duration_since(adv)
     }
 
+    /// How long the downstream sender waited between its first advertisement,
+    /// answerable or not, and the upstream's rejection. Our listener answers
+    /// one that overtook the RTT too (1624), so this is its measure.
+    pub fn first_adv_to_rcl(&self) -> Option<std::time::Duration> {
+        let adv = self.first_adv_to_upstream?;
+        let rcl = self.first_rcl_to_downstream?;
+        rcl.checked_duration_since(adv)
+    }
+
     /// One line naming the whole exchange, quoted by every assertion.
     pub fn evidence(&self) -> String {
         format!(
@@ -418,7 +427,7 @@ impl ProxyLog {
 /// Re-framing rather than byte-copying is what makes the gate exact: the drop
 /// removes one packet and leaves the stream otherwise identical, because
 /// `hdlc::frame` is the same encoder both ends use
-/// (`leviculum-std/src/interfaces/tcp.rs:1316`, Python's `TCPInterface`).
+/// (`leviculum-std/src/interfaces/tcp.rs:1681`, Python's `TCPInterface`).
 async fn pump(
     mut src: tokio::net::tcp::OwnedReadHalf,
     mut dst: tokio::net::tcp::OwnedWriteHalf,

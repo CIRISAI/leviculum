@@ -75,6 +75,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let mut interfaces: HashMap<String, InterfaceConfig> = HashMap::new();
     // Every key `no` unless the file's `[auto]` section says otherwise (#471).
     let mut auto = AutoMedia::NONE;
+    // `[auto] server_list`, the pinned server list (#471 step 3).
+    let mut auto_server_list: Option<Vec<String>> = None;
 
     let mut current_section = String::new();
     let mut current_subsection: Option<String> = None;
@@ -174,6 +176,11 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     "reticulum" => apply_reticulum_key(&mut reticulum, key, value)
                         .map_err(|e| format!("config line {number}: {e}"))?,
                     "logging" => apply_logging_key(&mut reticulum, key, value),
+                    "auto" if key == "server_list" => {
+                        let list = crate::auto_servers::parse_list(value)
+                            .map_err(|e| format!("config line {number}: [auto] server_list: {e}"))?;
+                        auto_server_list = Some(list.iter().map(ToString::to_string).collect());
+                    }
                     "auto" => apply_auto_key(&mut auto, key, value)
                         .map_err(|e| format!("config line {number}: {e}"))?,
                     // A key in a section nobody reads. Python keeps it in the
@@ -341,6 +348,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             | "AX25KISSInterface"
             | "I2PInterface"
             | "BLEInterface" => true,
+            "WebSocketServerInterface" | "WebSocketClientInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -358,6 +366,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         reticulum,
         interfaces: supported,
         auto,
+        auto_server_list,
         auto_layer: None,
         origin: crate::config::InterfaceOrigin::Configured,
     })
@@ -396,7 +405,7 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
         };
         iface.mode = Some(mode.to_string());
         // Python logs this at NOTICE; our levels fold notice into info
-        // (lnsd.rs:343-345). The wording is the reference's, because the point
+        // (lnsd.rs:473-475). The wording is the reference's, because the point
         // is the same: the operator must be able to see in the log why the
         // mode is not what the config file says.
         tracing::info!(
@@ -578,14 +587,17 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         }
         // Route choice between competing copies of one announce emission
         // (Codeberg #230). Leviculum-only key — rnsd reading the shared
-        // config ignores it — and the default is Python's own hop rule, so
-        // only the exact opt-in string changes anything. An unrecognised
-        // value keeps the default, like every other tolerant value in this
-        // section (the LINE is still validated as a keyword, so a typo'd
-        // KEY fails the parse as before).
+        // config ignores it. Set, it overrides every interface's medium
+        // default (`hops_and_loss` on radio, `hops` elsewhere, order 1380);
+        // an unrecognised value keeps the medium defaults, like every other
+        // tolerant value in this section (the LINE is still validated as a
+        // keyword, so a typo'd KEY fails the parse as before).
         "path_choice" => {
-            if value.trim().eq_ignore_ascii_case("hops_and_loss") {
-                config.path_choice = crate::config::PathChoiceSetting::HopsAndLoss;
+            let value = value.trim();
+            if value.eq_ignore_ascii_case("hops_and_loss") {
+                config.path_choice = Some(crate::config::PathChoiceSetting::HopsAndLoss);
+            } else if value.eq_ignore_ascii_case("hops") {
+                config.path_choice = Some(crate::config::PathChoiceSetting::Hops);
             }
         }
         // Cadence of the management (probe, remote-management) announces,
@@ -699,15 +711,27 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
     Ok(())
 }
 
-/// Apply one `key = value` from the `[logging]` section. Only `loglevel` (the
-/// RNS 0-7 level, Reticulum.py:66-73) is consumed; other keys (`logtimestamps`,
-/// `logfile`, ...) are tolerated so a stock rnsd config is not rejected. Before
-/// this the whole `[logging]` section was silently dropped.
+/// Apply one `key = value` from the `[logging]` section. `loglevel` (the RNS
+/// 0-7 level, Reticulum.py:66-73) and lnsd's own `log_addresses` (order 1678)
+/// are consumed; other keys (`logtimestamps`, `logfile`, ...) are tolerated so
+/// a stock rnsd config is not rejected. Before this the whole `[logging]`
+/// section was silently dropped.
 fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
     if key == "loglevel" {
         // A non-numeric or out-of-u8-range value leaves loglevel unset rather
         // than aborting the parse (matches the tolerant reticulum-key contract).
         config.loglevel = value.trim().parse().ok();
+    } else if key == "log_addresses" {
+        // Anything but the two names keeps the pseudonym: an unreadable value
+        // must never turn raw addresses on.
+        match crate::peer_tag::LogAddresses::parse(value) {
+            Some(mode) => config.log_addresses = mode,
+            None => tracing::warn!(
+                "[logging] log_addresses = {} is neither pseudonym nor full; \
+                 keeping pseudonym",
+                value.trim()
+            ),
+        }
     }
 }
 
@@ -715,7 +739,8 @@ fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
 /// never reads the section, so its values are ours to define: the four
 /// media as booleans. A value that is no boolean refuses the file, as it does
 /// in `[reticulum]`: a switch that keeps the automatic layer out must not be
-/// guessed. An unknown key is warned about and ignored.
+/// guessed. An unknown key is warned about and ignored. `server_list`, the
+/// one key that is no medium, is read beside this in [`parse_ini`].
 fn apply_auto_key(auto: &mut AutoMedia, key: &str, value: &str) -> Result<(), String> {
     let slot = match key {
         "lan" => &mut auto.lan,
@@ -724,8 +749,8 @@ fn apply_auto_key(auto: &mut AutoMedia, key: &str, value: &str) -> Result<(), St
         "serial" => &mut auto.serial,
         other => {
             tracing::warn!(
-                "'{}' in [auto] is not a medium lnsd knows (lan, servers, bluetooth, serial) \
-                 and is ignored",
+                "'{}' in [auto] is not a key lnsd knows (lan, servers, bluetooth, serial, \
+                 server_list) and is ignored",
                 other
             );
             return Ok(());
@@ -916,6 +941,9 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // frames (see `InterfaceConfig::test_drop_direct_ingress`). No Python
         // equivalent; consumed by the 3-node relay hardware scenario.
         "test_drop_direct_ingress" => iface.test_drop_direct_ingress = parse_bool(key, value)?,
+        // A single-UART board (see `InterfaceConfig::serial_mux`); unset
+        // detects it from the board. No Python equivalent.
+        "serial_mux" => iface.serial_mux = Some(parse_bool(key, value)?),
         // Ingress control (Codeberg #8, Python `ingress_control`,
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
@@ -1014,6 +1042,25 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         "discovery_frequency" => iface.discovery_frequency = value.parse().ok(),
         "discovery_bandwidth" => iface.discovery_bandwidth = value.parse().ok(),
         "discovery_modulation" => iface.discovery_modulation = value.parse().ok(),
+        // TCP server admission (1190). No Python equivalent: the reference
+        // accepts every connection. `max_connections`, the total cap, shares
+        // the BLE arm above.
+        "max_connections_per_source" => iface.max_connections_per_source = value.parse().ok(),
+        "silent_timeout_secs" => iface.silent_timeout_secs = value.parse().ok(),
+        "silent_timeout_pressure_secs" => iface.silent_timeout_pressure_secs = value.parse().ok(),
+        "pressure_fraction" => iface.pressure_fraction = value.parse().ok(),
+        // TCP liveness (1176), on a client or a server. No Python equivalent:
+        // the reference fixes the values (TCPInterface.py:84-87) and ignores
+        // the keys. Range-checked when the interface is built.
+        "tcp_keepalive_idle_secs" => iface.tcp_keepalive_idle_secs = value.parse().ok(),
+        "tcp_keepalive_interval_secs" => iface.tcp_keepalive_interval_secs = value.parse().ok(),
+        "tcp_keepalive_probes" => iface.tcp_keepalive_probes = value.parse().ok(),
+        "tcp_user_timeout_secs" => iface.tcp_user_timeout_secs = value.parse().ok(),
+        // +ciris (#109): a WebSocket client's handshake path and TLS.
+        "path" => iface.websocket_path = Some(value.to_string()),
+        "tls" => iface.websocket_tls = Some(parse_bool(key, value)?),
+        "framing" => iface.websocket_framing = Some(value.to_string()),
+        "url" => iface.websocket_url = Some(value.to_string()),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -1334,6 +1381,28 @@ mod tests {
         // An unquoted `#` terminates the value like ConfigObj does; only the
         // text before the hash survives.
         assert_eq!(cli.networkname.as_deref(), Some("abc"));
+    }
+
+    /// `max_connections_per_source` (1190) reaches the interface: a value
+    /// above the default, zero (cap off), and an absent key that leaves the
+    /// default to `admission_config`. The hub load test relies on the first.
+    #[test]
+    fn max_connections_per_source_parses_on_a_tcp_server() {
+        let section = |line: &str| {
+            let config = parse_ini(&format!(
+                "[interfaces]\n  [[Srv]]\n    type = TCPServerInterface\n    \
+                 listen_port = 4242\n    {line}\n"
+            ))
+            .expect("config parses");
+            config
+                .interfaces
+                .get("Srv")
+                .expect("srv")
+                .max_connections_per_source
+        };
+        assert_eq!(section("max_connections_per_source = 1024"), Some(1024));
+        assert_eq!(section("max_connections_per_source = 0"), Some(0));
+        assert_eq!(section("enabled = yes"), None);
     }
 
     /// `advertise_when_full` (752) parses both ways, and a value that is
@@ -1959,6 +2028,34 @@ mod tests {
         assert_eq!(iface.tx_power, Some(17));
         assert_eq!(iface.preamble_symbols, Some(18));
         assert_eq!(iface.csma_enabled, Some(true));
+    }
+
+    /// `serial_mux` parses on the INI path (periculum and operators write
+    /// INI) as an override either way, and is unset without the key, which
+    /// leaves the bring-up to detect it from the board.
+    #[test]
+    fn test_parse_serial_mux_key() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[M9]]
+    type = SerialInterface
+    port = /dev/ttyUSB1
+    serial_mux = yes
+  [[Plain]]
+    type = SerialInterface
+    port = /dev/ttyUSB0
+    serial_mux = no
+  [[Detect]]
+    type = SerialInterface
+    port = /dev/ttyUSB2
+"#,
+        )
+        .unwrap();
+        let mux = |name: &str| config.interfaces.get(name).expect(name).serial_mux;
+        assert_eq!(mux("M9"), Some(true));
+        assert_eq!(mux("Plain"), Some(false));
+        assert_eq!(mux("Detect"), None);
     }
 
     /// The TEST-ONLY `test_drop_direct_ingress` key parses on the INI path
@@ -2861,21 +2958,27 @@ mod tests {
     }
 
     #[test]
-    fn test_path_choice_defaults_to_hops_and_is_opt_in() {
-        // Codeberg #230: the evidence rule is a deliberate opt-in. Absent
-        // key, the explicit default spelling and any unrecognised value all
-        // keep the hop rule, so a typo'd VALUE degrades to Python's
-        // behaviour rather than to a surprise; only the exact opt-in string
-        // selects the evidence rule.
+    fn test_path_choice_absent_leaves_the_medium_default_and_either_value_overrides() {
+        // Codeberg #230, order 1380: with the key absent every interface
+        // runs its medium's default (the evidence rule on radio, hop count
+        // elsewhere). Either exact spelling overrides that on every
+        // interface; an unrecognised value keeps the medium defaults rather
+        // than guessing which override was meant.
         use crate::config::PathChoiceSetting;
         let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
-        assert_eq!(absent.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(absent.reticulum.path_choice, None);
         let explicit = parse_ini("[reticulum]\n  path_choice = hops\n").unwrap();
-        assert_eq!(explicit.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(
+            explicit.reticulum.path_choice,
+            Some(PathChoiceSetting::Hops)
+        );
         let on = parse_ini("[reticulum]\n  path_choice = hops_and_loss\n").unwrap();
-        assert_eq!(on.reticulum.path_choice, PathChoiceSetting::HopsAndLoss);
+        assert_eq!(
+            on.reticulum.path_choice,
+            Some(PathChoiceSetting::HopsAndLoss)
+        );
         let typo = parse_ini("[reticulum]\n  path_choice = hops_and_los\n").unwrap();
-        assert_eq!(typo.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(typo.reticulum.path_choice, None);
     }
 
     #[test]
@@ -2934,6 +3037,21 @@ mod tests {
             config.reticulum.flush_interval_secs,
             crate::config::DEFAULT_FLUSH_INTERVAL_SECS
         );
+    }
+
+    #[test]
+    fn test_parse_logging_log_addresses() {
+        use crate::peer_tag::LogAddresses;
+        // Order 1678: the pseudonym unless the file asks for `full`, and an
+        // unreadable value never turns raw addresses on.
+        let none = parse_ini("[logging]\n  loglevel = 4\n").unwrap();
+        assert_eq!(none.reticulum.log_addresses, LogAddresses::Pseudonym);
+        let full = parse_ini("[logging]\n  log_addresses = full\n").unwrap();
+        assert_eq!(full.reticulum.log_addresses, LogAddresses::Full);
+        let pseudo = parse_ini("[logging]\n  log_addresses = pseudonym\n").unwrap();
+        assert_eq!(pseudo.reticulum.log_addresses, LogAddresses::Pseudonym);
+        let junk = parse_ini("[logging]\n  log_addresses = raw\n").unwrap();
+        assert_eq!(junk.reticulum.log_addresses, LogAddresses::Pseudonym);
     }
 
     #[test]
@@ -3586,6 +3704,31 @@ mod tests {
         // An unknown medium is warned about; it neither refuses nor sets.
         let config = parse_ini("[auto]\nwifi = yes\n").expect("parses");
         assert_eq!(config.auto, AutoMedia::NONE);
+    }
+
+    /// `[auto] server_list` (#471 step 3) pins the server list; an entry
+    /// that is no `host:port` refuses the file, absent is `None`.
+    #[test]
+    fn the_auto_server_list_pins_the_servers() {
+        let config =
+            parse_ini("[auto]\n  servers = yes\n  server_list = a.example:4242, [::1]:7\n")
+                .expect("parses");
+        assert_eq!(
+            config.auto_server_list,
+            Some(vec!["a.example:4242".to_string(), "[::1]:7".to_string()])
+        );
+        assert!(config.auto.servers);
+        assert_eq!(
+            parse_ini("[auto]\nlan = yes\n")
+                .expect("parses")
+                .auto_server_list,
+            None
+        );
+        let err = parse_ini("[auto]\nserver_list = nowhere\n").expect_err("refused");
+        assert!(
+            err.contains("config line 2") && err.contains("server_list"),
+            "{err}"
+        );
     }
 
     /// A switch that keeps the automatic layer out is not guessed.
