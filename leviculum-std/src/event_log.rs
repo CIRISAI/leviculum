@@ -608,6 +608,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "channel_decrypt_fail",
             "resource_full",
             "resource_compressed",
+            // +ciris (leviculum#102): an unordered link datagram shed at a
+            // full interface queue.
+            "datagram_shed",
             "total",
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.
