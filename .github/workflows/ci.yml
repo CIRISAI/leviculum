@@ -90,6 +90,11 @@ jobs:
         run: cargo test -p leviculum-core --lib
       - name: cargo test -p leviculum-std --lib
         run: cargo test -p leviculum-std --lib
+      # The bounded known-destinations flush and load, and the fork's pinned
+      # entry inside it (leviculum#49). A few seconds; the 0.35 sync broke
+      # three of its tests and no lane ran them.
+      - name: cargo test -p leviculum-std --test known_destinations_flush_memory
+        run: cargo test -p leviculum-std --test known_destinations_flush_memory
 
   # ─── interop: real Python-RNS CLI tools vs the Rust daemon ──────────
   # Uses the vendored reference Reticulum (reallew fork, tracks upstream RNS) as

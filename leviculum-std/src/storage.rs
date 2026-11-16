@@ -545,21 +545,21 @@ type KnownDestTable = BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>;
 /// kept whatever its age, beside the newest `cap` of the rest. A pin is the
 /// application's word that it needs the identity recallable now (CIRISEdge
 /// encrypts to pinned contacts), so leaving it on disk only is not enough.
-/// Pins count against `cap`, as they do in the core's identity table, so the
-/// two stay in step; pins alone past `cap` are all kept.
+/// Pins count against `cap`, as in the core's identity table; pins alone past
+/// it keep the newest `cap` of them, and the rest stay in the file.
 fn newest_known_destinations(table: KnownDestTable, cap: usize) -> KnownDestTable {
     let pinned = |e: &KnownDestEntry| matches!(e.use_state, KnownDestUseState::Retained);
     if table.values().any(pinned) {
         let (pins, rest): (KnownDestTable, KnownDestTable) =
             table.into_iter().partition(|(_, e)| pinned(e));
-        let mut kept = newest_unpinned(rest, cap.saturating_sub(pins.len()));
-        kept.extend(pins);
+        let mut kept = newest_by_announce(pins, cap);
+        kept.extend(newest_by_announce(rest, cap.saturating_sub(kept.len())));
         return kept;
     }
-    newest_unpinned(table, cap)
+    newest_by_announce(table, cap)
 }
 
-fn newest_unpinned(table: KnownDestTable, cap: usize) -> KnownDestTable {
+fn newest_by_announce(table: KnownDestTable, cap: usize) -> KnownDestTable {
     if table.len() <= cap {
         return table;
     }
