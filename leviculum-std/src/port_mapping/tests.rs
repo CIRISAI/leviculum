@@ -114,7 +114,12 @@ fn same_port(secs: u32) -> Script {
 }
 
 fn silent() -> Script {
-    Box::new(|_, _| Err(MapError::Unsupported("no answer".into())))
+    Box::new(|_, _| {
+        Err(MapError::Unsupported(
+            FailReason::Timeout,
+            "no answer".into(),
+        ))
+    })
 }
 
 struct Rig {
@@ -281,7 +286,10 @@ async fn a_failed_renewal_retries_then_loses_the_mapping_at_expiry_and_recovers(
             if n == 1 || n >= 8 {
                 grant(PUBLIC, req.external_port, 120)
             } else {
-                Err(MapError::Refused("network failure".into()))
+                Err(MapError::Refused(
+                    FailReason::Other,
+                    "network failure".into(),
+                ))
             }
         }),
     );
@@ -293,7 +301,7 @@ async fn a_failed_renewal_retries_then_loses_the_mapping_at_expiry_and_recovers(
     tokio::time::sleep(Duration::from_secs(61)).await;
     assert_eq!(pmp.map_count(), 2);
     assert!(
-        matches!(rig.status(0).state, MappingState::Renewing { ref reason } if reason.contains("network failure")),
+        matches!(rig.status(0).state, MappingState::Renewing { cause: FailReason::Other, ref detail } if detail.contains("network failure")),
         "still leased, renewal failing: {:?}",
         rig.status(0).state
     );
@@ -303,7 +311,7 @@ async fn a_failed_renewal_retries_then_loses_the_mapping_at_expiry_and_recovers(
     tokio::time::sleep(Duration::from_secs(62)).await;
     let s = rig.status(0);
     assert!(
-        matches!(s.state, MappingState::Failed { ref reason } if reason.contains("renewal")),
+        matches!(s.state, MappingState::Failed { cause: FailReason::Other, ref detail } if detail.contains("renewal")),
         "{s:?}"
     );
     assert_eq!(s.external, None);
@@ -360,7 +368,12 @@ async fn no_gateway_and_a_refusal_are_told_apart() {
 
     let refusing = MockClient::new(
         MappingMethod::UpnpIgd,
-        Box::new(|_, _| Err(MapError::Refused("ActionNotAuthorized".into()))),
+        Box::new(|_, _| {
+            Err(MapError::Refused(
+                FailReason::Refused,
+                "ActionNotAuthorized".into(),
+            ))
+        }),
     );
     let rig = Rig::start(
         vec![tcp(4242)],
@@ -370,7 +383,7 @@ async fn no_gateway_and_a_refusal_are_told_apart() {
     settle().await;
     assert!(matches!(
         rig.status(0).state,
-        MappingState::Failed { ref reason } if reason.contains("upnp-igd: ActionNotAuthorized")
+        MappingState::Failed { cause: FailReason::Refused, ref detail } if detail.contains("upnp-igd: ActionNotAuthorized")
     ));
     rig.finish().await;
 }
@@ -776,7 +789,7 @@ mod against_fakes {
         let pcp = PcpClient::new(crab_nat::GatewayAddress::IpV4(LOOPBACK), LOOPBACK.into());
         assert!(matches!(
             pcp.map(&req(4242)).await,
-            Err(MapError::Unsupported(_))
+            Err(MapError::Unsupported(..))
         ));
         let pmp = NatPmpClient::new(LOOPBACK);
         let lease = pmp.map(&req(4242)).await.expect("NAT-PMP maps");
@@ -937,6 +950,12 @@ mod against_fakes {
         no_listing: bool,
         /// The router's mapping table.
         table: Arc<Mutex<Vec<FakeEntry>>>,
+        /// Answer AddAnyPortMapping with 718.
+        any_fails: bool,
+        /// Answer DeletePortMapping with 606 (not authorized).
+        delete_refuses: bool,
+        /// Never answer DeletePortMapping.
+        delete_hangs: bool,
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -1095,7 +1114,9 @@ mod against_fakes {
                     ok("")
                 }
             }
+            "AddAnyPortMapping" if b.any_fails => (500, fault(718, "ConflictInMappingEntry")),
             "AddAnyPortMapping" => ok("<NewReservedPort>50000</NewReservedPort>"),
+            "DeletePortMapping" if b.delete_refuses => (500, fault(606, "Action not authorized")),
             "DeletePortMapping" => {
                 let port: u16 = tag(body, "NewExternalPort")
                     .and_then(|p| p.parse().ok())
@@ -1191,6 +1212,9 @@ mod against_fakes {
                 tag(&body, "NewExternalPort").unwrap_or_default(),
                 tag(&body, "NewLeaseDuration").unwrap_or_default()
             ));
+            if action == "DeletePortMapping" && b.delete_hangs {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
             control(&b, &action, &body)
         } else {
             (404, String::new())
@@ -1369,6 +1393,122 @@ mod against_fakes {
         assert!(!igd.actions().iter().any(|a| a.starts_with("Delete")));
     }
 
+    #[tokio::test]
+    async fn a_taken_port_the_router_cannot_replace_is_port_taken() {
+        let igd = FakeIgd::start(IgdBehaviour {
+            taken: Some(4242),
+            any_fails: true,
+            ..Default::default()
+        })
+        .await;
+        let err = upnp(&igd, &[4242]).map(&req(4242)).await.unwrap_err();
+        assert!(
+            matches!(err, MapError::Refused(FailReason::PortTaken, _)),
+            "{err:?}"
+        );
+    }
+
+    /// Run the engine over one UPnP client until the mapping is held, then
+    /// stop it: the clean-stop path, as `set_port_mapping(false)` runs it.
+    async fn map_then_stop(b: IgdBehaviour) -> (PortMappingStatus, Vec<PortMappingStatus>) {
+        let igd = FakeIgd::start(b).await;
+        let client: Arc<dyn MappingClient> = Arc::new(upnp(&igd, &[4242]));
+        let rig = Rig::start(vec![tcp(4242)], 7200, vec![client]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !rig.status(0).state.is_held() {
+            assert!(tokio::time::Instant::now() < deadline, "never mapped");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let events = Arc::clone(&rig.events);
+        let after = rig.finish().await;
+        let events = events.lock_recover().clone();
+        (after[0].clone(), events)
+    }
+
+    #[tokio::test]
+    async fn a_refused_delete_is_remove_failed_and_keeps_the_address() {
+        let (s, events) = map_then_stop(IgdBehaviour {
+            permanent_only: true,
+            delete_refuses: true,
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            s.state,
+            MappingState::RemoveFailed {
+                cause: FailReason::Refused,
+                permanent: true
+            }
+        );
+        let at = Some(SocketAddr::new(PUBLIC.into(), 4242));
+        assert_eq!(s.external, at, "the host needs it to name the port");
+        assert_eq!(events.last().unwrap().state, s.state);
+        assert_eq!(events.last().unwrap().external, at);
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_never_answers_is_remove_failed_timeout() {
+        let (s, _) = map_then_stop(IgdBehaviour {
+            delete_hangs: true,
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            s.state,
+            MappingState::RemoveFailed {
+                cause: FailReason::Timeout,
+                permanent: false
+            }
+        );
+    }
+
+    #[test]
+    fn failures_map_to_their_causes() {
+        use crate::port_mapping::clients::{pcp_err, pmp_err, upnp_err};
+        let cause = |e: MapError| (matches!(e, MapError::Unsupported(..)), e.cause());
+        // Silence: a timeout, and the next method is tried.
+        assert_eq!(
+            cause(pcp_err(crab_nat::pcp::Failure::Timeout)),
+            (true, FailReason::Timeout)
+        );
+        assert_eq!(
+            cause(pmp_err(crab_nat::natpmp::Failure::Timeout)),
+            (true, FailReason::Timeout)
+        );
+        // Nothing listens on 5351 (ICMP refused): no such protocol here.
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            cause(pcp_err(crab_nat::pcp::Failure::Socket(refused))),
+            (true, FailReason::Unsupported)
+        );
+        // The gateway said no.
+        assert_eq!(
+            cause(pcp_err(crab_nat::pcp::Failure::NotAuthorized(0))),
+            (false, FailReason::Refused)
+        );
+        assert_eq!(
+            cause(pmp_err(crab_nat::natpmp::Failure::NotAuthorized)),
+            (false, FailReason::Refused)
+        );
+        use igd_next::RequestError as R;
+        assert_eq!(
+            cause(upnp_err(&R::ErrorCode(
+                718,
+                "ConflictInMappingEntry".into()
+            ))),
+            (false, FailReason::PortTaken)
+        );
+        assert_eq!(
+            cause(upnp_err(&R::ErrorCode(606, "Action not authorized".into()))),
+            (false, FailReason::Refused)
+        );
+        // A malformed answer is a protocol fault, and its body (which can
+        // hold the external address) stays out of the detail.
+        let bad = upnp_err(&R::InvalidResponse("<x>203.0.113.7</x>".into()));
+        assert_eq!(bad.cause(), FailReason::Protocol);
+        assert!(!bad.detail().contains("203.0.113.7"));
+    }
+
     #[test]
     fn the_upnp_tag_is_stable_short_and_not_the_identity() {
         let id = [0x11u8; 16];
@@ -1448,7 +1588,7 @@ mod against_fakes {
         );
         assert!(matches!(
             client.map(&req(4242)).await,
-            Err(MapError::Unsupported(_))
+            Err(MapError::Unsupported(..))
         ));
     }
 }

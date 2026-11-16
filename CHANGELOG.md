@@ -45,8 +45,12 @@ git tag, not the version string. -->
   leaves no orphan and keeps the external port. On a live node
   `ReticulumNode::set_port_mapping(bool).await` turns it off (deleting every
   mapping now) or on, and `port_mapping_enabled()` reads it;
-  `MappingState::Renewing` shows a held mapping whose renewal is failing, and
-  a changed gateway is noticed at the next renewal. See
+  `MappingState::Renewing` shows a held mapping whose renewal is failing,
+  `MappingState::RemoveFailed { cause, permanent }` a delete that did not
+  land (with the external address kept), failures carry a structured
+  `FailReason` (`Refused`, `PortTaken`, `Timeout`, `Unsupported`,
+  `Protocol`, `Other`), a lapsed lease is never reported held, and a
+  changed gateway is noticed at the next renewal. See
   `docs/src/concepts/port-mapping.md`.
 
 ## [0.35.0+ciris.1] — CIRIS fork

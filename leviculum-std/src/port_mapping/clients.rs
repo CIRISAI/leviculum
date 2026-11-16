@@ -13,13 +13,13 @@ use igd_next::aio::tokio::{search_gateway, Tokio};
 use igd_next::aio::Gateway;
 use igd_next::{
     AddAnyPortError, AddPortError, GetGenericPortMappingEntryError as GenericError,
-    PortMappingProtocol, SearchOptions,
+    PortMappingProtocol, RequestError, SearchOptions,
 };
 
 use super::engine::{
     BoxFut, Discover, Discovered, Lease, MapError, MapRequest, MappingClient, PortKey,
 };
-use super::{netinfo, MappingMethod, MappingProtocol, PortMappingConfig};
+use super::{netinfo, FailReason, MappingMethod, MappingProtocol, PortMappingConfig};
 use crate::sync_ext::MutexRecover;
 
 /// How many entries of the router's UPnP table the start-up reclaim reads
@@ -45,24 +45,99 @@ fn proto(p: MappingProtocol) -> InternetProtocol {
 }
 
 fn nz(port: u16) -> Result<NonZeroU16, MapError> {
-    NonZeroU16::new(port).ok_or_else(|| MapError::Refused("port 0 cannot be mapped".into()))
+    NonZeroU16::new(port)
+        .ok_or_else(|| MapError::Refused(FailReason::Other, "port 0 cannot be mapped".into()))
 }
 
-fn pcp_err(e: pcp::Failure) -> MapError {
+/// A PCP failure as the engine sees it: silence, an ICMP refusal (nothing
+/// listens on 5351) or a NAT-PMP-only answer mean "try the next method".
+pub(crate) fn pcp_err(e: pcp::Failure) -> MapError {
+    use pcp::Failure as F;
+    let detail = format!("PCP: {e}");
     match e {
-        pcp::Failure::Timeout | pcp::Failure::Socket(_) | pcp::Failure::UnsupportedVersion(_) => {
-            MapError::Unsupported(format!("PCP: {e}"))
+        F::Timeout => MapError::Unsupported(FailReason::Timeout, detail),
+        F::Socket(_) | F::UnsupportedVersion(_) => {
+            MapError::Unsupported(FailReason::Unsupported, detail)
         }
-        other => MapError::Refused(format!("PCP: {other}")),
+        F::UnsupportedOpcode | F::UnsupportedOption | F::UnsupportedProtocol => {
+            MapError::Unsupported(FailReason::Unsupported, detail)
+        }
+        F::NotAuthorized(_) | F::NoResources(_) | F::UserExceededQuota(_) => {
+            MapError::Refused(FailReason::Refused, detail)
+        }
+        F::CannotProvideExternal(_) => MapError::Refused(FailReason::PortTaken, detail),
+        F::Nonce | F::InvalidResponse(_) | F::MalformedRequest | F::MalformedOption => {
+            MapError::Refused(FailReason::Protocol, detail)
+        }
+        _ => MapError::Refused(FailReason::Other, detail),
     }
 }
 
-fn pmp_err(e: natpmp::Failure) -> MapError {
+/// A NAT-PMP failure as the engine sees it.
+pub(crate) fn pmp_err(e: natpmp::Failure) -> MapError {
+    use natpmp::Failure as F;
+    let detail = format!("NAT-PMP: {e}");
     match e {
-        natpmp::Failure::Timeout
-        | natpmp::Failure::Socket(_)
-        | natpmp::Failure::UnsupportedVersion(_) => MapError::Unsupported(format!("NAT-PMP: {e}")),
-        other => MapError::Refused(format!("NAT-PMP: {other}")),
+        F::Timeout => MapError::Unsupported(FailReason::Timeout, detail),
+        F::Socket(_) | F::UnsupportedVersion(_) | F::UnsupportedOpcode => {
+            MapError::Unsupported(FailReason::Unsupported, detail)
+        }
+        F::NotAuthorized | F::OutOfResources => MapError::Refused(FailReason::Refused, detail),
+        F::InvalidResponse(_) => MapError::Refused(FailReason::Protocol, detail),
+        _ => MapError::Refused(FailReason::Other, detail),
+    }
+}
+
+fn crab_err(e: crab_nat::MappingFailure) -> MapError {
+    match e {
+        crab_nat::MappingFailure::Pcp(e) => pcp_err(e),
+        crab_nat::MappingFailure::NatPmp(e) => pmp_err(e),
+    }
+}
+
+/// An `AddAnyPortMapping` failure, which only follows a taken port: the
+/// router could not choose another, so the port stays taken, unless it
+/// refused outright or did not answer.
+fn any_err(e: AddAnyPortError) -> MapError {
+    let taken = |what: String| MapError::Refused(FailReason::PortTaken, what);
+    match e {
+        AddAnyPortError::ActionNotAuthorized => {
+            MapError::Refused(FailReason::Refused, "UPnP-IGD: not authorized".into())
+        }
+        AddAnyPortError::RequestError(r) => match upnp_err(&r) {
+            err if err.cause() == FailReason::Timeout => err,
+            err => taken(err.detail().to_string()),
+        },
+        other => taken(format!("UPnP-IGD: {other}")),
+    }
+}
+
+/// A UPnP control failure. The detail never carries a response body,
+/// which can hold the external address.
+pub(crate) fn upnp_err(e: &RequestError) -> MapError {
+    let refused = |cause, what: &str| MapError::Refused(cause, format!("UPnP-IGD: {what}"));
+    match e {
+        RequestError::ErrorCode(718, _) => refused(FailReason::PortTaken, "error 718 (port taken)"),
+        RequestError::ErrorCode(728, _) => refused(FailReason::PortTaken, "error 728 (no ports)"),
+        RequestError::ErrorCode(code, d) => {
+            refused(FailReason::Refused, &format!("error {code} ({d})"))
+        }
+        RequestError::UnsupportedAction(a) => {
+            MapError::Unsupported(FailReason::Unsupported, format!("UPnP-IGD: no {a} action"))
+        }
+        RequestError::IoError(io) if io.kind() == std::io::ErrorKind::TimedOut => {
+            MapError::Unsupported(FailReason::Timeout, "UPnP-IGD: no answer".into())
+        }
+        RequestError::IoError(_)
+        | RequestError::HyperError(_)
+        | RequestError::HyperClientError(_) => MapError::Unsupported(
+            FailReason::Unsupported,
+            "UPnP-IGD: the gateway could not be reached".into(),
+        ),
+        RequestError::InvalidResponse(_) | RequestError::Utf8Error(_) => {
+            refused(FailReason::Protocol, "invalid response")
+        }
+        _ => refused(FailReason::Other, "request failed"),
     }
 }
 
@@ -99,10 +174,7 @@ impl MappingClient for PcpClient {
             let held = self.held.lock_recover().get(&req.key).cloned();
             let mapping = match held {
                 Some(mut m) => {
-                    m.renew().await.map_err(|e| match e {
-                        crab_nat::MappingFailure::Pcp(e) => pcp_err(e),
-                        crab_nat::MappingFailure::NatPmp(e) => pmp_err(e),
-                    })?;
+                    m.renew().await.map_err(crab_err)?;
                     m
                 }
                 None => pcp::port_mapping(
@@ -124,7 +196,10 @@ impl MappingClient for PcpClient {
                 .map_err(pcp_err)?,
             };
             let crab_nat::PortMappingType::Pcp { external_ip, .. } = mapping.mapping_type() else {
-                return Err(MapError::Refused("PCP answered as NAT-PMP".into()));
+                return Err(MapError::Refused(
+                    FailReason::Protocol,
+                    "PCP answered as NAT-PMP".into(),
+                ));
             };
             let lease = Lease {
                 external: SocketAddr::new(external_ip, mapping.external_port().get()),
@@ -140,9 +215,7 @@ impl MappingClient for PcpClient {
             let Some(m) = self.held.lock_recover().remove(&key) else {
                 return Ok(());
             };
-            m.try_drop()
-                .await
-                .map_err(|(e, _)| MapError::Refused(e.to_string()))
+            m.try_drop().await.map_err(|(e, _)| crab_err(e))
         })
     }
 }
@@ -176,10 +249,7 @@ impl MappingClient for NatPmpClient {
             let held = self.held.lock_recover().get(&req.key).cloned();
             let mapping = match held {
                 Some(mut m) => {
-                    m.renew().await.map_err(|e| match e {
-                        crab_nat::MappingFailure::Pcp(e) => pcp_err(e),
-                        crab_nat::MappingFailure::NatPmp(e) => pmp_err(e),
-                    })?;
+                    m.renew().await.map_err(crab_err)?;
                     m
                 }
                 None => natpmp::port_mapping(
@@ -213,9 +283,7 @@ impl MappingClient for NatPmpClient {
             let Some(m) = self.held.lock_recover().remove(&key) else {
                 return Ok(());
             };
-            m.try_drop()
-                .await
-                .map_err(|(e, _)| MapError::Refused(e.to_string()))
+            m.try_drop().await.map_err(|(e, _)| crab_err(e))
         })
     }
 }
@@ -376,9 +444,12 @@ impl UpnpClient {
         search.timeout = Some(Duration::from_secs(3));
         search.single_search_timeout = Some(Duration::from_secs(2));
         search.allowed_gateway_ips = self.trusted.clone();
-        let gw = search_gateway(search)
-            .await
-            .map_err(|e| MapError::Unsupported(format!("UPnP-IGD: {e}")))?;
+        let gw = search_gateway(search).await.map_err(|e| match e {
+            igd_next::SearchError::NoResponseWithinTimeout => {
+                MapError::Unsupported(FailReason::Timeout, "UPnP-IGD: no gateway answered".into())
+            }
+            other => MapError::Unsupported(FailReason::Unsupported, format!("UPnP-IGD: {other}")),
+        })?;
         tracing::debug!(
             "port mapping: UPnP gateway at {} offers {}",
             gw.addr,
@@ -398,7 +469,9 @@ impl UpnpClient {
         lease: u32,
         desc: &str,
     ) -> Result<(u16, u32), MapError> {
-        let refused = |e: &dyn std::fmt::Display| MapError::Refused(format!("UPnP-IGD: {e}"));
+        let refused = |e: &dyn std::fmt::Display| {
+            MapError::Refused(FailReason::Refused, format!("UPnP-IGD: {e}"))
+        };
         match gw
             .add_port(protocol, external_port, local, lease, desc)
             .await
@@ -411,8 +484,12 @@ impl UpnpClient {
                 };
             }
             Err(AddPortError::PortInUse) => {}
-            Err(AddPortError::RequestError(e)) => {
-                return Err(MapError::Unsupported(format!("UPnP-IGD: {e}")));
+            Err(AddPortError::RequestError(e)) => return Err(upnp_err(&e)),
+            Err(AddPortError::DescriptionTooLong) => {
+                return Err(MapError::Refused(
+                    FailReason::Protocol,
+                    "UPnP-IGD: description too long".into(),
+                ))
             }
             Err(e) => return Err(refused(&e)),
         }
@@ -423,8 +500,8 @@ impl UpnpClient {
                 .add_any_port(protocol, local, 0, desc)
                 .await
                 .map(|port| (port, 0))
-                .map_err(|e| refused(&e)),
-            Err(e) => Err(refused(&e)),
+                .map_err(any_err),
+            Err(e) => Err(any_err(e)),
         }
     }
 }
@@ -495,16 +572,19 @@ impl MappingClient for UpnpClient {
                 Ok(v) => v,
                 Err(e) => {
                     // The router may have gone or changed; search again next time.
-                    if matches!(e, MapError::Unsupported(_)) {
+                    if matches!(e, MapError::Unsupported(..)) {
                         *self.gateway.lock().await = None;
                     }
                     return Err(e);
                 }
             };
-            let ip = gw
-                .get_external_ip()
-                .await
-                .map_err(|e| MapError::Refused(format!("UPnP-IGD external address: {e}")))?;
+            let ip = gw.get_external_ip().await.map_err(|e| match e {
+                igd_next::GetExternalIpError::RequestError(r) => upnp_err(&r),
+                _ => MapError::Refused(
+                    FailReason::Refused,
+                    "UPnP-IGD: external address not given".into(),
+                ),
+            })?;
             Ok(Lease {
                 external: SocketAddr::new(ip, port),
                 lifetime_secs: lease,
@@ -519,9 +599,15 @@ impl MappingClient for UpnpClient {
                 MappingProtocol::Tcp => PortMappingProtocol::TCP,
                 MappingProtocol::Udp => PortMappingProtocol::UDP,
             };
-            gw.remove_port(protocol, lease.external.port())
-                .await
-                .map_err(|e| MapError::Refused(format!("UPnP-IGD: {e}")))
+            match gw.remove_port(protocol, lease.external.port()).await {
+                // Already gone is what a delete wants.
+                Ok(()) | Err(igd_next::RemovePortError::NoSuchPortMapping) => Ok(()),
+                Err(igd_next::RemovePortError::RequestError(r)) => Err(upnp_err(&r)),
+                Err(_) => Err(MapError::Refused(
+                    FailReason::Refused,
+                    "UPnP-IGD: delete not authorized".into(),
+                )),
+            }
         })
     }
 }

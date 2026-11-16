@@ -48,7 +48,7 @@ whose port is taken is asked with `AddAnyPortMapping`), the router's port is
 reported, and that is the port a host has to advertise.
 
 The node asks for a two-hour lease and renews at half of what the router
-granted. If a renewal fails, the mapping reads `Renewing { reason }` and the
+granted. If a renewal fails, the mapping reads `Renewing { cause, detail }` and the
 node retries while the lease lasts; when the lease runs out the mapping is
 reported lost, and the node starts over with backoff
 (one minute, doubling, at most an hour). Some IGDv1 routers grant only
@@ -225,9 +225,31 @@ build without the `port-mapping` feature returns an error.
 
 - `ReticulumNode::port_mappings() -> Vec<PortMappingStatus>`: for each
   requested port, the protocol, internal port, method, external address,
-  lease and its expiry, and the state (`Pending`, `Mapped`,
-  `Renewing { reason }` (held, renewal failing), `Failed { reason }`, `CgnatDetected { external_ip, reason }`, `NoGateway`,
-  `Removed`).
+  lease and its expiry, and the state:
+
+  | State | Meaning |
+  |---|---|
+  | `Pending` | not tried yet |
+  | `Mapped` | the router holds it, lease valid |
+  | `Renewing { cause, detail }` | held, lease still valid, renewal failing; becomes `Failed` at expiry |
+  | `Failed { cause, detail }` | refused, or lost when the lease ran out; retried with backoff |
+  | `CgnatDetected { external_ip, reason }` | the router's own address is not public; deleted again |
+  | `NoGateway` | nothing answered |
+  | `Removed` | deleted (clean stop, or turned off) |
+  | `RemoveFailed { cause, permanent }` | the delete failed; the external address stays in the status so the user can be told which port to remove; `permanent` means it never lapses |
+
+  `cause` is a `FailReason` (`#[non_exhaustive]`): `Refused` (declined, not
+  authorized, mapping disabled on the router), `PortTaken` (UPnP 718, and the
+  router could not choose another), `Timeout` (no answer), `Unsupported` (no
+  PCP, NAT-PMP or UPnP, or not that operation), `Protocol` (a malformed or
+  unexpected response) and `Other`. `detail` is debug text and never holds
+  the external address. `MappingState::is_held()` is true for `Mapped` and
+  `Renewing`. A mapping whose lease has run out is never reported held: the
+  accessor reports it `Failed { cause: Timeout, .. }` even if the task has
+  not got to it.
+
+  A `RemoveFailed` UPnP entry is this node's own, so the next start, or
+  turning port mapping on again, reclaims it.
 - `NodeEvent::PortMappingChanged { internal_port, udp, external, method }`,
   on the control plane, each time a mapping is gained, its external address
   changes, or it is lost or removed (`external: None`).
