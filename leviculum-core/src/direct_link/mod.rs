@@ -38,7 +38,7 @@ pub mod nat;
 
 pub use nat::{
     DirectLinkOutcome, DirectLinkOutcomes, DirectLinkRecord, NatMapping, NatProbe, NatReport,
-    NatUnknown,
+    NatUnknown, OutcomeCounts,
 };
 pub use session::{Failure, Phase, Role, Session, Step};
 pub use wire::{ProbeProtocol, SessionId, Signal};

@@ -51,6 +51,9 @@ git tag, not the version string. -->
   attempt's end (established, punch failed, timed out, refused, probe
   failed, fell back, superseded, later lost) is counted, and the latest 32
   are kept with that session's verdict, under the application's link id.
+  The same counts per NAT class (`DirectLinkOutcomes::by_nat`) and the
+  number of NAT reports per class (`DirectLinkOutcomes::reports`) carry no
+  address and can be exported as they are.
   The report carries raw addresses; the host decides what to export
   (CIRISEdge exports counts by class only). Core's
   `NodeCore::record_nat_report` / `nat_report` / `direct_link_outcomes` /
