@@ -214,9 +214,12 @@ pub(crate) async fn probe_many(
             let until = stop_at.map_or(deadline, |s| s.min(deadline));
             match tokio::time::timeout_at(until, socket.recv_from(&mut buf)).await {
                 Err(_) => break,
+                // An ICMP unreachable from one server surfaces here on some
+                // platforms (Windows: WSAECONNRESET); the others' answers
+                // may still come, so the wait goes on.
                 Ok(Err(e)) => {
                     tracing::debug!("direct link: probe recv error: {e}");
-                    break;
+                    continue;
                 }
                 Ok(Ok((len, src))) => {
                     let src = canonical(src);
