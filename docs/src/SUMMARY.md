@@ -12,6 +12,7 @@
 - [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
 - [The I2P interface](concepts/i2p-interface.md)
 - [The WebSocket interface](concepts/websocket-interface.md)
+- [Port mapping](concepts/port-mapping.md)
 - [Media profiles](concepts/media-profiles.md)
 - [How far one firmware build reaches](concepts/board-support-scope.md)
 - [The firmware's host-test seam](concepts/firmware-host-test-seam.md)
