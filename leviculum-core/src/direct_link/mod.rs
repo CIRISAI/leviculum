@@ -33,6 +33,12 @@ pub const DIRECT_LINK_MTU: u32 = 1400;
 
 pub mod session;
 pub mod wire;
+// +ciris (leviculum#100): the NAT type from two probe servers.
+pub mod nat;
 
+pub use nat::{
+    DirectLinkOutcome, DirectLinkOutcomes, DirectLinkRecord, NatMapping, NatProbe, NatReport,
+    NatUnknown, OutcomeCounts,
+};
 pub use session::{Failure, Phase, Role, Session, Step};
 pub use wire::{ProbeProtocol, SessionId, Signal};

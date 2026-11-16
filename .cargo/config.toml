@@ -106,3 +106,12 @@ rustflags = ["--cfg", "aes_force_soft", "--cfg", 'curve25519_dalek_backend="seri
 # thread tests carry `cfg_attr(target_family = "wasm", ignore)`.
 [target.wasm32-wasip1]
 runner = "wasmtime"
+
+# +ciris (leviculum#101): port mapping is on by default, so a node a test
+# builds would ask the real router of the machine (or CI runner) to open its
+# ports. This moves the default to off for everything cargo runs here (tests,
+# `cargo run`); a test that wants mapping turns it on explicitly and points it
+# at a loopback fake. Shipped binaries are not affected: the variable is read
+# at run time, and nothing sets it outside this workspace.
+[env]
+LEVICULUM_PORT_MAPPING_DEFAULT = "off"

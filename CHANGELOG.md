@@ -10,6 +10,108 @@ never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
 
+## [0.35.0+ciris.2] — CIRIS fork
+
+### Added
+
+- Router port mapping (leviculum#101), so a home node behind an ordinary
+  router can be reached directly. On by default, in the background (`start`
+  never waits): the node asks the gateway to forward its TCP and WebSocket
+  server ports and the direct-link facilitator's UDP port, PCP first, then
+  NAT-PMP (both through `crab_nat`), then UPnP-IGD v2 or v1 (`igd-next`). It
+  renews at half the granted lease, reports a router-chosen external port,
+  deletes its mappings on a clean stop, and over IPv6 asks for a PCP firewall
+  pinhole. The switch: `[reticulum] port_mapping = no` or
+  `ReticulumNodeBuilder::enable_port_mapping(false)`;
+  `ReticulumNodeBuilder::port_mapping(PortMappingConfig)` sets the rest, and
+  `port_mapping_gateway` overrides the default route. An external address in
+  100.64.0.0/10 or a private range is reported once as
+  `MappingState::CgnatDetected`, the mapping deleted, and looked at again
+  only every six hours. A network with no gateway costs one round of
+  requests, backing off to hourly, logged once. Info logs name the
+  protocol, internal port and lease; the external address is logged at
+  debug only. `ReticulumNode::port_mappings`, `ReticulumNode::reachability`
+  (with `ReachabilityReport::is_directly_reachable`) and
+  `ReticulumNode::record_reachability_check` report it, and
+  `NodeEvent::PortMappingChanged` (new, at the end of the enum, control
+  plane) says when a mapping is gained, moves or is lost. Behind the
+  default-on `port-mapping` feature of `leviculum-std`; core gains only the
+  event. `LEVICULUM_PORT_MAPPING_DEFAULT=off` moves the default to off; the
+  workspace's `.cargo/config.toml` sets it so tests never reach a real
+  router. Every UPnP mapping is described `leviculum:<tag>:<proto>/<port>`,
+  the tag a hash of the identity hash; at start the node reads the IGD's
+  table and reclaims only its own stale entries (tag, this host's address and
+  a port it maps all matching), so a crash on a permanent-lease router
+  leaves no orphan and keeps the external port. On a live node
+  `ReticulumNode::set_port_mapping(bool).await` turns it off (deleting every
+  mapping now) or on, and `port_mapping_enabled()` reads it;
+  `MappingState::Renewing` shows a held mapping whose renewal is failing,
+  `MappingState::RemoveFailed { cause, permanent }` a delete that did not
+  land (with the external address kept), failures carry a structured
+  `FailReason` (`Refused`, `PortTaken`, `Timeout`, `Unsupported`,
+  `Protocol`, `Other`), a lapsed lease is never reported held, and a
+  changed gateway is noticed at the next renewal. See
+  `docs/src/concepts/port-mapping.md`.
+- A node's NAT type (leviculum#100), from probes to servers at two
+  distinct IP addresses off one socket: `NatMapping::{NoNat,
+  EndpointIndependent, EndpointDependent, Unknown(OneServer | OneAnswered |
+  NoAnswer)}` in `leviculum_core::direct_link::nat`. The verdict stays
+  `Unknown` until two distinct addresses have answered; it never guesses,
+  and two ports of one host count as one server. `NatReport` keeps every
+  server's raw answer, the local port, port preservation, whether the
+  servers shared an IP, whether the socket had a global IPv6 address, and
+  when it ran.
+- The second probe is any node this node peers with. Every node answers a
+  NAT probe on its direct-link sockets, from that path's peer IP only, on
+  by default: `answer_probes = yes|no` in `[reticulum]`, or
+  `ReticulumNodeBuilder::answer_probes(bool)`. The request is an RNSP
+  request zero-padded to 40 bytes, so the answer is never larger than the
+  request; it is rate-limited (6 at once, one per 2 s), and a v0.34 peer
+  ignores it. A session probes its facilitator, this node's own
+  facilitator when the peer named another, every live direct-link peer (one
+  per address, four at most), and the optional host list: `[reticulum]`
+  `nat_probe_addrs` (comma-separated `host:port`, `stun:` for STUN) or
+  `ReticulumNodeBuilder::nat_probe_servers`. A peer at a new address starts
+  a re-probe, spaced by a backoff that doubles from 30 s to 30 min. The
+  other servers' answers are waited for at most 500 ms past the
+  facilitator's. The facilitator (`probe_port`) now also rate-limits each
+  source (10 at once, one per 500 ms), and answers a padded request with no
+  more than its size. It still answers the bare 21-byte request every
+  version sends, with its 28 or 40 bytes, so old probers keep working. A
+  peer behind an address-and-port-dependent filter (Linux conntrack, most
+  home routers) cannot hear a probe from a fresh socket, so only public or
+  endpoint-independent-filtering peers answer. The wire is otherwise
+  unchanged.
+- `ReticulumNode::nat_report()`, `direct_link_outcomes()` and
+  `probe_nat()` (a probe outside any session), and
+  `NodeEvent::NatTypeChanged { previous, report }`, raised for the first
+  report and whenever a known verdict differs from the last known one. Each
+  attempt's end (established, punch failed, timed out, refused, probe
+  failed, fell back, superseded, later lost) is counted, and the latest 32
+  are kept with that session's verdict, under the application's link id.
+  The same counts per NAT class (`DirectLinkOutcomes::by_nat`) and the
+  number of NAT reports per class (`DirectLinkOutcomes::reports`) carry no
+  address and can be exported as they are.
+  The report carries raw addresses; the host decides what to export
+  (CIRISEdge exports counts by class only). Core's
+  `NodeCore::record_nat_report` / `nat_report` / `direct_link_outcomes` /
+  `direct_link_peer_hash` hold the state. The core-lock census is 97 (+3).
+- One info line per direct-link phase, each naming the link, the session
+  and the peer's hash (never an address; addresses are at debug): ACCEPT,
+  READY and COMPLETE sent or received, the facilitator probe, the NAT
+  type, punching, the first punch heard (with its delay), the punch's end,
+  the path MTU, and the outcome. The direct-link info lines that carried
+  addresses before (proposing, accepting, punching, a dead direct path) now
+  carry them at debug only.
+- A NAT lab on the real stack: `scripts/natlab/nat_type.py` runs the
+  `natlab_node` example (relay, a second probe server on its own IP, two
+  peers) in network namespaces behind Linux cone (`MASQUERADE`) and
+  symmetric (`MASQUERADE --random-fully`) NATs. Its witness is that every
+  peer classifies as its NAT kind; it reports the punch outcomes beside
+  that. It needs root, so it runs in CI (`natlab-nat-type` workflow), not on
+  a developer machine. Its outcomes measure two Linux NATs, not any real
+  network.
+
 ## [0.35.0+ciris.1] — CIRIS fork
 
 The fork carried onto current upstream master (+1,366 since the Oct 30 base).

@@ -823,3 +823,22 @@ that link stalls behind it.
   probe_addr = transport.example.org:4343
   direct_connect_policy = identified_only
 ```
+
+## Port mapping (+ciris, leviculum#101)
+
+These keys go in the `[reticulum]` section. With port mapping on, the node
+asks its router (PCP, then NAT-PMP, then UPnP-IGD) to forward its TCP and
+WebSocket server ports, and the direct-link facilitator's UDP port, from the
+internet. It renews the mappings and deletes them on a clean stop. On by
+default, in the background; `port_mapping = no` turns it off. The external
+address is logged at debug only. See [Port mapping](../concepts/port-mapping.md).
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `port_mapping` | yes/no | yes | Ask the router to open this node's listening ports. Any other word is a config error. |
+| `port_mapping_gateway` | IP address | default route | The gateway asked over PCP and NAT-PMP. UPnP finds its gateway by SSDP either way. |
+
+```ini
+[reticulum]
+  port_mapping = no
+```
