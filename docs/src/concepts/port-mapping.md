@@ -48,11 +48,19 @@ whose port is taken is asked with `AddAnyPortMapping`), the router's port is
 reported, and that is the port a host has to advertise.
 
 The node asks for a two-hour lease and renews at half of what the router
-granted. If a renewal fails, it retries while the lease lasts; when the lease
-runs out the mapping is reported lost, and the node starts over with backoff
+granted. If a renewal fails, the mapping reads `Renewing { reason }` and the
+node retries while the lease lasts; when the lease runs out the mapping is
+reported lost, and the node starts over with backoff
 (one minute, doubling, at most an hour). Some IGDv1 routers grant only
 permanent mappings; the node takes one (it logs a warning) and re-adds it
 every 20 minutes, so a router that rebooted and forgot it gets it back.
+
+Every round, renewals included, the node reads the routing table again
+(the cached clients are reused while the gateway and local address stay the
+same). When the gateway changed (a new default route, another network), a
+held mapping is reported lost at its next renewal and the new gateway is
+asked at once, instead of renewing into a gateway that is gone until the
+lease dies.
 
 On a clean stop (`stop` or `stop_shared`) the node deletes every mapping it
 holds and waits up to 12 seconds for the router to confirm. A stop sends no
@@ -204,12 +212,21 @@ are asked for. `ReticulumNodeBuilder::enable_port_mapping(false)` is the
 off switch; `enable_port_mapping(true)` turns it back on over a config that
 says no.
 
+On a live node, `ReticulumNode::set_port_mapping(enabled).await` is the
+switch for a host's settings toggle, and `port_mapping_enabled()` reads it.
+Off deletes every held mapping at once, as a clean stop does (bounded at 12
+seconds), raises `PortMappingChanged` for each, leaves every entry `Removed`
+and ends the task. On starts the task at once, with the reclaim of this
+node's stale UPnP entries first. Calling it with the current setting does
+nothing; the setting holds across a later stop and start. Turning it on in a
+build without the `port-mapping` feature returns an error.
+
 ## What a host reads
 
 - `ReticulumNode::port_mappings() -> Vec<PortMappingStatus>`: for each
   requested port, the protocol, internal port, method, external address,
   lease and its expiry, and the state (`Pending`, `Mapped`,
-  `Failed { reason }`, `CgnatDetected { external_ip, reason }`, `NoGateway`,
+  `Renewing { reason }` (held, renewal failing), `Failed { reason }`, `CgnatDetected { external_ip, reason }`, `NoGateway`,
   `Removed`).
 - `NodeEvent::PortMappingChanged { internal_port, udp, external, method }`,
   on the control plane, each time a mapping is gained, its external address

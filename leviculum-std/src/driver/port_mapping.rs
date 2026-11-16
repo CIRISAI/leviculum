@@ -5,7 +5,7 @@
 //! line of upstream's driver moves.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,6 +30,11 @@ const STOP_BOUND: Duration = Duration::from_secs(12);
 pub(crate) struct NodePortMapping {
     config: PortMappingConfig,
     shared: Arc<Mutex<Shared>>,
+    /// The live switch, from `config.enabled` at build and
+    /// [`ReticulumNode::set_port_mapping`] after.
+    enabled: AtomicBool,
+    /// One `set_port_mapping` at a time.
+    toggle: tokio::sync::Mutex<()>,
 }
 
 impl Default for NodePortMapping {
@@ -42,6 +47,8 @@ impl Default for NodePortMapping {
                 ..Default::default()
             },
             shared: Arc::default(),
+            enabled: AtomicBool::new(false),
+            toggle: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -95,6 +102,9 @@ pub(super) fn configure(
         None => PortMappingConfig::from_config(reticulum)?,
     };
     config.validate()?;
+    node.port_mapping
+        .enabled
+        .store(config.enabled, Ordering::Release);
     node.port_mapping.config = config;
     Ok(())
 }
@@ -175,11 +185,7 @@ fn event_sink(node: &ReticulumNode) -> crate::port_mapping::engine::ChangeSink {
     let dropped = Arc::clone(&node.control_dropped);
     Box::new(move |s: &PortMappingStatus| {
         let Some(tx) = &tx else { return };
-        let external = if s.state == MappingState::Mapped {
-            s.external
-        } else {
-            None
-        };
+        let external = if s.state.is_held() { s.external } else { None };
         let event = NodeEvent::PortMappingChanged {
             internal_port: s.internal_port,
             udp: s.protocol == MappingProtocol::Udp,
@@ -198,8 +204,7 @@ fn event_sink(node: &ReticulumNode) -> crate::port_mapping::engine::ChangeSink {
 /// has entered it). `None` when port mapping is off or there is nothing to
 /// map.
 pub(super) fn start(node: &ReticulumNode) -> Option<RunHandle> {
-    let config = &node.port_mapping.config;
-    if !config.enabled {
+    if !node.port_mapping.enabled.load(Ordering::Acquire) {
         return None;
     }
     if node.connect_instance_name.is_some() {
@@ -267,6 +272,10 @@ fn spawn_engine(_node: &ReticulumNode, _keys: Vec<PortKey>) -> Option<RunHandle>
 /// Delete this run's mappings and end its task, on the node's runtime,
 /// before that runtime is shut down.
 pub(super) async fn stop(handle: Option<RunHandle>, runtime: Option<&tokio::runtime::Runtime>) {
+    stop_on(handle, runtime.map(|rt| rt.handle().clone())).await
+}
+
+async fn stop_on(handle: Option<RunHandle>, runtime: Option<tokio::runtime::Handle>) {
     let Some(RunHandle { shutdown, task }) = handle else {
         return;
     };
@@ -290,6 +299,57 @@ pub(super) async fn stop(handle: Option<RunHandle>, runtime: Option<&tokio::runt
 }
 
 impl ReticulumNode {
+    /// +ciris (leviculum#101): turn port mapping on or off on a live node,
+    /// for a host's settings toggle. Async: turning it off waits for the
+    /// gateway to confirm each deletion.
+    ///
+    /// Off deletes every held mapping now, as a clean stop does (bounded at
+    /// 12 s), raises `PortMappingChanged` for each, leaves every entry
+    /// `Removed` and ends the task. On starts the task at once, reclaiming
+    /// this node's own stale UPnP entries first. Either way the setting
+    /// holds across a later stop and start. Calling it with the current
+    /// setting does nothing. Turning it on in a build without the
+    /// `port-mapping` feature is an error.
+    pub async fn set_port_mapping(&self, enabled: bool) -> Result<(), Error> {
+        if enabled && !cfg!(feature = "port-mapping") {
+            return Err(Error::Config(
+                "port mapping needs leviculum-std's `port-mapping` feature, which this build \
+                 leaves out"
+                    .to_string(),
+            ));
+        }
+        let _one_at_a_time = self.port_mapping.toggle.lock().await;
+        if self.port_mapping.enabled.swap(enabled, Ordering::AcqRel) == enabled {
+            return Ok(());
+        }
+        tracing::info!(
+            "port mapping: turned {} by the host",
+            if enabled { "on" } else { "off" }
+        );
+        let Ok(running) = self.running() else {
+            // Stopped: the next start reads the switch.
+            return Ok(());
+        };
+        if enabled {
+            let handle = {
+                let _rt = running.runtime.enter();
+                start(self)
+            };
+            let old = std::mem::replace(&mut self.run.lock_recover().port_mapping, handle);
+            stop_on(old, Some(running.runtime)).await;
+        } else {
+            let handle = self.run.lock_recover().port_mapping.take();
+            stop_on(handle, Some(running.runtime)).await;
+        }
+        Ok(())
+    }
+
+    /// +ciris (leviculum#101): whether port mapping is on (the builder or
+    /// config at build, [`set_port_mapping`](Self::set_port_mapping) since).
+    pub fn port_mapping_enabled(&self) -> bool {
+        self.port_mapping.enabled.load(Ordering::Acquire)
+    }
+
     /// +ciris (leviculum#101): every mapping this run asked for, with its
     /// state, external address and lease. Empty while port mapping is off
     /// or before the first start.
@@ -308,7 +368,7 @@ impl ReticulumNode {
         let external_ipv4 = shared
             .statuses
             .iter()
-            .filter(|s| s.state == MappingState::Mapped)
+            .filter(|s| s.state.is_held())
             .filter_map(|s| s.external)
             .map(|e| e.ip())
             .find(IpAddr::is_ipv4);
@@ -318,7 +378,7 @@ impl ReticulumNode {
             shared.global_v6.clone()
         };
         ReachabilityReport {
-            enabled: self.port_mapping.config.enabled,
+            enabled: self.port_mapping_enabled(),
             mappings: shared.statuses.clone(),
             external_ipv4,
             global_ipv6,
@@ -375,7 +435,7 @@ mod tests {
                 .build()
                 .await
                 .unwrap();
-            node.port_mapping.config.enabled
+            node.port_mapping_enabled()
         };
         assert_eq!(
             build(ReticulumNodeBuilder::new()).await,

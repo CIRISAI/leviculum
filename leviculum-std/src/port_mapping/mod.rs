@@ -102,6 +102,13 @@ pub enum MappingState {
     /// The router holds a mapping; `external` says from where. Still not
     /// proof of reachability (see the module docs).
     Mapped,
+    /// A mapping is held, but its renewal is failing; the lease has not
+    /// run out yet, and the node keeps retrying until it does (then
+    /// `Failed`). Still counts as mapped.
+    Renewing {
+        /// Why the last renewal failed.
+        reason: String,
+    },
     /// A gateway answered and refused, or a held mapping could not be
     /// renewed before its lease ran out. Retried with backoff.
     Failed {
@@ -123,6 +130,13 @@ pub enum MappingState {
     NoGateway,
     /// Deleted on a clean stop.
     Removed,
+}
+
+impl MappingState {
+    /// `Mapped` or `Renewing`: the router holds a mapping with a live lease.
+    pub fn is_held(&self) -> bool {
+        matches!(self, MappingState::Mapped | MappingState::Renewing { .. })
+    }
 }
 
 /// One requested mapping, as [`ReticulumNode::port_mappings`] reports it.
@@ -229,7 +243,7 @@ impl ReachabilityReport {
             None => {}
         }
         let mapped = self.mappings.iter().any(|m| {
-            m.state == MappingState::Mapped
+            m.state.is_held()
                 && m.external
                     .is_some_and(|e| netinfo::non_public_reason(e.ip()).is_none())
         });
