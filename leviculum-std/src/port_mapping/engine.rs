@@ -240,20 +240,29 @@ impl Engine {
             if self.entries[i].next > now {
                 continue;
             }
-            if self.entries[i].lease.is_some() {
-                self.renew(i).await;
-            } else {
-                if discovered.is_none() {
-                    let d = self.discover.discover().await;
-                    self.shared.lock_recover().global_v6 = d.global_v6.clone();
-                    discovered = Some(d);
-                }
-                let clients = discovered
-                    .as_ref()
-                    .map(|d| d.clients.clone())
-                    .unwrap_or_default();
-                self.acquire(i, &clients, &mut silent).await;
+            // Look at the network on every round, renewals included, so a
+            // changed gateway (a new default route, another network) is
+            // noticed at the next renewal rather than when the lease dies.
+            if discovered.is_none() {
+                let d = self.discover.discover().await;
+                self.shared.lock_recover().global_v6 = d.global_v6.clone();
+                discovered = Some(d);
             }
+            let clients = discovered
+                .as_ref()
+                .map(|d| d.clients.clone())
+                .unwrap_or_default();
+            if let Some(held) = self.entries[i].client.clone() {
+                if clients.iter().any(|c| Arc::ptr_eq(c, &held)) {
+                    self.renew(i).await;
+                    continue;
+                }
+                // The gateway that holds it is no longer ours to ask: start
+                // over on the network the host is on now.
+                self.lose(i, "the gateway changed");
+                self.entries[i].failures = 0;
+            }
+            self.acquire(i, &clients, &mut silent).await;
         }
         self.publish();
     }
@@ -411,8 +420,7 @@ impl Engine {
     fn hold(&mut self, i: usize, client: Arc<dyn MappingClient>, lease: Lease) {
         let now = Instant::now();
         let e = &mut self.entries[i];
-        let changed =
-            e.status.external != Some(lease.external) || e.status.state != MappingState::Mapped;
+        let changed = e.status.external != Some(lease.external) || !e.status.state.is_held();
         e.failures = 0;
         e.next = now + renew_after(lease.lifetime_secs);
         e.expires = (lease.lifetime_secs > 0)
@@ -485,6 +493,7 @@ impl Engine {
                         );
                         self.entries[i].next =
                             now + (left / 2).clamp(Duration::from_secs(5), FIRST_BACKOFF);
+                        self.entries[i].status.state = MappingState::Renewing { reason };
                     }
                     _ => {
                         self.lose(i, &format!("renewal failed: {reason}"));
@@ -547,6 +556,13 @@ impl Engine {
             e.status.lease_expires = None;
             e.status.state = MappingState::Removed;
             self.tell(i);
+        }
+        // Nothing is held any more: every entry reads Removed, the ones
+        // never mapped included.
+        for e in &mut self.entries {
+            e.status.state = MappingState::Removed;
+            e.status.external = None;
+            e.status.lease_expires = None;
         }
         self.publish();
     }

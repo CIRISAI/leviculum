@@ -42,7 +42,11 @@ git tag, not the version string. -->
   the tag a hash of the identity hash; at start the node reads the IGD's
   table and reclaims only its own stale entries (tag, this host's address and
   a port it maps all matching), so a crash on a permanent-lease router
-  leaves no orphan and keeps the external port. See
+  leaves no orphan and keeps the external port. On a live node
+  `ReticulumNode::set_port_mapping(bool).await` turns it off (deleting every
+  mapping now) or on, and `port_mapping_enabled()` reads it;
+  `MappingState::Renewing` shows a held mapping whose renewal is failing, and
+  a changed gateway is noticed at the next renewal. See
   `docs/src/concepts/port-mapping.md`.
 - A node's NAT type (leviculum#100), from probes to servers at two
   distinct IP addresses off one socket: `NatMapping::{NoNat,

@@ -74,11 +74,15 @@ impl MappingClient for MockClient {
     }
 }
 
-struct MockDiscover(Vec<Arc<dyn MappingClient>>);
+type ClientList = Arc<Mutex<Vec<Arc<dyn MappingClient>>>>;
+
+/// The clients the network offers now; a test swaps them to move the host
+/// to another gateway.
+struct MockDiscover(ClientList);
 
 impl Discover for MockDiscover {
     fn discover(&self) -> BoxFut<'_, Discovered> {
-        let clients = self.0.clone();
+        let clients = self.0.lock_recover().clone();
         Box::pin(async move {
             Discovered {
                 clients,
@@ -114,6 +118,7 @@ fn silent() -> Script {
 }
 
 struct Rig {
+    network: ClientList,
     shared: Arc<Mutex<Shared>>,
     events: Arc<Mutex<Vec<PortMappingStatus>>>,
     stop: watch::Sender<bool>,
@@ -125,16 +130,18 @@ impl Rig {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink_events = Arc::clone(&events);
+        let network: ClientList = Arc::new(Mutex::new(clients));
         let engine = Engine::new(
             keys,
             lease_secs,
-            Box::new(MockDiscover(clients)),
+            Box::new(MockDiscover(Arc::clone(&network))),
             Arc::clone(&shared),
             Box::new(move |s| sink_events.lock_recover().push(s.clone())),
         );
         let (stop, rx) = watch::channel(false);
         let task = tokio::spawn(engine.run(rx));
         Rig {
+            network,
             shared,
             events,
             stop,
@@ -202,6 +209,31 @@ async fn an_unanswered_pcp_falls_back_to_natpmp_and_renews_at_half_life() {
     rig.finish().await;
 }
 
+/// A host that moved to another gateway (new default route, other
+/// network) is noticed at the next renewal round: the old mapping is
+/// reported lost and the new gateway asked at once.
+#[tokio::test(start_paused = true)]
+async fn a_changed_gateway_is_noticed_at_the_next_renewal() {
+    let old = MockClient::new(MappingMethod::NatPmp, same_port(120));
+    let new = MockClient::new(
+        MappingMethod::Pcp,
+        Box::new(|req, _| grant(Ipv4Addr::new(198, 51, 100, 4), req.external_port, 120)),
+    );
+    let rig = Rig::start(vec![tcp(4242)], 7200, vec![old.clone()]);
+    settle().await;
+    assert_eq!(rig.status(0).method, Some(MappingMethod::NatPmp));
+    *rig.network.lock_recover() = vec![new.clone()];
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(old.map_count(), 1, "the old gateway is not renewed");
+    let s = rig.status(0);
+    assert_eq!(s.state, MappingState::Mapped);
+    assert_eq!(s.method, Some(MappingMethod::Pcp));
+    let events = rig.events();
+    assert_eq!(events.len(), 3, "gained, lost, gained: {events:?}");
+    assert_eq!(events[1].external, None);
+    rig.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_router_chosen_port_is_reported_and_asked_for_again() {
     let pmp = MockClient::new(
@@ -260,7 +292,13 @@ async fn a_failed_renewal_retries_then_loses_the_mapping_at_expiry_and_recovers(
     // Renewal at 60 s fails; retries come inside the remaining lease.
     tokio::time::sleep(Duration::from_secs(61)).await;
     assert_eq!(pmp.map_count(), 2);
-    assert_eq!(rig.status(0).state, MappingState::Mapped, "still leased");
+    assert!(
+        matches!(rig.status(0).state, MappingState::Renewing { ref reason } if reason.contains("network failure")),
+        "still leased, renewal failing: {:?}",
+        rig.status(0).state
+    );
+    assert!(rig.status(0).state.is_held());
+    assert_eq!(rig.events().len(), 1, "a failing renewal is not a loss");
     // By 121 s the lease is gone: the mapping is reported lost.
     tokio::time::sleep(Duration::from_secs(62)).await;
     let s = rig.status(0);
@@ -815,6 +853,46 @@ mod against_fakes {
         assert_eq!(report.external_ipv4, Some(IpAddr::V4(PUBLIC)));
         assert_eq!(report.is_directly_reachable(), Reachability::Mapped);
 
+        // The host's settings toggle: off deletes now, on maps again, and
+        // a repeated call does nothing.
+        assert!(node.port_mapping_enabled());
+        let before = fake.requests().len();
+        node.set_port_mapping(false).await.unwrap();
+        assert!(!node.port_mapping_enabled());
+        assert_eq!(node.port_mappings()[0].state, MappingState::Removed);
+        let after_off = fake.requests();
+        let delete = after_off[before..]
+            .iter()
+            .find(|r| r[0] == 0 && r[1] == 2)
+            .expect("turning it off deleted the mapping");
+        assert_eq!(&delete[8..12], &[0, 0, 0, 0]);
+        let lost = next_mapping_event(&mut events).await;
+        assert!(matches!(
+            lost,
+            leviculum_core::node::NodeEvent::PortMappingChanged { external: None, .. }
+        ));
+        node.set_port_mapping(false).await.unwrap();
+        assert_eq!(
+            fake.requests().len(),
+            after_off.len(),
+            "off twice is a no-op"
+        );
+
+        node.set_port_mapping(true).await.unwrap();
+        let regained = next_mapping_event(&mut events).await;
+        assert!(matches!(
+            regained,
+            leviculum_core::node::NodeEvent::PortMappingChanged {
+                external: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(node.port_mappings()[0].state, MappingState::Mapped);
+        let after_on = fake.requests().len();
+        node.set_port_mapping(true).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(fake.requests().len(), after_on, "on twice is a no-op");
+
         node.stop().await.unwrap();
         assert_eq!(node.port_mappings()[0].state, MappingState::Removed);
         let delete = fake
@@ -828,6 +906,22 @@ mod against_fakes {
             &[0, 0, 0, 0],
             "the stop deleted the mapping"
         );
+    }
+
+    async fn next_mapping_event(
+        events: &mut crate::driver::EventReceiver,
+    ) -> leviculum_core::node::NodeEvent {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, events.recv()).await {
+                Ok(Some(e @ leviculum_core::node::NodeEvent::PortMappingChanged { .. })) => {
+                    return e
+                }
+                Ok(Some(_)) => continue,
+                other => panic!("no PortMappingChanged: {other:?}"),
+            }
+        }
     }
 
     // UPnP
