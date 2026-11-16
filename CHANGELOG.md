@@ -10,6 +10,32 @@ never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+- `ReticulumNode::attach_interface(ExternalInterfaceConfig)`: attach an
+  interface whose carrier the host drives. It returns an `ExternalInterface`
+  made of three handles. An `ExternalInbound` (`Clone + Send + Sync`) pushes
+  received frames in. An `ExternalOutbound` takes the frames to send, as
+  `OutboundFrame`s. An `ExternalInterfaceGuard` has `set_up` and
+  `set_down`, and dropping it detaches the interface. The interface goes
+  through the built-in registration path, so it shows in `interface_stats`,
+  has IFAC applied, and has its mode and kind reach the transport (announce
+  rebroadcast, the `ByMedium` window). It takes the run lock, not the core
+  lock.
+- `ReticulumNode::attach_host_interface(carrier, HostInterfaceConfig)`: a
+  framed Reticulum interface over a `HostCarrier`, a trait that mirrors the
+  `ciris:node` WIT `net` `stream` resource. It has non-blocking
+  `send`/`recv`, `info`, `close` and `poll_event`, with edge-triggered
+  readiness. Message framing is one packet per message (`rns.raw`). Stream
+  framing is the TCP HDLC (`rns.hdlc`). The kind comes from the carrier. One
+  interface carries one connection, and the host owns the reconnect policy
+  (`HostInterfaceHandle::ended`).
+- `test_support::mem_carrier`: an in-memory carrier pair that keeps the
+  WIT's edge-triggered rules, with short writes and would-block on demand.
+  See `docs/src/concepts/attached-interfaces.md`.
+
 ## [0.35.0+ciris.1] — CIRIS fork
 
 The fork carried onto current upstream master (+1,366 since the Oct 30 base).
