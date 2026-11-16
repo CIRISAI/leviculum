@@ -10,6 +10,30 @@ never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+- Router port mapping (leviculum#101), so a home node behind an ordinary
+  router can be reached directly. With `[reticulum] port_mapping = yes` or
+  `ReticulumNodeBuilder::port_mapping(PortMappingConfig)`, the node asks the
+  gateway to forward its TCP and WebSocket server ports and the
+  direct-link facilitator's UDP port: PCP first, then NAT-PMP (both through
+  `crab_nat`), then UPnP-IGD v2 or v1 (`igd-next`). It renews at half the
+  granted lease, reports a router-chosen external port, deletes its
+  mappings on a clean stop, and over IPv6 asks for a PCP firewall pinhole.
+  An external address in 100.64.0.0/10 or a private range is reported as
+  `MappingState::CgnatDetected` and the mapping deleted. Off by default;
+  every mapping is logged at info level. `ReticulumNode::port_mappings`,
+  `ReticulumNode::reachability` (with
+  `ReachabilityReport::is_directly_reachable`) and
+  `ReticulumNode::record_reachability_check` report it, and
+  `NodeEvent::PortMappingChanged` (new, at the end of the enum, control
+  plane) says when a mapping is gained, moves or is lost. Behind the
+  default-on `port-mapping` feature of `leviculum-std`; core gains only the
+  event. Config key `port_mapping_gateway` overrides the default route. See
+  `docs/src/concepts/port-mapping.md`.
+
 ## [0.35.0+ciris.1] — CIRIS fork
 
 The fork carried onto current upstream master (+1,366 since the Oct 30 base).
