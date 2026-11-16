@@ -17,6 +17,12 @@
 //!   dead path is left in seconds, as ICE consent checks (RFC 7675) do,
 //!   instead of minutes. With any other peer (rns-rs) the plain keepalive
 //!   and timeout above stay, since its interface does not ack keepalives;
+//! - (+ciris, leviculum#100) answers a NAT probe (a padded RNSP request)
+//!   from the peer's IP address, on any port, so the peer can classify
+//!   its NAT against this node from a fresh socket: never with more bytes
+//!   than the request, at most [`PROBE_ANSWER_BURST`] at once and one per
+//!   [`PROBE_ANSWER_REFILL`] after, and not at all when the host turned
+//!   probe answering off;
 //! - answers a late punch frame with its ack. The peer finishes punching
 //!   only once it has seen an ack; if this side finished first and the one
 //!   ack it sent was lost, the peer would otherwise punch into silence and
@@ -58,6 +64,11 @@ pub(crate) const FAST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
 const DATAGRAM_MAX: usize = 65_535;
 const CHANNEL_DEPTH: usize = 256;
 
+/// +ciris (leviculum#100): NAT probes answered at once, and the wait that
+/// earns one more. A probing peer sends at most three per server per probe.
+pub(crate) const PROBE_ANSWER_BURST: u32 = 6;
+pub(crate) const PROBE_ANSWER_REFILL: Duration = Duration::from_secs(2);
+
 /// Timing knobs, overridable in tests.
 #[derive(Clone, Copy)]
 pub(crate) struct DirectUdpTiming {
@@ -65,6 +76,8 @@ pub(crate) struct DirectUdpTiming {
     pub inactivity: Duration,
     /// +ciris: keepalives carry a sequence number, so the peer acks them.
     pub sequenced: bool,
+    /// +ciris (leviculum#100): answer the peer's NAT probes.
+    pub answer_probes: bool,
 }
 
 impl DirectUdpTiming {
@@ -80,6 +93,7 @@ impl DirectUdpTiming {
             keepalive,
             inactivity,
             sequenced: true,
+            answer_probes: true,
         }
     }
 }
@@ -90,6 +104,7 @@ impl Default for DirectUdpTiming {
             keepalive: KEEPALIVE_INTERVAL,
             inactivity: INACTIVITY_TIMEOUT,
             sequenced: false,
+            answer_probes: true,
         }
     }
 }
@@ -211,6 +226,7 @@ async fn direct_io_task(
     let mut probe_seq: u32 = 0;
     let mut buf = vec![0u8; DATAGRAM_MAX];
     let mut last_heard = Instant::now();
+    let mut answers = crate::direct_link::nat::Bucket::new(PROBE_ANSWER_BURST, PROBE_ANSWER_REFILL);
     let mut keepalive_tick = tokio::time::interval(timing.keepalive);
     keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -227,6 +243,19 @@ async fn direct_io_task(
                     }
                 };
                 if crate::direct_link::canonical(src) != peer {
+                    // +ciris (leviculum#100): the peer probing its NAT from
+                    // a fresh socket; nobody else is answered.
+                    let src = crate::direct_link::canonical(src);
+                    if timing.answer_probes && src.ip() == peer.ip() {
+                        if let Some(answer) =
+                            leviculum_core::direct_link::nat::answer_peer_probe(&buf[..len], &src)
+                        {
+                            if answers.take(std::time::Instant::now()) {
+                                let to = crate::direct_link::on_socket(&socket, src);
+                                let _ = socket.send_to(&answer, to).await;
+                            }
+                        }
+                    }
                     continue;
                 }
                 let frame = &buf[..len];
@@ -283,10 +312,8 @@ async fn direct_io_task(
             }
             _ = keepalive_tick.tick() => {
                 if last_heard.elapsed() >= timing.inactivity {
-                    tracing::info!(
-                        "{name}: nothing from {peer} for {:?}, direct path down",
-                        timing.inactivity
-                    );
+                    tracing::info!("{name}: nothing from the peer for {:?}, direct path down", timing.inactivity);
+                    tracing::debug!("{name}: the silent peer was {peer}");
                     return;
                 }
                 // Sequenced, the peer acks it, so silence means the path is

@@ -14,16 +14,15 @@
 //! probe_protocol = rnsp               # or `stun`, to use a public STUN server
 //! direct_connect_policy = reject      # | accept_all | identified_only | ask_host
 //! nat_probe_addrs = rns2.example.org:4343, stun:stun.example.net:3478
+//! answer_probes = yes                 # answer direct-link peers' NAT probes
 //! ```
 //!
-//! +ciris (leviculum#100): `nat_probe_addrs` names more probe servers, each
-//! probed from the session's socket beside the facilitator, so the node can
-//! tell its NAT type ([`leviculum_core::direct_link::NatMapping`]). A
-//! `stun:` prefix probes that server with STUN, otherwise RNSP; nothing is
-//! sent to any of them unless a session probes. A responder that has a
-//! `probe_addr` of its own probes it too when the peer named another
-//! facilitator, so two differently configured nodes classify with no extra
-//! key.
+//! +ciris (leviculum#100): a node tells its NAT type
+//! ([`leviculum_core::direct_link::NatMapping`]) by probing two servers at
+//! distinct addresses from one socket; see [`nat`]. The servers are its
+//! facilitators, its live direct-link peers (every node answers their
+//! probes unless `answer_probes = no`), and the optional `nat_probe_addrs`
+//! (comma-separated `host:port`, `stun:` for a STUN server).
 
 use std::collections::HashMap;
 use std::io;
@@ -33,10 +32,8 @@ use std::time::Duration;
 
 use leviculum_core::direct_link::wire::{self, PunchKind, SessionId};
 use leviculum_core::direct_link::ProbeProtocol;
-use leviculum_core::link::LinkId;
 use leviculum_core::node::{DirectLinkJob, DirectLinkPolicy};
 use leviculum_core::transport::InterfaceId;
-use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -45,6 +42,12 @@ use tokio::task::AbortHandle;
 use crate::error::Error;
 use crate::interfaces::direct_udp::{spawn_direct_udp_interface, DirectUdpTiming};
 use crate::interfaces::InterfaceHandle;
+use crate::sync_ext::MutexRecover;
+
+// +ciris (leviculum#100): the NAT-type probe.
+pub(crate) mod nat;
+pub use nat::{parse_nat_probe_servers, NatProbeServer};
+pub(crate) use nat::{DirectLinkExtras, DirectLinkExtrasConfig};
 
 /// Direct-link settings, from config or the builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -139,6 +142,14 @@ pub struct DirectLinkKeys {
     /// [`parse_nat_probe_servers`].
     #[serde(default)]
     pub nat_probe_addrs: Option<String>,
+    /// +ciris (leviculum#100): answer direct-link peers' NAT probes
+    /// (default yes).
+    #[serde(default)]
+    pub answer_probes: Option<bool>,
+    /// An INI `answer_probes` that is no boolean, kept for the builder to
+    /// refuse.
+    #[serde(skip)]
+    pub invalid_answer_probes: Option<String>,
     /// Which peers' direct-link requests to accept: `reject` (default),
     /// `accept_all` or `identified_only`.
     #[serde(default)]
@@ -181,6 +192,10 @@ pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &s
             config.direct_link.direct_connect_policy = Some(value.trim().to_ascii_lowercase())
         }
         "nat_probe_addrs" => config.direct_link.nat_probe_addrs = Some(value.trim().to_string()),
+        "answer_probes" => match nat::parse_bool(value) {
+            Some(on) => config.direct_link.answer_probes = Some(on),
+            None => config.direct_link.invalid_answer_probes = Some(value.trim().to_string()),
+        },
         _ => {
             crate::port_mapping::apply_ini_key(config, key, value);
         }
@@ -207,43 +222,6 @@ pub(crate) async fn resolve_facilitator(addr: &str) -> io::Result<SocketAddr> {
 const PROBE_ATTEMPTS: u32 = 3;
 const PROBE_WAIT: Duration = Duration::from_secs(2);
 
-/// One probe request and what identifies its answer.
-enum ProbeAttempt {
-    Rnsp([u8; 16]),
-    Stun([u8; 12]),
-}
-
-impl ProbeAttempt {
-    fn new(protocol: ProbeProtocol, rng: &mut impl RngCore) -> Self {
-        match protocol {
-            ProbeProtocol::Rnsp => {
-                let mut nonce = [0u8; 16];
-                rng.fill_bytes(&mut nonce);
-                ProbeAttempt::Rnsp(nonce)
-            }
-            ProbeProtocol::Stun => {
-                let mut txn = [0u8; 12];
-                rng.fill_bytes(&mut txn);
-                ProbeAttempt::Stun(txn)
-            }
-        }
-    }
-
-    fn request(&self) -> Vec<u8> {
-        match self {
-            ProbeAttempt::Rnsp(nonce) => wire::rnsp_request(nonce).to_vec(),
-            ProbeAttempt::Stun(txn) => wire::stun_binding_request(txn).to_vec(),
-        }
-    }
-
-    fn answer(&self, data: &[u8]) -> Option<SocketAddr> {
-        match self {
-            ProbeAttempt::Rnsp(nonce) => wire::parse_rnsp_response(data, nonce),
-            ProbeAttempt::Stun(txn) => wire::parse_stun_binding_response(data, txn),
-        }
-    }
-}
-
 /// Learn `socket`'s reflexive address from `server`.
 #[cfg(test)]
 pub(crate) async fn probe(
@@ -251,7 +229,7 @@ pub(crate) async fn probe(
     server: SocketAddr,
     protocol: ProbeProtocol,
 ) -> io::Result<SocketAddr> {
-    probe_many(socket, (server, protocol), &[])
+    nat::probe_many(socket, &[(server, nat::Ask::Server(protocol))], true)
         .await
         .first()
         .and_then(|p| p.mapped)
@@ -261,187 +239,6 @@ pub(crate) async fn probe(
                 format!("facilitator {server} did not answer"),
             )
         })
-}
-
-/// +ciris (leviculum#100): one more server to probe for the NAT type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NatProbeServer {
-    /// `host:port`, resolved at each probe.
-    pub addr: String,
-    /// How to probe it.
-    pub protocol: ProbeProtocol,
-}
-
-/// +ciris (leviculum#100): read a `nat_probe_addrs` value: comma-separated
-/// `host:port` entries, each probed with RNSP, or with STUN when prefixed
-/// `stun:` (`rnsp:` is accepted too). An entry with no port is a config
-/// error.
-pub fn parse_nat_probe_servers(value: &str) -> Result<Vec<NatProbeServer>, Error> {
-    let mut out = Vec::new();
-    for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let (protocol, addr) = if let Some(rest) = entry.strip_prefix("stun:") {
-            (ProbeProtocol::Stun, rest)
-        } else if let Some(rest) = entry.strip_prefix("rnsp:") {
-            (ProbeProtocol::Rnsp, rest)
-        } else {
-            (ProbeProtocol::Rnsp, entry)
-        };
-        let port_ok = addr
-            .rsplit_once(':')
-            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-        if !port_ok {
-            return Err(Error::Config(format!(
-                "nat_probe_addrs: {entry:?} is not host:port (optionally stun: or rnsp:)"
-            )));
-        }
-        out.push(NatProbeServer {
-            addr: addr.to_string(),
-            protocol,
-        });
-    }
-    Ok(out)
-}
-
-/// +ciris (leviculum#100): how long the other servers' answers are waited
-/// for once the facilitator has answered. The punch waits on the
-/// facilitator's answer alone; this bounds what the NAT probe adds to it.
-const NAT_PROBE_GRACE: Duration = Duration::from_millis(500);
-
-/// +ciris (leviculum#100): how long a NAT probe server's name may take to
-/// resolve before that server is left out of this probe.
-const NAT_PROBE_RESOLVE: Duration = Duration::from_secs(1);
-
-/// +ciris (leviculum#100): probe `primary` and each of `others` from one
-/// socket at once, so the mappings can be compared. Every unanswered
-/// server is asked again each attempt. Returns once all have answered, or
-/// [`NAT_PROBE_GRACE`] after `primary` answered, or when the attempts run
-/// out; the first probe is `primary`'s.
-pub(crate) async fn probe_many(
-    socket: &UdpSocket,
-    primary: (SocketAddr, ProbeProtocol),
-    others: &[(SocketAddr, ProbeProtocol)],
-) -> Vec<leviculum_core::direct_link::NatProbe> {
-    use leviculum_core::direct_link::NatProbe;
-    let mut rng = rand_core::OsRng;
-    let mut buf = [0u8; 512];
-    let servers: Vec<(SocketAddr, ProbeProtocol)> = core::iter::once(primary)
-        .chain(others.iter().copied())
-        .collect();
-    let mut probes: Vec<NatProbe> = servers
-        .iter()
-        .map(|(server, _)| NatProbe {
-            server: *server,
-            mapped: None,
-        })
-        .collect();
-    let mut stop_at: Option<tokio::time::Instant> = None;
-    for _ in 0..PROBE_ATTEMPTS {
-        let attempts: Vec<Option<ProbeAttempt>> = servers
-            .iter()
-            .zip(&probes)
-            .map(|((_, protocol), p)| {
-                p.mapped
-                    .is_none()
-                    .then(|| ProbeAttempt::new(*protocol, &mut rng))
-            })
-            .collect();
-        for ((server, _), attempt) in servers.iter().zip(&attempts) {
-            if let Some(attempt) = attempt {
-                if let Err(e) = socket
-                    .send_to(&attempt.request(), on_socket(socket, *server))
-                    .await
-                {
-                    tracing::debug!("direct link: probe of {server} not sent: {e}");
-                }
-            }
-        }
-        let deadline = tokio::time::Instant::now() + PROBE_WAIT;
-        loop {
-            let until = stop_at.map_or(deadline, |s| s.min(deadline));
-            match tokio::time::timeout_at(until, socket.recv_from(&mut buf)).await {
-                Err(_) => break,
-                Ok(Err(e)) => {
-                    tracing::debug!("direct link: probe recv error: {e}");
-                    break;
-                }
-                Ok(Ok((len, src))) => {
-                    let src = canonical(src);
-                    for (i, ((server, _), attempt)) in servers.iter().zip(&attempts).enumerate() {
-                        if probes[i].mapped.is_some() || canonical(*server) != src {
-                            continue;
-                        }
-                        if let Some(mapped) = attempt.as_ref().and_then(|a| a.answer(&buf[..len])) {
-                            probes[i].mapped = Some(canonical(mapped));
-                            if i == 0 {
-                                stop_at = Some(tokio::time::Instant::now() + NAT_PROBE_GRACE);
-                            }
-                        }
-                    }
-                    if probes.iter().all(|p| p.mapped.is_some()) {
-                        return probes;
-                    }
-                }
-            }
-            if stop_at.is_some_and(|s| tokio::time::Instant::now() >= s) {
-                return probes;
-            }
-        }
-        if stop_at.is_some_and(|s| tokio::time::Instant::now() >= s) {
-            return probes;
-        }
-    }
-    probes
-}
-
-/// +ciris (leviculum#100): resolve the NAT probe servers, leaving out any
-/// that does not resolve within [`NAT_PROBE_RESOLVE`] or is `primary`
-/// itself, and any repeat.
-async fn resolve_nat_servers(
-    primary: SocketAddr,
-    servers: &[NatProbeServer],
-) -> Vec<(SocketAddr, ProbeProtocol)> {
-    let lookups = servers.iter().map(|s| async move {
-        match tokio::time::timeout(NAT_PROBE_RESOLVE, resolve_facilitator(&s.addr)).await {
-            Ok(Ok(addr)) => Some((addr, s.protocol)),
-            Ok(Err(e)) => {
-                tracing::info!("direct link: NAT probe server {} not resolved: {e}", s.addr);
-                None
-            }
-            Err(_) => {
-                tracing::info!(
-                    "direct link: NAT probe server {} timed out resolving",
-                    s.addr
-                );
-                None
-            }
-        }
-    });
-    let mut out: Vec<(SocketAddr, ProbeProtocol)> = Vec::new();
-    for (addr, protocol) in futures::future::join_all(lookups)
-        .await
-        .into_iter()
-        .flatten()
-    {
-        if canonical(addr) != canonical(primary) && !out.iter().any(|(a, _)| *a == addr) {
-            out.push((addr, protocol));
-        }
-    }
-    out
-}
-
-/// +ciris (leviculum#100): probe `primary` and the NAT probe servers from
-/// `socket` and classify the result. The report's times are left at zero
-/// for the node to stamp.
-pub(crate) async fn probe_nat_type(
-    socket: &UdpSocket,
-    primary: (SocketAddr, ProbeProtocol),
-    servers: &[NatProbeServer],
-) -> leviculum_core::direct_link::NatReport {
-    let others = resolve_nat_servers(primary.0, servers).await;
-    let probes = probe_many(socket, primary, &others).await;
-    let local_port = socket.local_addr().map_or(0, |a| a.port());
-    let candidates = host_candidates(socket, primary.0);
-    leviculum_core::direct_link::NatReport::from_probes(probes, local_port, candidates, 0, None)
 }
 
 // Punch
@@ -509,17 +306,17 @@ pub(crate) async fn punch(
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
-    punch_logged(socket, targets, session, token, "-").await
+    punch_logged(socket, targets, session, token, &Label::default()).await
 }
 
-/// [`punch`], naming `link` (short hex) in its log line for the first punch
-/// heard from the peer (+ciris, leviculum#100).
+/// [`punch`], naming the session's link and peer hash in its log line for
+/// the first punch heard (+ciris, leviculum#100).
 pub(crate) async fn punch_logged(
     socket: &UdpSocket,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
-    link: &str,
+    label: &Label,
 ) -> Option<Punched> {
     let started = tokio::time::Instant::now();
     let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
@@ -576,12 +373,13 @@ pub(crate) async fn punch_logged(
                         }
                         if heard.is_empty() {
                             tracing::info!(
-                                link = %link,
+                                link = %label.link,
                                 session = %hex_short(session),
-                                peer = %src,
+                                peer = %label.peer,
                                 after_ms = started.elapsed().as_millis() as u64,
                                 "direct link: first punch heard"
                             );
+                            tracing::debug!("direct link: the first punch came from {src}");
                         }
                         if !heard.contains(&src) && heard.len() < targets.len() {
                             heard.push(src);
@@ -824,36 +622,61 @@ fn host_candidates(socket: &UdpSocket, server: SocketAddr) -> Vec<SocketAddr> {
 /// session upgrades, under one hold of the core lock.
 pub(crate) fn take_jobs(
     core: &mut crate::driver::StdNodeCore,
-) -> Vec<(DirectLinkJob, Option<LinkId>)> {
+) -> Vec<(DirectLinkJob, Option<Label>)> {
     core.take_direct_link_jobs()
         .into_iter()
         .map(|job| {
-            let link = match &job {
+            let label = match &job {
                 DirectLinkJob::Probe { session, .. } | DirectLinkJob::Punch { session, .. } => {
-                    core.direct_link_session_link(session)
+                    core.direct_link_session_link(session).map(|link| Label {
+                        link: hex_short(link.as_bytes()),
+                        peer: core
+                            .direct_link_peer_hash(&link)
+                            .map_or_else(|| "-".to_string(), |h| hex_short(&h)),
+                    })
                 }
                 _ => None,
             };
-            (job, link)
+            (job, label)
         })
         .collect()
 }
 
+/// +ciris (leviculum#100): what the driver's log lines name a session by:
+/// its link and its peer's hash, in hex, never an address.
+#[derive(Debug, Clone)]
+pub(crate) struct Label {
+    link: String,
+    peer: String,
+}
+
+impl Default for Label {
+    fn default() -> Self {
+        Label {
+            link: "-".into(),
+            peer: "-".into(),
+        }
+    }
+}
+
 /// +ciris (leviculum#100): a probe finished ([`Outcome::Probed`]): record
 /// its NAT type, then hand the node the reflexive address. One output for
-/// both, the NAT report's events first.
+/// both, the NAT report's events first. A re-probe ([`Outcome::NatProbed`])
+/// records only the type.
 pub(crate) fn probed(
     core: &mut crate::driver::StdNodeCore,
     outcome: Outcome,
 ) -> leviculum_core::transport::TickOutput {
-    let Outcome::Probed {
-        session,
-        public,
-        local,
-        nat,
-    } = outcome
-    else {
-        return leviculum_core::transport::TickOutput::empty();
+    let (session, public, local, nat) = match outcome {
+        Outcome::Probed {
+            session,
+            public,
+            local,
+            nat,
+        } => (session, public, local, nat),
+        // A probe outside any session: only the NAT type to record.
+        Outcome::NatProbed { report } => return core.record_nat_report(None, *report),
+        Outcome::Punched { .. } => return leviculum_core::transport::TickOutput::empty(),
     };
     let first = nat.map(|report| core.record_nat_report(Some(&session), *report));
     let mut output = core.direct_link_probed_with_local(&session, public, local);
@@ -866,99 +689,21 @@ pub(crate) fn probed(
     output
 }
 
-/// +ciris (leviculum#99, #100): direct-link settings the host sets beside
-/// [`DirectLinkSettings`] (which stays as it was, so a host's struct literal
-/// still builds).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DirectLinkExtras {
-    /// The keepalive interval and silence bound of a fast-liveness
-    /// interface, when the host set them (leviculum#99).
-    pub(crate) keepalive: Option<(Duration, Duration)>,
-    /// Servers probed beside the facilitator for the NAT type
-    /// (leviculum#100).
-    pub(crate) nat_probe_servers: Vec<NatProbeServer>,
-}
-
-/// +ciris (leviculum#99, #100): what the builder holds of
-/// [`DirectLinkExtras`] until it builds: the host's keepalive, and the NAT
-/// probe servers as given (`None` reads the config's `nat_probe_addrs`).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DirectLinkExtrasConfig {
-    pub(crate) keepalive: Option<(Duration, Duration)>,
-    pub(crate) nat_probe_servers: Option<Vec<String>>,
-}
-
-impl DirectLinkExtrasConfig {
-    /// Check both and read the config's servers when the host gave none.
-    pub(crate) fn resolve(
-        self,
-        config: &crate::config::ReticulumConfig,
-    ) -> Result<DirectLinkExtras, Error> {
-        if let Some((interval, dead_after)) = self.keepalive {
-            if interval.is_zero() || dead_after <= interval {
-                return Err(Error::Config(format!(
-                    "direct_link_keepalive: interval {interval:?} must be above zero and below \
-                     dead_after {dead_after:?}"
-                )));
-            }
-        }
-        let nat_probe_servers = match self.nat_probe_servers {
-            Some(servers) => parse_nat_probe_servers(&servers.join(","))?,
-            None => parse_nat_probe_servers(
-                config.direct_link.nat_probe_addrs.as_deref().unwrap_or(""),
-            )?,
-        };
-        Ok(DirectLinkExtras {
-            keepalive: self.keepalive,
-            nat_probe_servers,
-        })
-    }
-}
-
-/// +ciris (leviculum#100): the servers a session's probe asks beside its
-/// facilitator: this node's own facilitator (`probe_addr`), which the
-/// session skips when it is the one the session probes anyway, then
-/// `configured`. A responder whose peer named another facilitator so
-/// classifies with no extra key.
-pub(crate) fn nat_servers(
-    settings: &DirectLinkSettings,
-    configured: Vec<NatProbeServer>,
-) -> Vec<NatProbeServer> {
-    let mut out: Vec<NatProbeServer> = settings
-        .facilitator
-        .iter()
-        .map(|addr| NatProbeServer {
-            addr: addr.clone(),
-            protocol: settings.protocol,
-        })
-        .collect();
-    for server in configured {
-        if !out.iter().any(|s| s.addr == server.addr) {
-            out.push(server);
-        }
-    }
-    out
-}
-
-/// +ciris (leviculum#100): a NAT probe outside any session: a fresh
-/// socket, the facilitator (resolved now) and `servers` probed from it.
-pub(crate) async fn probe_nat_now(
-    settings: &DirectLinkSettings,
-    servers: &[NatProbeServer],
-) -> Result<leviculum_core::direct_link::NatReport, Error> {
-    let addr = settings.facilitator.clone().ok_or(Error::DirectLink(
-        leviculum_core::node::DirectLinkError::NoFacilitator,
-    ))?;
-    let facilitator = resolve_facilitator(&addr).await?;
-    let socket = UdpSocket::from_std(bind_session_socket(facilitator)?)?;
-    let extra = nat_servers(settings, servers.to_vec());
-    Ok(probe_nat_type(&socket, (facilitator, settings.protocol), &extra).await)
-}
-
 // Facilitator
 
+/// +ciris (leviculum#100): a facilitator's answers per source address at
+/// once, and the wait that earns one more. A prober sends three per probe.
+const FACILITATOR_BURST: u32 = 10;
+const FACILITATOR_REFILL: Duration = Duration::from_millis(500);
+
 /// Answer RNSP and STUN Binding requests on `port`, telling each prober the
-/// address its datagram arrived from. Stateless; runs until aborted.
+/// address its datagram arrived from. Runs until aborted. +ciris
+/// (leviculum#100): at most [`FACILITATOR_BURST`] answers at once per
+/// source address and one per [`FACILITATOR_REFILL`] after, so it cannot be
+/// made to flood a forged source; and a padded request (as a peer probe
+/// sends) gets an answer no larger than itself. The bare 21-byte request
+/// every prober has always sent is answered as before, with its 28 or 40
+/// bytes.
 pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
     tracing::info!(
@@ -967,6 +712,7 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     );
     let task = tokio::spawn(async move {
         let mut buf = [0u8; 576];
+        let mut limit = nat::PerSource::new(FACILITATOR_BURST, FACILITATOR_REFILL);
         loop {
             let (len, src) = match socket.recv_from(&mut buf).await {
                 Ok(r) => r,
@@ -976,7 +722,14 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
                 }
             };
             let request = &buf[..len];
-            let answer = if let Some(nonce) = wire::parse_rnsp_request(request) {
+            if !limit.take(src.ip(), std::time::Instant::now()) {
+                continue;
+            }
+            let answer = if let Some(answer) =
+                leviculum_core::direct_link::nat::answer_peer_probe(request, &src)
+            {
+                answer
+            } else if let Some(nonce) = wire::parse_rnsp_request(request) {
                 wire::rnsp_response(&nonce, &src)
             } else if let Some(txn) = wire::parse_stun_binding_request(request) {
                 wire::stun_binding_response(&txn, &src)
@@ -1012,6 +765,10 @@ pub(crate) enum Outcome {
         /// +ciris (leviculum#100): the NAT type the probe found, when it
         /// ran (not when the socket failed to bind).
         nat: Option<Box<leviculum_core::direct_link::NatReport>>,
+    },
+    /// +ciris (leviculum#100): a NAT re-probe outside any session.
+    NatProbed {
+        report: Box<leviculum_core::direct_link::NatReport>,
     },
     Punched {
         session: SessionId,
@@ -1053,9 +810,19 @@ pub(crate) struct DirectLinkRuntime {
     /// the NAT type: this node's own facilitator first, then
     /// `nat_probe_addrs`.
     nat_servers: Vec<NatProbeServer>,
-    /// +ciris (leviculum#100): the link each session upgrades, for the log
-    /// lines.
-    links: HashMap<SessionId, LinkId>,
+    /// +ciris (leviculum#100): the link and peer each session upgrades, for
+    /// the log lines.
+    labels: HashMap<SessionId, Label>,
+    /// +ciris (leviculum#100): each live direct interface's peer address,
+    /// probed for the NAT type; mirrored in `extras.peers` for
+    /// `ReticulumNode::probe_nat`.
+    peers: HashMap<usize, SocketAddr>,
+    /// +ciris (leviculum#100): the host's extras, and this node's settings,
+    /// for re-probes.
+    extras: DirectLinkExtras,
+    settings: DirectLinkSettings,
+    /// +ciris (leviculum#100): when the NAT is probed again.
+    reprobe: nat::Reprobe,
 }
 
 impl DirectLinkRuntime {
@@ -1072,7 +839,11 @@ impl DirectLinkRuntime {
             fast_timing: DirectUdpTiming::fast(),
             fast_liveness: HashMap::new(),
             nat_servers: Vec::new(),
-            links: HashMap::new(),
+            labels: HashMap::new(),
+            peers: HashMap::new(),
+            extras: DirectLinkExtras::default(),
+            settings: DirectLinkSettings::default(),
+            reprobe: nat::Reprobe::new(std::time::Instant::now()),
         }
     }
 
@@ -1082,27 +853,73 @@ impl DirectLinkRuntime {
         if let Some((keepalive, inactivity)) = extras.keepalive {
             self.set_fast_timing(keepalive, inactivity);
         }
-        self.nat_servers = nat_servers(settings, extras.nat_probe_servers);
+        self.timing.answer_probes = extras.answer_probes;
+        self.fast_timing.answer_probes = extras.answer_probes;
+        self.nat_servers = nat::nat_servers(settings, extras.nat_probe_servers.clone());
+        self.settings = settings.clone();
+        self.extras = extras;
+    }
+
+    /// +ciris (leviculum#100): the live direct-link peers' addresses.
+    fn peer_addrs(&self) -> Vec<SocketAddr> {
+        let mut peers: Vec<SocketAddr> = self.peers.values().copied().collect();
+        peers.sort();
+        peers
+    }
+
+    /// +ciris (leviculum#100): the peer set changed; share it, and see
+    /// whether a new address makes a re-probe due.
+    fn peers_changed(&mut self, added: Option<SocketAddr>) {
+        let peers = self.peer_addrs();
+        *self.extras.peers.lock_recover() = peers;
+        if let Some(peer) = added {
+            self.reprobe
+                .peer_seen(canonical(peer).ip(), std::time::Instant::now());
+        }
+    }
+
+    /// +ciris (leviculum#100): start a NAT re-probe if one is due: this
+    /// node's facilitator, the host's servers and the live peers, from a
+    /// fresh socket, recorded as a probe outside any session.
+    fn start_due_reprobe(&mut self, now: std::time::Instant) {
+        if !self.reprobe.take_due(now) {
+            return;
+        }
+        let peers = self.peer_addrs();
+        self.reprobe
+            .probed(peers.iter().map(|p| canonical(*p).ip()));
+        let (settings, extras) = (self.settings.clone(), self.extras.clone());
+        let outcomes = self.outcomes.clone();
+        tokio::spawn(async move {
+            match nat::probe_nat_now(&settings, &extras).await {
+                Ok(report) => {
+                    let _ = outcomes
+                        .send(Outcome::NatProbed {
+                            report: Box::new(report),
+                        })
+                        .await;
+                }
+                Err(e) => tracing::debug!("direct link: NAT re-probe not run: {e}"),
+            }
+        });
     }
 
     /// +ciris (leviculum#100): [`Self::run`], for a job of the session that
     /// upgrades `link` (named in the log lines).
-    pub(crate) fn run_on(&mut self, job: DirectLinkJob, link: Option<LinkId>) {
+    pub(crate) fn run_on(&mut self, job: DirectLinkJob, label: Option<Label>) {
         if let (
             DirectLinkJob::Probe { session, .. } | DirectLinkJob::Punch { session, .. },
-            Some(link),
-        ) = (&job, link)
+            Some(label),
+        ) = (&job, label)
         {
-            self.links.insert(*session, link);
+            self.labels.insert(*session, label);
         }
         self.run(job);
     }
 
-    /// The link a session upgrades, in short hex, or `-`.
-    fn label(&self, session: &SessionId) -> String {
-        self.links
-            .get(session)
-            .map_or_else(|| "-".to_string(), |l| hex_short(l.as_bytes()))
+    /// The link and peer a session upgrades, in hex, or `-`.
+    fn label(&self, session: &SessionId) -> Label {
+        self.labels.get(session).cloned().unwrap_or_default()
     }
 
     /// +ciris (leviculum#99): the keepalive interval and silence bound of a
@@ -1142,6 +959,9 @@ impl DirectLinkRuntime {
                     tracing::info!("direct link: closing direct interface {interface_index}");
                     task.abort();
                 }
+                if self.peers.remove(&interface_index).is_some() {
+                    self.peers_changed(None);
+                }
             }
         }
     }
@@ -1163,23 +983,34 @@ impl DirectLinkRuntime {
         };
         self.sockets.insert(session, Arc::clone(&socket));
         let nat_servers = self.nat_servers.clone();
-        let link = self.label(&session);
+        // +ciris (leviculum#100): the live direct-link peers too; they count
+        // as probed now, so no re-probe repeats them.
+        let peers = self.peer_addrs();
+        self.reprobe
+            .probed(peers.iter().map(|p| canonical(*p).ip()));
+        let label = self.label(&session);
         let task = tokio::spawn(async move {
-            // +ciris (leviculum#100): the facilitator and the NAT probe
-            // servers at once, off this one socket.
-            let report = probe_nat_type(&socket, (server, protocol), &nat_servers).await;
+            // +ciris (leviculum#100): the facilitator, the NAT probe servers
+            // and the peers at once, off this one socket.
+            let report =
+                nat::probe_nat_type(&socket, Some((server, protocol)), &nat_servers, &peers).await;
             let public = report.probes.first().and_then(|p| p.mapped);
+            let tag = hex_short(&session);
+            tracing::info!(
+                link = %label.link,
+                session = %tag,
+                peer = %label.peer,
+                answered = public.is_some(),
+                "direct link: facilitator probed"
+            );
             match public {
-                Some(public) => tracing::info!(
-                    link = %link,
-                    session = %hex_short(&session),
+                Some(public) => tracing::debug!(
+                    session = %tag,
                     "direct link: reflexive address {public} (via {server})"
                 ),
-                None => tracing::info!(
-                    link = %link,
-                    session = %hex_short(&session),
-                    "direct link: probe failed: facilitator {server} did not answer"
-                ),
+                None => {
+                    tracing::debug!(session = %tag, "direct link: facilitator {server} did not answer")
+                }
             }
             let local = report.host_candidates.clone();
             let _ = outcomes
@@ -1215,7 +1046,7 @@ impl DirectLinkRuntime {
             return;
         };
         self.tokens.insert(session, token);
-        let link = self.label(&session);
+        let label = self.label(&session);
         let task = tokio::spawn(async move {
             // The responder waits out the READY's trip to the initiator, so
             // both ends start together.
@@ -1224,42 +1055,35 @@ impl DirectLinkRuntime {
             }
             let targets = alloc_targets(peer, &alternates);
             let tag = hex_short(&session);
-            if targets.len() > 1 {
-                tracing::info!(
-                    link = %link,
-                    session = %tag,
-                    peer = %peer,
-                    "direct link: punching toward {peer} and host candidate(s) {alternates:?} \
-                     (a shared NAT, or IPv6)"
-                );
-            } else {
-                tracing::info!(link = %link, session = %tag, peer = %peer, "direct link: punching toward {peer}");
-            }
-            let seen = punch_logged(&socket, &targets, &session, &token, &link).await;
-            match &seen {
-                Some(p) => tracing::info!(
-                    link = %link,
-                    session = %tag,
-                    peer = %p.peer,
-                    "direct link: punch through to {}",
-                    p.peer
-                ),
-                None => tracing::info!(
-                    link = %link,
-                    session = %tag,
-                    peer = %peer,
-                    "direct link: punch toward {peer} failed"
-                ),
+            // +ciris (leviculum#100): info lines name the link and the peer's
+            // hash; the addresses are at debug.
+            tracing::info!(
+                link = %label.link,
+                session = %tag,
+                peer = %label.peer,
+                targets = targets.len(),
+                "direct link: punching"
+            );
+            tracing::debug!(session = %tag, "direct link: punching toward {peer}, also {alternates:?}");
+            let seen = punch_logged(&socket, &targets, &session, &token, &label).await;
+            tracing::info!(
+                link = %label.link,
+                session = %tag,
+                peer = %label.peer,
+                through = seen.is_some(),
+                "direct link: punch ended"
+            );
+            if let Some(p) = &seen {
+                tracing::debug!(session = %tag, "direct link: punch through to {}", p.peer);
             }
             let (peer, early, mtu) = match seen {
                 Some(mut p) => {
                     let mtu = probe_path_mtu(&socket, p.peer, &session, &token, &mut p.early).await;
                     tracing::info!(
-                        link = %link,
+                        link = %label.link,
                         session = %tag,
-                        peer = %p.peer,
-                        "direct link: path to {} carries {mtu:?}",
-                        p.peer
+                        peer = %label.peer,
+                        "direct link: the path carries {mtu:?}"
                     );
                     (Some(p.peer), p.early, mtu)
                 }
@@ -1290,7 +1114,7 @@ impl DirectLinkRuntime {
         self.sockets.remove(session);
         self.tokens.remove(session);
         self.fast_liveness.remove(session);
-        self.links.remove(session);
+        self.labels.remove(session);
     }
 
     /// The punch for `session` succeeded toward `peer`: build its interface
@@ -1306,7 +1130,7 @@ impl DirectLinkRuntime {
         id: InterfaceId,
     ) -> Option<InterfaceHandle> {
         self.tasks.remove(&session);
-        self.links.remove(&session);
+        self.labels.remove(&session);
         let socket = self.sockets.remove(&session)?;
         let token = self.tokens.remove(&session)?;
         let timing = if self.fast_liveness.remove(&session).unwrap_or(false) {
@@ -1318,6 +1142,9 @@ impl DirectLinkRuntime {
             spawn_direct_udp_interface(id, socket, peer, session, token, early, timing, hw_mtu);
         self.registering.insert(id, session);
         self.interfaces.insert(id.0, task);
+        // +ciris (leviculum#100): a new peer for the NAT probe.
+        self.peers.insert(id.0, canonical(peer));
+        self.peers_changed(Some(peer));
         Some(handle)
     }
 
@@ -1334,7 +1161,11 @@ impl DirectLinkRuntime {
 
     /// Direct interfaces whose announces are due again: still live, and
     /// past their repeat time.
+    ///
+    /// +ciris (leviculum#100): the event loop's periodic pass also starts a
+    /// NAT re-probe that has come due here.
     pub(crate) fn take_due_reannounces(&mut self, now: std::time::Instant) -> Vec<usize> {
+        self.start_due_reprobe(now);
         let mut due = Vec::new();
         self.reannounce.retain(|(at, index)| {
             if *at <= now {
@@ -1353,6 +1184,9 @@ impl DirectLinkRuntime {
         self.interfaces.remove(&id.0);
         self.registering.remove(&id);
         self.reannounce.retain(|(_, index)| *index != id.0);
+        if self.peers.remove(&id.0).is_some() {
+            self.peers_changed(None);
+        }
     }
 }
 
@@ -1496,162 +1330,192 @@ mod tests {
         task.abort();
     }
 
-    /// +ciris (leviculum#100): a fake RNSP server that reports each
-    /// prober's address with its port moved by `shift`: a NAT that gives
-    /// each destination its own port, seen from the server.
-    async fn shifting_server(shift: u16) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        let socket = loopback().await;
-        let addr = socket.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let mut buf = [0u8; 576];
-            while let Ok((len, src)) = socket.recv_from(&mut buf).await {
-                if let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) {
-                    let seen = SocketAddr::new(src.ip(), src.port().wrapping_add(shift));
-                    let _ = socket
-                        .send_to(&wire::rnsp_response(&nonce, &seen), src)
-                        .await;
-                }
+    /// +ciris (leviculum#100): a direct interface answers its peer's NAT
+    /// probe, from the peer's IP on any port, with no more bytes than the
+    /// request; it answers nobody else, never a bare request, at most its
+    /// burst at once, and nothing when probe answering is off. Needs a
+    /// second loopback address for the stranger (Linux has 127/8).
+    /// Send a (padded or bare) RNSP request from `socket` to `to`; what the
+    /// answer says, if one comes.
+    async fn ask_nat(
+        socket: &UdpSocket,
+        to: SocketAddr,
+        padded: bool,
+        n: u8,
+    ) -> Option<SocketAddr> {
+        use leviculum_core::direct_link::nat::{rnsp_peer_request, RNSP_PEER_REQUEST_LEN};
+        let request = if padded {
+            rnsp_peer_request(&[n; 16]).to_vec()
+        } else {
+            wire::rnsp_request(&[n; 16]).to_vec()
+        };
+        socket.send_to(&request, to).await.unwrap();
+        let mut buf = [0u8; 128];
+        match tokio::time::timeout(Duration::from_millis(200), socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                assert!(len <= RNSP_PEER_REQUEST_LEN, "never amplifies");
+                wire::parse_rnsp_response(&buf[..len], &[n; 16])
             }
-        });
-        (addr, task)
+            _ => None,
+        }
     }
 
-    /// +ciris (leviculum#100): two probe servers on different ports, from
-    /// one socket: the same mapping from both reads endpoint-independent,
-    /// a different port from the second reads endpoint-dependent, and a
-    /// second that never answers leaves it unknown, without waiting out
-    /// every attempt once the facilitator has answered.
     #[tokio::test]
-    async fn two_probe_servers_classify_the_mapping() {
-        use leviculum_core::direct_link::{NatMapping, NatUnknown};
-        let rnsp = ProbeProtocol::Rnsp;
-        let (same_a, ta) = shifting_server(0).await;
-        let (same_b, tb) = shifting_server(0).await;
-        let (moved, tc) = shifting_server(7).await;
-        let silent = loopback().await;
-        let silent = silent.local_addr().unwrap();
-        let server = |addr: SocketAddr| NatProbeServer {
-            addr: addr.to_string(),
-            protocol: rnsp,
+    async fn a_direct_interface_answers_only_its_peers_padded_probes() {
+        use crate::interfaces::direct_udp::{DirectUdpTiming, PROBE_ANSWER_BURST};
+        let Ok(stranger) = UdpSocket::bind("127.0.0.2:0").await else {
+            return;
         };
+        for answer_probes in [true, false] {
+            let iface = Arc::new(loopback().await);
+            let iface_addr = iface.local_addr().unwrap();
+            let punched = loopback().await; // the peer's punched socket
+            let fresh = loopback().await; // the peer probing from a new one
+            let timing = DirectUdpTiming {
+                answer_probes,
+                ..DirectUdpTiming::default()
+            };
+            let (_handle, task) = spawn_direct_udp_interface(
+                InterfaceId(9),
+                iface,
+                punched.local_addr().unwrap(),
+                [1; 16],
+                [2; 32],
+                Vec::new(),
+                timing,
+                None,
+            );
+            let seen = ask_nat(&fresh, iface_addr, true, 1).await;
+            if answer_probes {
+                assert_eq!(
+                    seen,
+                    Some(fresh.local_addr().unwrap()),
+                    "the peer's IP, a new port"
+                );
+            } else {
+                assert_eq!(seen, None, "answering is off");
+            }
+            assert_eq!(
+                ask_nat(&fresh, iface_addr, false, 2).await,
+                None,
+                "a bare request gets nothing"
+            );
+            assert_eq!(
+                ask_nat(&stranger, iface_addr, true, 3).await,
+                None,
+                "another address gets nothing"
+            );
+            if answer_probes {
+                let mut answered = 1;
+                for n in 10..30 {
+                    answered += u32::from(ask_nat(&fresh, iface_addr, true, n).await.is_some());
+                }
+                // About 3 s of asking: the burst, and a refill or two.
+                assert!(
+                    (PROBE_ANSWER_BURST..=PROBE_ANSWER_BURST + 2).contains(&answered),
+                    "the burst, then the rate limit: {answered}"
+                );
+            }
+            task.abort();
+        }
+    }
 
-        let socket = loopback().await;
-        let local = socket.local_addr().unwrap();
-        let cone = probe_nat_type(&socket, (same_a, rnsp), &[server(same_b)]).await;
-        assert_eq!(cone.mapping, NatMapping::EndpointIndependent);
+    /// +ciris (leviculum#100): with no facilitator and no server, two live
+    /// direct-link peers at distinct addresses classify the NAT, each
+    /// answering from its direct socket; one peer alone leaves it unknown.
+    #[tokio::test]
+    async fn two_direct_link_peers_classify_without_a_server() {
+        use crate::interfaces::direct_udp::DirectUdpTiming;
+        use leviculum_core::direct_link::{NatMapping, NatUnknown};
+        let prober_ip = "127.0.0.1";
+        let mut peers = Vec::new();
+        let mut tasks = Vec::new();
+        for ip in ["127.0.0.2", "127.0.0.3"] {
+            let Ok(socket) = UdpSocket::bind(format!("{ip}:0")).await else {
+                return; // no extra loopback addresses here
+            };
+            let socket = Arc::new(socket);
+            peers.push(socket.local_addr().unwrap());
+            // Each peer's punched path ends at some socket of the prober's IP.
+            let punched: SocketAddr = format!("{prober_ip}:9").parse().unwrap();
+            let (_h, task) = spawn_direct_udp_interface(
+                InterfaceId(peers.len()),
+                socket,
+                punched,
+                [1; 16],
+                [2; 32],
+                Vec::new(),
+                DirectUdpTiming::default(),
+                None,
+            );
+            tasks.push((_h, task));
+        }
+        let socket = UdpSocket::bind(format!("{prober_ip}:0")).await.unwrap();
+        let both = nat::probe_nat_type(&socket, None, &[], &peers).await;
         assert_eq!(
-            cone.probes.iter().map(|p| p.mapped).collect::<Vec<_>>(),
-            vec![Some(local), Some(local)]
+            both.mapping,
+            NatMapping::EndpointIndependent,
+            "{:?}",
+            both.probes
         );
-        assert_eq!(cone.port_preserved, Some(true));
-        assert!(cone.servers_share_ip);
-
-        let sym = probe_nat_type(&socket, (same_a, rnsp), &[server(moved)]).await;
-        assert_eq!(sym.mapping, NatMapping::EndpointDependent);
-        assert_eq!(sym.port_preserved, Some(false));
-        assert_eq!(
-            sym.probes[0].mapped,
-            Some(local),
-            "the facilitator's answer"
-        );
-
-        let started = tokio::time::Instant::now();
-        let half = probe_nat_type(&socket, (same_a, rnsp), &[server(silent)]).await;
-        assert_eq!(half.mapping, NatMapping::Unknown(NatUnknown::OneAnswered));
-        assert!(started.elapsed() < PROBE_WAIT, "{:?}", started.elapsed());
-
-        let alone = probe_nat_type(&socket, (same_a, rnsp), &[]).await;
-        assert_eq!(alone.mapping, NatMapping::Unknown(NatUnknown::OneServer));
-        // The facilitator itself is not probed twice.
-        let dup = probe_nat_type(&socket, (same_a, rnsp), &[server(same_a)]).await;
-        assert_eq!(dup.probes.len(), 1);
-        for t in [ta, tb, tc] {
+        let one = nat::probe_nat_type(&socket, None, &[], &peers[..1]).await;
+        assert_eq!(one.mapping, NatMapping::Unknown(NatUnknown::OneServer));
+        for (_, t) in tasks {
             t.abort();
         }
     }
 
-    /// +ciris (leviculum#100): a facilitator that answers only after the
-    /// second server still gives the session its reflexive address.
+    /// +ciris (leviculum#100): the facilitator rate-limits each source, and
+    /// answers a padded request with no more bytes than it.
     #[tokio::test]
-    async fn the_facilitator_answer_is_waited_for_whatever_the_others_do() {
-        let (other, task) = shifting_server(0).await;
-        let slow = loopback().await;
-        let slow_addr = slow.local_addr().unwrap();
-        let slow_task = tokio::spawn(async move {
-            let mut buf = [0u8; 576];
-            if let Ok((len, src)) = slow.recv_from(&mut buf).await {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                if let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) {
-                    let _ = slow.send_to(&wire::rnsp_response(&nonce, &src), src).await;
-                }
-            }
-        });
+    async fn the_facilitator_limits_each_source_and_never_amplifies_a_padded_probe() {
+        use leviculum_core::direct_link::nat::rnsp_peer_request;
+        let port = loopback().await.local_addr().unwrap().port();
+        let task = spawn_facilitator(port).await.unwrap();
+        let server: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let socket = loopback().await;
-        let probes = probe_many(
-            &socket,
-            (slow_addr, ProbeProtocol::Rnsp),
-            &[(other, ProbeProtocol::Rnsp)],
-        )
-        .await;
-        assert!(probes
-            .iter()
-            .all(|p| p.mapped == Some(socket.local_addr().unwrap())));
-        task.abort();
-        slow_task.abort();
-    }
-
-    #[test]
-    fn nat_probe_addrs_parse_and_a_missing_port_is_refused() {
-        let parsed = parse_nat_probe_servers(
-            " rns2.example.org:4343, stun:stun.example.net:3478 ,rnsp:[2001:db8::1]:4343,",
-        )
-        .unwrap();
-        assert_eq!(
-            parsed,
-            vec![
-                NatProbeServer {
-                    addr: "rns2.example.org:4343".into(),
-                    protocol: ProbeProtocol::Rnsp
-                },
-                NatProbeServer {
-                    addr: "stun.example.net:3478".into(),
-                    protocol: ProbeProtocol::Stun
-                },
-                NatProbeServer {
-                    addr: "[2001:db8::1]:4343".into(),
-                    protocol: ProbeProtocol::Rnsp
-                },
-            ]
-        );
-        assert!(parse_nat_probe_servers("").unwrap().is_empty());
-        for bad in ["rns2.example.org", "stun:", ":4343", "host:port"] {
-            assert!(parse_nat_probe_servers(bad).is_err(), "{bad}");
+        let mut buf = [0u8; 128];
+        let request = rnsp_peer_request(&[4; 16]);
+        socket.send_to(&request, server).await.unwrap();
+        let (len, _) = socket.recv_from(&mut buf).await.unwrap();
+        assert!(len <= request.len());
+        let mut answered = 1;
+        for n in 0..30u8 {
+            socket
+                .send_to(&wire::rnsp_request(&[n; 16]), server)
+                .await
+                .unwrap();
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_millis(50), socket.recv_from(&mut buf)).await
+            {
+                answered += 1;
+            }
         }
-        // The INI key reaches the settings' parser whole, commas and all.
-        let config = reticulum(&[("nat_probe_addrs", "a.example:1, stun:b.example:2")]);
-        assert_eq!(
-            parse_nat_probe_servers(config.direct_link.nat_probe_addrs.as_deref().unwrap())
-                .unwrap()
-                .len(),
-            2
-        );
+        assert!(answered <= FACILITATOR_BURST + 2, "{answered}");
+        task.abort();
     }
 
-    /// +ciris (leviculum#100): the node's own facilitator is probed beside
-    /// a session's, then the configured servers, with no repeat.
     #[test]
-    fn a_session_probes_the_own_facilitator_then_the_configured_servers() {
-        let settings = DirectLinkSettings {
-            facilitator: Some("own.example:4343".into()),
+    fn answer_probes_is_read_and_a_bad_value_refused() {
+        let off = reticulum(&[("answer_probes", "no")]);
+        assert_eq!(off.direct_link.answer_probes, Some(false));
+        let extras = DirectLinkExtrasConfig::default().resolve(&off).unwrap();
+        assert!(!extras.answer_probes);
+        let default = DirectLinkExtrasConfig::default()
+            .resolve(&reticulum(&[]))
+            .unwrap();
+        assert!(default.answer_probes, "on by default");
+        let host = DirectLinkExtrasConfig {
+            answer_probes: Some(true),
             ..Default::default()
         };
-        let configured = parse_nat_probe_servers("own.example:4343, two.example:4343").unwrap();
-        let servers: Vec<String> = nat_servers(&settings, configured)
-            .into_iter()
-            .map(|s| s.addr)
-            .collect();
-        assert_eq!(servers, vec!["own.example:4343", "two.example:4343"]);
-        assert!(nat_servers(&DirectLinkSettings::default(), Vec::new()).is_empty());
+        assert!(
+            host.resolve(&off).unwrap().answer_probes,
+            "the builder wins"
+        );
+        assert!(DirectLinkExtrasConfig::default()
+            .resolve(&reticulum(&[("answer_probes", "perhaps")]))
+            .is_err());
     }
 
     #[tokio::test]
