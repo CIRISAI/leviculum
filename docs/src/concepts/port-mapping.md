@@ -7,8 +7,10 @@ in (leviculum#101). Constitution 5.4.6 makes a home node a relay parent when
 it is directly reachable and offers relay, so port mapping decides how many
 homes can be parents.
 
-The feature is in `leviculum-std`, behind the `port-mapping` cargo feature,
-which is on by default. `leviculum-core` gains no dependency; it only carries
+Port mapping is **on by default**, with a switch to turn it off (the ruling on
+#101). It runs in the background: `start` never waits for a
+gateway. The feature is in `leviculum-std`, behind the `port-mapping` cargo
+feature, which is on by default. `leviculum-core` gains no dependency; it only carries
 the event.
 
 ## What is mapped
@@ -48,12 +50,14 @@ reported, and that is the port a host has to advertise.
 The node asks for a two-hour lease and renews at half of what the router
 granted. If a renewal fails, it retries while the lease lasts; when the lease
 runs out the mapping is reported lost, and the node starts over with backoff
-(one minute, doubling, at most 30 minutes). Some IGDv1 routers grant only
+(one minute, doubling, at most an hour). Some IGDv1 routers grant only
 permanent mappings; the node takes one (it logs a warning) and re-adds it
 every 20 minutes, so a router that rebooted and forgot it gets it back.
 
 On a clean stop (`stop` or `stop_shared`) the node deletes every mapping it
-holds and waits up to 12 seconds for the router to confirm. After an unclean
+holds and waits up to 12 seconds for the router to confirm. A stop sends no
+new request: it waits for at most the one already in flight (a few seconds
+on a silent network), so a mapping is never made behind its back. After an unclean
 exit a leased mapping lapses with its lease. A permanent UPnP mapping does
 not lapse: delete it on the router, or start the node again and stop it
 cleanly.
@@ -69,7 +73,9 @@ carrier-grade NAT. A home router there can map a port, but only on its own
 WAN side, which the internet cannot reach. When a router reports an external
 address in the shared range (100.64.0.0/10), a private range (RFC 1918), or
 link-local, the node deletes the mapping again and reports
-`MappingState::CgnatDetected`. It looks again every 30 minutes.
+`MappingState::CgnatDetected`, once, at info. It looks again only every six
+hours (at debug), in case the home moved or the ISP handed out a public
+address.
 
 That check only catches a CGNAT the router knows about. A router can report
 a public-looking address and still sit behind filtering, or behind a NAT that
@@ -88,14 +94,26 @@ can still try them.
 
 A listener on the default `0.0.0.0` is IPv4 only and gets no IPv6 entry.
 
-## Security
+## A network with no gateway
+
+On by default means most nodes run it where it cannot work: a phone on
+cellular, a server with no NAT, a LAN whose router speaks none of the three.
+There it stays cheap and quiet. Each round sends at most one request per
+method for all the ports together (a method that does not answer is skipped
+for the rest of the round): a few PCP/NAT-PMP datagrams to the gateway and
+one SSDP search (three M-SEARCH packets). Rounds back off from one minute,
+doubling, to an hour, about 25 a day. "No gateway answered" is logged once
+at info; the retries log at debug.
+
+## Security and privacy
 
 Opening a port on someone's router changes what the internet can reach. So:
 
-- port mapping is off unless the config or the builder turns it on;
-- the node logs at info level each port it is about to ask for, each
-  mapping the router grants (with its external address and lease), and each
-  mapping it removes;
+- `port_mapping = no` in the config, or `enable_port_mapping(false)` on the
+  builder, turns it off;
+- the node logs at info level each port it is about to ask for (once), each
+  mapping the router grants (protocol, internal port, method and lease), and
+  each mapping it removes or loses;
 - it maps only the node's own listeners and the host's explicit extras,
   never a range;
 - a shared-instance client maps nothing; the shared instance owns the
@@ -103,35 +121,50 @@ Opening a port on someone's router changes what the internet can reach. So:
 
 A mapped listener is exposed to the whole internet. Whatever admission
 control the interface has (the TCP server's per-source limits, IFAC) is what
-stands between it and every scanner. Turn port mapping on only on a node
-meant to accept strangers' connections.
+stands between it and every scanner. Turn port mapping off on a node that is
+not meant to accept strangers' connections.
 
-Port mapping is off by default. The Constitution has every owned node offer
-relay by default (5.4.3, 5.4.6), but nothing in it or in CEWP says a node
-opens ports on its router by default. That stays a choice for whoever runs
-the node until a decision says otherwise.
+The external address the router reports is the home's public IP, which says
+where the user is. It is never logged at info or warn: the external
+`addr:port` of a mapping, a router-chosen port and a `CgnatDetected`
+external address are logged at debug only. `port_mappings()`,
+`reachability()` and `NodeEvent::PortMappingChanged` do carry it, because a
+host needs it to advertise the node; the host decides what it exports and
+to whom.
+
+The default is on by the ruling on #101, in line with the
+Constitution's relay offered by default on every owned node (5.4.3, 5.4.6):
+a home can be a parent only if it is reachable.
 
 ## Config
 
 ```ini
 [reticulum]
-  port_mapping = yes
+  # On by default; this turns it off:
+  port_mapping = no
   # Optional: the PCP/NAT-PMP gateway, instead of the default route's.
   port_mapping_gateway = 192.168.1.1
 ```
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `port_mapping` | yes/no | no | Ask the router to open this node's listening ports. Any other word is a config error. In TOML, a boolean or a string. |
+| `port_mapping` | yes/no | yes | Ask the router to open this node's listening ports. Any other word is a config error. In TOML, a boolean or a string. |
 | `port_mapping_gateway` | IP address | default route | The gateway asked over PCP and NAT-PMP. UPnP finds its gateway by SSDP either way. |
 
-A build without the `port-mapping` feature refuses `port_mapping = yes`.
+A build without the `port-mapping` feature maps nothing by default, and
+refuses an explicit `port_mapping = yes`.
+
+The environment variable `LEVICULUM_PORT_MAPPING_DEFAULT=off` moves the
+default to off; an explicit key or builder setting still wins. The
+workspace's `.cargo/config.toml` sets it, so `cargo test` and `cargo run` in
+this repository never ask a real router (see Testing).
 
 From code, `ReticulumNodeBuilder::port_mapping(PortMappingConfig)` overrides
 the config. `PortMappingConfig` also sets the methods and their order, the
 lease, extra ports, whether listeners are mapped, and whether IPv6 pinholes
-are asked for. `ReticulumNodeBuilder::enable_port_mapping(bool)` is the
-switch alone.
+are asked for. `ReticulumNodeBuilder::enable_port_mapping(false)` is the
+off switch; `enable_port_mapping(true)` turns it back on over a config that
+says no.
 
 ## What a host reads
 
@@ -167,6 +200,14 @@ UDP 5351, and an SSDP responder with an IGDv2 description and SOAP control.
 One test starts a node with a TCP listener against the loopback gateway and
 checks the event, the report and the deletion on stop. None of them talks to
 a real router.
+
+Every other test that builds a node would, with the default on, ask the
+router of the machine or CI runner it runs on. `.cargo/config.toml` sets
+`LEVICULUM_PORT_MAPPING_DEFAULT=off` for everything cargo runs in this
+workspace, child processes included (a test that spawns `lnsd` passes it
+on). A test that wants mapping turns it on explicitly and points it at a
+loopback fake, with `methods` limited to PCP and NAT-PMP so it can never
+fall through to SSDP.
 
 `real_router`, an ignored lib test, does read-only discovery against the
 LAN's router (`cargo test -p leviculum-std --lib real_router -- --ignored

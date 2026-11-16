@@ -26,10 +26,11 @@ const MIN_RENEW: Duration = Duration::from_secs(30);
 /// First retry after a failure; doubles up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(60);
 /// The longest wait between attempts at a port that keeps failing.
-const MAX_BACKOFF: Duration = Duration::from_secs(1800);
+const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 /// How often a CGNAT verdict is looked at again (the home may move, or the
-/// ISP may hand out a public address).
-const CGNAT_RECHECK: Duration = Duration::from_secs(1800);
+/// ISP may hand out a public address). Long: a mapping that cannot help is
+/// reported once, not asked for over and over.
+const CGNAT_RECHECK: Duration = Duration::from_secs(6 * 3600);
 /// How often a permanent (lease 0) UPnP mapping is re-added, so a router
 /// that rebooted and forgot it gets it back.
 const PERMANENT_RECHECK: Duration = Duration::from_secs(1200);
@@ -120,7 +121,20 @@ struct Entry {
     failures: u32,
 }
 
+/// Info the first time, debug on every retry: a node with port mapping on by
+/// default must stay quiet on a network that never answers.
+macro_rules! first_info {
+    ($first:expr, $($arg:tt)*) => {
+        if $first {
+            tracing::info!($($arg)*)
+        } else {
+            tracing::debug!($($arg)*)
+        }
+    };
+}
+
 pub(crate) struct Engine {
+    stop: Option<watch::Receiver<bool>>,
     discover: Box<dyn Discover>,
     entries: Vec<Entry>,
     lease_secs: u32,
@@ -164,6 +178,7 @@ impl Engine {
             })
             .collect();
         let engine = Engine {
+            stop: None,
             discover,
             entries,
             lease_secs,
@@ -182,6 +197,7 @@ impl Engine {
     /// Run until `shutdown` turns true (or its sender goes), then delete
     /// every held mapping.
     pub(crate) async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+        self.stop = Some(shutdown.clone());
         loop {
             if *shutdown.borrow() {
                 break;
@@ -204,6 +220,12 @@ impl Engine {
         self.release_all().await;
     }
 
+    /// A stop was asked for: no new request goes out, so a stop waits for
+    /// at most the one in flight.
+    fn stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+
     /// Work every entry that is due.
     pub(crate) async fn step(&mut self) {
         let now = Instant::now();
@@ -212,6 +234,9 @@ impl Engine {
         // wait out the same timeout.
         let mut silent: Vec<(MappingMethod, bool)> = Vec::new();
         for i in 0..self.entries.len() {
+            if self.stopping() {
+                break;
+            }
             if self.entries[i].next > now {
                 continue;
             }
@@ -246,12 +271,17 @@ impl Engine {
             external_port: key.internal_port,
         };
         let mut refusals: Vec<String> = Vec::new();
+        let first = self.entries[i].failures == 0;
         for client in clients.iter().filter(|c| c.v6() == key.v6) {
             let tag = (client.method(), client.v6());
             if silent.contains(&tag) {
                 continue;
             }
-            tracing::info!(
+            if self.stopping() {
+                return;
+            }
+            first_info!(
+                first,
                 "port mapping: asking the gateway over {} to open {} port {}{} to this host",
                 client.method().as_str(),
                 key.protocol.as_str(),
@@ -271,7 +301,15 @@ impl Engine {
                     silent.push(tag);
                 }
                 Err(MapError::Refused(why)) => {
-                    tracing::warn!(
+                    if first {
+                        tracing::warn!(
+                            "port mapping: {} refused {} port {}: {why}",
+                            client.method().as_str(),
+                            key.protocol.as_str(),
+                            key.internal_port
+                        );
+                    }
+                    tracing::debug!(
                         "port mapping: {} refused {} port {}: {why}",
                         client.method().as_str(),
                         key.protocol.as_str(),
@@ -306,9 +344,23 @@ impl Engine {
     async fn granted(&mut self, i: usize, client: Arc<dyn MappingClient>, lease: Lease) {
         let key = self.entries[i].key;
         if let Some(reason) = netinfo::non_public_reason(lease.external.ip()) {
-            tracing::warn!(
-                "port mapping: the gateway's external address {} is {reason}; the mapping \
-                 cannot be reached from the internet, so it is deleted again",
+            // The address itself goes at debug only: the host decides what
+            // to export (CIRISEdge, #101).
+            let seen_before = matches!(
+                self.entries[i].status.state,
+                MappingState::CgnatDetected { .. }
+            );
+            first_info!(
+                !seen_before,
+                "port mapping: the gateway's external address is {reason}; another NAT \
+                 sits upstream, so {} port {} cannot be reached from the internet and the \
+                 mapping is deleted again (looked at again in {} h)",
+                key.protocol.as_str(),
+                key.internal_port,
+                CGNAT_RECHECK.as_secs() / 3600
+            );
+            tracing::debug!(
+                "port mapping: the gateway reported external address {}",
                 lease.external.ip()
             );
             if let Err(e) = timed(client.unmap(key, &lease)).await {
@@ -325,16 +377,21 @@ impl Engine {
             return;
         }
         tracing::info!(
-            "port mapping: the gateway now forwards {} {} to this host's port {} via {} \
-             (lease {}); peers on the internet can open connections to it",
+            "port mapping: mapped {} port {} via {} (lease {}); peers on the internet can \
+             open connections to it",
             key.protocol.as_str(),
-            lease.external,
             key.internal_port,
             client.method().as_str(),
             lease_text(lease.lifetime_secs),
         );
+        tracing::debug!(
+            "port mapping: {} port {} is reachable at {}",
+            key.protocol.as_str(),
+            key.internal_port,
+            lease.external
+        );
         if lease.external.port() != key.internal_port {
-            tracing::info!(
+            tracing::debug!(
                 "port mapping: the gateway chose external port {} for internal port {}",
                 lease.external.port(),
                 key.internal_port
@@ -342,10 +399,10 @@ impl Engine {
         }
         if lease.lifetime_secs == 0 {
             tracing::warn!(
-                "port mapping: the gateway grants only permanent UPnP mappings; {} {} stays \
-                 open if this node stops uncleanly",
+                "port mapping: the gateway grants only permanent UPnP mappings; {} port {} \
+                 stays open if this node stops uncleanly",
                 key.protocol.as_str(),
-                lease.external
+                key.internal_port
             );
         }
         self.hold(i, client, lease);
@@ -388,7 +445,7 @@ impl Engine {
         match timed(client.map(&req)).await {
             Ok(new) => {
                 if new.external != lease.external {
-                    tracing::info!(
+                    tracing::debug!(
                         "port mapping: the gateway moved {} port {} from {} to {}",
                         key.protocol.as_str(),
                         key.internal_port,
@@ -461,16 +518,15 @@ impl Engine {
             };
             match timed(client.unmap(e.key, &lease)).await {
                 Ok(()) => tracing::info!(
-                    "port mapping: removed {} {} -> port {} from the gateway",
+                    "port mapping: removed the mapping of {} port {} from the gateway",
                     e.key.protocol.as_str(),
-                    lease.external,
                     e.key.internal_port
                 ),
                 Err(err) => tracing::warn!(
-                    "port mapping: could not remove {} {} from the gateway ({err:?}); it \
-                     lapses {}",
+                    "port mapping: could not remove the mapping of {} port {} from the \
+                     gateway ({err:?}); it lapses {}",
                     e.key.protocol.as_str(),
-                    lease.external,
+                    e.key.internal_port,
                     if lease.lifetime_secs == 0 {
                         "never: delete it on the router by hand".to_string()
                     } else {

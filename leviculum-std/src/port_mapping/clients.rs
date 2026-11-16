@@ -260,7 +260,7 @@ impl UpnpClient {
         let gw = search_gateway(search)
             .await
             .map_err(|e| MapError::Unsupported(format!("UPnP-IGD: {e}")))?;
-        tracing::info!(
+        tracing::debug!(
             "port mapping: UPnP gateway at {} offers {}",
             gw.addr,
             gw.service_type

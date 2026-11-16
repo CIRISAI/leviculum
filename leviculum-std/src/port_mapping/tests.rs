@@ -301,11 +301,15 @@ async fn a_private_or_shared_external_address_is_deleted_and_reported_as_cgnat()
         "the useless mapping is deleted"
     );
     assert!(rig.events().is_empty(), "nothing reachable was gained");
-    // Looked at again after half an hour, not before.
-    tokio::time::sleep(Duration::from_secs(1700)).await;
+    // Reported once, then looked at again only after six hours.
+    tokio::time::sleep(Duration::from_secs(6 * 3600 - 100)).await;
     assert_eq!(pmp.map_count(), 1);
     tokio::time::sleep(Duration::from_secs(200)).await;
     assert_eq!(pmp.map_count(), 2);
+    assert!(matches!(
+        rig.status(0).state,
+        MappingState::CgnatDetected { .. }
+    ));
     rig.finish().await;
 }
 
@@ -403,8 +407,9 @@ fn backoff_doubles_to_its_cap_and_renewal_is_at_half_life() {
     assert_eq!(backoff(1), Duration::from_secs(60));
     assert_eq!(backoff(2), Duration::from_secs(120));
     assert_eq!(backoff(5), Duration::from_secs(960));
-    assert_eq!(backoff(6), Duration::from_secs(1800));
-    assert_eq!(backoff(60), Duration::from_secs(1800));
+    assert_eq!(backoff(6), Duration::from_secs(1920));
+    assert_eq!(backoff(7), Duration::from_secs(3600));
+    assert_eq!(backoff(60), Duration::from_secs(3600));
     assert_eq!(renew(7200), Duration::from_secs(3600));
     assert_eq!(renew(10), Duration::from_secs(30), "never sooner than 30 s");
     assert_eq!(renew(0), Duration::from_secs(1200));
@@ -451,10 +456,13 @@ fn reticulum(ini: &str) -> crate::config::ReticulumConfig {
 
 #[test]
 fn the_config_key_reads_yes_and_no_and_refuses_other_words() {
-    assert!(
-        !PortMappingConfig::from_config(&reticulum(""))
+    // Unset: the default, which the workspace's cargo config turns off
+    // for tests.
+    assert_eq!(
+        PortMappingConfig::from_config(&reticulum(""))
             .unwrap()
-            .enabled
+            .enabled,
+        default_on()
     );
     let on = PortMappingConfig::from_config(&reticulum(
         "  port_mapping = yes\n  port_mapping_gateway = 192.168.1.1",
@@ -492,11 +500,46 @@ fn the_config_key_reads_yes_and_no_and_refuses_other_words() {
 }
 
 #[test]
-fn validation_refuses_what_cannot_work() {
-    assert!(
-        PortMappingConfig::default().validate().is_ok(),
-        "off is always fine"
+fn the_default_is_on_unless_the_environment_moves_it() {
+    let on = cfg!(feature = "port-mapping");
+    assert!(PortMappingConfig::default().enabled);
+    assert_eq!(super::default_on_given(None), on);
+    assert_eq!(super::default_on_given(Some("yes")), on);
+    for off in ["off", "No", " 0 ", "false"] {
+        assert!(!super::default_on_given(Some(off)), "{off}");
+    }
+}
+
+/// Port mapping on by default must stay quiet on a network that never
+/// answers: one request per method per round, rounds backing off to an
+/// hour, and nothing in between.
+#[tokio::test(start_paused = true)]
+async fn a_silent_network_is_asked_rarely() {
+    let pcp = MockClient::new(MappingMethod::Pcp, silent());
+    let upnp = MockClient::new(MappingMethod::UpnpIgd, silent());
+    let rig = Rig::start(
+        vec![tcp(4242), tcp(8765), tcp(9000)],
+        7200,
+        vec![pcp.clone(), upnp.clone()],
     );
+    settle().await;
+    assert_eq!(upnp.map_count(), 1, "one SSDP round for all three ports");
+    assert_eq!(rig.status(2).state, MappingState::NoGateway);
+    // A day: rounds at 1, 3, 7, 15, 31, 63 min, then hourly.
+    tokio::time::sleep(Duration::from_secs(86_400)).await;
+    let rounds = upnp.map_count();
+    assert!((20..=30).contains(&rounds), "{rounds} rounds in a day");
+    assert_eq!(pcp.map_count(), rounds);
+    rig.finish().await;
+}
+
+#[test]
+fn validation_refuses_what_cannot_work() {
+    let off = PortMappingConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert!(off.validate().is_ok(), "off is always fine");
     let mut c = PortMappingConfig::enabled();
     assert_eq!(c.validate().is_ok(), cfg!(feature = "port-mapping"));
     c.lease = Duration::from_secs(5);
