@@ -192,11 +192,13 @@ pub fn classify(probes: &[NatProbe], host_candidates: &[SocketAddr]) -> NatMappi
 pub enum DirectLinkOutcome {
     /// The punch went through and the link moved onto the direct path.
     Established,
-    /// No punch got through in the window; the link stays on the relay.
+    /// No punch got through in the window, on this side or (a REJECT with
+    /// reason PUNCH_FAILED) on the peer's; the link stays on the relay.
     PunchFailed,
     /// The peer (or the facilitator, for the peer) went quiet partway.
     TimedOut,
-    /// The peer refused, with this REJECT reason byte.
+    /// The peer refused, with this REJECT reason byte (any but
+    /// PUNCH_FAILED, which is [`DirectLinkOutcome::PunchFailed`]).
     Refused(u8),
     /// The facilitator never answered this node's probe.
     ProbeFailed,
@@ -217,6 +219,8 @@ impl DirectLinkOutcome {
     pub fn of_failure(failure: super::Failure) -> Self {
         use super::Failure;
         match failure {
+            // The peer's verdict on its own punch, not a refusal.
+            Failure::Rejected(super::wire::REJECT_PUNCH_FAILED) => DirectLinkOutcome::PunchFailed,
             Failure::Rejected(reason) => DirectLinkOutcome::Refused(reason),
             Failure::ProbeFailed => DirectLinkOutcome::ProbeFailed,
             Failure::Timeout => DirectLinkOutcome::TimedOut,
@@ -459,5 +463,22 @@ mod tests {
         assert_eq!(outcomes.punch_failed, 17);
         assert_eq!(outcomes.recent.len(), OUTCOME_RECORDS);
         assert_eq!(outcomes.recent[0].at_ms, 3);
+    }
+
+    /// The NAT lab's first run (leviculum#100) recorded the side whose peer
+    /// failed to punch as `refused`: the peer's REJECT PUNCH_FAILED is a
+    /// failed punch, any other reason a refusal.
+    #[test]
+    fn a_peers_failed_punch_is_a_failed_punch_not_a_refusal() {
+        use super::super::wire::{REJECT_POLICY, REJECT_PUNCH_FAILED};
+        use super::super::Failure;
+        assert_eq!(
+            DirectLinkOutcome::of_failure(Failure::Rejected(REJECT_PUNCH_FAILED)),
+            DirectLinkOutcome::PunchFailed
+        );
+        assert_eq!(
+            DirectLinkOutcome::of_failure(Failure::Rejected(REJECT_POLICY)),
+            DirectLinkOutcome::Refused(REJECT_POLICY)
+        );
     }
 }
