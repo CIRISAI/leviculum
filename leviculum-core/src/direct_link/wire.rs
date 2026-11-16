@@ -334,7 +334,7 @@ impl Fields {
                 b"p" => fields.protocol = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"r" => fields.reason = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"l" => fields.local = read_local(data, &mut pos)?,
-                b"c" => fields.commit = read_bool(data, &mut pos)?,
+                b"c" => fields.commit = msgpack::read_bool(data, &mut pos)?,
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -377,17 +377,6 @@ fn write_extras(buf: &mut Vec<u8>, commit: bool, host_payload: Option<&[u8]>) {
         msgpack::write_fixstr(buf, "h");
         msgpack::write_bin(buf, payload);
     }
-}
-
-fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
-    let byte = *data.get(*pos)?;
-    let value = match byte {
-        0xc3 => true,
-        0xc2 => false,
-        _ => return None,
-    };
-    *pos += 1;
-    Some(value)
 }
 
 /// +ciris: `"l"`, the sender's host candidates, as an array of endpoints.
