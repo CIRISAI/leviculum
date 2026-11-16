@@ -14127,3 +14127,11 @@ mod first_hop_timeout_tests {
 // +ciris: a link's Channel sequence watermarks, in its own file so no cited
 // line moves.
 mod seq_stats;
+
+// +ciris: attach_interface, in its own file so no cited line moves.
+mod attach;
+pub use attach::{
+    DeliverError, ExternalInbound, ExternalInterface, ExternalInterfaceConfig,
+    ExternalInterfaceGuard, ExternalOutbound, OutboundFrame, OutboundRecvError,
+    EXTERNAL_DEFAULT_BUFFER_SIZE,
+};
