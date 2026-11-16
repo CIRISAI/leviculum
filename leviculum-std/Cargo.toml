@@ -12,7 +12,7 @@ description = "Standard library extensions for reticulum - networking, file I/O,
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [features]
-default = ["compression", "ble", "serial", "i2p", "websocket"]
+default = ["compression", "ble", "serial", "i2p", "websocket", "port-mapping"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)
 compression = ["leviculum-core/compression"]
 # The Columba BLE interface (`interfaces::ble`, `BLEInterface`): bluer and
@@ -45,6 +45,12 @@ heap-accounting = ["dep:backtrace"]
 # uses; no native-tls, no system CA files. Off, both sections are a config
 # error naming this feature.
 websocket = ["dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots"]
+# +ciris (#101): router port mapping (`port_mapping`), so a home node behind
+# an ordinary router can be reached directly. PCP and NAT-PMP through
+# crab_nat, UPnP-IGD through igd-next. Compiled in by default, but a node
+# maps nothing unless its config or builder turns it on. Off, turning it on
+# is a config error naming this feature.
+port-mapping = ["dep:crab_nat", "dep:igd-next"]
 # INTERNAL. Enables the `cf_*` test targets, which exist to NOT compile: they
 # are the enforcement of the two prohibitions the core-lock budget places on
 # anything the event loop calls (Codeberg #196). Never enable it in a build you
@@ -142,6 +148,9 @@ backtrace = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "1", optional = true }
+# `port-mapping` only (#101); see it.
+crab_nat = { version = "0.8", optional = true }
+igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"], optional = true }
 
 # md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
 # package name as unused because grepping the sources finds `md5::` but

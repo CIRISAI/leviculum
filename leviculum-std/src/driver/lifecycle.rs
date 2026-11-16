@@ -31,6 +31,8 @@ pub(crate) struct RunState {
     pub(crate) action_dispatch_tx: super::ActionTx,
     pub(crate) running: Option<Running>,
     pub(crate) traffic_counter: Option<TrafficCounter>,
+    /// +ciris (leviculum#101): the port-mapping task of this run.
+    pub(crate) port_mapping: Option<super::port_mapping::RunHandle>,
 }
 
 impl RunState {
@@ -42,6 +44,7 @@ impl RunState {
             action_dispatch_tx,
             running: None,
             traffic_counter: None,
+            port_mapping: None,
         }
     }
 }
