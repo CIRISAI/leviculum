@@ -1,4 +1,5 @@
-//! Interfaces a host drives itself (+ciris): [`ReticulumNode::attach_interface`].
+//! Interfaces a host drives itself (+ciris): [`ReticulumNode::attach_interface`]
+//! and [`ReticulumNode::attach_host_interface`].
 //!
 //! A built-in interface owns its carrier: the TCP client dials, the RNode
 //! interface talks to its radio. An attached interface leaves the carrier
@@ -15,6 +16,8 @@
 //! rebroadcast, the `ByMedium` resource window), and the interface-up
 //! re-announce runs on it. See `docs/src/concepts/attached-interfaces.md`.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -22,11 +25,12 @@ use std::task::{Context, Poll};
 use leviculum_core::ifac::IfacConfig;
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::lifecycle::Running;
 use super::ReticulumNode;
 use crate::error::Error;
+use crate::interfaces::host::{self, HostCarrier, HostInterfaceConfig, HostInterfaceEnd};
 use crate::interfaces::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, ReadySignal,
 };
@@ -466,5 +470,291 @@ impl ReticulumNode {
         cfg: ExternalInterfaceConfig,
     ) -> Result<ExternalInterface, Error> {
         attach(&self.running()?, cfg)
+    }
+
+    /// Attach a [`HostInterface`](crate::interfaces::host) over a carrier the
+    /// host supplies: a framed Reticulum interface (one packet per message,
+    /// or the TCP HDLC byte stream) driven by the carrier's edge-triggered
+    /// readiness, on the node's runtime.
+    ///
+    /// The interface registers when the carrier is connected (at once when
+    /// `cfg.connected` says it already is) and detaches when the carrier
+    /// closes or fails, or when the returned handle is dropped. It never
+    /// redials: reconnecting is the host's policy, and a new connection is a
+    /// new interface, as an accepted TCP connection is. [`Error::NotRunning`]
+    /// before [`start`](Self::start). Takes the run lock, not the core lock.
+    pub fn attach_host_interface<C>(
+        &self,
+        carrier: C,
+        cfg: HostInterfaceConfig,
+    ) -> Result<HostInterfaceHandle, Error>
+    where
+        C: HostCarrier + Send + 'static,
+    {
+        let running = self.running()?;
+        let runtime = running.runtime.clone();
+        let (state_tx, state_rx) = watch::channel(HostInterfaceState::Connecting);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let attach_tx = state_tx.clone();
+        let attacher = move |cfg: ExternalInterfaceConfig| {
+            let iface = attach(&running, cfg)?;
+            let _ = attach_tx.send(HostInterfaceState::Up(iface.id()));
+            Ok(iface)
+        };
+        runtime.spawn(async move {
+            let end = host::run(carrier, cfg, attacher, StopSignal(stop_rx)).await;
+            let _ = state_tx.send(HostInterfaceState::Ended(end));
+        });
+        Ok(HostInterfaceHandle {
+            state: state_rx,
+            _stop: stop_tx,
+        })
+    }
+}
+
+/// Resolves when the handle drops.
+struct StopSignal(oneshot::Receiver<()>);
+
+impl Future for StopSignal {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        Pin::new(&mut self.0).poll(cx).map(|_| ())
+    }
+}
+
+/// Where a host interface is in its one connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostInterfaceState {
+    /// Waiting for the carrier to connect.
+    Connecting,
+    /// Registered with the node under this id.
+    Up(InterfaceId),
+    /// Over, and why. The interface is detached.
+    Ended(HostInterfaceEnd),
+}
+
+/// The host's handle to an interface from
+/// [`ReticulumNode::attach_host_interface`]. Dropping it detaches the
+/// interface and closes the carrier.
+pub struct HostInterfaceHandle {
+    state: watch::Receiver<HostInterfaceState>,
+    _stop: oneshot::Sender<()>,
+}
+
+impl HostInterfaceHandle {
+    /// Where the interface is now.
+    pub fn state(&self) -> HostInterfaceState {
+        self.state.borrow().clone()
+    }
+
+    /// The node's id for the interface, once it registered.
+    pub fn interface_id(&self) -> Option<InterfaceId> {
+        match &*self.state.borrow() {
+            HostInterfaceState::Up(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Wait until the interface registers or ends; the state it reached.
+    pub async fn connected(&mut self) -> HostInterfaceState {
+        let state = self
+            .state
+            .wait_for(|s| !matches!(s, HostInterfaceState::Connecting))
+            .await
+            .map(|s| s.clone());
+        state.unwrap_or(HostInterfaceState::Ended(HostInterfaceEnd::Removed))
+    }
+
+    /// Wait until the connection is over: the host's cue to redial if its
+    /// policy says so.
+    pub async fn ended(&mut self) -> HostInterfaceEnd {
+        let state = self
+            .state
+            .wait_for(|s| matches!(s, HostInterfaceState::Ended(_)))
+            .await
+            .map(|s| s.clone());
+        match state {
+            Ok(HostInterfaceState::Ended(end)) => end,
+            _ => HostInterfaceEnd::Removed,
+        }
+    }
+
+    /// Detach now; the same as dropping the handle.
+    pub fn detach(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    //! The HostInterface run loop between two in-memory carriers, without a
+    //! node: every frame each side is handed comes out the other, in order,
+    //! under strictly edge-triggered readiness.
+
+    use super::*;
+    use crate::interfaces::host::{CarrierKind, Framing};
+    use crate::test_support::mem_carrier::{mem_carrier_pair, MemCarrierConfig};
+    use std::time::Duration;
+
+    /// An interface with its node-side ends: what it delivers, and where
+    /// the node's frames go in.
+    fn test_interface(
+        buffer: usize,
+    ) -> (
+        ExternalInterface,
+        mpsc::Receiver<IncomingPacket>,
+        mpsc::Sender<OutgoingPacket>,
+    ) {
+        let (incoming_tx, incoming_rx) = mpsc::channel(buffer);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer);
+        let (reconnect_tx, _) = mpsc::channel(1);
+        let (detach_tx, _) = oneshot::channel();
+        let counters = Arc::new(InterfaceCounters::new());
+        let iface = ExternalInterface {
+            inbound: ExternalInbound {
+                tx: incoming_tx,
+                counters: Arc::clone(&counters),
+            },
+            outbound: ExternalOutbound {
+                rx: outgoing_rx,
+                counters: Arc::clone(&counters),
+            },
+            guard: ExternalInterfaceGuard {
+                id: InterfaceId(7),
+                counters,
+                ready: ReadySignal::ready_immediate(),
+                reconnect_tx,
+                been_up: AtomicBool::new(true),
+                _detach: detach_tx,
+            },
+        };
+        (iface, incoming_rx, outgoing_tx)
+    }
+
+    /// A frame of `len` bytes that names its index and contains the HDLC
+    /// flag and escape octets, so the stream path escapes on every frame.
+    fn numbered(i: usize, len: usize) -> Vec<u8> {
+        let mut f = vec![0x7E, 0x7D];
+        f.extend_from_slice(&(i as u32).to_be_bytes());
+        while f.len() < len {
+            f.push((f.len() * 31 + i) as u8);
+        }
+        f
+    }
+
+    async fn every_frame_crosses(
+        cfg: MemCarrierConfig,
+        frames: usize,
+    ) -> crate::test_support::mem_carrier::MemCarrierStats {
+        let (a, b) = mem_carrier_pair(cfg);
+        let observer = a.observer();
+        let (ia, rx_a, tx_a) = test_interface(8);
+        let (ib, rx_b, tx_b) = test_interface(8);
+        let mut slot_a = Some(ia);
+        let mut slot_b = Some(ib);
+        let (stop_a, stop_a_rx) = oneshot::channel::<()>();
+        let (stop_b, stop_b_rx) = oneshot::channel::<()>();
+        let run_a = tokio::spawn(host::run(
+            a,
+            HostInterfaceConfig::new("a"),
+            move |_| Ok(slot_a.take().unwrap()),
+            StopSignal(stop_a_rx),
+        ));
+        let run_b = tokio::spawn(host::run(
+            b,
+            HostInterfaceConfig::new("b"),
+            move |_| Ok(slot_b.take().unwrap()),
+            StopSignal(stop_b_rx),
+        ));
+
+        let send = move |tx: mpsc::Sender<OutgoingPacket>, salt: usize| async move {
+            for i in 0..frames {
+                let data: Arc<[u8]> = numbered(i, 20 + (i * 7 + salt) % 480).into();
+                tx.send(OutgoingPacket {
+                    data,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            }
+        };
+        // The node keeps its sending end for as long as the interface is
+        // registered; closing it would read as a removal.
+        let (keep_a, keep_b) = (tx_a.clone(), tx_b.clone());
+        let sends = tokio::spawn(async move {
+            tokio::join!(send(tx_a, 0), send(tx_b, 3));
+        });
+        let collect = move |mut rx: mpsc::Receiver<IncomingPacket>, salt: usize| async move {
+            for i in 0..frames {
+                let Some(p) = rx.recv().await else {
+                    panic!("frame {i} missing")
+                };
+                assert_eq!(p.data, numbered(i, 20 + (i * 7 + salt) % 480), "frame {i}");
+            }
+            rx
+        };
+        // What a sent lands at b, what b sent lands at a.
+        let (mut rx_b, mut rx_a) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(collect(rx_b, 0), collect(rx_a, 3))
+        })
+        .await
+        .expect("every frame crosses without a stall");
+        sends.await.unwrap();
+        assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+
+        let stats = observer.stats();
+        drop(stop_a);
+        let _keep = (keep_a, keep_b);
+        assert_eq!(run_a.await.unwrap(), HostInterfaceEnd::Detached);
+        assert!(observer.is_closed(), "detach closes the carrier");
+        // The other side hears the close.
+        assert_eq!(
+            run_b.await.unwrap(),
+            HostInterfaceEnd::Closed(crate::interfaces::host::CloseReason::PeerClose)
+        );
+        drop(stop_b);
+        assert!(stats.recv_would_blocks > 0 && stats.readable_events > 0);
+        // Every Readable after the first was earned by a WouldBlock.
+        assert!(stats.readable_events <= stats.recv_would_blocks + 2);
+        if stats.send_would_blocks > 0 {
+            assert!(stats.writable_events > 0);
+        }
+        stats
+    }
+
+    #[tokio::test]
+    async fn message_framing_carries_every_frame_in_order() {
+        let mut cfg = MemCarrierConfig::new(CarrierKind::Ws, Framing::Message);
+        cfg.capacity = 3;
+        let stats = every_frame_crosses(cfg, 400).await;
+        assert!(stats.send_would_blocks > 0, "{stats:?}");
+    }
+
+    #[tokio::test]
+    async fn stream_framing_survives_short_writes_and_would_block() {
+        let mut cfg = MemCarrierConfig::new(CarrierKind::Tcp, Framing::Stream);
+        cfg.capacity = 64;
+        cfg.max_chunk = 7;
+        let stats = every_frame_crosses(cfg, 300).await;
+        assert!(
+            stats.short_writes > 0 && stats.send_would_blocks > 0,
+            "{stats:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carrier_whose_messages_cannot_hold_a_packet_is_unusable() {
+        let mut cfg = MemCarrierConfig::new(CarrierKind::WebTransport, Framing::Message);
+        cfg.max_message = Some(400);
+        let (a, _b) = mem_carrier_pair(cfg);
+        let observer = a.observer();
+        let (_stop, stop_rx) = oneshot::channel::<()>();
+        let end = host::run(
+            a,
+            HostInterfaceConfig::new("small"),
+            |_| -> Result<ExternalInterface, Error> { panic!("must not attach") },
+            StopSignal(stop_rx),
+        )
+        .await;
+        assert!(matches!(end, HostInterfaceEnd::Unusable(_)), "{end:?}");
+        assert!(observer.is_closed());
     }
 }

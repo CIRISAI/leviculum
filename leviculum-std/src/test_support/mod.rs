@@ -14,3 +14,5 @@ pub mod event_log;
 pub mod log_capture;
 pub mod tracing_setup;
 pub mod warn_capture;
+// +ciris: an in-memory HostCarrier pair.
+pub mod mem_carrier;

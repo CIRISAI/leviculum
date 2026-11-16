@@ -1,15 +1,24 @@
-//! +ciris: interfaces a host drives (`attach_interface`).
+//! +ciris: interfaces a host drives (`attach_interface`) and HostInterface
+//! (`attach_host_interface`) between two nodes over in-memory carriers.
 //!
-//! An IFAC'd pair carries an announce and a mismatched one does not;
-//! attached interfaces show in the stats, follow their up/down signals, and
-//! leave the node when their guard is dropped.
+//! A pair with message framing and a pair with stream framing (short writes,
+//! would-block) each carry an announce, a link and data both ways; an IFAC'd
+//! pair carries an announce and a mismatched one does not; attached
+//! interfaces show in the stats, follow their up/down signals, and leave the
+//! node when their guard or handle is dropped.
 
 use std::time::Duration;
 
 use leviculum_core::ifac::IfacConfig;
 use leviculum_core::traits::InterfaceKind;
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
-use leviculum_std::driver::{ExternalInterfaceConfig, ReticulumNode, ReticulumNodeBuilder};
+use leviculum_std::driver::{
+    ExternalInterfaceConfig, HostInterfaceState, ReticulumNode, ReticulumNodeBuilder,
+};
+use leviculum_std::interfaces::host::{
+    CarrierKind, CloseReason, Framing, HostInterfaceConfig, HostInterfaceEnd,
+};
+use leviculum_std::test_support::mem_carrier::{mem_carrier_pair, MemCarrierConfig};
 use leviculum_std::{EventReceiver, NodeEvent};
 
 struct TestNode {
@@ -71,6 +80,19 @@ fn register_dest(
     (signing_key, hash)
 }
 
+async fn send(handle: &leviculum_std::LinkHandle, data: &[u8]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match handle.try_send_seq(data).await {
+            Ok(_) => return,
+            Err(leviculum_std::Error::Send(_)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("send: {e:?}"),
+        }
+    }
+}
+
 /// Announce until the other node hears it, or give up after `window`.
 async fn announce_until_heard(
     from: &TestNode,
@@ -115,6 +137,144 @@ async fn stats_until(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Two nodes joined by HostInterfaces over one in-memory pair: an announce
+/// crosses, a link establishes, data flows both ways.
+async fn round_trip(
+    cfg: MemCarrierConfig,
+) -> leviculum_std::test_support::mem_carrier::MemCarrierStats {
+    let mut server = start().await;
+    let mut client = start().await;
+    let (a, b) = mem_carrier_pair(cfg);
+    let observer = a.observer();
+    let mut ha = server
+        .node
+        .attach_host_interface(a, HostInterfaceConfig::new("host_a"))
+        .expect("attach a");
+    let mut hb = client
+        .node
+        .attach_host_interface(b, HostInterfaceConfig::new("host_b"))
+        .expect("attach b");
+    assert!(matches!(ha.connected().await, HostInterfaceState::Up(_)));
+    assert!(matches!(hb.connected().await, HostInterfaceState::Up(_)));
+
+    let (signing_key, hash) = register_dest(&server.node, "pair");
+    assert!(
+        announce_until_heard(&server, &hash, &mut client.rx, Duration::from_secs(15)).await,
+        "the client hears the server's announce"
+    );
+
+    let handle = client
+        .node
+        .connect(&hash, &signing_key)
+        .await
+        .expect("connect");
+    client
+        .node
+        .await_link_established(handle.link_id())
+        .await
+        .expect("link establishes");
+    let Some(NodeEvent::LinkEstablished { link_id, .. }) =
+        next_event(&mut server.rx, Duration::from_secs(10), |ev| {
+            matches!(
+                ev,
+                NodeEvent::LinkEstablished {
+                    is_initiator: false,
+                    ..
+                }
+            )
+        })
+        .await
+    else {
+        panic!("the server sees the link");
+    };
+
+    send(&handle, b"client to server").await;
+    let ev = next_event(&mut server.rx, Duration::from_secs(10), |ev| {
+        matches!(ev, NodeEvent::MessageReceived { .. })
+    })
+    .await
+    .expect("the server receives");
+    assert!(matches!(ev, NodeEvent::MessageReceived { data, .. } if data == b"client to server"));
+
+    let back = server.node.link_handle(&link_id);
+    send(&back, b"server to client").await;
+    let ev = next_event(&mut client.rx, Duration::from_secs(10), |ev| {
+        matches!(ev, NodeEvent::MessageReceived { .. })
+    })
+    .await
+    .expect("the client receives");
+    assert!(matches!(ev, NodeEvent::MessageReceived { data, .. } if data == b"server to client"));
+
+    let stats = observer.stats();
+    // Dropping one side's handle closes the carrier; the other side hears it
+    // and its interface ends too.
+    drop(ha);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), hb.ended())
+            .await
+            .expect("the far side ends"),
+        HostInterfaceEnd::Closed(CloseReason::PeerClose)
+    );
+    stats_until(&client.node, "the far side detaches", |s| {
+        !s.iter().any(|i| i.name == "host_b")
+    })
+    .await;
+    stats_until(&server.node, "the dropped side detaches", |s| {
+        !s.iter().any(|i| i.name == "host_a")
+    })
+    .await;
+
+    client.node.stop().await.expect("client stop");
+    server.node.stop().await.expect("server stop");
+    stats
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_framed_pair_carries_an_announce_a_link_and_data_both_ways() {
+    let mut cfg = MemCarrierConfig::new(CarrierKind::Ws, Framing::Message);
+    cfg.max_message = Some(1200);
+    round_trip(cfg).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_framed_pair_with_short_writes_carries_an_announce_a_link_and_data() {
+    let mut cfg = MemCarrierConfig::new(CarrierKind::Tcp, Framing::Stream);
+    cfg.capacity = 96;
+    cfg.max_chunk = 13;
+    let stats = round_trip(cfg).await;
+    assert!(
+        stats.short_writes > 0 && stats.send_would_blocks > 0,
+        "the carrier made the interface handle partial sends: {stats:?}"
+    );
+}
+
+/// The kind and the hardware MTU come from the carrier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_interface_takes_its_kind_from_the_carrier() {
+    let mut node = start().await;
+    let (a, _b) = mem_carrier_pair(MemCarrierConfig::new(CarrierKind::Ws, Framing::Message));
+    let mut h = node
+        .node
+        .attach_host_interface(a, HostInterfaceConfig::new("ws_host"))
+        .expect("attach");
+    let HostInterfaceState::Up(id) = h.connected().await else {
+        panic!("connects");
+    };
+    assert_eq!(h.interface_id(), Some(id));
+    stats_until(&node.node, "the interface shows", |s| {
+        s.iter().any(|i| {
+            i.interface_id == id && i.name == "ws_host" && i.kind == InterfaceKind::WebSocket
+        })
+    })
+    .await;
+    drop(h);
+    stats_until(&node.node, "the handle's drop detaches it", |s| {
+        !s.iter().any(|i| i.interface_id == id)
+    })
+    .await;
+    node.node.stop().await.expect("stop");
 }
 
 /// Attached interfaces with the same IFAC carry an announce; with

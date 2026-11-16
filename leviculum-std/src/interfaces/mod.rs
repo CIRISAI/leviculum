@@ -1590,3 +1590,5 @@ mod tests {
 pub(crate) mod websocket;
 #[cfg(feature = "websocket")]
 pub use websocket::{WsFraming, SUBPROTOCOL_HDLC, SUBPROTOCOL_RAW};
+// +ciris: HostInterface, a framed interface over a host-supplied carrier.
+pub mod host;
