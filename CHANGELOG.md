@@ -10,6 +10,50 @@ never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
 
+## [0.35.0+ciris.2] — CIRIS fork
+
+### Added
+
+- The NAT type from two probe servers (leviculum#100). A direct-link
+  session probes its facilitator and the NAT probe servers at once, all
+  from the session's one socket, and compares the mappings:
+  `NatMapping::{NoNat, EndpointIndependent, EndpointDependent,
+  Unknown(OneServer | OneAnswered | NoAnswer)}`, in
+  `leviculum_core::direct_link::nat`. The `NatReport` keeps every server's
+  raw answer, the local port, port preservation, whether the servers shared
+  an IP (two ports on one host cannot see an address-dependent NAT),
+  whether the socket had a global IPv6 address, and when it ran. The second
+  server comes from the new `[reticulum]` key `nat_probe_addrs`
+  (comma-separated `host:port`, `stun:` for a STUN server) or
+  `ReticulumNodeBuilder::nat_probe_servers`. A responder with a
+  `probe_addr` of its own also probes that one when the peer named another
+  facilitator. With one server the verdict is `Unknown(OneServer)`, or
+  `NoNat` when the answer is the socket's own address. The other servers'
+  answers are waited for at most 500 ms past the facilitator's, so the
+  punch starts no later than that. The wire is unchanged: these are plain
+  RNSP or STUN probes, which any facilitator answers.
+- `ReticulumNode::nat_report()`, `direct_link_outcomes()` and
+  `probe_nat()` (a probe outside any session), and
+  `NodeEvent::NatTypeChanged { previous, report }`, raised for the first
+  report and whenever a known verdict differs from the last known one. Each
+  attempt's end (established, punch failed, timed out, refused, probe
+  failed, fell back, superseded, later lost) is counted, and the latest 32
+  are kept with that session's verdict, under the application's link id,
+  so a host can correlate NAT type with outcome. Core's
+  `NodeCore::record_nat_report` / `nat_report` / `direct_link_outcomes`
+  hold the state. The core-lock census is 97 (+3).
+- One info line per direct-link phase, each naming the link, the session
+  and the peer: ACCEPT, READY and COMPLETE sent or received, the NAT type,
+  the first punch heard (with its delay), and the outcome.
+- A NAT lab on the real stack: `scripts/natlab/nat_type.py` runs the
+  `natlab_node` example (relay, second probe server, two peers) in network
+  namespaces behind Linux cone (`MASQUERADE`) and symmetric
+  (`MASQUERADE --random-fully`) NATs. Its witness is that every peer
+  classifies as its NAT kind; it reports the punch outcomes beside that.
+  It needs root, so it runs in CI (`natlab-nat-type` workflow), not on a
+  developer machine. Its outcomes measure two Linux NATs, not any real
+  network.
+
 ## [0.35.0+ciris.1] — CIRIS fork
 
 The fork carried onto current upstream master (+1,366 since the Oct 30 base).
