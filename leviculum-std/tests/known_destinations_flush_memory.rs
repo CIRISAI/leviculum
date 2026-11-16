@@ -329,9 +329,9 @@ fn the_file_keeps_what_the_cull_keeps_and_relearns_the_rest() {
     storage.flush();
 
     let file = read_file(dir.path());
-    for i in 0..CAP {
-        assert!(file.contains_key(&dest(i, 0x01)), "held entry {i} dropped");
-    }
+    // +ciris (leviculum#49): the pin is held in memory, in one of CAP slots.
+    let held = |i| file.contains_key(&dest(i, 0x01));
+    assert_eq!((0..CAP).filter(|&i| held(i)).count() as u64, CAP - 1);
     assert!(
         file.contains_key(&[0xEE; 16]),
         "the new announce is in the file"
@@ -355,8 +355,8 @@ fn the_file_keeps_what_the_cull_keeps_and_relearns_the_rest() {
     );
     assert_eq!(
         file.len() as u64,
-        CAP + 4,
-        "held + new + pinned + recently used + fresh foreign, and nothing else"
+        CAP + 3,
+        "held (the pin among them) + new + recently used + fresh foreign, only"
     );
 
     // The dropped destination announces again: the core remembers it
@@ -500,5 +500,37 @@ fn kill_during_flush_leaves_a_complete_file() {
         file.len() as u64 >= N,
         "the file after the kill is complete: {} of at least {N} entries",
         file.len()
+    );
+}
+
+/// +ciris (leviculum#49): a pinned entry older than every other one is held
+/// in memory after a restart, inside the identity cap, so the node recalls
+/// it at once (CIRISEdge encrypts to pinned contacts). Upstream keeps such
+/// an entry on disk only; the newest unpinned one gives up its slot.
+#[test]
+fn a_pinned_entry_is_recalled_after_a_restart_inside_the_cap() {
+    const CAP: u64 = 2_048;
+    let dir = store_dir();
+    let key = Identity::generate(&mut rand_core::OsRng).public_key_bytes();
+    let now = now_secs();
+    let mut on_disk: Vec<([u8; 16], Value)> = (0..CAP)
+        .map(|i| (dest(i, 0x01), entry(&key, now - i as f64, Use::Never)))
+        .collect();
+    let pinned = dest(0, 0x04);
+    on_disk.push((pinned, entry(&key, now - 30.0 * 86_400.0, Use::Retained)));
+    write_file(dir.path(), on_disk);
+
+    let storage = StdStorage::new_with_caps(dir.path(), TableCaps::local_client()).unwrap();
+    assert!(
+        storage.get_identity(&pinned).is_some(),
+        "the pin is recalled"
+    );
+    assert!(
+        storage.get_identity(&dest(CAP - 1, 0x01)).is_none(),
+        "the oldest unpinned entry gave up its slot"
+    );
+    assert!(
+        (0..CAP - 1).all(|i| storage.get_identity(&dest(i, 0x01)).is_some()),
+        "every newer entry is held"
     );
 }
