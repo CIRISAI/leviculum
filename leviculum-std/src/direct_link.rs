@@ -320,6 +320,19 @@ pub(crate) async fn punch(
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
+    let mut diag = PunchDiag::new(targets);
+    let result = punch_inner(socket, targets, session, token, &mut diag).await;
+    diag.log(session, result.is_some());
+    result
+}
+
+async fn punch_inner(
+    socket: &UdpSocket,
+    targets: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    diag: &mut PunchDiag,
+) -> Option<Punched> {
     let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
     let mut targets: Vec<SocketAddr> = alloc_targets(
         canonical(*targets.first()?),
@@ -347,17 +360,24 @@ pub(crate) async fn punch(
                 let frame = wire::punch_frame(PunchKind::Punch, session, token, seq);
                 seq = seq.wrapping_add(1) % wire::KEEPALIVE_SEQ;
                 for target in &targets {
-                    if socket.send_to(&frame, on_socket(socket, *target)).await.is_ok()
-                        && !punched.contains(target)
-                    {
+                    let sent = socket.send_to(&frame, on_socket(socket, *target)).await.is_ok();
+                    if !sent {
+                        diag.send_errors += 1;
+                    }
+                    if sent && !punched.contains(target) {
                         punched.push(*target);
                     }
                 }
+                diag.punched = punched.len();
             }
             result = socket.recv_from(&mut buf) => {
-                let Ok((len, src)) = result else { continue };
+                let Ok((len, src)) = result else {
+                    diag.recv_errors += 1;
+                    continue
+                };
                 let src = canonical(src);
                 let frame = &buf[..len];
+                diag.rx_frames += 1;
                 // +ciris (leviculum#104): the peer may already be probing the
                 // path's MTU; answer, and never keep a probe as data.
                 if wire::is_mtu_probe(frame) {
@@ -371,17 +391,21 @@ pub(crate) async fn punch(
                         if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
                             tracing::debug!("direct link: peer-reflexive candidate {src}");
                             targets.push(src);
+                            diag.peer_reflexive += 1;
                         }
                         if !heard.contains(&src) && heard.len() < targets.len() {
                             heard.push(src);
                         }
+                        diag.heard(src);
                     }
                     Some((PunchKind::Ack, _)) => {
                         if punched.contains(&src) && !acked.contains(&src) {
                             acked.push(src);
                         }
+                        diag.acked(src, punched.contains(&src));
                     }
                     None => {
+                        diag.unparsed(wire::punch_frame_kind(frame).is_some());
                         if targets.contains(&src)
                             && wire::punch_frame_kind(frame).is_none()
                             && !frame.is_empty()
@@ -400,6 +424,253 @@ pub(crate) async fn punch(
             }
         }
     }
+}
+
+// Punch diagnostics (+ciris)
+
+/// The tracing target of the one-line punch and probe summaries, so a tool
+/// can collect them without the address-bearing lines beside them.
+pub const DIAG_TARGET: &str = "direct_link_diag";
+
+/// +ciris — where a punch was heard from, relative to what the peer
+/// advertised. Addresses never leave this function: only the class does,
+/// which says what the peer's NAT did without saying where anyone is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeardRelation {
+    /// Exactly the public address the peer advertised (its facilitator
+    /// mapping): the peer's NAT used one mapping for both destinations.
+    Same,
+    /// The advertised public IP on another port: the peer's NAT made a new
+    /// mapping for this destination (endpoint-dependent mapping, "symmetric",
+    /// on the PEER's side).
+    SameIpOtherPort,
+    /// One of the peer's host candidates, exactly.
+    HostCandidate,
+    /// A host candidate's IP on another port.
+    HostIpOtherPort,
+    /// None of the addresses the peer advertised (another public IP: a
+    /// multi-homed NAT or a CGNAT pool).
+    OtherIp,
+}
+
+impl HeardRelation {
+    /// The word logged.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeardRelation::Same => "same",
+            HeardRelation::SameIpOtherPort => "same_ip_other_port",
+            HeardRelation::HostCandidate => "host_candidate",
+            HeardRelation::HostIpOtherPort => "host_ip_other_port",
+            HeardRelation::OtherIp => "other_ip",
+        }
+    }
+}
+
+/// +ciris — classify `src` against the peer's advertised `public` address
+/// and its `host` candidates. All in canonical form.
+pub fn heard_relation(src: SocketAddr, public: SocketAddr, host: &[SocketAddr]) -> HeardRelation {
+    let (src, public) = (canonical(src), canonical(public));
+    if src == public {
+        HeardRelation::Same
+    } else if host.iter().any(|h| canonical(*h) == src) {
+        HeardRelation::HostCandidate
+    } else if src.ip() == public.ip() {
+        HeardRelation::SameIpOtherPort
+    } else if host.iter().any(|h| canonical(*h).ip() == src.ip()) {
+        HeardRelation::HostIpOtherPort
+    } else {
+        HeardRelation::OtherIp
+    }
+}
+
+/// +ciris — what one punch saw, in counts and classes only; logged once
+/// when it ends.
+#[derive(Debug)]
+pub(crate) struct PunchDiag {
+    start: tokio::time::Instant,
+    started_unix_ms: u64,
+    public: Option<SocketAddr>,
+    host: Vec<SocketAddr>,
+    host_v4: usize,
+    host_v6: usize,
+    pub(crate) peer_reflexive: usize,
+    pub(crate) punched: usize,
+    pub(crate) send_errors: u32,
+    pub(crate) recv_errors: u32,
+    pub(crate) rx_frames: u32,
+    rx_foreign_punch: u32,
+    rx_other: u32,
+    punches_heard: u32,
+    acks_heard: u32,
+    acks_unpunched: u32,
+    heard: Vec<(SocketAddr, HeardRelation)>,
+    acked: Vec<(SocketAddr, HeardRelation)>,
+    first_heard_ms: Option<u64>,
+    first_acked_ms: Option<u64>,
+}
+
+impl PunchDiag {
+    pub(crate) fn new(targets: &[SocketAddr]) -> Self {
+        let public = targets.first().map(|a| canonical(*a));
+        let host: Vec<SocketAddr> = targets.iter().skip(1).map(|a| canonical(*a)).collect();
+        PunchDiag {
+            start: tokio::time::Instant::now(),
+            started_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            public,
+            host_v4: host.iter().filter(|a| a.is_ipv4()).count(),
+            host_v6: host.iter().filter(|a| a.is_ipv6()).count(),
+            host,
+            peer_reflexive: 0,
+            punched: 0,
+            send_errors: 0,
+            recv_errors: 0,
+            rx_frames: 0,
+            rx_foreign_punch: 0,
+            rx_other: 0,
+            punches_heard: 0,
+            acks_heard: 0,
+            acks_unpunched: 0,
+            heard: Vec::new(),
+            acked: Vec::new(),
+            first_heard_ms: None,
+            first_acked_ms: None,
+        }
+    }
+
+    fn relation(&self, src: SocketAddr) -> HeardRelation {
+        match self.public {
+            Some(public) => heard_relation(src, public, &self.host),
+            None => HeardRelation::OtherIp,
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+
+    pub(crate) fn heard(&mut self, src: SocketAddr) {
+        self.punches_heard += 1;
+        self.first_heard_ms
+            .get_or_insert_with(|| self.start.elapsed().as_millis() as u64);
+        if !self.heard.iter().any(|(a, _)| *a == src) && self.heard.len() < 16 {
+            let r = self.relation(src);
+            self.heard.push((src, r));
+        }
+    }
+
+    pub(crate) fn acked(&mut self, src: SocketAddr, was_punched: bool) {
+        self.acks_heard += 1;
+        if !was_punched {
+            self.acks_unpunched += 1;
+            return;
+        }
+        self.first_acked_ms
+            .get_or_insert_with(|| self.start.elapsed().as_millis() as u64);
+        if !self.acked.iter().any(|(a, _)| *a == src) && self.acked.len() < 16 {
+            let r = self.relation(src);
+            self.acked.push((src, r));
+        }
+    }
+
+    pub(crate) fn unparsed(&mut self, punch_shaped: bool) {
+        if punch_shaped {
+            self.rx_foreign_punch += 1;
+        } else {
+            self.rx_other += 1;
+        }
+    }
+
+    fn classes(list: &[(SocketAddr, HeardRelation)]) -> String {
+        let words: Vec<&str> = list.iter().map(|(_, r)| r.as_str()).collect();
+        format!("[{}]", words.join(","))
+    }
+
+    /// The one INFO line, with no address or port in it.
+    pub(crate) fn log(&self, session: &SessionId, succeeded: bool) {
+        let heard_and_acked = self
+            .heard
+            .iter()
+            .any(|(h, _)| self.acked.iter().any(|(a, _)| a == h));
+        tracing::info!(
+            target: DIAG_TARGET,
+            event = "punch",
+            session = %session_short(session),
+            outcome = if succeeded { "punched" } else { "window_expired" },
+            elapsed_ms = self.elapsed_ms(),
+            started_unix_ms = self.started_unix_ms,
+            targets_facilitator_public = usize::from(self.public.is_some()),
+            targets_host_v4 = self.host_v4,
+            targets_host_v6 = self.host_v6,
+            targets_peer_reflexive = self.peer_reflexive,
+            public_family = match self.public { Some(a) if a.is_ipv6() => "v6", Some(_) => "v4", None => "none" },
+            punched = self.punched,
+            heard = self.heard.len(),
+            acked = self.acked.len(),
+            heard_classes = %Self::classes(&self.heard),
+            acked_classes = %Self::classes(&self.acked),
+            heard_and_acked,
+            punches_heard = self.punches_heard,
+            acks_heard = self.acks_heard,
+            acks_from_unpunched = self.acks_unpunched,
+            rx_frames = self.rx_frames,
+            rx_foreign_punch = self.rx_foreign_punch,
+            rx_other = self.rx_other,
+            send_errors = self.send_errors,
+            recv_errors = self.recv_errors,
+            first_heard_ms = self.first_heard_ms.map(|v| v as i64).unwrap_or(-1),
+            first_acked_ms = self.first_acked_ms.map(|v| v as i64).unwrap_or(-1),
+            "direct link diag: punch summary"
+        );
+    }
+}
+
+/// The first four bytes of a session id, in hex: enough to pair two ends'
+/// lines, nothing more.
+fn session_short(session: &SessionId) -> String {
+    session[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// +ciris — the one INFO line after a facilitator probe: whether this NAT
+/// preserved the port, and whether there is a NAT at all. No address.
+fn log_probe_diag(
+    session: &SessionId,
+    socket: &UdpSocket,
+    public: Option<SocketAddr>,
+    local: &[SocketAddr],
+    elapsed_ms: u64,
+) {
+    let local_port = socket.local_addr().map(|a| a.port()).ok();
+    let (port_preserved, no_nat) = match public {
+        Some(p) => {
+            let p = canonical(p);
+            (
+                Some(local_port == Some(p.port())),
+                Some(local.iter().any(|l| canonical(*l).ip() == p.ip())),
+            )
+        }
+        None => (None, None),
+    };
+    let word = |b: Option<bool>| match b {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    tracing::info!(
+        target: DIAG_TARGET,
+        event = "probe",
+        session = %session_short(session),
+        answered = public.is_some(),
+        elapsed_ms,
+        public_family = match public { Some(a) if canonical(a).is_ipv6() => "v6", Some(_) => "v4", None => "none" },
+        port_preserved = word(port_preserved),
+        no_nat = word(no_nat),
+        host_v4 = local.iter().filter(|a| a.is_ipv4()).count(),
+        host_v6 = local.iter().filter(|a| a.is_ipv6()).count(),
+        "direct link diag: probe summary"
+    );
 }
 
 /// +ciris (leviculum#104): how long a path-MTU probe sends, and how long it
@@ -755,6 +1026,7 @@ impl DirectLinkRuntime {
         };
         self.sockets.insert(session, Arc::clone(&socket));
         let task = tokio::spawn(async move {
+            let probe_start = tokio::time::Instant::now();
             let public = match probe(&socket, server, protocol).await {
                 Ok(public) => {
                     tracing::info!("direct link: reflexive address {public} (via {server})");
@@ -766,6 +1038,13 @@ impl DirectLinkRuntime {
                 }
             };
             let local = host_candidates(&socket, server);
+            log_probe_diag(
+                &session,
+                &socket,
+                public,
+                &local,
+                probe_start.elapsed().as_millis() as u64,
+            );
             let _ = outcomes
                 .send(Outcome::Probed {
                     session,
@@ -944,6 +1223,54 @@ mod tests {
             assert_eq!(public, socket.local_addr().unwrap(), "{protocol:?}");
         }
         task.abort();
+    }
+
+    #[test]
+    fn heard_relation_classifies_each_case() {
+        let public: SocketAddr = "203.0.113.7:40000".parse().unwrap();
+        let host_v4: SocketAddr = "192.168.1.20:40000".parse().unwrap();
+        let host_v6: SocketAddr = "[2001:db8::20]:40000".parse().unwrap();
+        let host = [host_v4, host_v6];
+        let rel = |s: &str| heard_relation(s.parse().unwrap(), public, &host);
+        assert_eq!(rel("203.0.113.7:40000"), HeardRelation::Same);
+        assert_eq!(rel("203.0.113.7:51234"), HeardRelation::SameIpOtherPort);
+        assert_eq!(rel("192.168.1.20:40000"), HeardRelation::HostCandidate);
+        assert_eq!(rel("[2001:db8::20]:40000"), HeardRelation::HostCandidate);
+        assert_eq!(rel("[2001:db8::20]:40001"), HeardRelation::HostIpOtherPort);
+        assert_eq!(rel("198.51.100.9:40000"), HeardRelation::OtherIp);
+        // A dual-stack socket reports an IPv4 peer IPv4-mapped.
+        assert_eq!(rel("[::ffff:203.0.113.7]:40000"), HeardRelation::Same);
+        assert_eq!(
+            rel("[::ffff:203.0.113.7]:40002"),
+            HeardRelation::SameIpOtherPort
+        );
+        assert_eq!(
+            heard_relation("[::ffff:203.0.113.7]:40000".parse().unwrap(), public, &[]),
+            HeardRelation::Same
+        );
+        assert_eq!(
+            HeardRelation::SameIpOtherPort.as_str(),
+            "same_ip_other_port"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_punch_diag_counts_heard_and_acked_by_class() {
+        let public: SocketAddr = "203.0.113.7:40000".parse().unwrap();
+        let host: SocketAddr = "[2001:db8::20]:40000".parse().unwrap();
+        let mut diag = PunchDiag::new(&[public, host]);
+        assert_eq!((diag.host_v4, diag.host_v6), (0, 1));
+        let remapped: SocketAddr = "203.0.113.7:50000".parse().unwrap();
+        diag.heard(remapped);
+        diag.heard(remapped);
+        diag.acked(public, true);
+        diag.acked(remapped, false);
+        assert_eq!(diag.punches_heard, 2);
+        assert_eq!(diag.heard, vec![(remapped, HeardRelation::SameIpOtherPort)]);
+        assert_eq!(diag.acked, vec![(public, HeardRelation::Same)]);
+        assert_eq!(diag.acks_unpunched, 1);
+        assert_eq!(PunchDiag::classes(&diag.heard), "[same_ip_other_port]");
+        assert!(diag.first_heard_ms.is_some() && diag.first_acked_ms.is_some());
     }
 
     #[tokio::test]
