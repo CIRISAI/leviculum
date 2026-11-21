@@ -48,6 +48,12 @@ path = "src/lntd.rs"
 name = "auto-crossmachine-test"
 path = "src/bin/auto_crossmachine_test.rs"
 
+# +ciris: measures a direct-link punch between two hosts over a real relay
+# (CIRISEdge NAT diagnostics). Not packaged.
+[[bin]]
+name = "punch-probe"
+path = "src/bin/punch_probe.rs"
+
 # `heap-accounting` is off by default, and it has to stay that way: a node
 # built without it is byte-identical to one built before the feature existed
 # (verified by sha256 on the musl-static `lnsd`, 2026-09-21). With it, `lnsd`

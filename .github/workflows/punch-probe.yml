@@ -1,0 +1,86 @@
+# +ciris: live NAT punch diagnostics. Dials a `punch-probe listen` running
+# elsewhere, over the relay, from each OS's hosted runner, and keeps each
+# runner's JSON lines. Manual dispatch only: never on push or pull request.
+#
+# The tool prints no IP address or port (counts and classes only), so the
+# logs and artifacts are safe to keep. The relay dial is public.
+name: punch-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      role:
+        description: "dial (runners dial the listener) or listen (runners listen; dial them)"
+        required: false
+        default: "dial"
+      dest:
+        description: "listener destination hash (hex); dial only"
+        required: false
+        default: ""
+      key:
+        description: "listener signing key (hex); dial only"
+        required: false
+        default: ""
+      listen_secs:
+        description: "how long a listening runner stays up"
+        required: false
+        default: "900"
+      relay:
+        description: "relay TCP dial = UDP facilitator (host:port)"
+        required: true
+      attempts:
+        description: "proposals per runner"
+        required: false
+        default: "3"
+      stun:
+        description: "public STUN server for the mapping check (empty: skip)"
+        required: false
+        default: "stun.l.google.com:19302"
+
+permissions:
+  contents: read
+
+jobs:
+  dial:
+    name: ${{ inputs.role }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build punch-probe
+        run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
+      - name: run
+        shell: bash
+        run: |
+          stun_arg=()
+          if [ -n "${{ inputs.stun }}" ]; then stun_arg=(--stun "${{ inputs.stun }}"); fi
+          bin="target/${{ matrix.target }}/release/punch-probe"
+          if [ "${{ inputs.role }}" = "listen" ]; then
+            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
+              listen --duration-secs "${{ inputs.listen_secs }}" | tee "punch-probe-${{ matrix.os }}.jsonl"
+          else
+            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
+              dial --to "${{ inputs.dest }}" --key "${{ inputs.key }}" --attempts "${{ inputs.attempts }}" \
+              | tee "punch-probe-${{ matrix.os }}.jsonl"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: punch-probe-${{ matrix.os }}
+          path: punch-probe-${{ matrix.os }}.jsonl
