@@ -7,6 +7,11 @@
 name: punch-probe
 
 on:
+  # TEMPORARY: this one diagnostic branch only (workflow_dispatch needs the
+  # file on the default branch, which this must not touch). Inputs then come
+  # from .github/punch-probe.env. Removed right after the run.
+  push:
+    branches: [diag/punch-telemetry]
   workflow_dispatch:
     inputs:
       role:
@@ -40,21 +45,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: punch-probe-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   dial:
-    name: ${{ inputs.role }} (${{ matrix.os }})
+    name: probe (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         include:
+          # TEMPORARY for this run: three Ubuntu VMs, to land on one behind
+          # an endpoint-dependent NAT (run 44930393845's ubuntu was).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
@@ -67,16 +78,29 @@ jobs:
         run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
       - name: run
         shell: bash
+        env:
+          IN_ROLE: ${{ inputs.role }}
+          IN_DEST: ${{ inputs.dest }}
+          IN_KEY: ${{ inputs.key }}
+          IN_RELAY: ${{ inputs.relay }}
+          IN_ATTEMPTS: ${{ inputs.attempts }}
+          IN_LISTEN_SECS: ${{ inputs.listen_secs }}
+          IN_STUN: ${{ inputs.stun }}
         run: |
-          stun_arg=()
-          if [ -n "${{ inputs.stun }}" ]; then stun_arg=(--stun "${{ inputs.stun }}"); fi
-          bin="target/${{ matrix.target }}/release/punch-probe"
-          if [ "${{ inputs.role }}" = "listen" ]; then
-            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
-              listen --duration-secs "${{ inputs.listen_secs }}" | tee "punch-probe-${{ matrix.os }}.jsonl"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            set -a; . .github/punch-probe.env; set +a
           else
-            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
-              dial --to "${{ inputs.dest }}" --key "${{ inputs.key }}" --attempts "${{ inputs.attempts }}" \
+            ROLE=$IN_ROLE DEST=$IN_DEST KEY=$IN_KEY RELAY=$IN_RELAY
+            ATTEMPTS=$IN_ATTEMPTS LISTEN_SECS=$IN_LISTEN_SECS STUN=$IN_STUN
+          fi
+          stun_arg=()
+          if [ -n "$STUN" ]; then stun_arg=(--stun "$STUN"); fi
+          bin="target/${{ matrix.target }}/release/punch-probe"
+          if [ "$ROLE" = "listen" ]; then
+            "$bin" --relay "$RELAY" "${stun_arg[@]}" listen --duration-secs "$LISTEN_SECS" \
+              | tee "punch-probe-${{ matrix.os }}.jsonl"
+          else
+            "$bin" --relay "$RELAY" "${stun_arg[@]}" dial --to "$DEST" --key "$KEY" --attempts "$ATTEMPTS" \
               | tee "punch-probe-${{ matrix.os }}.jsonl"
           fi
       - uses: actions/upload-artifact@v4
