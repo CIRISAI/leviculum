@@ -120,6 +120,18 @@ pub fn same_nat_alternates(
         .collect()
 }
 
+/// +ciris — append the peer's predicted ports, on its public IP, to the
+/// punch alternates: each one not already there, and never its advertised
+/// address itself. Bounded by [`super::wire::MAX_PREDICTED_PORTS`].
+fn push_predicted(alternates: &mut Vec<SocketAddr>, peer_public: SocketAddr, ports: &[u16]) {
+    for port in ports.iter().take(super::wire::MAX_PREDICTED_PORTS) {
+        let addr = SocketAddr::new(peer_public.ip(), *port);
+        if *port != 0 && addr != peer_public && !alternates.contains(&addr) {
+            alternates.push(addr);
+        }
+    }
+}
+
 /// +ciris — a global unicast IPv6 address (2000::/3), the only kind a peer
 /// elsewhere can reach.
 #[must_use]
@@ -179,6 +191,9 @@ pub struct Session {
     /// +ciris (leviculum#88): opaque bytes the REQUEST carries for the
     /// responder's host.
     host_payload: Option<Vec<u8>>,
+    /// +ciris: the ports the peer predicts its NAT maps toward this node,
+    /// on its public IP; punched beside its advertised address.
+    peer_predicted: Vec<u16>,
 }
 
 impl Session {
@@ -204,6 +219,7 @@ impl Session {
             commit: true,
             peer_committed: false,
             host_payload: None,
+            peer_predicted: Vec::new(),
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -241,6 +257,7 @@ impl Session {
             commit: false,
             peer_committed: false,
             host_payload: None,
+            peer_predicted: Vec::new(),
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -285,6 +302,14 @@ impl Session {
     /// responder's host. Set before the probe answers.
     pub fn set_host_payload(&mut self, payload: Option<Vec<u8>>) {
         self.host_payload = payload;
+    }
+
+    /// +ciris: the ports the initiator's REQUEST predicted (a responder
+    /// only; READY carries the responder's to the initiator).
+    pub fn set_peer_predicted(&mut self, ports: Vec<u16>) {
+        self.peer_predicted = ports;
+        self.peer_predicted
+            .truncate(super::wire::MAX_PREDICTED_PORTS);
     }
 
     /// +ciris (leviculum#96): this node's own proposal has not reached the
@@ -333,6 +358,20 @@ impl Session {
         local: Vec<SocketAddr>,
         now_ms: u64,
     ) -> Vec<Step> {
+        self.probed_with_candidates(public, local, Vec::new(), now_ms)
+    }
+
+    /// +ciris — [`Self::probed_with_local`], with the ports this node
+    /// predicts its NAT will map toward the peer (see
+    /// [`super::wire::MAX_PREDICTED_PORTS`]): sent to the peer, which
+    /// punches them on this node's public IP.
+    pub fn probed_with_candidates(
+        &mut self,
+        public: SocketAddr,
+        local: Vec<SocketAddr>,
+        predicted: Vec<u16>,
+        now_ms: u64,
+    ) -> Vec<Step> {
         if self.phase != Phase::Discovering {
             return Vec::new();
         }
@@ -348,6 +387,7 @@ impl Session {
                     initiator_local: local,
                     commit: self.commit,
                     host_payload: self.host_payload.take(),
+                    initiator_predicted: predicted,
                 })]
             }
             Role::Responder => {
@@ -356,13 +396,15 @@ impl Session {
                     return alloc::vec![Step::Failed(Failure::Timeout)];
                 };
                 self.enter(Phase::Punching, now_ms);
-                let alternates = same_nat_alternates(public, peer, &self.peer_local);
+                let mut alternates = same_nat_alternates(public, peer, &self.peer_local);
+                push_predicted(&mut alternates, peer, &self.peer_predicted);
                 alloc::vec![
                     Step::Send(Signal::Ready {
                         session: self.id,
                         responder_public: public,
                         responder_local: local,
                         commit: self.commit,
+                        responder_predicted: predicted,
                     }),
                     Step::Punch { peer, alternates },
                 ]
@@ -420,6 +462,7 @@ impl Session {
                     responder_public,
                     responder_local,
                     commit,
+                    responder_predicted,
                     ..
                 },
             ) => {
@@ -428,10 +471,14 @@ impl Session {
                 self.peer_public = Some(*responder_public);
                 self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
-                let alternates = match self.own_public {
+                let mut alternates = match self.own_public {
                     Some(own) => same_nat_alternates(own, *responder_public, responder_local),
                     None => Vec::new(),
                 };
+                self.peer_predicted = responder_predicted.clone();
+                self.peer_predicted
+                    .truncate(super::wire::MAX_PREDICTED_PORTS);
+                push_predicted(&mut alternates, *responder_public, &self.peer_predicted);
                 alloc::vec![Step::Punch {
                     peer: *responder_public,
                     alternates,
@@ -574,6 +621,7 @@ mod tests {
             protocol,
             initiator_local,
             commit: true,
+            initiator_predicted: _,
             host_payload: None,
         } = request_from(&steps).clone()
         else {
@@ -633,6 +681,38 @@ mod tests {
     /// other's host candidates too; a router that does not hairpin never
     /// delivers a punch sent to its own public address. Behind different NATs
     /// a host candidate is never punched.
+    /// +ciris: each side's predicted ports reach the other in REQUEST and
+    /// READY, and are punched on the predicting side's public IP.
+    #[test]
+    fn predicted_ports_are_punched_on_the_predicting_sides_ip() {
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        let steps = a.probed_with_candidates(a_pub(), Vec::new(), alloc::vec![5001, 5002], 1);
+        let Signal::Request {
+            initiator_predicted,
+            ..
+        } = request_from(&steps)
+        else {
+            unreachable!()
+        };
+        assert_eq!(initiator_predicted, &[5001, 5002]);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 2);
+        b.set_peer_predicted(initiator_predicted.clone());
+        let b_steps = b.probed_with_candidates(b_pub(), Vec::new(), alloc::vec![6003], 3);
+        let ip = |p: u16| SocketAddr::new(a_pub().ip(), p);
+        assert!(b_steps.iter().any(|s| matches!(
+            s,
+            Step::Punch { peer, alternates } if *peer == a_pub() && *alternates == [ip(5001), ip(5002)]
+        )));
+        let _ = deliver(&[Step::Send(Signal::Accept { session: ID })], &mut a, 4);
+        let a_steps = deliver(&b_steps, &mut a, 5);
+        assert!(a_steps.iter().any(|s| matches!(
+            s,
+            Step::Punch { peer, alternates }
+                if *peer == b_pub() && *alternates == [SocketAddr::new(b_pub().ip(), 6003)]
+        )));
+    }
+
     #[test]
     fn behind_one_nat_each_side_punches_the_others_host_candidate() {
         use core::net::{IpAddr, Ipv4Addr};
@@ -653,6 +733,7 @@ mod tests {
             protocol,
             initiator_local,
             commit: true,
+            initiator_predicted: _,
             host_payload: None,
         } = request_from(&steps).clone()
         else {
@@ -767,6 +848,7 @@ mod tests {
             responder_public: b_pub(),
             responder_local: Vec::new(),
             commit: true,
+            responder_predicted: alloc::vec::Vec::new(),
         };
         a.signal(&ready, 3);
         assert_eq!(a.phase(), Phase::Punching);
@@ -804,6 +886,7 @@ mod tests {
             responder_public: b_pub(),
             responder_local: Vec::new(),
             commit: false,
+            responder_predicted: alloc::vec::Vec::new(),
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);

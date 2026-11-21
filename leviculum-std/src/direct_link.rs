@@ -320,9 +320,15 @@ pub(crate) async fn punch(
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
-    let mut diag = PunchDiag::new(targets);
+    // Logged when dropped, so a punch the session aborts (the peer's REJECT
+    // arrived first) still says what it saw.
+    let mut diag = PunchDiag::new(targets, *session);
     let result = punch_inner(socket, targets, session, token, &mut diag).await;
-    diag.log(session, result.is_some());
+    diag.finish(if result.is_some() {
+        "punched"
+    } else {
+        "window_expired"
+    });
     result
 }
 
@@ -397,6 +403,18 @@ async fn punch_inner(
                             heard.push(src);
                         }
                         diag.heard(src);
+                        // +ciris: heard at its advertised address, the peer's
+                        // mapping did not move; stop spraying its predicted
+                        // ports, which are other hosts' mappings on its NAT.
+                        if src == targets[0] {
+                            let before = targets.len();
+                            let public = targets[0];
+                            let keep = |t: &SocketAddr, heard: &[SocketAddr]| {
+                                *t == public || t.ip() != public.ip() || heard.contains(t)
+                            };
+                            targets.retain(|t| keep(t, &heard));
+                            diag.predicted_dropped += before - targets.len();
+                        }
                     }
                     Some((PunchKind::Ack, _)) => {
                         if punched.contains(&src) && !acked.contains(&src) {
@@ -426,6 +444,75 @@ async fn punch_inner(
     }
 }
 
+// Port prediction (+ciris)
+
+/// The largest per-allocation step taken as a steady one. Past it the NAT
+/// allocates randomly, or the measurement saw too many other hosts'
+/// allocations in between, and a prediction would only spray.
+const MAX_PREDICT_STEP: i32 = 64;
+
+/// How far apart the NAT put three consecutive mappings: the session
+/// socket's (`base`), then two fresh sockets', each toward the facilitator.
+/// Differences only, never a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AllocationSteps {
+    base: u16,
+    last: u16,
+    pub(crate) step1: i32,
+    pub(crate) step2: i32,
+}
+
+/// Probe `server` from two fresh sockets after the session socket's probe
+/// mapped to `base_port`: the steps between the three mappings. `None` when
+/// either probe went unanswered.
+async fn allocation_steps(
+    server: SocketAddr,
+    protocol: ProbeProtocol,
+    base_port: u16,
+) -> Option<AllocationSteps> {
+    let bind = if server.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0u16; 8], 0))
+    };
+    let mut ports = [base_port; 3];
+    for port in ports.iter_mut().skip(1) {
+        let socket = UdpSocket::bind(bind).await.ok()?;
+        *port = probe(&socket, server, protocol).await.ok()?.port();
+    }
+    Some(AllocationSteps {
+        base: ports[0],
+        last: ports[2],
+        step1: i32::from(ports[1]) - i32::from(ports[0]),
+        step2: i32::from(ports[2]) - i32::from(ports[1]),
+    })
+}
+
+/// The ports a NAT that allocates in `steps` will likely give the session
+/// socket's next mapping (toward the peer): the next
+/// [`wire::MAX_PREDICTED_PORTS`] allocations past the last one seen, at the
+/// smaller of the two steps. None when the steps disagree in sign, either is
+/// zero (one mapping: nothing to predict) or past [`MAX_PREDICT_STEP`].
+pub(crate) fn predict_ports(steps: AllocationSteps) -> Vec<u16> {
+    let (a, b) = (steps.step1, steps.step2);
+    if a == 0 || b == 0 || a.signum() != b.signum() {
+        return Vec::new();
+    }
+    if a.abs() > MAX_PREDICT_STEP || b.abs() > MAX_PREDICT_STEP {
+        return Vec::new();
+    }
+    let step = a.signum() * a.abs().min(b.abs());
+    let mut out = Vec::new();
+    for k in 1..=wire::MAX_PREDICTED_PORTS as i32 {
+        let port = i32::from(steps.last) + step * k;
+        match u16::try_from(port) {
+            Ok(p) if p >= 1024 && p != steps.base && !out.contains(&p) => out.push(p),
+            _ => {}
+        }
+    }
+    out
+}
+
 // Punch diagnostics (+ciris)
 
 /// The tracing target of the one-line punch and probe summaries, so a tool
@@ -446,6 +533,10 @@ pub enum HeardRelation {
     SameIpOtherPort,
     /// One of the peer's host candidates, exactly.
     HostCandidate,
+    /// One of the ports the peer predicted its NAT would map toward this
+    /// node, on its public IP: the prediction closed an endpoint-dependent
+    /// mapping on the peer's side.
+    Predicted,
     /// A host candidate's IP on another port.
     HostIpOtherPort,
     /// None of the addresses the peer advertised (another public IP: a
@@ -460,6 +551,7 @@ impl HeardRelation {
             HeardRelation::Same => "same",
             HeardRelation::SameIpOtherPort => "same_ip_other_port",
             HeardRelation::HostCandidate => "host_candidate",
+            HeardRelation::Predicted => "predicted",
             HeardRelation::HostIpOtherPort => "host_ip_other_port",
             HeardRelation::OtherIp => "other_ip",
         }
@@ -467,13 +559,18 @@ impl HeardRelation {
 }
 
 /// +ciris — classify `src` against the peer's advertised `public` address
-/// and its `host` candidates. All in canonical form.
+/// and its other targets (`host`): its host candidates and, on its public IP,
+/// the ports it predicted. All in canonical form.
 pub fn heard_relation(src: SocketAddr, public: SocketAddr, host: &[SocketAddr]) -> HeardRelation {
     let (src, public) = (canonical(src), canonical(public));
     if src == public {
         HeardRelation::Same
     } else if host.iter().any(|h| canonical(*h) == src) {
-        HeardRelation::HostCandidate
+        if src.ip() == public.ip() {
+            HeardRelation::Predicted
+        } else {
+            HeardRelation::HostCandidate
+        }
     } else if src.ip() == public.ip() {
         HeardRelation::SameIpOtherPort
     } else if host.iter().any(|h| canonical(*h).ip() == src.ip()) {
@@ -487,12 +584,19 @@ pub fn heard_relation(src: SocketAddr, public: SocketAddr, host: &[SocketAddr]) 
 /// when it ends.
 #[derive(Debug)]
 pub(crate) struct PunchDiag {
+    session: SessionId,
+    /// Set once the line is out, so the drop does not log it twice.
+    logged: bool,
     start: tokio::time::Instant,
     started_unix_ms: u64,
     public: Option<SocketAddr>,
     host: Vec<SocketAddr>,
     host_v4: usize,
     host_v6: usize,
+    predicted: usize,
+    /// Predicted targets dropped because the peer was heard at its
+    /// advertised address (its mapping did not move).
+    pub(crate) predicted_dropped: usize,
     pub(crate) peer_reflexive: usize,
     pub(crate) punched: usize,
     pub(crate) send_errors: u32,
@@ -510,18 +614,29 @@ pub(crate) struct PunchDiag {
 }
 
 impl PunchDiag {
-    pub(crate) fn new(targets: &[SocketAddr]) -> Self {
+    pub(crate) fn new(targets: &[SocketAddr], session: SessionId) -> Self {
         let public = targets.first().map(|a| canonical(*a));
         let host: Vec<SocketAddr> = targets.iter().skip(1).map(|a| canonical(*a)).collect();
+        let is_predicted = |a: &&SocketAddr| public.is_some_and(|p| a.ip() == p.ip());
         PunchDiag {
+            session,
+            logged: false,
             start: tokio::time::Instant::now(),
             started_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
             public,
-            host_v4: host.iter().filter(|a| a.is_ipv4()).count(),
-            host_v6: host.iter().filter(|a| a.is_ipv6()).count(),
+            host_v4: host
+                .iter()
+                .filter(|a| a.is_ipv4() && !is_predicted(a))
+                .count(),
+            host_v6: host
+                .iter()
+                .filter(|a| a.is_ipv6() && !is_predicted(a))
+                .count(),
+            predicted: host.iter().filter(is_predicted).count(),
+            predicted_dropped: 0,
             host,
             peer_reflexive: 0,
             punched: 0,
@@ -588,8 +703,16 @@ impl PunchDiag {
         format!("[{}]", words.join(","))
     }
 
+    /// Log the line with `outcome`, once.
+    pub(crate) fn finish(&mut self, outcome: &'static str) {
+        if !self.logged {
+            self.logged = true;
+            self.log(outcome);
+        }
+    }
+
     /// The one INFO line, with no address or port in it.
-    pub(crate) fn log(&self, session: &SessionId, succeeded: bool) {
+    fn log(&self, outcome: &'static str) {
         let heard_and_acked = self
             .heard
             .iter()
@@ -597,13 +720,15 @@ impl PunchDiag {
         tracing::info!(
             target: DIAG_TARGET,
             event = "punch",
-            session = %session_short(session),
-            outcome = if succeeded { "punched" } else { "window_expired" },
+            session = %session_short(&self.session),
+            outcome,
             elapsed_ms = self.elapsed_ms(),
             started_unix_ms = self.started_unix_ms,
             targets_facilitator_public = usize::from(self.public.is_some()),
             targets_host_v4 = self.host_v4,
             targets_host_v6 = self.host_v6,
+            targets_predicted = self.predicted,
+            predicted_dropped = self.predicted_dropped,
             targets_peer_reflexive = self.peer_reflexive,
             public_family = match self.public { Some(a) if a.is_ipv6() => "v6", Some(_) => "v4", None => "none" },
             punched = self.punched,
@@ -627,6 +752,14 @@ impl PunchDiag {
     }
 }
 
+impl Drop for PunchDiag {
+    /// A punch the session aborted (the peer's REJECT, a release) logs what
+    /// it saw up to then.
+    fn drop(&mut self) {
+        self.finish("aborted");
+    }
+}
+
 /// The first four bytes of a session id, in hex: enough to pair two ends'
 /// lines, nothing more.
 fn session_short(session: &SessionId) -> String {
@@ -640,6 +773,8 @@ fn log_probe_diag(
     socket: &UdpSocket,
     public: Option<SocketAddr>,
     local: &[SocketAddr],
+    steps: Option<AllocationSteps>,
+    predicted: usize,
     elapsed_ms: u64,
 ) {
     let local_port = socket.local_addr().map(|a| a.port()).ok();
@@ -669,6 +804,10 @@ fn log_probe_diag(
         no_nat = word(no_nat),
         host_v4 = local.iter().filter(|a| a.is_ipv4()).count(),
         host_v6 = local.iter().filter(|a| a.is_ipv6()).count(),
+        alloc_measured = steps.is_some(),
+        alloc_step1 = steps.map_or(0, |s| s.step1),
+        alloc_step2 = steps.map_or(0, |s| s.step2),
+        predicted,
         "direct link diag: probe summary"
     );
 }
@@ -924,6 +1063,9 @@ pub(crate) enum Outcome {
         public: Option<SocketAddr>,
         /// +ciris: the probe socket's host candidates.
         local: Vec<SocketAddr>,
+        /// +ciris: the ports this node predicts its NAT will map toward the
+        /// peer (empty: one mapping, or no steady step).
+        predicted: Vec<u16>,
     },
     Punched {
         session: SessionId,
@@ -1020,6 +1162,7 @@ impl DirectLinkRuntime {
                     session,
                     public: None,
                     local: Vec::new(),
+                    predicted: Vec::new(),
                 });
                 return;
             }
@@ -1038,11 +1181,25 @@ impl DirectLinkRuntime {
                 }
             };
             let local = host_candidates(&socket, server);
+            let local_port = socket.local_addr().map(|a| a.port()).ok();
+            // +ciris: a NAT that did not keep the port may be one that maps
+            // per destination; measure its step on fresh sockets.
+            let steps = match public {
+                Some(p)
+                    if Some(p.port()) != local_port && !local.iter().any(|l| l.ip() == p.ip()) =>
+                {
+                    allocation_steps(server, protocol, p.port()).await
+                }
+                _ => None,
+            };
+            let predicted = steps.map(predict_ports).unwrap_or_default();
             log_probe_diag(
                 &session,
                 &socket,
                 public,
                 &local,
+                steps,
+                predicted.len(),
                 probe_start.elapsed().as_millis() as u64,
             );
             let _ = outcomes
@@ -1050,6 +1207,7 @@ impl DirectLinkRuntime {
                     session,
                     public,
                     local,
+                    predicted,
                 })
                 .await;
         });
@@ -1258,8 +1416,13 @@ mod tests {
     async fn the_punch_diag_counts_heard_and_acked_by_class() {
         let public: SocketAddr = "203.0.113.7:40000".parse().unwrap();
         let host: SocketAddr = "[2001:db8::20]:40000".parse().unwrap();
-        let mut diag = PunchDiag::new(&[public, host]);
-        assert_eq!((diag.host_v4, diag.host_v6), (0, 1));
+        let predicted: SocketAddr = "203.0.113.7:40017".parse().unwrap();
+        let mut diag = PunchDiag::new(&[public, host, predicted], [0u8; 16]);
+        assert_eq!((diag.host_v4, diag.host_v6, diag.predicted), (0, 1, 1));
+        diag.heard(predicted);
+        assert_eq!(diag.heard[0].1, HeardRelation::Predicted);
+        diag.heard.clear();
+        diag.punches_heard = 0;
         let remapped: SocketAddr = "203.0.113.7:50000".parse().unwrap();
         diag.heard(remapped);
         diag.heard(remapped);
@@ -1271,6 +1434,143 @@ mod tests {
         assert_eq!(diag.acks_unpunched, 1);
         assert_eq!(PunchDiag::classes(&diag.heard), "[same_ip_other_port]");
         assert!(diag.first_heard_ms.is_some() && diag.first_acked_ms.is_some());
+        diag.finish("punched");
+        assert!(diag.logged, "dropping it now logs nothing more");
+    }
+
+    fn steps(base: u16, p1: u16, p2: u16) -> AllocationSteps {
+        AllocationSteps {
+            base,
+            last: p2,
+            step1: i32::from(p1) - i32::from(base),
+            step2: i32::from(p2) - i32::from(p1),
+        }
+    }
+
+    #[test]
+    fn a_steady_step_predicts_the_next_allocations() {
+        let ports = predict_ports(steps(40000, 40001, 40002));
+        assert_eq!(ports.len(), wire::MAX_PREDICTED_PORTS);
+        assert_eq!(ports[0], 40003);
+        assert_eq!(
+            *ports.last().unwrap(),
+            40002 + wire::MAX_PREDICTED_PORTS as u16
+        );
+        // Other hosts allocating between the probes: the smaller step, so
+        // the range still covers the next allocations.
+        assert_eq!(
+            predict_ports(steps(40000, 40002, 40005))[..2],
+            [40007, 40009]
+        );
+        // Downward allocation.
+        assert_eq!(predict_ports(steps(40010, 40008, 40006))[0], 40004);
+    }
+
+    #[test]
+    fn no_prediction_without_a_steady_step() {
+        // One mapping for every socket's port (or a measurement that saw
+        // the same port twice): nothing to predict.
+        assert!(predict_ports(steps(40000, 40000, 40001)).is_empty());
+        // Random allocation.
+        assert!(predict_ports(steps(40000, 51234, 33310)).is_empty());
+        assert!(predict_ports(steps(40000, 40100, 40200)).is_empty());
+        // Steps of opposite sign.
+        assert!(predict_ports(steps(40000, 40003, 40001)).is_empty());
+        // Never below 1024, never past 65535.
+        assert!(predict_ports(steps(65530, 65532, 65534))
+            .iter()
+            .all(|p| *p > 65534));
+        assert!(predict_ports(steps(1030, 1028, 1026))
+            .iter()
+            .all(|p| *p >= 1024));
+    }
+
+    /// A peer whose NAT filters: it answers nothing until a punch from this
+    /// end has reached its real address, then punches back to wherever that
+    /// came from and acks, as an address-and-port-dependent filter admits.
+    async fn filtered_peer(socket: UdpSocket, session: SessionId, token: [u8; 32]) {
+        let mut buf = [0u8; 256];
+        let until = tokio::time::Instant::now() + PUNCH_WINDOW + Duration::from_secs(1);
+        let mut toward: Option<SocketAddr> = None;
+        let mut tick = tokio::time::interval(PUNCH_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(until) => return,
+                _ = tick.tick() => if let Some(to) = toward {
+                    let frame = wire::punch_frame(PunchKind::Punch, &session, &token, 1);
+                    let _ = socket.send_to(&frame, to).await;
+                },
+                r = socket.recv_from(&mut buf) => {
+                    let Ok((len, src)) = r else { continue };
+                    if let Some((PunchKind::Punch, seq)) =
+                        wire::parse_punch_frame(&buf[..len], &session, &token)
+                    {
+                        toward.get_or_insert(src);
+                        let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                        let _ = socket.send_to(&ack, src).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// +ciris: the peer's advertised address is not where its NAT maps
+    /// toward this end (endpoint-dependent mapping), and its filter drops
+    /// everything until this end has sent to the real one. Only a predicted
+    /// port gets there.
+    #[tokio::test]
+    async fn a_predicted_port_punches_a_peer_its_advertised_address_cannot() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        // The peer's facilitator mapping: same IP, another port.
+        let advertised = loopback().await.local_addr().unwrap();
+        let (session, token) = ([7u8; 16], [8u8; 32]);
+        let peer = tokio::spawn(filtered_peer(b, session, token));
+        let to_b = [advertised, b_addr];
+        let result = punch(&a, &to_b, &session, &token).await;
+        peer.abort();
+        assert_eq!(result.map(|p| p.peer), Some(b_addr));
+        assert_eq!(
+            heard_relation(b_addr, advertised, &[b_addr]),
+            HeardRelation::Predicted
+        );
+    }
+
+    /// Without the prediction the same peer is never reached: the deadlock
+    /// the runners showed (heard 0, rx 0).
+    #[tokio::test]
+    async fn without_the_prediction_the_filtered_peer_is_never_heard() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let advertised = loopback().await.local_addr().unwrap();
+        let (session, token) = ([9u8; 16], [10u8; 32]);
+        let peer = tokio::spawn(filtered_peer(b, session, token));
+        let result = punch(&a, std::slice::from_ref(&advertised), &session, &token).await;
+        peer.abort();
+        assert_eq!(result, None);
+    }
+
+    /// Heard at its advertised address, the peer's mapping did not move: its
+    /// predicted ports stop being punched, and the punch still completes.
+    #[tokio::test]
+    async fn predicted_targets_are_dropped_once_the_peer_is_heard_where_it_said() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        // B predicts two ports on its own IP that nobody holds.
+        let spare1 = loopback().await.local_addr().unwrap();
+        let spare2 = loopback().await.local_addr().unwrap();
+        let (session, token) = ([11u8; 16], [12u8; 32]);
+        let to_b = [b_addr, spare1, spare2];
+        let (ra, rb) = tokio::join!(
+            punch(&a, &to_b, &session, &token),
+            punch(&b, std::slice::from_ref(&a_addr), &session, &token)
+        );
+        assert_eq!(
+            (ra.map(|p| p.peer), rb.map(|p| p.peer)),
+            (Some(b_addr), Some(a_addr))
+        );
     }
 
     #[tokio::test]

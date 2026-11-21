@@ -897,6 +897,7 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
         commit: false,
+        initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
     };
     let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
@@ -1137,6 +1138,7 @@ fn a_peer_cannot_propose_again_inside_the_cooldown() {
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
         commit: false,
+        initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
     };
     pair.a.transport.clock().advance(1_000);
@@ -1901,6 +1903,7 @@ fn a_session_already_punching_stays_busy() {
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
         commit: true,
+        initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
     };
     pair.b.transport.clock().advance(1_000);
@@ -1967,6 +1970,7 @@ fn an_old_style_link_initiators_busy_finds_the_responder_already_yielded() {
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
         commit: true,
+        initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
     };
     let busy = crate::direct_link::Signal::Reject {

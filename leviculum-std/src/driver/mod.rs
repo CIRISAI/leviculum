@@ -5593,11 +5593,10 @@ async fn run_event_loop(
                         session,
                         public,
                         local,
-                    } => Some(
-                        inner
-                            .lock_recover()
-                            .direct_link_probed_with_local(&session, public, local),
-                    ),
+                        predicted,
+                    } => Some(inner.lock_recover().direct_link_probed_with_candidates(
+                        &session, public, local, predicted,
+                    )),
                     Outcome::Punched { session, peer: Some(peer), early, mtu } => {
                         let id = InterfaceId(
                             autoconnect_wiring

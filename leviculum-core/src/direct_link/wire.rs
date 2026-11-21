@@ -49,6 +49,13 @@ pub const REJECT_UNSUPPORTED: u8 = 0x03;
 /// +ciris: the most host candidates a signal carries or a decoder keeps.
 pub const MAX_LOCAL_CANDIDATES: usize = 4;
 
+/// +ciris: the most predicted ports a REQUEST or READY carries (`"q"`). The
+/// sender's NAT allocates a new port per destination (endpoint-dependent
+/// mapping) in steps it measured; these are where its mapping toward the
+/// peer will likely land, on its public IP. The peer punches each, so the
+/// bound is also the most extra targets one session can make it punch.
+pub const MAX_PREDICTED_PORTS: usize = 16;
+
 /// +ciris (leviculum#88): the largest host payload a REQUEST carries. Big
 /// enough for a hybrid-signed CIRIS contact grant (ML-DSA-65, about 6-8 KiB);
 /// the REQUEST must still fit the link's channel MDU.
@@ -132,6 +139,11 @@ pub enum Signal {
         /// +ciris (leviculum#88): opaque bytes for the responder's host to
         /// decide on (CIRIS: the requester's signed contact grant).
         host_payload: Option<Vec<u8>>,
+        /// +ciris: ports the initiator predicts its NAT will map toward the
+        /// responder, on `initiator_public`'s IP ([`MAX_PREDICTED_PORTS`] at
+        /// most); empty when its NAT kept one mapping or showed no steady
+        /// step.
+        initiator_predicted: Vec<u16>,
     },
     Accept {
         session: SessionId,
@@ -148,6 +160,8 @@ pub enum Signal {
         /// +ciris (leviculum#89): the responder agrees to the two-sided
         /// commit (it offers it only when the REQUEST did).
         commit: bool,
+        /// +ciris: the responder's predicted ports, as in REQUEST.
+        responder_predicted: Vec<u16>,
     },
     Complete {
         session: SessionId,
@@ -193,6 +207,7 @@ impl Signal {
                 initiator_local,
                 commit,
                 host_payload,
+                initiator_predicted,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
                 let local = !initiator_local.is_empty();
@@ -201,7 +216,8 @@ impl Signal {
                     3 + u8::from(stun)
                         + u8::from(local)
                         + u8::from(*commit)
-                        + u8::from(host_payload.is_some()),
+                        + u8::from(host_payload.is_some())
+                        + u8::from(!initiator_predicted.is_empty()),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
@@ -216,6 +232,7 @@ impl Signal {
                     write_local(&mut buf, initiator_local);
                 }
                 write_extras(&mut buf, *commit, host_payload.as_deref());
+                write_predicted(&mut buf, initiator_predicted);
             }
             Signal::Accept { session } | Signal::Complete { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
@@ -232,9 +249,15 @@ impl Signal {
                 responder_public,
                 responder_local,
                 commit,
+                responder_predicted,
             } => {
                 let local = !responder_local.is_empty();
-                msgpack::write_fixmap_header(&mut buf, 2 + u8::from(local) + u8::from(*commit));
+                msgpack::write_fixmap_header(
+                    &mut buf,
+                    2 + u8::from(local)
+                        + u8::from(*commit)
+                        + u8::from(!responder_predicted.is_empty()),
+                );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
                 write_endpoint(&mut buf, responder_public);
@@ -242,6 +265,7 @@ impl Signal {
                     write_local(&mut buf, responder_local);
                 }
                 write_extras(&mut buf, *commit, None);
+                write_predicted(&mut buf, responder_predicted);
             }
         }
         buf
@@ -269,6 +293,7 @@ impl Signal {
                 initiator_local: fields.local,
                 commit: fields.commit,
                 host_payload: fields.host_payload,
+                initiator_predicted: fields.predicted,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -283,6 +308,7 @@ impl Signal {
                 responder_public: fields.address.ok_or(WireError::Malformed)?,
                 responder_local: fields.local,
                 commit: fields.commit,
+                responder_predicted: fields.predicted,
             },
             _ => Signal::Complete { session },
         };
@@ -301,6 +327,7 @@ struct Fields {
     local: Vec<SocketAddr>,
     commit: bool,
     host_payload: Option<Vec<u8>>,
+    predicted: Vec<u16>,
 }
 
 impl Fields {
@@ -321,6 +348,7 @@ impl Fields {
                 b"r" => fields.reason = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"l" => fields.local = read_local(data, &mut pos)?,
                 b"c" => fields.commit = read_bool(data, &mut pos)?,
+                b"q" => fields.predicted = read_predicted(data, &mut pos)?,
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -362,6 +390,40 @@ fn write_extras(buf: &mut Vec<u8>, commit: bool, host_payload: Option<&[u8]>) {
         msgpack::write_fixstr(buf, "h");
         msgpack::write_bin(buf, payload);
     }
+}
+
+/// +ciris: `"q"`, the sender's predicted ports, as an array of uints.
+/// Written only when there are any, so a signal without them is byte for
+/// byte what it was; an older decoder skips the unknown key.
+fn write_predicted(buf: &mut Vec<u8>, ports: &[u16]) {
+    if ports.is_empty() {
+        return;
+    }
+    let ports = &ports[..ports.len().min(MAX_PREDICTED_PORTS)];
+    msgpack::write_fixstr(buf, "q");
+    // Not a fixarray: that holds 15 at most, under the cap.
+    msgpack::write_array_header(buf, ports.len());
+    for port in ports {
+        msgpack::write_uint(buf, u64::from(*port));
+    }
+}
+
+/// Ports past [`MAX_PREDICTED_PORTS`], port 0 and anything over 65535 are
+/// skipped, not kept.
+fn read_predicted(data: &[u8], pos: &mut usize) -> Option<Vec<u16>> {
+    let len = msgpack::read_array_len(data, pos)?;
+    let mut out = Vec::new();
+    for _ in 0..len {
+        let port = msgpack::read_msgpack_uint(data, pos)?;
+        if out.len() < MAX_PREDICTED_PORTS {
+            if let Ok(port) = u16::try_from(port) {
+                if port != 0 && !out.contains(&port) {
+                    out.push(port);
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
@@ -801,6 +863,7 @@ mod tests {
             protocol: ProbeProtocol::Rnsp,
             initiator_local: Vec::new(),
             commit: false,
+            initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
         };
         let golden = hex(
@@ -819,6 +882,7 @@ mod tests {
             protocol: ProbeProtocol::Stun,
             initiator_local: Vec::new(),
             commit: false,
+            initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
         };
         let golden = hex(
@@ -848,6 +912,7 @@ mod tests {
                     responder_public: public_v4(),
                     responder_local: Vec::new(),
                     commit: false,
+                    responder_predicted: alloc::vec::Vec::new(),
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -889,8 +954,80 @@ mod tests {
                 responder_public: public_v6(),
                 responder_local: Vec::new(),
                 commit: false,
+                responder_predicted: alloc::vec::Vec::new(),
             })
         );
+    }
+
+    /// +ciris: predicted ports ride `"q"` on REQUEST and READY, round-trip,
+    /// are capped at [`MAX_PREDICTED_PORTS`], and drop port 0 and repeats.
+    #[test]
+    fn predicted_ports_round_trip_and_are_capped() {
+        let many: Vec<u16> = (40_000..40_000 + 2 * MAX_PREDICTED_PORTS as u16).collect();
+        let request = Signal::Request {
+            session: SESSION,
+            facilitator: public_v6(),
+            initiator_public: public_v6(),
+            protocol: ProbeProtocol::Rnsp,
+            initiator_local: Vec::new(),
+            commit: true,
+            host_payload: None,
+            initiator_predicted: many.clone(),
+        };
+        let Ok(Signal::Request {
+            initiator_predicted,
+            ..
+        }) = Signal::decode(MSG_UPGRADE_REQUEST, &request.encode())
+        else {
+            panic!("decodes");
+        };
+        assert_eq!(initiator_predicted, many[..MAX_PREDICTED_PORTS]);
+        let ready = Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: Vec::new(),
+            commit: false,
+            responder_predicted: alloc::vec![0, 41_000, 41_000, 41_001],
+        };
+        let Ok(Signal::Ready {
+            responder_predicted,
+            ..
+        }) = Signal::decode(MSG_UPGRADE_READY, &ready.encode())
+        else {
+            panic!("decodes");
+        };
+        assert_eq!(responder_predicted, [41_000, 41_001]);
+    }
+
+    /// +ciris: a signal with no predicted ports is byte for byte what it was
+    /// before `"q"` existed, so an older peer sees nothing new; one with
+    /// them only adds a key that older decoders skip.
+    #[test]
+    fn no_predicted_ports_leave_the_signal_unchanged() {
+        let ready = Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: Vec::new(),
+            commit: true,
+            responder_predicted: Vec::new(),
+        };
+        let mut old = Vec::new();
+        msgpack::write_fixmap_header(&mut old, 3);
+        write_session(&mut old, &SESSION);
+        msgpack::write_fixstr(&mut old, "a");
+        write_endpoint(&mut old, &public_v6());
+        write_extras(&mut old, true, None);
+        assert_eq!(ready.encode(), old);
+        let with = Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: Vec::new(),
+            commit: true,
+            responder_predicted: alloc::vec![41_000],
+        };
+        let bytes = with.encode();
+        assert_eq!(bytes[0], 0x80 | 4, "one more map entry");
+        assert!(bytes.windows(2).any(|w| w == [0xa1, b'q']));
     }
 
     /// +ciris: host candidates ride `"l"` on REQUEST and READY, round-trip,
@@ -905,6 +1042,7 @@ mod tests {
             protocol: ProbeProtocol::Rnsp,
             initiator_local: alloc::vec![lan(10)],
             commit: false,
+            initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
         };
         assert_eq!(
@@ -917,6 +1055,7 @@ mod tests {
             responder_public: public_v6(),
             responder_local: many.clone(),
             commit: false,
+            responder_predicted: alloc::vec::Vec::new(),
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
@@ -925,6 +1064,7 @@ mod tests {
                 responder_public: public_v6(),
                 responder_local: many[..MAX_LOCAL_CANDIDATES].to_vec(),
                 commit: false,
+                responder_predicted: alloc::vec::Vec::new(),
             })
         );
     }

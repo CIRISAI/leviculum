@@ -212,6 +212,8 @@ struct PendingRequest {
     asked_at_ms: u64,
     /// +ciris (leviculum#89): the REQUEST offered the two-sided commit.
     commit: bool,
+    /// +ciris: the initiator's predicted ports.
+    predicted: Vec<u16>,
 }
 
 /// +ciris: a link this node proposed on, for proposing again.
@@ -575,11 +577,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         public: Option<SocketAddr>,
         local: Vec<SocketAddr>,
     ) -> crate::transport::TickOutput {
+        self.direct_link_probed_with_candidates(session, public, local, Vec::new())
+    }
+
+    /// +ciris — [`Self::direct_link_probed_with_local`], with the ports this
+    /// node predicts its NAT will map toward the peer, sent to the peer to
+    /// punch (see [`wire::MAX_PREDICTED_PORTS`]).
+    pub fn direct_link_probed_with_candidates(
+        &mut self,
+        session: &SessionId,
+        public: Option<SocketAddr>,
+        local: Vec<SocketAddr>,
+        predicted: Vec<u16>,
+    ) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
         if let Some(link_id) = self.direct_links.link_of_session(session) {
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => match public {
-                    Some(addr) => s.probed_with_local(addr, local, now_ms),
+                    Some(addr) => s.probed_with_candidates(addr, local, predicted, now_ms),
                     None => s.probe_failed(),
                 },
                 None => Vec::new(),
@@ -870,6 +885,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             initiator_local,
             commit,
             host_payload,
+            initiator_predicted,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -991,6 +1007,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             protocol,
             asked_at_ms: now_ms,
             commit,
+            predicted: initiator_predicted,
         };
         if ask_host {
             // Held: nothing probed, nothing sent, until the host answers.
@@ -1038,6 +1055,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             now_ms,
         );
         session.set_commit(request.commit);
+        session.set_peer_predicted(request.predicted);
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
     }
