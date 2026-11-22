@@ -175,6 +175,9 @@ pub enum DirectLinkJob {
         session: SessionId,
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
+        /// +ciris: the peer's predicted ports, knocked only (see
+        /// [`crate::direct_link::Step::Punch`]).
+        predicted: Vec<SocketAddr>,
         token: [u8; 32],
         start_delay_ms: u64,
         fast_liveness: bool,
@@ -206,12 +209,13 @@ enum SignalSend {
 
 /// A peer's REQUEST held for the host's answer ([`DirectLinkPolicy::AskHost`]).
 #[derive(Debug, Clone)]
+///
+/// +ciris (CC 5.4.6): the facilitator and probe protocol the REQUEST names
+/// are not kept: the responder probes its own (see `accept_direct_request`).
 struct PendingRequest {
     session: SessionId,
-    facilitator: SocketAddr,
     initiator_public: SocketAddr,
     initiator_local: Vec<SocketAddr>,
-    protocol: ProbeProtocol,
     asked_at_ms: u64,
     /// +ciris (leviculum#89): the REQUEST offered the two-sided commit.
     commit: bool,
@@ -488,7 +492,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session_id),
-            %facilitator,
+            facilitator = "own",
             "direct link: proposing"
         );
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
@@ -890,9 +894,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let Signal::Request {
             session,
-            facilitator,
+            // Named by the peer; never probed here (CC 5.4.6).
+            facilitator: _,
             initiator_public,
-            protocol,
+            protocol: _,
             initiator_local,
             commit,
             host_payload,
@@ -1013,10 +1018,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let request = PendingRequest {
             session,
-            facilitator,
             initiator_public,
             initiator_local,
-            protocol,
             asked_at_ms: now_ms,
             commit,
             predicted: initiator_predicted,
@@ -1040,8 +1043,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.accept_direct_request(link_id, link_key, request, now_ms);
     }
 
-    /// Answer a peer's REQUEST with the establishment flow: probe the
-    /// facilitator it named, then punch.
+    /// Answer a peer's REQUEST with the establishment flow: probe this
+    /// node's OWN facilitator, then punch.
+    ///
+    /// +ciris (CC 5.4.6): never the facilitator the REQUEST names (`"f"`,
+    /// still written and read for rns-rs): probing a party only the peer
+    /// chose would tell that party this node is reaching the peer. With no
+    /// facilitator of its own the node refuses (REJECT UNSUPPORTED) and the
+    /// link stays relayed.
     fn accept_direct_request(
         &mut self,
         link_id: LinkId,
@@ -1049,11 +1058,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request: PendingRequest,
         now_ms: u64,
     ) {
+        let Some(own) = self.direct_links.config.facilitator else {
+            crate::tracing::info!(
+                link = %HexShort(link_id.as_bytes()),
+                session = %HexShort(&request.session),
+                facilitator = "none",
+                "direct link: refusing a peer's proposal: no facilitator of our own"
+            );
+            self.send_direct_link_signal(
+                &link_id,
+                &Signal::Reject {
+                    session: request.session,
+                    reason: wire::REJECT_UNSUPPORTED,
+                },
+                now_ms,
+            );
+            return;
+        };
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&request.session),
-            facilitator = %request.facilitator,
-            peer = %request.initiator_public,
+            facilitator = "own",
             "direct link: accepting a peer's proposal"
         );
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
@@ -1061,10 +1086,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let (mut session, steps) = Session::respond(
             request.session,
             token,
-            request.facilitator,
+            own,
             request.initiator_public,
             request.initiator_local,
-            request.protocol,
+            self.direct_links.config.protocol,
             now_ms,
         );
         session.set_commit(request.commit);
@@ -1207,8 +1232,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 Step::Punch {
                     peer,
                     alternates,
+                    predicted,
                     spray,
                 } => {
+                    // +ciris (review item 2): the knock spray goes to an IP
+                    // the peer reported itself, so only a node that answers
+                    // identified peers sprays: never under accept_all.
+                    let spray = spray
+                        && matches!(
+                            self.direct_links.config.policy,
+                            DirectLinkPolicy::IdentifiedOnly | DirectLinkPolicy::AskHost
+                        );
                     let token = *session.token();
                     let fast_liveness = session.commit();
                     // READY reaches the initiator one relay trip after the
@@ -1225,6 +1259,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         session: session_id,
                         peer,
                         alternates,
+                        predicted,
                         token,
                         start_delay_ms,
                         fast_liveness,

@@ -186,6 +186,12 @@ async fn linked_through_relay_with(
             )
         }
     };
+    // +ciris (CC 5.4.6): a responder probes its OWN facilitator; here, the
+    // relay's, unless the test names one.
+    let mut a_settings = a_settings;
+    if a_settings.facilitator.is_none() {
+        a_settings.facilitator = Some(format!("127.0.0.1:{facilitator_port}"));
+    }
     let mut a = leaf(tcp_port, a_settings).await;
     let mut b = leaf_with(tcp_port, proposer(facilitator_port), b_udp).await;
     tokio::time::sleep(Duration::from_millis(600)).await;

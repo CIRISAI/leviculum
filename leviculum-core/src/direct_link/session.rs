@@ -120,16 +120,24 @@ pub fn same_nat_alternates(
         .collect()
 }
 
-/// +ciris — append the peer's predicted ports, on its public IP, to the
-/// punch alternates: each one not already there, and never its advertised
-/// address itself. Bounded by [`super::wire::MAX_PREDICTED_PORTS`].
-fn push_predicted(alternates: &mut Vec<SocketAddr>, peer_public: SocketAddr, ports: &[u16]) {
+/// +ciris — the peer's predicted ports, on its public IP: each one not an
+/// alternate already, and never its advertised address itself. Bounded by
+/// [`super::wire::MAX_PREDICTED_PORTS`]. Kept apart from the alternates
+/// (review item 1): those get tokened punches, these only knocks.
+fn predicted_targets(
+    alternates: &[SocketAddr],
+    peer_public: SocketAddr,
+    ports: &[u16],
+) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
     for port in ports.iter().take(super::wire::MAX_PREDICTED_PORTS) {
         let addr = SocketAddr::new(peer_public.ip(), *port);
-        if *port != 0 && addr != peer_public && !alternates.contains(&addr) {
-            alternates.push(addr);
+        if *port != 0 && addr != peer_public && !alternates.contains(&addr) && !out.contains(&addr)
+        {
+            out.push(addr);
         }
     }
+    out
 }
 
 /// +ciris — a global unicast IPv6 address (2000::/3), the only kind a peer
@@ -156,6 +164,9 @@ pub enum Step {
     Punch {
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
+        /// +ciris: the peer's predicted ports on its public IP, knocked (no
+        /// token) once the punch has been silent for a while.
+        predicted: Vec<SocketAddr>,
         /// +ciris: the peer's NAT is random and it asked to be sprayed: also
         /// punch up to [`super::wire::MAX_SPRAY_PORTS`] random ports on its
         /// public IP, until anything is heard from it.
@@ -422,8 +433,8 @@ impl Session {
                     return alloc::vec![Step::Failed(Failure::Timeout)];
                 };
                 self.enter(Phase::Punching, now_ms);
-                let mut alternates = same_nat_alternates(public, peer, &self.peer_local);
-                push_predicted(&mut alternates, peer, &self.peer_predicted);
+                let alternates = same_nat_alternates(public, peer, &self.peer_local);
+                let knock = predicted_targets(&alternates, peer, &self.peer_predicted);
                 alloc::vec![
                     Step::Send(Signal::Ready {
                         session: self.id,
@@ -436,6 +447,7 @@ impl Session {
                     Step::Punch {
                         peer,
                         alternates,
+                        predicted: knock,
                         spray: self.peer_birthday,
                     },
                 ]
@@ -503,18 +515,20 @@ impl Session {
                 self.peer_public = Some(*responder_public);
                 self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
-                let mut alternates = match self.own_public {
+                let alternates = match self.own_public {
                     Some(own) => same_nat_alternates(own, *responder_public, responder_local),
                     None => Vec::new(),
                 };
                 self.peer_predicted = responder_predicted.clone();
                 self.peer_predicted
                     .truncate(super::wire::MAX_PREDICTED_PORTS);
-                push_predicted(&mut alternates, *responder_public, &self.peer_predicted);
+                let predicted =
+                    predicted_targets(&alternates, *responder_public, &self.peer_predicted);
                 self.peer_birthday = *responder_birthday;
                 alloc::vec![Step::Punch {
                     peer: *responder_public,
                     alternates,
+                    predicted,
                     spray: self.peer_birthday,
                 }]
             }
@@ -691,6 +705,7 @@ mod tests {
                 peer: a_pub(),
                 alternates: Vec::new(),
                 spray: false,
+                predicted: Vec::new(),
             }
         );
 
@@ -701,6 +716,7 @@ mod tests {
                 peer: b_pub(),
                 alternates: Vec::new(),
                 spray: false,
+                predicted: Vec::new(),
             }]
         );
         assert_eq!(a.peer_public(), Some(b_pub()));
@@ -739,14 +755,15 @@ mod tests {
         let ip = |p: u16| SocketAddr::new(a_pub().ip(), p);
         assert!(b_steps.iter().any(|s| matches!(
             s,
-            Step::Punch { peer, alternates, spray: _  } if *peer == a_pub() && *alternates == [ip(5001), ip(5002)]
+            Step::Punch { peer, predicted, .. } if *peer == a_pub() && *predicted == [ip(5001), ip(5002)]
         )));
         let _ = deliver(&[Step::Send(Signal::Accept { session: ID })], &mut a, 4);
         let a_steps = deliver(&b_steps, &mut a, 5);
         assert!(a_steps.iter().any(|s| matches!(
             s,
-            Step::Punch { peer, alternates, spray: _  }
-                if *peer == b_pub() && *alternates == [SocketAddr::new(b_pub().ip(), 6003)]
+            Step::Punch { peer, alternates, predicted, .. }
+                if *peer == b_pub() && alternates.is_empty()
+                    && *predicted == [SocketAddr::new(b_pub().ip(), 6003)]
         )));
     }
 
@@ -831,6 +848,7 @@ mod tests {
                 peer: a_pub,
                 alternates: alloc::vec![a_lan],
                 spray: false,
+                predicted: Vec::new(),
             },
             "B punches A's public address and A's host candidate"
         );
@@ -841,6 +859,7 @@ mod tests {
                 peer: b_pub,
                 alternates: alloc::vec![b_lan],
                 spray: false,
+                predicted: Vec::new(),
             }],
             "A punches B's public address and B's host candidate"
         );

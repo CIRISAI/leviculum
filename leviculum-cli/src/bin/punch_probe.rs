@@ -48,6 +48,15 @@ struct Cli {
     /// A public STUN server (`host:port`) for the mapping-behaviour check.
     #[arg(long)]
     stun: Option<String>,
+    /// A second observer the node's session socket also probes, so it can
+    /// tell an endpoint-dependent NAT (and only then advertise predicted
+    /// ports or "b"). TEST ONLY: a production node has none unless its
+    /// operator configures one (`probe_addr2`).
+    #[arg(long)]
+    facilitator2: Option<String>,
+    /// How to probe `--facilitator2`: rnsp or stun.
+    #[arg(long, default_value = "stun")]
+    protocol2: String,
     /// Print every log line to stderr (local runs only: they carry addresses).
     #[arg(long)]
     verbose: bool,
@@ -70,6 +79,11 @@ enum Role {
         /// listener prints it (`whois`). Test identities only.
         #[arg(long)]
         seed: Option<String>,
+        /// Accept a direct link only from the dialer whose identity
+        /// `dial --seed` derives from this (ask_host with an allowlist; never
+        /// accept_all on a public destination).
+        #[arg(long)]
+        allow_seed: String,
     },
     /// Print the destination and key `listen --seed` will use; no network.
     Whois {
@@ -89,6 +103,11 @@ enum Role {
         /// Seconds between proposals; leviculum refuses under 60.
         #[arg(long, default_value_t = 70)]
         spacing_secs: u64,
+        /// Derive this dialer's throwaway identity from this string; it
+        /// identifies itself on the link, so the listener's allowlist
+        /// (`listen --allow-seed`) admits it.
+        #[arg(long)]
+        seed: String,
     },
 }
 
@@ -341,10 +360,18 @@ async fn main() {
         .enable_transport(false)
         .add_tcp_client(relay)
         .direct_link(DirectLinkSettings {
-            policy: DirectLinkPolicy::AcceptAll,
+            // ask_host: the listener admits only its allowlisted dialer, and
+            // only a node answering identified peers may spray.
+            policy: DirectLinkPolicy::AskHost,
             facilitator: Some(cli.relay.clone()),
             protocol: ProbeProtocol::Rnsp,
             facilitator_port: None,
+            facilitator2: cli.facilitator2.clone(),
+            protocol2: if cli.protocol2 == "rnsp" {
+                ProbeProtocol::Rnsp
+            } else {
+                ProbeProtocol::Stun
+            },
         })
         .storage_path(storage.path().to_path_buf())
         .build()
@@ -361,7 +388,9 @@ async fn main() {
             duration_secs,
             announce_secs,
             seed,
+            allow_seed,
         } => {
+            let allowed = *listener_identity(Some(&allow_seed)).hash();
             let identity = listener_identity(seed.as_deref());
             let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
             let mut dest = Destination::new(
@@ -391,6 +420,16 @@ async fn main() {
                         out(json!({"role": role, "kind": "announce", "ok": ok}));
                     }
                     ev = rx.recv() => match ev {
+                        Some(NodeEvent::DirectLinkRequested { link_id, peer_identity, .. }) => {
+                            let ok = peer_identity == Some(allowed);
+                            let r = if ok {
+                                node.accept_direct_link(&link_id).await
+                            } else {
+                                node.reject_direct_link(&link_id).await
+                            };
+                            out(json!({"role": role, "kind": "event", "event": "DirectLinkRequested",
+                                       "allowlisted": ok, "answered": r.is_ok()}));
+                        }
                         Some(ev) => if let Some(v) = event_json(role, &ev) { out(v) },
                         None => break,
                     },
@@ -406,7 +445,9 @@ async fn main() {
             key,
             attempts,
             spacing_secs,
+            seed,
         } => {
+            let me = listener_identity(Some(&seed));
             let hash = DestinationHash::new(unhex::<16>(&to).expect("--to"));
             let key = unhex::<32>(&key).expect("--key");
             let t = Instant::now();
@@ -434,7 +475,12 @@ async fn main() {
                             )
                             .await
                             {
-                                Ok(Ok(_)) => Some((id, h)),
+                                Ok(Ok(_)) => {
+                                    // Identify, so the listener's allowlist
+                                    // can admit this dialer.
+                                    let _ = node.identify_link(&id, &me).await;
+                                    Some((id, h))
+                                }
                                 _ => None,
                             }
                         }

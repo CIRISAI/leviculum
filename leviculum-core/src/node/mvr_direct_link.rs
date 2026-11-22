@@ -149,9 +149,10 @@ impl Pair {
             facilitator: Some(facilitator()),
             protocol: ProbeProtocol::Rnsp,
         });
+        // +ciris (CC 5.4.6): B answers by probing its own facilitator.
         self.b.set_direct_link_config(DirectLinkConfig {
             policy: b_policy,
-            facilitator: None,
+            facilitator: Some(facilitator()),
             protocol: ProbeProtocol::Rnsp,
         });
     }
@@ -318,6 +319,100 @@ fn signals_never_reach_the_application() {
     };
     assert!(!leaked(&pair.a_events), "A saw a signal as a message");
     assert!(!leaked(&pair.b_events), "B saw a signal as a message");
+}
+
+/// +ciris (CC 5.4.6): a responder probes its OWN facilitator, never the one
+/// the REQUEST names; with none of its own it refuses (UNSUPPORTED) and the
+/// link stays relayed.
+#[test]
+fn a_responder_probes_its_own_facilitator_not_the_one_named() {
+    let own: SocketAddr = "198.51.100.200:4343".parse().unwrap();
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.b.set_direct_link_config(DirectLinkConfig {
+        policy: DirectLinkPolicy::AcceptAll,
+        facilitator: Some(own),
+        protocol: ProbeProtocol::Rnsp,
+    });
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    // A's REQUEST names A's facilitator.
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    match pair.b.take_direct_link_jobs().as_slice() {
+        [DirectLinkJob::Probe {
+            session: s, server, ..
+        }] => {
+            assert_eq!(*s, session);
+            assert_eq!(*server, own, "B probes its own facilitator");
+            assert_ne!(*server, facilitator(), "never the one A named");
+        }
+        other => panic!("expected one probe, got {other:?}"),
+    }
+}
+
+/// +ciris (review item 2): the spray goes to an IP the peer reported, so a
+/// node answering under accept_all never sprays, even when the peer asks
+/// ("b"); one answering identified peers (here ask_host) does.
+#[test]
+fn only_a_node_answering_identified_peers_sprays() {
+    for (policy, sprays) in [
+        (DirectLinkPolicy::AcceptAll, false),
+        (DirectLinkPolicy::AskHost, true),
+    ] {
+        let mut pair = Pair::new();
+        pair.configure(policy);
+        pair.propose();
+        let session = only_probe(&pair.a.take_direct_link_jobs());
+        // A's NAT is random: its REQUEST asks to be sprayed.
+        let out = pair.a.direct_link_probed_with_candidates(
+            &session,
+            Some(a_public()),
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        pair.pump_from_a(packets(&out));
+        if policy == DirectLinkPolicy::AskHost {
+            let out = pair.b.accept_direct_link(&pair.link).expect("accept");
+            pair.pump_from_b(packets(&out));
+        }
+        let _ = only_probe(&pair.b.take_direct_link_jobs());
+        let _ = pair.b.direct_link_probed(&session, Some(b_public()));
+        match pair.b.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { spray, .. }] => {
+                assert_eq!(*spray, sprays, "{policy:?}");
+            }
+            other => panic!("expected one punch, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_responder_with_no_facilitator_of_its_own_refuses() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.b.set_direct_link_config(DirectLinkConfig {
+        policy: DirectLinkPolicy::AcceptAll,
+        facilitator: None,
+        protocol: ProbeProtocol::Rnsp,
+    });
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert!(
+        pair.b.take_direct_link_jobs().is_empty(),
+        "B probes nothing"
+    );
+    assert!(pair.a_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkFailed {
+            failure: Failure::Rejected(wire::REJECT_UNSUPPORTED),
+            proposed: true,
+            ..
+        }
+    )));
 }
 
 #[test]

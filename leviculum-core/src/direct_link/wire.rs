@@ -447,8 +447,8 @@ fn write_birthday(buf: &mut Vec<u8>, birthday: bool) {
     }
 }
 
-/// Ports past [`MAX_PREDICTED_PORTS`], port 0 and anything over 65535 are
-/// skipped, not kept.
+/// Ports past [`MAX_PREDICTED_PORTS`], below 1024 (well-known, never a NAT
+/// mapping worth knocking on) and over 65535 are skipped, not kept.
 fn read_predicted(data: &[u8], pos: &mut usize) -> Option<Vec<u16>> {
     let len = msgpack::read_array_len(data, pos)?;
     let mut out = Vec::new();
@@ -456,7 +456,8 @@ fn read_predicted(data: &[u8], pos: &mut usize) -> Option<Vec<u16>> {
         let port = msgpack::read_msgpack_uint(data, pos)?;
         if out.len() < MAX_PREDICTED_PORTS {
             if let Ok(port) = u16::try_from(port) {
-                if port != 0 && !out.contains(&port) {
+                // +ciris (review item 2): never a well-known port.
+                if port >= 1024 && !out.contains(&port) {
                     out.push(port);
                 }
             }
@@ -804,6 +805,29 @@ pub fn punch_frame_kind(data: &[u8]) -> Option<PunchKind> {
     }
 }
 
+/// +ciris (review item 1): the magic of a knock.
+const KNOCK_MAGIC: &[u8; 4] = b"RNSK";
+/// +ciris: length of a knock: the magic and 12 random bytes.
+pub const KNOCK_LEN: usize = 4 + 12;
+
+/// +ciris (review item 1): a knock, sent to ports that may belong to anyone
+/// on the peer's NAT (the spray, the predicted ports). Its only job is to
+/// open this node's own NAT filter toward that port, so the peer's tokened
+/// punch from it gets in. It carries no session id and no token, nothing a
+/// stranger on that IP could tie to a session or replay: the magic and
+/// `pad` (random per knock). A peer ignores it.
+pub fn knock_frame(pad: &[u8; 12]) -> [u8; KNOCK_LEN] {
+    let mut out = [0u8; KNOCK_LEN];
+    out[..4].copy_from_slice(KNOCK_MAGIC);
+    out[4..].copy_from_slice(pad);
+    out
+}
+
+/// +ciris: whether `data` is a knock (never a punch, an ack or data).
+pub fn is_knock(data: &[u8]) -> bool {
+    data.len() == KNOCK_LEN && &data[..4] == KNOCK_MAGIC
+}
+
 /// +ciris (leviculum#104): the magic of a path-MTU probe.
 const MTU_PROBE_MAGIC: &[u8; 4] = b"RNSM";
 
@@ -1031,7 +1055,8 @@ mod tests {
             responder_public: public_v6(),
             responder_local: Vec::new(),
             commit: false,
-            responder_predicted: alloc::vec![0, 41_000, 41_000, 41_001],
+            // Port 0, a well-known port and a repeat are all dropped.
+            responder_predicted: alloc::vec![0, 80, 41_000, 41_000, 41_001],
             responder_birthday: false,
         };
         let Ok(Signal::Ready {
@@ -1042,6 +1067,23 @@ mod tests {
             panic!("decodes");
         };
         assert_eq!(responder_predicted, [41_000, 41_001]);
+    }
+
+    /// +ciris (review item 1): a knock carries neither the session nor the
+    /// token, parses as no punch frame, and is told apart.
+    #[test]
+    fn a_knock_carries_no_session_and_no_token() {
+        let token = [0xA7u8; 32];
+        let pad = [0x5Cu8; 12];
+        let knock = knock_frame(&pad);
+        assert!(is_knock(&knock));
+        assert_eq!(punch_frame_kind(&knock), None);
+        assert_eq!(parse_punch_frame(&knock, &SESSION, &token), None);
+        for needle in [&SESSION[..4], &token[..4]] {
+            assert!(!knock.windows(4).any(|w| w == needle), "leaks {needle:?}");
+        }
+        let punch = punch_frame(PunchKind::Punch, &SESSION, &token, 1);
+        assert!(!is_knock(&punch));
     }
 
     /// +ciris: `"b"` rides REQUEST and READY only when set, and round-trips.

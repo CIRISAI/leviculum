@@ -5198,6 +5198,12 @@ async fn run_event_loop(
     let (direct_outcome_tx, mut direct_outcome_rx) =
         mpsc::channel::<crate::direct_link::Outcome>(64);
     let mut direct_links = crate::direct_link::DirectLinkRuntime::new(direct_outcome_tx);
+    direct_links.set_second_observer(
+        direct_link
+            .facilitator2
+            .clone()
+            .map(|addr| (addr, direct_link.protocol2)),
+    );
     let _facilitator = match direct_link.facilitator_port {
         Some(port) => match crate::direct_link::spawn_facilitator(port).await {
             Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),

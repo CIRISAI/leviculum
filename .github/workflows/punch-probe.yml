@@ -1,9 +1,13 @@
-# +ciris: live NAT punch diagnostics. Dials a `punch-probe listen` running
-# elsewhere, over the relay, from each OS's hosted runner, and keeps each
-# runner's JSON lines. Manual dispatch only: never on push or pull request.
+# +ciris: live NAT punch diagnostics. Runs `punch-probe` on each OS's hosted
+# runner, dialing a listener elsewhere over the relay (or listening, for the
+# reverse run), and keeps each runner's JSON lines. Manual dispatch only:
+# never on push or pull request.
 #
 # The tool prints no IP address or port (counts and classes only), so the
 # logs and artifacts are safe to keep. The relay dial is public.
+#
+# Inputs reach the shell only through env, never interpolated into the
+# script (review item 9).
 name: punch-probe
 
 on:
@@ -21,6 +25,9 @@ on:
         description: "listener signing key (hex); dial only"
         required: false
         default: ""
+      seed_tag:
+        description: "throwaway identity tag: the dialer is <tag>-dialer, a listening runner <tag>-<os>"
+        required: true
       listen_secs:
         description: "how long a listening runner stays up"
         required: false
@@ -36,25 +43,26 @@ on:
         description: "public STUN server for the mapping check (empty: skip)"
         required: false
         default: "stun.l.google.com:19302"
+      facilitator2:
+        description: "TEST ONLY second observer for NAT classification (empty: none)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  dial:
-    name: ${{ inputs.role }} (${{ matrix.os }})
+  probe:
+    name: probe (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, job: ubuntu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, job: windows }
+          - { os: macos-latest, target: aarch64-apple-darwin, job: macos }
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
@@ -67,20 +75,42 @@ jobs:
         run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
       - name: run
         shell: bash
+        env:
+          IN_ROLE: ${{ inputs.role }}
+          IN_DEST: ${{ inputs.dest }}
+          IN_KEY: ${{ inputs.key }}
+          IN_SEED_TAG: ${{ inputs.seed_tag }}
+          IN_RELAY: ${{ inputs.relay }}
+          IN_ATTEMPTS: ${{ inputs.attempts }}
+          IN_LISTEN_SECS: ${{ inputs.listen_secs }}
+          IN_STUN: ${{ inputs.stun }}
+          IN_FAC2: ${{ inputs.facilitator2 }}
+          EVENT: ${{ github.event_name }}
+          JOB: ${{ matrix.job }}
+          TARGET: ${{ matrix.target }}
+          ATTEMPTS_OVERRIDE: ${{ matrix.attempts }}
         run: |
-          stun_arg=()
-          if [ -n "${{ inputs.stun }}" ]; then stun_arg=(--stun "${{ inputs.stun }}"); fi
-          bin="target/${{ matrix.target }}/release/punch-probe"
-          if [ "${{ inputs.role }}" = "listen" ]; then
-            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
-              listen --duration-secs "${{ inputs.listen_secs }}" | tee "punch-probe-${{ matrix.os }}.jsonl"
+          if [ "$EVENT" = "push" ] && [ -f .github/punch-probe.env ]; then
+            set -a; . .github/punch-probe.env; set +a
           else
-            "$bin" --relay "${{ inputs.relay }}" "${stun_arg[@]}" \
-              dial --to "${{ inputs.dest }}" --key "${{ inputs.key }}" --attempts "${{ inputs.attempts }}" \
-              | tee "punch-probe-${{ matrix.os }}.jsonl"
+            ROLE=$IN_ROLE DEST=$IN_DEST KEY=$IN_KEY SEED_TAG=$IN_SEED_TAG RELAY=$IN_RELAY
+            ATTEMPTS=$IN_ATTEMPTS LISTEN_SECS=$IN_LISTEN_SECS STUN=$IN_STUN FAC2=$IN_FAC2
+          fi
+          if [ -n "$ATTEMPTS_OVERRIDE" ]; then ATTEMPTS=$ATTEMPTS_OVERRIDE; fi
+          extra=()
+          if [ -n "$STUN" ]; then extra+=(--stun "$STUN"); fi
+          if [ -n "$FAC2" ]; then extra+=(--facilitator2 "$FAC2" --protocol2 stun); fi
+          bin="target/$TARGET/release/punch-probe"
+          out="punch-probe-$JOB.jsonl"
+          if [ "$ROLE" = "listen" ]; then
+            "$bin" --relay "$RELAY" "${extra[@]}" listen --duration-secs "$LISTEN_SECS" \
+              --seed "$SEED_TAG-$JOB" --allow-seed "$SEED_TAG-dialer" | tee "$out"
+          else
+            "$bin" --relay "$RELAY" "${extra[@]}" dial --to "$DEST" --key "$KEY" \
+              --attempts "$ATTEMPTS" --seed "$SEED_TAG-dialer" | tee "$out"
           fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: punch-probe-${{ matrix.os }}
-          path: punch-probe-${{ matrix.os }}.jsonl
+          name: punch-probe-${{ matrix.job }}
+          path: punch-probe-${{ matrix.job }}.jsonl
