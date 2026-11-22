@@ -324,8 +324,13 @@ fn event_json(role: &str, ev: &NodeEvent) -> Option<Value> {
         NodeEvent::LinkEstablished { .. } => {
             json!({"role": role, "kind": "event", "event": "LinkEstablished"})
         }
-        NodeEvent::LinkClosed { .. } => {
-            json!({"role": role, "kind": "event", "event": "LinkClosed"})
+        NodeEvent::LinkClosed {
+            reason,
+            is_initiator,
+            ..
+        } => {
+            json!({"role": role, "kind": "event", "event": "LinkClosed",
+                   "reason": format!("{reason:?}"), "initiator": is_initiator})
         }
         _ => return None,
     })
@@ -515,14 +520,22 @@ async fn main() {
             let me = identity_from_file(&identity_file).unwrap_or_else(|e| fail(role, &e));
             let hash = DestinationHash::new(unhex::<16>(&to).expect("--to"));
             let key = unhex::<32>(&key).expect("--key");
-            let t = Instant::now();
-            let found = node
-                .wait_for_path(&hash, Duration::from_secs(60), Duration::from_secs(5))
-                .await
-                .unwrap_or(false);
-            out(
-                json!({"role": role, "kind": "path", "found": found, "ms": t.elapsed().as_millis() as u64, "hops": node.hops_to(&hash)}),
-            );
+            // Up to three 60 s waits, each one logged: a miss is a finding
+            // (it is reported per wait), not a reason to lose the job.
+            let mut found = false;
+            for wait in 1..=3u32 {
+                let t = Instant::now();
+                found = node
+                    .wait_for_path(&hash, Duration::from_secs(60), Duration::from_secs(5))
+                    .await
+                    .unwrap_or(false);
+                out(
+                    json!({"role": role, "kind": "path", "wait": wait, "found": found, "ms": t.elapsed().as_millis() as u64, "hops": node.hops_to(&hash)}),
+                );
+                if found {
+                    break;
+                }
+            }
             if !found {
                 std::process::exit(3);
             }
@@ -531,6 +544,33 @@ async fn main() {
             // Proposals refused by policy (the listener has not admitted this
             // dialer's hash yet): retried, not counted, at most this often.
             let mut not_admitted = 0u32;
+            // Wait until `$next`, logging every event and diag line meanwhile;
+            // a close of our link is logged and drops it, so the next attempt
+            // reopens it instead of proposing on a link that is gone.
+            macro_rules! idle_until {
+                ($next:expr) => {{
+                    let until = tokio::time::Instant::from_std($next);
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(until) => break,
+                            d = diag_rx.recv() => if let Some(d) = d {
+                                out(json!({"role": role, "kind": "diag", "diag": d}));
+                            },
+                            ev = rx.recv() => match ev {
+                                Some(NodeEvent::LinkClosed { link_id: l, reason, .. })
+                                    if link.as_ref().is_some_and(|(id, _)| *id == l) =>
+                                {
+                                    out(json!({"role": role, "kind": "link_lost_idle",
+                                               "reason": format!("{reason:?}")}));
+                                    link = None;
+                                }
+                                Some(ev) => if let Some(v) = event_json(role, &ev) { out(v) },
+                                None => break,
+                            },
+                        }
+                    }
+                }};
+            }
             while attempt <= attempts {
                 // (Re)open the link when there is none.
                 if link.is_none() {
@@ -617,8 +657,7 @@ async fn main() {
                 if refused_by_policy && not_admitted < 10 {
                     not_admitted += 1;
                     out(json!({"role": role, "kind": "not_admitted", "tries": not_admitted}));
-                    let next = proposed_at + Duration::from_secs(61);
-                    tokio::time::sleep_until(next.into()).await;
+                    idle_until!(proposed_at + Duration::from_secs(61));
                     continue;
                 }
                 out(json!({
@@ -632,8 +671,7 @@ async fn main() {
                     let _ = node.retire_direct_link(&link_id).await;
                 }
                 if attempt < attempts {
-                    let next = proposed_at + Duration::from_secs(spacing_secs.max(61));
-                    tokio::time::sleep_until(next.into()).await;
+                    idle_until!(proposed_at + Duration::from_secs(spacing_secs.max(61)));
                 }
                 attempt += 1;
             }
