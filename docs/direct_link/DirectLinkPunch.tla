@@ -1,155 +1,120 @@
 --------------------------- MODULE DirectLinkPunch ---------------------------
 (***************************************************************************)
-(* The direct-link punch of leviculum (+ciris), as the code does it at     *)
-(* 72be0f9 on diag/punch-telemetry: two nodes A and B share a relayed      *)
-(* link, A proposes, both probe a facilitator, both punch, and the link    *)
-(* moves only when both punches succeeded (the two-sided commit, #89).     *)
+(* The direct-link punch of leviculum (+ciris), as the code does it at the *)
+(* head of diag/punch-telemetry after the review fixes (d4ff59e): two     *)
+(* nodes A and B share a relayed RNS link; A proposes; each probes ITS OWN *)
+(* facilitator; both punch; the link moves only when both punches         *)
+(* succeeded (the two-sided commit, #89).                                 *)
 (*                                                                         *)
-(* Built from the code, not from intent. Each action names the code it     *)
-(* follows:                                                                *)
-(*   core  = leviculum-core/src/direct_link/session.rs (Session phases)    *)
-(*   node  = leviculum-core/src/node/direct_link.rs   (admission, steps)   *)
-(*   wire  = leviculum-core/src/direct_link/wire.rs   (signals, caps)      *)
-(*   std   = leviculum-std/src/direct_link.rs         (probe, punch)       *)
+(* Names agreed with the Constitution (CC): linkPath per side is one of   *)
+(* none / relayed / upgrading / direct; the initial state is              *)
+(* RelayedLinkUp, the terminal ones DirectPathUp and RelayedOnly.         *)
 (*                                                                         *)
-(* Abstractions (each listed in DirectLinkPunch.md, "Model choices"):      *)
-(* - time is a tick counter per side inside the punch window; one tick is *)
-(*   one PUNCH_INTERVAL round, and every datagram already sent to a side  *)
-(*   is delivered (or filtered, or lost) before that side ticks again;    *)
-(* - the port space of each public IP is 1..NP; a random allocation and   *)
-(*   the spray's port draws are nondeterministic choices, so a birthday   *)
-(*   collision is a branch, not a probability;                            *)
-(* - the relay carries signals as one FIFO per direction (the RNS Channel *)
-(*   is reliable and ordered); RelayLossy / RelayDup break that on        *)
-(*   purpose, to show what the code relies on.                            *)
+(* Two PLANTS put back behaviour the review removed, so TLC can show each *)
+(* named property catching it:                                            *)
+(*   HijackPlant            72be0f9's spray: tokened punches to sprayed   *)
+(*                          and predicted ports, and an ack from a        *)
+(*                          sprayed port counted as ours;                 *)
+(*   NamedFacilitatorPlant  the responder probes the facilitator the      *)
+(*                          REQUEST names ("f"), not its own.             *)
+(*                                                                         *)
+(* Code references (file:function) are in DirectLinkPunch.md, per action. *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS
     MapA, MapB,          \* "EIM" | "EDMseq" | "EDMrand"   (RFC 4787 4.1)
     FiltA, FiltB,        \* "EIF" | "ADF" | "APDF"          (RFC 4787 5)
-    SameNAT,             \* both behind one NAT: host candidates exchanged
-    Hairpin,             \* that NAT loops public-to-public back inside
-    FacAnswers,          \* the facilitator answers probes
-    Pooling,             \* "paired" | "arbitrary" (RFC 4787 4.1, IP pooling)
-    Observers,           \* 1..4: facilitators/observing peers (classification only)
-    PolicyB,             \* "accept" | "reject"   (B's direct_connect_policy)
-    Glare,               \* B proposes too, crossing A's REQUEST
-    BInitiatedLink,      \* B initiated the RNS link (wins a crossing)
-    RelayLossy,          \* signals may be lost
-    RelayDup,            \* signals may be duplicated
-    NetLossy,            \* UDP datagrams may be lost (not just filtered)
-    Teardown,            \* the link may be torn down mid-attempt
-    KeepaliveOK,         \* the direct interface's keepalive beats the NAT's idle timer
-    SprayHits,           \* "any" | "hit" | "miss": oracle on the spray's draws
-    NP,                  \* ports per public IP
-    W,                   \* punch window, in ticks (PUNCH_WINDOW)
-    EscAt,               \* ESCALATE_AFTER, in ticks
-    BdayAt,              \* BIRTHDAY_AFTER, in ticks
-    K,                   \* MAX_BIRTHDAY_SOCKETS (scaled)
-    S,                   \* MAX_SPRAY_PORTS (scaled)
-    Q,                   \* MAX_PREDICTED_PORTS (scaled)
-    MaxSkew,             \* how many ticks one side may run ahead of the other
-    Latency              \* receiver ticks a datagram may stay in flight (0: none)
+    SameNAT, Hairpin,    \* one NAT for both; it loops public->public back
+    FacA, FacB,          \* each side's OWN facilitator: "F1" | "F2" | "R"
+                         \* ("R": the relay carrying the link runs one)
+    FacAnswers,          \* facilitators answer probes
+    ForgedProbe,         \* A's facilitator answers with a forged mapping
+    Observers,           \* 1..4 observers a side's session socket probes;
+                         \* >= 2 classifies endpoint-dependent (review item 6)
+    Pooling,             \* "paired" | "arbitrary" (RFC 4787 4.1)
+    Stranger,            \* another host holds a port on the hard side's IP
+    PolicyB,             \* "ask_host" | "accept_all" | "reject"
+    Glare, BInitiatedLink,
+    RelayLossy, RelayDup, NetLossy, Teardown, KeepaliveOK,
+    HijackPlant, NamedFacilitatorPlant,
+    SprayHits,           \* "any" | "hit" | "miss": oracle on the spray
+    SprayBudget,         \* the process budget allows the spray (review 2)
+    NP, W, EscAt, BdayAt, K, S, Q, MaxSkew, Latency
 
 Sides == {"A", "B"}
 Other(s) == IF s = "A" THEN "B" ELSE "A"
 Map(s)  == IF s = "A" THEN MapA ELSE MapB
 Filt(s) == IF s = "A" THEN FiltA ELSE FiltB
+OwnFac(s) == IF s = "A" THEN FacA ELSE FacB
 Ports == 1..NP
 None == <<"none">>
-
-\* An address is <<ip, port>>. A side's public IP is its name; with
-\* arbitrary pooling a side's mapping toward the PEER leaves from a second
-\* IP (name \o "2") the facilitator never saw. LAN addresses are
-\* <<"lan", side>> (port 0), reachable only with SameNAT.
-Fac == <<"F", 0>>
+Facs == {"F1", "F2", "R"}
+FacAddr(f) == <<f, 0>>
+IsFac(a) == a[1] \in Facs
+\* The stranger's port on each side's IP (only the hard side's matters).
+StrangerPort == NP
 PubIP(s) == s
 PeerIP(s) == IF Pooling = "arbitrary" /\ Map(s) /= "EIM" THEN s \o "2" ELSE s
 Lan(s) == <<"lan", s>>
-
-\* Sockets: 0 is the session socket (probe + punch); 1..K are birthday
-\* sockets (std birthday_sockets), opened only by a "b" side.
 Socks == 0..K
-
-\* Signals on the relay (wire::Signal), tagged with the session that sent them.
-\*   REQUEST carries the initiator's advertised address, predicted ports, "b".
-\*   READY   the responder's.  ACCEPT / COMPLETE / REJECT(reason).
-Reasons == {"POLICY", "BUSY", "UNSUPPORTED", "PUNCH_FAILED", "GLARE"}
+\* Ports a side's NAT may allocate: never the stranger's.
+Alloc(s) == IF Stranger THEN Ports \ {StrangerPort} ELSE Ports
 
 Phases == {"Idle", "Discovering", "Proposing", "AwaitingReady", "Punching",
            "Committing", "Connected", "Failed", "Gone"}
 
 VARIABLES
-    phase,      \* core Phase, plus Idle / Failed / Gone (link removed)
-    role,       \* "I" (initiator) | "R" (responder) | "-"
-    sid,        \* the session this side runs: "A" or "B" (whose proposal)
-    failure,    \* why it failed (core Failure), or "-"
-    chan,       \* chan[s]: signals on their way TO s (Seq)
-    adv,        \* adv[s]: s's own facilitator-observed address, or None
-    pred,       \* pred[s]: ports s advertises as predicted ("q")
-    bday,       \* bday[s]: s advertises "b"
-    peerAdv, peerPred, peerB, \* what s learned from the peer's REQUEST/READY
-    nat,        \* nat[s]: set of <<sock, dst, port>> mappings on s's NAT
-    ctr,        \* ctr[s]: last sequentially allocated port (EDMseq)
-    open,       \* open[s]: sockets s holds open
-    active,     \* active[s]: the socket s punches from (0, or the winner)
-    targets,    \* punch targets (std punch_inner `targets`)
-    held,       \* predicted targets held back until ESCALATE_AFTER
-    sprayed,    \* addresses sprayed (std `sprayed`)
-    punched,    \* addresses a punch left for (std `punched`)
-    heard,      \* <<sock, addr>> a valid punch arrived on/from
-    acked,      \* <<sock, addr>> a valid ack arrived on/from, addr punched
-    tick,       \* ticks into the window
-    escalated,  \* past ESCALATE_AFTER with nothing heard
-    punch,      \* "none" | "running" | "ok" | "fail"  (driver's verdict)
-    path,       \* <<sock, addr>> the punch settled on, or None
-    peerDone,   \* core peer_committed: the peer's COMPLETE arrived
-    net,        \* datagrams in flight: [src |-> addr, dst |-> addr, k |-> "P"|"A"]
-    expired,    \* a Connected side's mapping went idle (keepalive lost)
-    linkUp
+    phase, role, sid, failure, chan,
+    adv, pred, bday, peerAdv, peerPred, peerB,
+    nat, ctr, open, active,
+    targets, held, knocking, sprayed, punched, heard, acked,
+    tick, escalated, punch, path, peerDone, fellBack,
+    net, linkUp,
+    duped,         \* signals the relay has duplicated (each at most once)
+    \* knowledge (what each party has been given)
+    facSaw,        \* facSaw[f]: <<side, mapped>> pairs facilitator f answered
+    facSessions,   \* session ids any facilitator ever saw (probes carry none)
+    strangerSaw,   \* kinds of frame the stranger received: "K" | "tokened"
+    relaySaw,      \* signal types the relay carried
+    persisted      \* observed mappings written to any record (CC 2.6.8)
 
 vars == <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv, peerPred,
-          peerB, nat, ctr, open, active, targets, held, sprayed, punched,
-          heard, acked, tick, escalated, punch, path, peerDone, net, expired,
-          linkUp>>
+          peerB, nat, ctr, open, active, targets, held, knocking, sprayed,
+          punched, heard, acked, tick, escalated, punch, path, peerDone,
+          fellBack, net, linkUp, duped, facSaw, facSessions, strangerSaw,
+          relaySaw, persisted>>
 
-punchVars == <<open, active, targets, held, sprayed, punched, heard, acked,
-               tick, escalated, punch, path>>
+punchVars == <<open, active, targets, held, knocking, sprayed, punched,
+               heard, acked, tick, escalated, punch, path>>
+knowVars == <<facSaw, facSessions, strangerSaw, relaySaw, persisted, duped>>
 
 -----------------------------------------------------------------------------
-(* NAT: which public port a socket's datagram to dst leaves from, and who   *)
-(* may come back in.                                                        *)
+(* linkPath (CC names), derived from the session state.                    *)
+linkPath(s) ==
+    IF ~linkUp \/ phase[s] = "Gone" THEN "none"
+    ELSE IF phase[s] = "Connected" THEN (IF fellBack[s] THEN "relayed" ELSE "direct")
+    ELSE IF phase[s] \in {"Idle", "Failed"} THEN "relayed"
+    ELSE "upgrading"
 
+RelayedLinkUp == \A s \in Sides : linkPath(s) = "relayed" /\ phase[s] = "Idle"
+DirectPathUp == \A s \in Sides : linkPath(s) = "direct"
+RelayedOnly == /\ \A s \in Sides : linkPath(s) = "relayed" /\ phase[s] \in {"Failed", "Idle"}
+               /\ \E t \in Sides : phase[t] = "Failed"
+
+-----------------------------------------------------------------------------
+(* NAT.                                                                     *)
 Used(s) == {m[3] : m \in nat[s]}
 MapOf(s, k, d) == {m[3] : m \in {x \in nat[s] : x[1] = k /\ x[2] = d}}
-\* The IP a datagram from s to d leaves with.
-SrcIP(s, d) == IF d[1] = "lan" THEN "lan"
-               ELSE IF d = Fac THEN PubIP(s) ELSE PeerIP(s)
-
-\* Ports a new mapping of socket k toward d may take (a set: several means
-\* the NAT's choice is free). EIM keeps one port per socket whatever the
-\* destination; EDMseq takes the next; EDMrand any unused one.
+SrcIP(s, d) == IF d[1] = "lan" THEN "lan" ELSE IF IsFac(d) THEN PubIP(s) ELSE PeerIP(s)
 NewPorts(s, k, d) ==
     IF Map(s) = "EIM" THEN
         LET have == {m[3] : m \in {x \in nat[s] : x[1] = k}}
         IN IF have /= {} THEN have ELSE {k + 1}
     ELSE IF Map(s) = "EDMseq" THEN {ctr[s] + 1}
-    ELSE Ports \ Used(s)
-
-\* The public address socket k of s sends to d from, if mapped already.
-Src(s, k, d) ==
-    IF d[1] = "lan" THEN Lan(s)
-    ELSE LET p == MapOf(s, k, d) IN
-         IF p = {} THEN None ELSE <<SrcIP(s, d), CHOOSE x \in p : TRUE>>
-
-\* Sending creates the mapping if needed: the new nat and ctr.
+    ELSE Alloc(s) \ Used(s)
 WithMapping(s, k, d, port) ==
-    IF d[1] = "lan" \/ MapOf(s, k, d) /= {} THEN nat[s]
-    ELSE nat[s] \cup {<<k, d, port>>}
-
-\* Does s's NAT let a datagram from src in to its public port? Returns the
-\* socket it reaches, or -1. (RFC 4787 5: filtering.)
+    IF d[1] = "lan" \/ MapOf(s, k, d) /= {} THEN nat[s] ELSE nat[s] \cup {<<k, d, port>>}
 Admit(s, src, dstAddr) ==
     LET ms == {m \in nat[s] : <<SrcIP(s, m[2]), m[3]>> = dstAddr}
         socks == {m[1] : m \in ms}
@@ -179,6 +144,7 @@ Init ==
     /\ active = [s \in Sides |-> 0]
     /\ targets = [s \in Sides |-> {}]
     /\ held = [s \in Sides |-> {}]
+    /\ knocking = [s \in Sides |-> {}]
     /\ sprayed = [s \in Sides |-> {}]
     /\ punched = [s \in Sides |-> {}]
     /\ heard = [s \in Sides |-> {}]
@@ -188,87 +154,93 @@ Init ==
     /\ punch = [s \in Sides |-> "none"]
     /\ path = [s \in Sides |-> None]
     /\ peerDone = [s \in Sides |-> FALSE]
+    /\ fellBack = [s \in Sides |-> FALSE]
     /\ net = {}
-    /\ expired = [s \in Sides |-> FALSE]
     /\ linkUp = TRUE
+    /\ duped = {}
+    /\ facSaw = [f \in Facs |-> {}]
+    /\ facSessions = {}
+    /\ strangerSaw = {}
+    /\ relaySaw = {}
+    /\ persisted = {}
 
-Send(s, m) == chan' = [chan EXCEPT ![Other(s)] = Append(@, m)]
+\* A signal on the relayed link (wire::Signal over the RNS Channel). The
+\* relay sees its type travel by; its content is the link's encrypted
+\* payload (RelaySaw records only the type).
+Send(s, m) ==
+    /\ chan' = [chan EXCEPT ![Other(s)] = Append(@, m)]
+    /\ relaySaw' = relaySaw \cup {m.t}
+Front(s) == chan[s][1]
 
 -----------------------------------------------------------------------------
-(* Proposing (node propose_direct_link -> core Session::initiate).          *)
-
-\* A proposes; with Glare, B proposes too. The initiator probes first.
+(* Proposing: node propose_direct_link -> core Session::initiate.          *)
 Propose(s) ==
-    /\ linkUp /\ phase[s] = "Idle"
-    /\ (s = "A" \/ Glare)
+    /\ linkUp /\ phase[s] = "Idle" /\ (s = "A" \/ Glare)
     /\ phase' = [phase EXCEPT ![s] = "Discovering"]
     /\ role' = [role EXCEPT ![s] = "I"]
     /\ sid' = [sid EXCEPT ![s] = s]
     /\ UNCHANGED <<failure, chan, adv, pred, bday, peerAdv, peerPred, peerB,
-                   nat, ctr, punchVars, peerDone, net, expired, linkUp>>
+                   nat, ctr, punchVars, peerDone, fellBack, net, linkUp, knowVars>>
 
-(* The punch starts (std start_punch -> punch_with). Targets: the peer's
-   advertised address, its LAN candidate when one NAT is shared (core
-   same_nat_alternates), and its predicted ports held back (std punch_inner
-   `held`). *)
+(* Which facilitator a side probes. The initiator: its own. The responder:
+   its own too (CC 5.4.6, node accept_direct_request), or, with the plant,
+   the one the REQUEST named. *)
+ProbeTarget(s) ==
+    IF role[s] = "R" /\ NamedFacilitatorPlant THEN OwnFac(Other(s)) ELSE OwnFac(s)
+
 StartPunch(s, padv, ppred) ==
     /\ targets' = [targets EXCEPT ![s] = {padv} \cup (IF SameNAT THEN {Lan(Other(s))} ELSE {})]
     /\ held' = [held EXCEPT ![s] = {<<padv[1], p>> : p \in ppred} \ {padv}]
     /\ punch' = [punch EXCEPT ![s] = "running"]
     /\ tick' = [tick EXCEPT ![s] = 0]
-    /\ UNCHANGED <<open, active, sprayed, punched, heard, acked, escalated, path>>
+    /\ UNCHANGED <<open, active, knocking, sprayed, punched, heard, acked, escalated, path>>
 
-(* The facilitator probe (std start_probe + allocation_steps + predict_ports).
-   The session socket maps toward the facilitator; a side whose port moved
-   measures two more allocations: steady (EDMseq) -> predicted ports, random
-   (EDMrand) -> "b". EIM keeps its port (port-preserving in the model): it
-   advertises neither. Gap G1: an EIM NAT that does not keep the port also
-   measures, and advertises "q" (steady) or "b" (random) on 0.34; no traffic
-   comes of it unless the punch is silent for ESCALATE_AFTER. *)
+(* The probe (std start_probe). The session socket maps toward the chosen
+   facilitator; it learns its address (or, ForgedProbe, a wrong port). With
+   Observers >= 2 the same socket toward a second observer says whether the
+   mapping is endpoint-dependent (classify_nat); only then does the side
+   advertise "q" (steady steps) or "b" (random) (advertise). A probe carries
+   a random nonce, never the session (facSessions stays empty). *)
 ProbeAnswer(s, p) ==
     /\ linkUp /\ phase[s] = "Discovering" /\ FacAnswers
-    /\ p \in NewPorts(s, 0, Fac)
-    /\ LET c2 == IF Map(s) = "EDMseq" THEN p + 2 ELSE ctr[s]
-           q  == IF Map(s) = "EDMseq" THEN {c2 + i : i \in 1..Q} \cap Ports ELSE {}
-           b  == Map(s) = "EDMrand"
+    /\ p \in NewPorts(s, 0, FacAddr(ProbeTarget(s)))
+    /\ LET f == ProbeTarget(s)
+           seen == IF ForgedProbe /\ s = "A" THEN (IF p = NP THEN 1 ELSE p + 1) ELSE p
+           edm == Map(s) /= "EIM" /\ Observers >= 2
+           c2 == IF Map(s) = "EDMseq" THEN p + 2 ELSE ctr[s]
+           q  == IF edm /\ Map(s) = "EDMseq" THEN {c2 + i : i \in 1..Q} \cap Ports ELSE {}
+           b  == edm /\ Map(s) = "EDMrand"
+           me == <<PubIP(s), seen>>
        IN
-       /\ nat' = [nat EXCEPT ![s] = @ \cup {<<0, Fac, p>>}]
+       /\ nat' = [nat EXCEPT ![s] = @ \cup {<<0, FacAddr(f), p>>}]
        /\ ctr' = [ctr EXCEPT ![s] = c2]
-       /\ adv' = [adv EXCEPT ![s] = <<PubIP(s), p>>]
+       /\ adv' = [adv EXCEPT ![s] = me]
        /\ pred' = [pred EXCEPT ![s] = q]
        /\ bday' = [bday EXCEPT ![s] = b]
+       /\ facSaw' = [facSaw EXCEPT ![f] = @ \cup {<<s, p>>}]
        /\ IF role[s] = "I"
-          THEN \* core probed_with_candidates, Initiator: send REQUEST.
-               /\ phase' = [phase EXCEPT ![s] = "Proposing"]
-               /\ Send(s, [t |-> "REQUEST", sess |-> sid[s], adv |-> <<PubIP(s), p>>,
-                           q |-> q, b |-> b])
+          THEN /\ phase' = [phase EXCEPT ![s] = "Proposing"]
+               /\ Send(s, [t |-> "REQUEST", sess |-> sid[s], adv |-> me, q |-> q, b |-> b])
                /\ UNCHANGED punchVars
-          ELSE \* Responder: send READY and punch.
-               /\ phase' = [phase EXCEPT ![s] = "Punching"]
-               /\ Send(s, [t |-> "READY", sess |-> sid[s], adv |-> <<PubIP(s), p>>,
-                           q |-> q, b |-> b])
+          ELSE /\ phase' = [phase EXCEPT ![s] = "Punching"]
+               /\ Send(s, [t |-> "READY", sess |-> sid[s], adv |-> me, q |-> q, b |-> b])
                /\ StartPunch(s, peerAdv[s], peerPred[s])
-    /\ UNCHANGED <<role, sid, failure, peerAdv, peerPred, peerB, peerDone, net,
-                   expired, linkUp>>
+    /\ UNCHANGED <<role, sid, failure, peerAdv, peerPred, peerB, peerDone, fellBack,
+                   net, linkUp, facSessions, strangerSaw, persisted, duped>>
 
-\* core probe_failed: a responder REJECTs UNSUPPORTED; both fail ProbeFailed.
 ProbeFail(s) ==
     /\ linkUp /\ phase[s] = "Discovering" /\ ~FacAnswers
     /\ phase' = [phase EXCEPT ![s] = "Failed"]
     /\ failure' = [failure EXCEPT ![s] = "ProbeFailed"]
     /\ IF role[s] = "R"
        THEN Send(s, [t |-> "REJECT", sess |-> sid[s], r |-> "UNSUPPORTED"])
-       ELSE UNCHANGED chan
+       ELSE UNCHANGED <<chan, relaySaw>>
     /\ UNCHANGED <<role, sid, adv, pred, bday, peerAdv, peerPred, peerB, nat,
-                   ctr, punchVars, peerDone, net, expired, linkUp>>
+                   ctr, punchVars, peerDone, fellBack, net, linkUp,
+                   facSaw, facSessions, strangerSaw, persisted, duped>>
 
 -----------------------------------------------------------------------------
-(* A signal arrives (node direct_link_signal, core Session::signal).        *)
-
-Front(s) == chan[s][1]
-Pop(s) == chan' = [chan EXCEPT ![s] = Tail(@)]
-
-\* REQUEST admission (node: policy, crossing/glare, busy).
+(* Signals (node direct_link_signal, core Session::signal).                *)
 RecvRequest(s) ==
     /\ linkUp /\ chan[s] /= <<>> /\ Front(s).t = "REQUEST"
     /\ LET m == Front(s)
@@ -277,36 +249,36 @@ RecvRequest(s) ==
            keepOurs == crossable /\ linkInit
            giveWay  == crossable /\ ~linkInit
            busy == phase[s] \notin {"Idle", "Failed"} /\ ~giveWay
-           reject == IF s = "B" /\ PolicyB = "reject" THEN "POLICY"
+           policy == IF s = "B" THEN PolicyB ELSE "ask_host"
+           reject == IF policy = "reject" THEN "POLICY"
                      ELSE IF keepOurs THEN "GLARE"
                      ELSE IF busy THEN "BUSY" ELSE "-"
        IN
        IF reject /= "-"
        THEN /\ chan' = [chan EXCEPT ![s] = Tail(@), ![Other(s)] = Append(@,
                    [t |-> "REJECT", sess |-> m.sess, r |-> reject])]
-            /\ UNCHANGED <<phase, role, sid, failure, peerAdv, peerPred, peerB,
-                           punchVars>>
-       ELSE \* Session::respond: ACCEPT, then probe the facilitator. A node
-            \* giving way ends its own proposal (Failure::Glare) first.
-            /\ chan' = [chan EXCEPT ![s] = Tail(@), ![Other(s)] = Append(@,
+            /\ relaySaw' = relaySaw \cup {"REJECT"}
+            /\ UNCHANGED <<phase, role, sid, failure, peerAdv, peerPred, peerB, punchVars>>
+       ELSE /\ chan' = [chan EXCEPT ![s] = Tail(@), ![Other(s)] = Append(@,
                    [t |-> "ACCEPT", sess |-> m.sess])]
+            /\ relaySaw' = relaySaw \cup {"ACCEPT"}
             /\ phase' = [phase EXCEPT ![s] = "Discovering"]
             /\ role' = [role EXCEPT ![s] = "R"]
             /\ sid' = [sid EXCEPT ![s] = m.sess]
             /\ failure' = [failure EXCEPT ![s] = "-"]
             /\ peerAdv' = [peerAdv EXCEPT ![s] = m.adv]
             /\ peerPred' = [peerPred EXCEPT ![s] = m.q]
-            /\ peerB' = [peerB EXCEPT ![s] = m.b]
+            \* Only a node answering identified peers sprays (node, review 2).
+            /\ peerB' = [peerB EXCEPT ![s] = m.b /\ policy /= "accept_all"]
             /\ UNCHANGED punchVars
-    /\ UNCHANGED <<adv, pred, bday, nat, ctr, peerDone, net, expired, linkUp>>
+    /\ UNCHANGED <<adv, pred, bday, nat, ctr, peerDone, fellBack, net, linkUp,
+                   facSaw, facSessions, strangerSaw, persisted, duped>>
 
-\* Every other signal: for this side's session, in a phase that takes it.
 RecvOther(s) ==
     /\ linkUp /\ chan[s] /= <<>> /\ Front(s).t /= "REQUEST"
-    /\ Pop(s)
+    /\ chan' = [chan EXCEPT ![s] = Tail(@)]
     /\ LET m == Front(s) IN
        IF m.sess /= sid[s] THEN
-            \* For no session of ours (a stale or given-way one): ignored.
             UNCHANGED <<phase, failure, peerAdv, peerPred, peerB, peerDone, punchVars>>
        ELSE CASE
          m.t = "ACCEPT" /\ phase[s] = "Proposing" ->
@@ -321,6 +293,7 @@ RecvOther(s) ==
             /\ phase' = [phase EXCEPT ![s] = "Punching"]
             /\ peerAdv' = [peerAdv EXCEPT ![s] = m.adv]
             /\ peerPred' = [peerPred EXCEPT ![s] = m.q]
+            \* A is the proposer; its policy for the model is ask_host.
             /\ peerB' = [peerB EXCEPT ![s] = m.b]
             /\ StartPunch(s, m.adv, m.q)
             /\ UNCHANGED <<failure, peerDone>>
@@ -331,142 +304,138 @@ RecvOther(s) ==
             /\ phase' = [phase EXCEPT ![s] = "Connected"]
             /\ UNCHANGED <<failure, peerAdv, peerPred, peerB, peerDone, punchVars>>
       [] m.t = "REJECT" /\ phase[s] \in {"Punching", "Committing"} ->
-            \* The peer's punch failed (0x10): this side aborts, its punch
-            \* task dropped (std PunchDiag logs "aborted").
             /\ phase' = [phase EXCEPT ![s] = "Failed"]
             /\ failure' = [failure EXCEPT ![s] = "Rejected(" \o m.r \o ")"]
             /\ punch' = [punch EXCEPT ![s] = IF @ = "running" THEN "aborted" ELSE @]
             /\ UNCHANGED <<peerAdv, peerPred, peerB, peerDone, open, active, targets,
-                           held, sprayed, punched, heard, acked, tick, escalated, path>>
+                           held, knocking, sprayed, punched, heard, acked, tick,
+                           escalated, path>>
       [] OTHER ->
-            \* Out of phase (a duplicate READY, a late ACCEPT): ignored.
             UNCHANGED <<phase, failure, peerAdv, peerPred, peerB, peerDone, punchVars>>
-    /\ UNCHANGED <<role, sid, adv, pred, bday, nat, ctr, net, expired, linkUp>>
+    /\ UNCHANGED <<role, sid, adv, pred, bday, nat, ctr, fellBack, net, linkUp, knowVars>>
 
 -----------------------------------------------------------------------------
-(* The punch (std punch_inner / punch_birthday), one tick at a time.        *)
-
-Punching(s) == phase[s] \in {"Punching"} /\ punch[s] = "running"
-\* The direct interface (Committing / Connected) keeps acking late punches.
+(* The punch (std punch_inner / punch_birthday).                            *)
+Punching(s) == phase[s] = "Punching" /\ punch[s] = "running"
 Listening(s) == Punching(s) \/ phase[s] \in {"Committing", "Connected"}
 PeerPub(s) == peerAdv[s]
-
-\* A datagram to s, and one s must take before it ticks again: in flight
-\* for Latency of s's ticks already (one tick is PUNCH_INTERVAL, 100 ms; a
-\* relay-free round trip spans one or more).
 ToSide(d, s) == d.dst[1] \in {PubIP(s), PeerIP(s)} \/ d.dst = Lan(s)
-DueTo(s) == \E d \in net : ToSide(d, s) /\ d.w >= Latency
-\* s ticks: every datagram still on its way to s has waited one tick more.
-Aged(s) == {IF ToSide(d, s) THEN [d EXCEPT !.w = @ + 1] ELSE d : d \in net}
-
-\* Skew: a side may not run more than MaxSkew ticks ahead of a peer that is
-\* punching or about to (READY in flight). Gap G2: the code bounds the skew
-\* only by RESPONDER_START_DELAY (RTT/2, at most 1.5 s).
+StrangerAddr(d) == Stranger /\ d.dst[1] \in Sides \cup {"A2", "B2"} /\ d.dst[2] = StrangerPort
+                   /\ \A m \in nat[IF d.dst[1] \in {"A", "A2"} THEN "A" ELSE "B"] : m[3] /= StrangerPort
+\* Model choice M1: the network delivers within Latency ticks of GLOBAL
+\* time: no side ticks past a datagram (to anyone) that has been in flight
+\* that long, and every in-flight datagram ages on every tick. (A per-side
+\* bound let one side run its whole window out while the other's answers
+\* sat in flight: an unbounded one-way delay the code never meets, its
+\* 10 s window being far longer than a round trip.)
+DueTo(s) == \E d \in net : ~StrangerAddr(d) /\ d.w >= Latency
+Aged(s) == {[d EXCEPT !.w = @ + 1] : d \in net}
 SkewOK(s) == phase[Other(s)] \in {"Punching", "AwaitingReady", "Discovering", "Proposing"}
              => tick[s] < tick[Other(s)] + MaxSkew + 1
+SilentPrimary(s) == heard[s] = {} /\ acked[s] = {}
 
-\* The spray draws for one tick: up to 1 fresh port on the peer's IP
-\* (SPRAY_PER_TICK, scaled), within S in all. The oracle SprayHits narrows
-\* the draws to the peer's birthday mappings ("hit") or away from them
-\* ("miss"); "any" leaves every draw.
+\* The peer's birthday mappings toward this side, for the spray oracle.
 PeerBdayPorts(s) == {m[3] : m \in {x \in nat[Other(s)] : x[1] # 0}}
 SprayDraws(s) ==
-    LET cand == {<<PeerPub(s)[1], p>> : p \in Ports} \ (targets[s] \cup sprayed[s])
+    LET cand == {<<PeerPub(s)[1], p>> : p \in Ports} \ (targets[s] \cup sprayed[s] \cup knocking[s])
         hits == {a \in cand : a[2] \in PeerBdayPorts(s)}
         pick == CASE SprayHits = "hit"  -> IF hits /= {} THEN hits ELSE cand
                   [] SprayHits = "miss" -> cand \ hits
                   [] OTHER -> cand
-    IN IF peerB[s] /\ escalated[s] /\ heard[s] = {} /\ Cardinality(sprayed[s]) < S
+    IN IF peerB[s] /\ escalated[s] /\ SprayBudget /\ heard[s] = {} /\ Cardinality(sprayed[s]) < S
        THEN {{a} : a \in pick} \cup (IF pick = {} THEN {{}} ELSE {})
        ELSE {{}}
 
-\* Sequential ports for new destinations, in a fixed order (EDMseq).
 RECURSIVE SeqPorts(_, _)
 SeqPorts(D, c) ==
     IF D = {} THEN [x \in {} |-> 0]
-    ELSE LET x == CHOOSE y \in D : TRUE
-         IN (x :> (c + 1)) @@ SeqPorts(D \ {x}, c + 1)
-
-\* The ways s's NAT may map the new destinations D of socket k: one
-\* function D -> port each. EIM: the socket's one port; EDMseq: the next
-\* ones; EDMrand: any injective choice of unused ports.
+    ELSE LET x == CHOOSE y \in D : TRUE IN (x :> (c + 1)) @@ SeqPorts(D \ {x}, c + 1)
 Allocations(s, k, D) ==
     IF D = {} THEN {[x \in {} |-> 0]}
     ELSE IF Map(s) = "EIM" THEN {[x \in D |-> CHOOSE p \in NewPorts(s, k, x) : TRUE]}
     ELSE IF Map(s) = "EDMseq" THEN {SeqPorts(D, ctr[s])}
-    ELSE {f \in [D -> Ports \ Used(s)] :
-            \A x, y \in D : x /= y => f[x] /= f[y]}
+    ELSE {f \in [D -> Alloc(s) \ Used(s)] : \A x, y \in D : x /= y => f[x] /= f[y]}
 
-\* One tick: punch every target from the active socket, spray, keep the
-\* birthday sockets' refresh going, and escalate once silent past EscAt
-\* (std punch_inner's tick arm; punch_birthday's BIRTHDAY_AFTER).
+\* Whether a datagram toward address x carries the token: a punch to a
+\* target does; a knock to a predicted or sprayed port does not, unless the
+\* HijackPlant puts 72be0f9's tokened spray back.
+Tokened(kind) == kind \in {"P", "A"}
+
 Tick(s) ==
-    /\ linkUp /\ Punching(s) /\ tick[s] < W
-    /\ ~DueTo(s) /\ SkewOK(s)
-    /\ LET esc == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] = {}
-           \* Heard already when the escalation point came: drop them (std).
+    /\ linkUp /\ Punching(s) /\ tick[s] < W /\ ~DueTo(s) /\ SkewOK(s)
+    /\ LET esc  == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] = {}
            drop == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] /= {}
-           tg == targets[s] \cup (IF esc THEN held[s] ELSE {})
+           kn   == IF esc THEN held[s] ELSE IF heard[s] /= {} THEN {} ELSE knocking[s]
            openB == bday[s] /\ active[s] = 0 /\ tick[s] + 1 >= BdayAt
-                    /\ heard[s] = {} /\ open[s] = {0}
+                    /\ SilentPrimary(s) /\ open[s] = {0}
            k == active[s]
        IN
        \E spray \in SprayDraws(s) :
-       LET dests == tg \cup spray
+       LET knockTo == kn \cup spray
+           tokTo == targets[s] \cup (IF HijackPlant THEN knockTo ELSE {})
+           dests == targets[s] \cup knockTo
            newD == {x \in dests : x[1] /= "lan" /\ MapOf(s, k, x) = {}}
        IN
        \E f \in Allocations(s, k, newD) :
        LET nat1 == nat[s] \cup {<<k, x, f[x]>> : x \in newD}
-           freeB == Ports \ {m[3] : m \in nat1}
+           freeB == Alloc(s) \ {m[3] : m \in nat1}
        IN
-       \E g \in (IF openB THEN {h \in [1..K -> freeB] :
-                                  \A i, j \in 1..K : i /= j => h[i] /= h[j]}
+       \E g \in (IF openB THEN {h \in [1..K -> freeB] : \A i, j \in 1..K : i /= j => h[i] /= h[j]}
                  ELSE {[x \in {} |-> 0]}) :
        LET nat2 == IF openB THEN nat1 \cup {<<j, PeerPub(s), g[j]>> : j \in 1..K} ELSE nat1
            opened == IF openB THEN 0..K ELSE open[s]
            srcOf(x) == IF x[1] = "lan" THEN Lan(s)
                        ELSE <<SrcIP(s, x), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = k /\ y[2] = x}} : TRUE>>
-           pk == {[src |-> srcOf(x), dst |-> x, k |-> "P", w |-> 0] : x \in dests}
+           pk == {[src |-> srcOf(x), dst |-> x, k |-> "P", w |-> 0] : x \in tokTo}
+           kk == {[src |-> srcOf(x), dst |-> x, k |-> "K", w |-> 0] : x \in knockTo \ tokTo}
            bsrc(j) == <<PeerIP(s), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = j /\ y[2] = PeerPub(s)}} : TRUE>>
            bk == {[src |-> bsrc(j), dst |-> PeerPub(s), k |-> "P", w |-> 0] : j \in (opened \ {0}) \ {k}}
        IN
        /\ nat' = [nat EXCEPT ![s] = nat2]
        /\ ctr' = [ctr EXCEPT ![s] = IF Map(s) = "EDMseq" THEN @ + Cardinality(newD) ELSE @]
-       /\ targets' = [targets EXCEPT ![s] = tg]
        /\ held' = [held EXCEPT ![s] = IF esc \/ drop THEN {} ELSE @]
+       /\ knocking' = [knocking EXCEPT ![s] = kn]
        /\ escalated' = [escalated EXCEPT ![s] = @ \/ esc \/ drop]
        /\ sprayed' = [sprayed EXCEPT ![s] = @ \cup spray]
-       /\ punched' = [punched EXCEPT ![s] = @ \cup tg]
+       /\ punched' = [punched EXCEPT ![s] = @ \cup tokTo]
        /\ open' = [open EXCEPT ![s] = opened]
        /\ tick' = [tick EXCEPT ![s] = @ + 1]
-       /\ net' = Aged(s) \cup pk \cup bk
+       /\ net' = Aged(s) \cup pk \cup kk \cup bk
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
-                   peerPred, peerB, active, heard, acked, punch, path, peerDone,
-                   expired, linkUp>>
+                   peerPred, peerB, active, targets, heard, acked, punch, path,
+                   peerDone, fellBack, linkUp, knowVars>>
 
-\* Deliver a datagram (or the NAT drops it). d.dst is an address on one
-\* side: its public IP (or pooled IP), or its LAN address.
 DstSide(d) == IF d.dst = Lan("A") \/ d.dst[1] \in {"A", "A2"} THEN "A" ELSE "B"
-\* Hairpin: a datagram to the public address of a peer behind the same NAT
-\* reaches it only if that NAT loops it back.
 HairOK(d) == ~SameNAT \/ d.dst[1] = "lan" \/ Hairpin
-\* The socket d reaches on its side, or -1 (NAT filter, closed socket).
 Reaches(d) == LET s == DstSide(d) IN
               IF d.dst[1] = "lan" THEN active[s] ELSE Admit(s, d.src, d.dst)
 Ack(d) == [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]
 
+\* The stranger: a host on the hard side's IP holding StrangerPort. It sees
+\* what lands there; it can answer with a valid tokened frame only if a
+\* tokened frame ever reached it (it cannot forge the token otherwise).
+StrangerGets(d) ==
+    /\ d \in net /\ StrangerAddr(d)
+    /\ net' = (net \ {d}) \cup
+              (IF Tokened(d.k) \/ "tokened" \in strangerSaw
+               THEN {[src |-> d.dst, dst |-> d.src, k |-> "P", w |-> 0],
+                     [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]}
+               ELSE {})
+    /\ strangerSaw' = strangerSaw \cup {IF Tokened(d.k) THEN "tokened" ELSE "K"}
+    /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
+                   peerPred, peerB, nat, ctr, punchVars, peerDone, fellBack,
+                   linkUp, facSaw, facSessions, relaySaw, persisted, duped>>
+
 Deliver(d) ==
-    /\ d \in net
+    /\ d \in net /\ ~StrangerAddr(d)
     /\ LET s == DstSide(d)
            k == Reaches(d)
            taken == linkUp /\ Listening(s) /\ HairOK(d) /\ k /= -1
            onActive == taken /\ k = active[s]
-           \* std birthday_task: the first valid frame on a birthday socket
-           \* switches the punch onto it; every other birthday socket and the
-           \* session socket close (std interface_for). AS CODED at 72be0f9:
-           \* nothing checks whether the session socket had already heard or
-           \* been acked (property SamePath).
+           \* std punch_birthday: switch to birthday socket k only while the
+           \* session socket has heard and been acked by nothing (review 5).
            switch == taken /\ k /= active[s] /\ k /= 0 /\ active[s] = 0 /\ Punching(s)
+                     /\ Tokened(d.k) /\ SilentPrimary(s)
            reply == (onActive \/ switch) /\ d.k = "P"
        IN
        /\ net' = (net \ {d}) \cup (IF reply THEN {Ack(d)} ELSE {})
@@ -475,96 +444,94 @@ Deliver(d) ==
                           CHOOSE p \in {m[3] : m \in {x \in nat[s] : <<SrcIP(s, x[2]), x[3]>> = d.dst}} : TRUE)]
                  ELSE nat
        /\ IF onActive /\ Punching(s) /\ d.k = "P"
-          THEN \* Heard: ack it, punch it too (peer-reflexive), and once heard
-               \* at the advertised address drop the predicted targets.
-               /\ heard' = [heard EXCEPT ![s] = @ \cup {<<k, d.src>>}]
-               /\ targets' = [targets EXCEPT ![s] =
-                     IF d.src = PeerPub(s)
-                     THEN {t \in @ : t = d.src \/ t[1] /= d.src[1] \/ <<k, t>> \in heard[s]} \cup {d.src}
-                     ELSE @ \cup {d.src}]
+          THEN /\ heard' = [heard EXCEPT ![s] = @ \cup {<<k, d.src>>}]
+               \* A source that sent a valid punch proved the token.
+               /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
                /\ UNCHANGED <<acked, open, active>>
           ELSE IF onActive /\ Punching(s) /\ d.k = "A"
-          THEN \* An ack counts if this side punched or sprayed there.
+          THEN \* Ours only if this side sent a tokened punch there (review
+               \* 1); with the plant, a sprayed port counts too (72be0f9).
                /\ acked' = [acked EXCEPT ![s] =
-                     IF d.src \in punched[s] \cup sprayed[s] \cup targets[s]
+                     IF d.src \in punched[s] \/ (HijackPlant /\ d.src \in sprayed[s])
                      THEN @ \cup {<<k, d.src>>} ELSE @]
                /\ UNCHANGED <<heard, targets, open, active>>
           ELSE IF switch
           THEN /\ active' = [active EXCEPT ![s] = k]
                /\ open' = [open EXCEPT ![s] = {k}]
-               \* The punch that got through counts as heard (d19ebf3 fix).
                /\ heard' = [heard EXCEPT ![s] = IF d.k = "P" THEN {<<k, d.src>>} ELSE {}]
                /\ acked' = [acked EXCEPT ![s] = {}]
                /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
           ELSE UNCHANGED <<heard, acked, targets, open, active>>
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
-                   peerPred, peerB, ctr, held, sprayed, punched, tick, escalated,
-                   punch, path, peerDone, expired, linkUp>>
+                   peerPred, peerB, ctr, held, knocking, sprayed, punched, tick,
+                   escalated, punch, path, peerDone, fellBack, linkUp, knowVars>>
 
-\* The network loses a datagram (always possible: UDP).
 Lose(d) ==
     /\ NetLossy /\ d \in net
     /\ net' = net \ {d}
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
-                   peerPred, peerB, nat, ctr, punchVars, peerDone, expired, linkUp>>
+                   peerPred, peerB, nat, ctr, punchVars, peerDone, fellBack,
+                   linkUp, knowVars>>
 
-\* The punch succeeds: the first address both heard and acked on the active
-\* socket (std punch_inner: `acked.iter().find(|a| heard.contains(a))`).
 PunchOK(s) ==
     /\ linkUp /\ Punching(s)
     /\ \E h \in heard[s] : h \in acked[s] /\ h[1] = active[s]
     /\ LET h == CHOOSE x \in heard[s] : x \in acked[s] /\ x[1] = active[s] IN
        /\ path' = [path EXCEPT ![s] = h]
        /\ punch' = [punch EXCEPT ![s] = "ok"]
-       \* core punched(true), two-sided: COMPLETE; Connected if the peer's
-       \* COMPLETE came already, else Committing.
        /\ phase' = [phase EXCEPT ![s] = IF peerDone[s] THEN "Connected" ELSE "Committing"]
        /\ Send(s, [t |-> "COMPLETE", sess |-> sid[s]])
     /\ UNCHANGED <<role, sid, failure, adv, pred, bday, peerAdv, peerPred, peerB,
-                   nat, ctr, open, active, targets, held, sprayed, punched, heard,
-                   acked, tick, escalated, peerDone, net, expired, linkUp>>
+                   nat, ctr, open, active, targets, held, knocking, sprayed,
+                   punched, heard, acked, tick, escalated, peerDone, fellBack,
+                   net, linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
 
-\* The window closes with no path: REJECT(PUNCH_FAILED), Failed(PunchFailed).
 PunchFail(s) ==
-    /\ linkUp /\ Punching(s) /\ tick[s] = W /\ ~(\E d \in net : ToSide(d, s))
+    /\ linkUp /\ Punching(s) /\ tick[s] = W
+    /\ ~(\E d \in net : ToSide(d, s) /\ ~StrangerAddr(d))
     /\ ~(\E h \in heard[s] : h \in acked[s] /\ h[1] = active[s])
     /\ punch' = [punch EXCEPT ![s] = "fail"]
     /\ phase' = [phase EXCEPT ![s] = "Failed"]
     /\ failure' = [failure EXCEPT ![s] = "PunchFailed"]
     /\ Send(s, [t |-> "REJECT", sess |-> sid[s], r |-> "PUNCH_FAILED"])
     /\ UNCHANGED <<role, sid, adv, pred, bday, peerAdv, peerPred, peerB, nat, ctr,
-                   open, active, targets, held, sprayed, punched, heard, acked,
-                   tick, escalated, path, peerDone, net, expired, linkUp>>
+                   open, active, targets, held, knocking, sprayed, punched,
+                   heard, acked, tick, escalated, path, peerDone, fellBack, net,
+                   linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
 
 -----------------------------------------------------------------------------
-(* Timeouts (core Session::poll), the relay's faults, teardown, expiry.     *)
-
-\* A phase that waits on the peer times out once nothing it waits for can
-\* still come: the peer has ended, and nothing is on its way here.
 Waiting(s) == phase[s] \in {"Proposing", "AwaitingReady", "Committing"}
-PeerEnded(s) == phase[Other(s)] \in {"Idle", "Failed", "Gone", "Connected"}
-             \/ (phase[Other(s)] = "Committing" /\ phase[s] = "Committing")
+\* The peer will send this side nothing more: it ended, or sits Idle with
+\* nothing on its way to it, or both wait in Committing (each lost the
+\* other's COMPLETE). Model choice M3: a phase timeout fires only then; the
+\* code's 10-12 s budgets are far longer than a relay round trip.
+PeerEnded(s) == \/ phase[Other(s)] \in {"Failed", "Gone", "Connected"}
+                \/ (phase[Other(s)] = "Idle" /\ chan[Other(s)] = <<>>)
+                \/ (phase[Other(s)] = "Committing" /\ phase[s] = "Committing")
 Timeout(s) ==
-    /\ linkUp /\ Waiting(s) /\ chan[s] = <<>>
-    /\ PeerEnded(s) \/ RelayLossy
+    /\ linkUp /\ Waiting(s) /\ chan[s] = <<>> /\ (PeerEnded(s) \/ RelayLossy)
     /\ phase' = [phase EXCEPT ![s] = "Failed"]
     /\ failure' = [failure EXCEPT ![s] = "Timeout"]
     /\ UNCHANGED <<role, sid, chan, adv, pred, bday, peerAdv, peerPred, peerB, nat,
-                   ctr, punchVars, peerDone, net, expired, linkUp>>
+                   ctr, punchVars, peerDone, fellBack, net, linkUp, knowVars>>
 
 LoseSignal(s) ==
     /\ RelayLossy /\ chan[s] /= <<>>
     /\ chan' = [chan EXCEPT ![s] = Tail(@)]
     /\ UNCHANGED <<phase, role, sid, failure, adv, pred, bday, peerAdv, peerPred,
-                   peerB, nat, ctr, punchVars, peerDone, net, expired, linkUp>>
+                   peerB, nat, ctr, punchVars, peerDone, fellBack, net, linkUp, knowVars>>
 
+\* Model choice M6: a duplicating relay duplicates each signal at most once
+\* (an adversary duplicating forever could starve every later signal).
 DupSignal(s) ==
-    /\ RelayDup /\ chan[s] /= <<>> /\ Len(chan[s]) < 4
+    /\ RelayDup /\ chan[s] /= <<>> /\ Front(s) \notin duped
     /\ chan' = [chan EXCEPT ![s] = <<Front(s)>> \o @]
+    /\ duped' = duped \cup {Front(s)}
     /\ UNCHANGED <<phase, role, sid, failure, adv, pred, bday, peerAdv, peerPred,
-                   peerB, nat, ctr, punchVars, peerDone, net, expired, linkUp>>
+                   peerB, nat, ctr, punchVars, peerDone, fellBack, net, linkUp,
+                   facSaw, facSessions, strangerSaw, relaySaw, persisted, duped>>
 
-\* node direct_link_link_removed: every session and interface goes, both ends.
+\* node direct_link_link_removed: any -> none, both ends.
 TearDown ==
     /\ Teardown /\ linkUp
     /\ linkUp' = FALSE
@@ -572,18 +539,29 @@ TearDown ==
     /\ chan' = [s \in Sides |-> <<>>]
     /\ punch' = [s \in Sides |-> IF punch[s] = "running" THEN "aborted" ELSE punch[s]]
     /\ UNCHANGED <<role, sid, failure, adv, pred, bday, peerAdv, peerPred, peerB,
-                   nat, ctr, open, active, targets, held, sprayed, punched, heard,
-                   acked, tick, escalated, path, peerDone, net, expired>>
+                   nat, ctr, open, active, targets, held, knocking, sprayed,
+                   punched, heard, acked, tick, escalated, path, peerDone,
+                   fellBack, net, knowVars>>
 
-\* After the move, a mapping the keepalive does not refresh expires (the
-\* direct interface then goes stale: DirectLinkLost, back to the relay).
-Expire(s) ==
-    /\ ~KeepaliveOK /\ phase[s] = "Connected" /\ ~expired[s]
-    /\ expired' = [expired EXCEPT ![s] = TRUE]
+\* direct -> relayed: the direct path goes stale (a mapping the keepalive
+\* does not refresh expires) and the link falls back to its relayed path
+\* (node direct_link_link_stale / release_direct_attachment). Both ends: the
+\* peer stops hearing too and falls back on its own interface timer.
+\* Also the recovery of a lone move (gap G2): a direct side whose peer has
+\* failed hears nothing on the direct interface and falls back too.
+FallBack(s) ==
+    /\ (~KeepaliveOK \/ phase[Other(s)] \in {"Failed", "Gone"})
+    /\ linkUp /\ phase[s] = "Connected" /\ ~fellBack[s]
+    /\ fellBack' = [fellBack EXCEPT ![s] = TRUE]
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
-                   peerPred, peerB, nat, ctr, punchVars, peerDone, net, linkUp>>
+                   peerPred, peerB, nat, ctr, punchVars, peerDone, net, linkUp, knowVars>>
 
 -----------------------------------------------------------------------------
+\* Named, so the state graph labels each delivery by what it was.
+DeliverAny == \E d \in net : Deliver(d)
+LoseAny == \E d \in net : Lose(d)
+StrangerGetsAny == \E d \in net : StrangerGets(d)
+
 Next ==
     \/ \E s \in Sides :
         \/ Propose(s)
@@ -591,12 +569,10 @@ Next ==
         \/ ProbeFail(s)
         \/ RecvRequest(s) \/ RecvOther(s)
         \/ Tick(s) \/ PunchOK(s) \/ PunchFail(s)
-        \/ Timeout(s) \/ LoseSignal(s) \/ DupSignal(s) \/ Expire(s)
-    \/ \E d \in net : Deliver(d) \/ Lose(d)
+        \/ Timeout(s) \/ LoseSignal(s) \/ DupSignal(s) \/ FallBack(s)
+    \/ DeliverAny \/ LoseAny \/ StrangerGetsAny
     \/ TearDown
 
-\* Fairness: every side keeps acting, the relay and the network deliver.
-\* Losses are not fair (they may happen, never must).
 Fairness ==
     /\ \A s \in Sides :
         /\ WF_vars(Propose(s))
@@ -605,62 +581,94 @@ Fairness ==
         /\ WF_vars(RecvRequest(s)) /\ WF_vars(RecvOther(s))
         /\ WF_vars(Tick(s)) /\ WF_vars(PunchOK(s)) /\ WF_vars(PunchFail(s))
         /\ WF_vars(Timeout(s))
-    /\ WF_vars(\E d \in net : Deliver(d))
+        /\ WF_vars(FallBack(s))
+    /\ WF_vars(DeliverAny \/ StrangerGetsAny)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 -----------------------------------------------------------------------------
-(* Properties.                                                              *)
-
-Terminal(s) == phase[s] \in {"Connected", "Failed", "Gone"}
-\* An attempt is over when neither side runs a session (Idle never proposed).
+(* Properties (names agreed with CC).                                       *)
 Over == \A s \in Sides : phase[s] \in {"Connected", "Failed", "Gone", "Idle"}
 Established == \A s \in Sides : phase[s] = "Connected"
-CleanAbort == \A s \in Sides : phase[s] \in {"Failed", "Gone", "Idle"}
 
-TypeOK ==
-    /\ phase \in [Sides -> Phases]
-    /\ \A s \in Sides : Cardinality(sprayed[s]) <= S
-    /\ \A s \in Sides : open[s] \subseteq Socks
+TypeOK == phase \in [Sides -> Phases]
 
-\* Caps (wire MAX_SPRAY_PORTS, MAX_BIRTHDAY_SOCKETS, MAX_PREDICTED_PORTS).
 CapsHeld ==
     /\ \A s \in Sides : Cardinality(sprayed[s]) <= S
     /\ \A s \in Sides : Cardinality(open[s] \ {0}) <= K
     /\ \A s \in Sides : Cardinality(pred[s]) <= Q
-
-\* Only probes ever go to the facilitator; the relay carries only signals
-\* (the net never addresses the facilitator with a punch).
-FacilitatorProbesOnly == \A d \in net : d.dst /= Fac /\ d.src /= Fac
-
-\* A side settles on a path only if that address was both heard and acked,
-\* on the socket it punches from.
-PathHeardAndAcked ==
-    \A s \in Sides : path[s] /= None => (path[s] \in heard[s] /\ path[s] \in acked[s])
 
 \* Where socket k of s, sending to x, appears to the peer.
 Shows(s, k, x) ==
     IF x[1] = "lan" THEN {Lan(s)}
     ELSE {<<SrcIP(s, m[2]), m[3]>> : m \in {y \in nat[s] : y[1] = k /\ y[2] = x}}
 
-\* Both sides on ONE pair: each side's path address is where the other's
-\* chosen socket, sending to its chosen address, appears.
+\* A side goes direct only on an address both heard and acked.
+PathHeardAndAcked ==
+    \A s \in Sides : path[s] /= None => (path[s] \in heard[s] /\ path[s] \in acked[s])
+
+\* Both direct, on one pair: each side's path address is where the other's
+\* chosen socket, toward its chosen address, appears. This is also
+\* ForgedReflexiveNeverWrongDirect: a direct path always joins A and B, never
+\* a stranger or an address a forged probe named.
 SamePath ==
     (phase["A"] = "Connected" /\ phase["B"] = "Connected") =>
         /\ path["A"][2] \in Shows("B", path["B"][1], path["B"][2])
         /\ path["B"][2] \in Shows("A", path["A"][1], path["A"][2])
+ForgedReflexiveNeverWrongDirect ==
+    \A s \in Sides : phase[s] = "Connected" =>
+        \E m \in nat[Other(s)] : <<SrcIP(Other(s), m[2]), m[3]>> = path[s][2] \/ path[s][2] = Lan(Other(s))
 
-\* No side is Connected while the other has failed (it would send into a
-\* socket the other released). The code's recovery when it happens anyway:
-\* the direct interface goes stale and the link falls back to the relay.
-NoLoneMove ==
-    ~(\E s \in Sides : phase[s] = "Connected" /\ phase[Other(s)] = "Failed")
+\* The hijack the review found (item 1): a side settles, even only into the
+\* commit, on the stranger's address. Unreachable on the fixed code;
+\* reachable with the HijackPlant.
+NoPathToStranger ==
+    \A s \in Sides : path[s] = None \/ ~Stranger \/ path[s][2][2] /= StrangerPort
+                                  \/ path[s][2][1] \notin {Other(s), Other(s) \o "2"}
 
-\* No stuck state: something can always happen until the attempt is over.
+\* No side direct while the other has failed.
+NoLoneMove == ~(\E s \in Sides : phase[s] = "Connected" /\ phase[Other(s)] = "Failed")
+
+\* A clean abort leaves the link as it was: relayed, on both sides.
+AbortLeavesLinkUnchanged ==
+    (Over /\ \E s \in Sides : phase[s] = "Failed") => \A s \in Sides : linkPath(s) = "relayed"
+
+\* Nothing but probes goes to or comes from a facilitator; the relay carries
+\* signals only (it never sees a punch, knock or payload).
+FacilitatorCarriesNothing ==
+    /\ \A d \in net : ~IsFac(d.dst) /\ ~IsFac(d.src)
+    /\ relaySaw \subseteq {"REQUEST", "ACCEPT", "READY", "COMPLETE", "REJECT"}
+
+\* CC 5.4.6. A facilitator learns only the mapping of a node that chose to
+\* ask it: a REQUEST naming a facilitator the responder does not itself use
+\* never causes a packet from the responder to that party. No identifier
+\* links two probes (they carry a nonce, never the session); where both
+\* sides chose one facilitator, it can at most correlate them by timing.
+FacilitatorKnowledge ==
+    /\ \A f \in Facs : \A x \in facSaw[f] : OwnFac(x[1]) = f
+    /\ facSessions = {}
+
+\* A stranger on a sprayed IP learns only that a knock arrived.
+StrangerKnowledge == strangerSaw \subseteq {"K"}
+NoTokenToStranger == "tokened" \notin strangerSaw
+
+\* CC 2.6.8: no observed mapping is ever written into a nodecode, a signed
+\* dial hint or any persisted record. The code has no such write; the model
+\* has no action that writes `persisted`, so this holds by construction and
+\* is listed as such in DirectLinkPunch.md.
+NoLearnedAddressPersisted == persisted = {}
+
 NotStuck == Over \/ ENABLED Next
 
-\* Liveness: every attempt ends; and, per scenario, how.
+\* linkPath moves only along the six agreed transitions (or stays).
+LinkPathStep(s) ==
+    \/ linkPath(s)' = linkPath(s)
+    \/ <<linkPath(s), linkPath(s)'>> \in
+        {<<"none", "relayed">>, <<"relayed", "upgrading">>, <<"upgrading", "direct">>,
+         <<"upgrading", "relayed">>, <<"direct", "relayed">>,
+         <<"relayed", "none">>, <<"upgrading", "none">>, <<"direct", "none">>}
+LinkPathTransitions == [][\A s \in Sides : LinkPathStep(s)]_vars
+
 EventuallyOver == <>[]Over
 EventuallyEstablished == <>Established
-EventuallyCleanAbort == <>[](Over /\ CleanAbort)
 =============================================================================

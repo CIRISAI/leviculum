@@ -6,9 +6,13 @@ CONSTANTS
     FiltB = "@FILTB@"
     SameNAT = @SAMENAT@
     Hairpin = @HAIRPIN@
+    FacA = "@FACA@"
+    FacB = "@FACB@"
     FacAnswers = @FAC@
-    Pooling = "@POOL@"
+    ForgedProbe = @FORGED@
     Observers = @OBS@
+    Pooling = "@POOL@"
+    Stranger = @STRANGER@
     PolicyB = "@POLICY@"
     Glare = @GLARE@
     BInitiatedLink = @BINIT@
@@ -17,7 +21,10 @@ CONSTANTS
     NetLossy = @NLOSS@
     Teardown = @TEAR@
     KeepaliveOK = @KEEP@
+    HijackPlant = @HIJACK@
+    NamedFacilitatorPlant = @NAMED@
     SprayHits = "@HITS@"
+    SprayBudget = @BUDGET@
     NP = @NP@
     W = @W@
     EscAt = 2
@@ -28,6 +35,6 @@ CONSTANTS
     MaxSkew = @SKEW@
     Latency = @LAT@
 SPECIFICATION Spec
-INVARIANTS TypeOK CapsHeld FacilitatorProbesOnly PathHeardAndAcked SamePath NoLoneMove NotStuck
+INVARIANTS @INVS@
 PROPERTIES @PROPS@
 CHECK_DEADLOCK FALSE
