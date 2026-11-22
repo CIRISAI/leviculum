@@ -444,8 +444,6 @@ enum BirthdayEnd {
         src: SocketAddr,
         seq: Option<u32>,
     },
-    /// The window closed with every birthday socket open and none reached.
-    Expired,
 }
 
 /// Punch from `socket`; past [`BIRTHDAY_AFTER`] with nothing heard, hold
@@ -467,6 +465,10 @@ async fn punch_birthday(
     // Written the moment the sockets are bound, while `diag` is lent to the
     // primary punch, so a punch the peer's REJECT aborts still logs them.
     let open_count = Arc::clone(&diag.birthday_open);
+    // Set by the session socket's punch the moment it hears the peer, before
+    // its ack leaves; read here on every birthday hit.
+    let primary_heard = Arc::clone(&diag.primary_heard);
+    let mut ignored = 0usize;
     let end = {
         let primary = punch_inner(
             socket,
@@ -507,12 +509,23 @@ async fn punch_birthday(
                     ));
                 }
                 drop(hit_tx);
-                let end = tokio::select! {
-                    r = &mut primary => BirthdayEnd::Primary(r),
-                    hit = hit_rx.recv() => match hit {
-                        Some((index, src, seq)) => BirthdayEnd::Hit { index, src, seq },
-                        None => BirthdayEnd::Expired,
-                    },
+                let end = loop {
+                    tokio::select! {
+                        r = &mut primary => break BirthdayEnd::Primary(r),
+                        hit = hit_rx.recv() => match hit {
+                            // The session socket has heard the peer, so the
+                            // peer may settle on it: switching now would put
+                            // the two ends on different socket pairs (found
+                            // by the TLA+ model, docs/direct_link). Stay.
+                            Some(_) if primary_heard.load(std::sync::atomic::Ordering::SeqCst) => {
+                                ignored += 1;
+                            }
+                            Some((index, src, seq)) => break BirthdayEnd::Hit { index, src, seq },
+                            // Every birthday task reported and was passed
+                            // over: the session socket finishes it.
+                            None => break BirthdayEnd::Primary((&mut primary).await),
+                        },
+                    }
                 };
                 // Every birthday task stops here, whichever way it went.
                 drop(tasks);
@@ -520,9 +533,9 @@ async fn punch_birthday(
             }
         }
     };
+    diag.birthday_ignored = ignored;
     let (index, src, seq) = match end {
         BirthdayEnd::Primary(r) => return r.map(|p| (p, None)),
-        BirthdayEnd::Expired => return None,
         BirthdayEnd::Hit { index, src, seq } => (index, src, seq),
     };
     // The peer reached the mapping of birthday socket `index`: close every
@@ -715,6 +728,9 @@ async fn punch_inner(
                 }
                 match wire::parse_punch_frame(frame, session, token) {
                     Some((PunchKind::Punch, their_seq)) => {
+                        // Before the ack leaves: from here the peer can
+                        // settle on this socket (see punch_birthday).
+                        diag.primary_heard.store(true, std::sync::atomic::Ordering::SeqCst);
                         let ack = wire::punch_frame(PunchKind::Ack, session, token, their_seq);
                         let _ = socket.send_to(&ack, on_socket(socket, src)).await;
                         if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
@@ -954,6 +970,11 @@ pub(crate) struct PunchDiag {
     /// Shared with the birthday block, which writes it while the diag is
     /// lent to the primary punch.
     pub(crate) birthday_open: Arc<std::sync::atomic::AtomicUsize>,
+    /// The punching socket has heard the peer; shared with the birthday
+    /// block, which must not switch away from it after that.
+    pub(crate) primary_heard: Arc<std::sync::atomic::AtomicBool>,
+    /// Birthday hits passed over because the session socket had heard.
+    pub(crate) birthday_ignored: usize,
     /// The peer reached one of them, which became the punch socket.
     pub(crate) birthday_switched: bool,
     /// Which one (its index among them, not a port).
@@ -1003,6 +1024,8 @@ impl PunchDiag {
             predicted_dropped: 0,
             sprayed: 0,
             birthday_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            primary_heard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            birthday_ignored: 0,
             birthday_switched: false,
             birthday_winner: None,
             escalated: false,
@@ -1112,6 +1135,7 @@ impl PunchDiag {
             sprayed = self.sprayed,
             birthday_sockets = self.birthday_sockets(),
             birthday_switched = self.birthday_switched,
+            birthday_ignored = self.birthday_ignored,
             birthday_winner = self.birthday_winner.map_or(-1, |i| i as i64),
             birthday_pps = self.birthday_pps(),
             escalated = self.escalated,
@@ -2080,6 +2104,65 @@ mod tests {
         assert_eq!(diag.birthday_sockets(), 5);
         assert_eq!(diag.birthday_pps(), 5);
         assert!(!diag.logged, "the drop is what logs it, as \"aborted\"");
+    }
+
+    /// +ciris (found by docs/direct_link/DirectLinkPunch.tla): once the
+    /// session socket has heard the peer, a later birthday hit must not move
+    /// the punch, or the two ends settle on different socket pairs. Here the
+    /// peer reaches the session socket and, 20 ms later, a birthday socket.
+    #[tokio::test]
+    async fn a_birthday_hit_after_the_session_socket_heard_does_not_switch() {
+        let a = Arc::new(loopback().await);
+        let a_addr = a.local_addr().unwrap();
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        let extra = Arc::new(loopback().await);
+        let extra_addr = extra.local_addr().unwrap();
+        let (session, token) = ([21u8; 16], [22u8; 32]);
+        let peer = {
+            let a = Arc::clone(&a);
+            tokio::spawn(async move {
+                // Silent past BIRTHDAY_AFTER, so B opens its birthday socket.
+                tokio::time::sleep(BIRTHDAY_AFTER + Duration::from_millis(150)).await;
+                let punch = wire::punch_frame(PunchKind::Punch, &session, &token, 1);
+                let _ = a.send_to(&punch, b_addr).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = a.send_to(&punch, extra_addr).await;
+                // Nothing acked yet: the hit lands while the session socket
+                // has heard but not been acked. Answer only from here on, as
+                // a peer a round trip away would.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let mut buf = [0u8; 256];
+                loop {
+                    let Ok((len, src)) = a.recv_from(&mut buf).await else {
+                        continue;
+                    };
+                    if let Some((PunchKind::Punch, seq)) =
+                        wire::parse_punch_frame(&buf[..len], &session, &token)
+                    {
+                        let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                        let _ = a.send_to(&ack, src).await;
+                        let _ = a.send_to(&punch, src).await;
+                    }
+                }
+            })
+        };
+        let r = punch_with_ports(
+            &b,
+            Some(Extras::Given(vec![extra])),
+            std::slice::from_ref(&a_addr),
+            &session,
+            &token,
+            None,
+        )
+        .await;
+        peer.abort();
+        let (p, winner) = r.expect("B punches through");
+        assert_eq!(p.peer, a_addr);
+        assert!(
+            winner.is_none(),
+            "B moved off the socket the peer reached first"
+        );
     }
 
     /// +ciris: behind a random NAT, the punch runs on whichever birthday
