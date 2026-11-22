@@ -11,9 +11,6 @@
 name: punch-probe
 
 on:
-  # TEMPORARY: this branch only; removed right after the run.
-  push:
-    branches: [diag/punch-telemetry]
   workflow_dispatch:
     inputs:
       role:
@@ -58,25 +55,18 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: punch-probe-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   probe:
     name: probe (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          # TEMPORARY for this run: weighted toward ubuntu-24.04, two EIM controls.
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, job: u24a, attempts: 3 }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, job: u24b, attempts: 3 }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, job: u24c, attempts: 3 }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, job: ulat, attempts: 2 }
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, job: u22, attempts: 2 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, job: ubuntu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, job: windows }
+          - { os: macos-latest, target: aarch64-apple-darwin, job: macos }
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
@@ -88,7 +78,7 @@ jobs:
       - name: build punch-probe
         run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
       - name: dialer keygen
-        if: false
+        if: inputs.role != 'listen'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -97,7 +87,7 @@ jobs:
           "target/$TARGET/release/punch-probe" --relay unused keygen --out "$RUNNER_TEMP/dialer.key" \
             | tee "dialer-hash-$JOB.json"
       - name: publish the dialer's public hash
-        if: false
+        if: inputs.role != 'listen'
         uses: actions/upload-artifact@v4
         with:
           name: dialer-hash-${{ matrix.job }}
@@ -105,16 +95,16 @@ jobs:
       - name: run
         shell: bash
         env:
-          IN_ROLE: "listen"
-          IN_DEST: ""
-          IN_KEY: ""
-          IN_SEED_TAG: "c2516482919f"
-          IN_ALLOW: "3b9557375510799f4973f2aaca4cbc3d"
-          IN_RELAY: "108.61.242.236:4242"
-          IN_ATTEMPTS: "3"
-          IN_LISTEN_SECS: "600"
-          IN_STUN: "stun.l.google.com:19302"
-          IN_FAC2: "stun.l.google.com:19302"
+          IN_ROLE: ${{ inputs.role }}
+          IN_DEST: ${{ inputs.dest }}
+          IN_KEY: ${{ inputs.key }}
+          IN_SEED_TAG: ${{ inputs.seed_tag }}
+          IN_ALLOW: ${{ inputs.allow }}
+          IN_RELAY: ${{ inputs.relay }}
+          IN_ATTEMPTS: ${{ inputs.attempts }}
+          IN_LISTEN_SECS: ${{ inputs.listen_secs }}
+          IN_STUN: ${{ inputs.stun }}
+          IN_FAC2: ${{ inputs.facilitator2 }}
           JOB: ${{ matrix.job }}
           TARGET: ${{ matrix.target }}
           ATTEMPTS_OVERRIDE: ${{ matrix.attempts }}
