@@ -314,16 +314,74 @@ const PEER_REFLEXIVE_MAX: usize = 4;
 /// reachable at. `targets` is the peer's public address, then (+ciris) its
 /// host candidates; the socket may be dual-stack, so addresses are compared
 /// in canonical form.
+///
+/// The runtime calls [`punch_with`]; this is its plain form, for the tests.
+#[cfg(test)]
 pub(crate) async fn punch(
     socket: &UdpSocket,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
+    punch_with(socket, Vec::new(), targets, session, token, false)
+        .await
+        .map(|(p, _)| p)
+}
+
+/// +ciris — [`punch`], with the two halves of the birthday approach for a
+/// peer pair where one NAT maps per destination at random:
+/// - `extras` (this node's NAT is the random one): more sockets, each
+///   sending one punch a second toward the peer's advertised address so its
+///   mapping stays open. The first one the peer reaches (its spray hit that
+///   mapping) becomes the punch socket for the rest of the window, and is
+///   returned so the interface runs on it.
+/// - `spray` (the peer's NAT is the random one): also punch random ports on
+///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is heard
+///   from it or [`wire::MAX_SPRAY_PORTS`] are used.
+pub(crate) async fn punch_with(
+    socket: &UdpSocket,
+    extras: Vec<Arc<UdpSocket>>,
+    targets: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    spray: bool,
+) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     // Logged when dropped, so a punch the session aborts (the peer's REJECT
     // arrived first) still says what it saw.
+    let spray: Option<SprayPorts> = spray.then(|| {
+        let mut rng = rand_core::OsRng;
+        Box::new(move || spray_port(&mut rng)) as SprayPorts
+    });
+    punch_with_ports(socket, extras, targets, session, token, spray).await
+}
+
+/// Where a spray draws its ports: random in production, fixed in tests.
+pub(crate) type SprayPorts = Box<dyn FnMut() -> u16 + Send>;
+
+/// [`punch_with`], with the spray's port source given.
+pub(crate) async fn punch_with_ports(
+    socket: &UdpSocket,
+    extras: Vec<Arc<UdpSocket>>,
+    targets: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    spray: Option<SprayPorts>,
+) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let mut diag = PunchDiag::new(targets, *session);
-    let result = punch_inner(socket, targets, session, token, &mut diag).await;
+    diag.birthday_sockets = extras.len();
+    let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
+    let result = if extras.is_empty() {
+        punch_inner(
+            socket, targets, session, token, &mut diag, deadline, spray, None,
+        )
+        .await
+        .map(|p| (p, None))
+    } else {
+        punch_birthday(
+            socket, extras, targets, session, token, &mut diag, deadline, spray,
+        )
+        .await
+    };
     diag.finish(if result.is_some() {
         "punched"
     } else {
@@ -332,14 +390,93 @@ pub(crate) async fn punch(
     result
 }
 
+/// Random ports sprayed on the peer's IP per punch tick (see [`punch_with`]).
+pub(crate) const SPRAY_PER_TICK: usize = 32;
+
+/// How often each birthday socket repeats its punch toward the peer.
+const BIRTHDAY_REFRESH: Duration = Duration::from_secs(1);
+
+/// Punch from `socket` while the `extras` hold mappings open; switch to the
+/// first extra the peer reaches.
+#[allow(clippy::too_many_arguments)]
+async fn punch_birthday(
+    socket: &UdpSocket,
+    extras: Vec<Arc<UdpSocket>>,
+    targets: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    diag: &mut PunchDiag,
+    deadline: tokio::time::Instant,
+    spray: Option<SprayPorts>,
+) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
+    let peer = canonical(*targets.first()?);
+    let (hit_tx, mut hit_rx) = mpsc::channel::<(usize, SocketAddr, Option<u32>)>(1);
+    let mut tasks = Vec::with_capacity(extras.len());
+    for (index, extra) in extras.iter().enumerate() {
+        let (extra, hit_tx, session, token) = (Arc::clone(extra), hit_tx.clone(), *session, *token);
+        tasks.push(AbortOnDrop(
+            tokio::spawn(async move {
+                let frame = wire::punch_frame(PunchKind::Punch, &session, &token, 0);
+                let mut refresh = tokio::time::interval(BIRTHDAY_REFRESH);
+                let mut buf = [0u8; 512];
+                loop {
+                    tokio::select! {
+                        _ = refresh.tick() => {
+                            let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
+                        }
+                        r = extra.recv_from(&mut buf) => {
+                            let Ok((len, src)) = r else { continue };
+                            let seq = match wire::parse_punch_frame(&buf[..len], &session, &token) {
+                                Some((PunchKind::Punch, seq)) => Some(seq),
+                                Some((PunchKind::Ack, _)) => None,
+                                None => continue,
+                            };
+                            let _ = hit_tx.send((index, canonical(src), seq)).await;
+                            return;
+                        }
+                    }
+                }
+            })
+            .abort_handle(),
+        ));
+    }
+    drop(hit_tx);
+    let (index, src, seq) = tokio::select! {
+        r = punch_inner(socket, targets, session, token, diag, deadline, spray, None) => {
+            return r.map(|p| (p, None));
+        }
+        Some(hit) = hit_rx.recv() => hit,
+    };
+    // The peer reached the mapping of extra `index`: stop the others, ack
+    // the punch that got through, and punch on from there.
+    drop(tasks);
+    let winner = Arc::clone(&extras[index]);
+    drop(extras);
+    diag.birthday_switched = true;
+    if let Some(seq) = seq {
+        let ack = wire::punch_frame(PunchKind::Ack, session, token, seq);
+        let _ = winner.send_to(&ack, on_socket(&winner, src)).await;
+    }
+    // A punch that got through is already heard: the peer may finish on our
+    // ack and then only ack, never punch again, so it must not be needed
+    // twice.
+    let seed = seq.is_some().then_some(src);
+    punch_inner(&winner, targets, session, token, diag, deadline, None, seed)
+        .await
+        .map(|p| (p, Some(winner)))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn punch_inner(
     socket: &UdpSocket,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
     diag: &mut PunchDiag,
+    deadline: tokio::time::Instant,
+    mut spray: Option<SprayPorts>,
+    seed_heard: Option<SocketAddr>,
 ) -> Option<Punched> {
-    let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
     let mut targets: Vec<SocketAddr> = alloc_targets(
         canonical(*targets.first()?),
         &targets[1..]
@@ -354,11 +491,25 @@ async fn punch_inner(
     // ack came from; the path is the first address in both, and punched.
     let mut heard: Vec<SocketAddr> = Vec::new();
     let mut acked: Vec<SocketAddr> = Vec::new();
+    // +ciris: a punch heard (and acked) before this loop began, on this
+    // socket: a birthday socket the peer reached. Punched too, as any
+    // peer-reflexive source is.
+    if let Some(src) = seed_heard.map(canonical) {
+        if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
+            targets.push(src);
+            diag.peer_reflexive += 1;
+        }
+        heard.push(src);
+        diag.heard(src);
+    }
     let mut early: Vec<Vec<u8>> = Vec::new();
     let mut early_bytes = 0usize;
     let mut seq: u32 = 0;
     let mut tick = tokio::time::interval(PUNCH_INTERVAL);
     let mut buf = vec![0u8; 65_535];
+    // +ciris: ports sprayed on the peer's IP (its NAT is random); an ack
+    // from one counts as from an address this end punched.
+    let mut sprayed: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
     loop {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => return None,
@@ -375,6 +526,31 @@ async fn punch_inner(
                     }
                 }
                 diag.punched = punched.len();
+                if spray.is_some() && (!heard.is_empty() || sprayed.len() >= wire::MAX_SPRAY_PORTS) {
+                    spray = None;
+                }
+                if let Some(next_port) = spray.as_mut() {
+                    let peer_ip = targets[0].ip();
+                    let mut sent_now = 0;
+                    // Bounded draws too: a source that repeats cannot spin.
+                    let mut draws = 0;
+                    while sent_now < SPRAY_PER_TICK
+                        && sprayed.len() < wire::MAX_SPRAY_PORTS
+                        && draws < 4 * SPRAY_PER_TICK
+                    {
+                        draws += 1;
+                        let port = next_port();
+                        let addr = SocketAddr::new(peer_ip, port);
+                        if targets.contains(&addr) || !sprayed.insert(addr) {
+                            continue;
+                        }
+                        sent_now += 1;
+                        if socket.send_to(&frame, on_socket(socket, addr)).await.is_err() {
+                            diag.send_errors += 1;
+                        }
+                    }
+                    diag.sprayed = sprayed.len();
+                }
             }
             result = socket.recv_from(&mut buf) => {
                 let Ok((len, src)) = result else {
@@ -417,10 +593,14 @@ async fn punch_inner(
                         }
                     }
                     Some((PunchKind::Ack, _)) => {
-                        if punched.contains(&src) && !acked.contains(&src) {
+                        let ours = punched.contains(&src) || sprayed.contains(&src);
+                        if ours && !punched.contains(&src) {
+                            punched.push(src);
+                        }
+                        if ours && !acked.contains(&src) {
                             acked.push(src);
                         }
-                        diag.acked(src, punched.contains(&src));
+                        diag.acked(src, ours);
                     }
                     None => {
                         diag.unparsed(wire::punch_frame_kind(frame).is_some());
@@ -442,6 +622,30 @@ async fn punch_inner(
             }
         }
     }
+}
+
+/// +ciris: up to [`wire::MAX_BIRTHDAY_SOCKETS`] fresh sockets for a punch
+/// toward `peer` from behind a random NAT, each a mapping of its own. Fewer
+/// when the host refuses more.
+async fn birthday_sockets(peer: SocketAddr) -> Vec<Arc<UdpSocket>> {
+    let bind = if canonical(peer).is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0u16; 8], 0))
+    };
+    let mut out = Vec::with_capacity(wire::MAX_BIRTHDAY_SOCKETS);
+    for _ in 0..wire::MAX_BIRTHDAY_SOCKETS {
+        match UdpSocket::bind(bind).await {
+            Ok(s) => out.push(Arc::new(s)),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// A random port to spray, above the well-known range.
+fn spray_port(rng: &mut impl RngCore) -> u16 {
+    1024 + (rng.next_u32() % (65_536 - 1024)) as u16
 }
 
 // Port prediction (+ciris)
@@ -597,6 +801,12 @@ pub(crate) struct PunchDiag {
     /// Predicted targets dropped because the peer was heard at its
     /// advertised address (its mapping did not move).
     pub(crate) predicted_dropped: usize,
+    /// Random ports sprayed on the peer's IP.
+    pub(crate) sprayed: usize,
+    /// Extra sockets held open toward the peer (this NAT is random).
+    pub(crate) birthday_sockets: usize,
+    /// The peer reached one of them, which became the punch socket.
+    pub(crate) birthday_switched: bool,
     pub(crate) peer_reflexive: usize,
     pub(crate) punched: usize,
     pub(crate) send_errors: u32,
@@ -637,6 +847,9 @@ impl PunchDiag {
                 .count(),
             predicted: host.iter().filter(is_predicted).count(),
             predicted_dropped: 0,
+            sprayed: 0,
+            birthday_sockets: 0,
+            birthday_switched: false,
             host,
             peer_reflexive: 0,
             punched: 0,
@@ -729,6 +942,9 @@ impl PunchDiag {
             targets_host_v6 = self.host_v6,
             targets_predicted = self.predicted,
             predicted_dropped = self.predicted_dropped,
+            sprayed = self.sprayed,
+            birthday_sockets = self.birthday_sockets,
+            birthday_switched = self.birthday_switched,
             targets_peer_reflexive = self.peer_reflexive,
             public_family = match self.public { Some(a) if a.is_ipv6() => "v6", Some(_) => "v4", None => "none" },
             punched = self.punched,
@@ -768,6 +984,7 @@ fn session_short(session: &SessionId) -> String {
 
 /// +ciris — the one INFO line after a facilitator probe: whether this NAT
 /// preserved the port, and whether there is a NAT at all. No address.
+#[allow(clippy::too_many_arguments)]
 fn log_probe_diag(
     session: &SessionId,
     socket: &UdpSocket,
@@ -775,6 +992,7 @@ fn log_probe_diag(
     local: &[SocketAddr],
     steps: Option<AllocationSteps>,
     predicted: usize,
+    birthday: bool,
     elapsed_ms: u64,
 ) {
     let local_port = socket.local_addr().map(|a| a.port()).ok();
@@ -808,6 +1026,7 @@ fn log_probe_diag(
         alloc_step1 = steps.map_or(0, |s| s.step1),
         alloc_step2 = steps.map_or(0, |s| s.step2),
         predicted,
+        birthday,
         "direct link diag: probe summary"
     );
 }
@@ -1066,6 +1285,8 @@ pub(crate) enum Outcome {
         /// +ciris: the ports this node predicts its NAT will map toward the
         /// peer (empty: one mapping, or no steady step).
         predicted: Vec<u16>,
+        /// +ciris: this node's NAT allocates at random (birthday approach).
+        birthday: bool,
     },
     Punched {
         session: SessionId,
@@ -1075,6 +1296,9 @@ pub(crate) enum Outcome {
         /// +ciris (leviculum#104): the largest probe step the path carried,
         /// which the interface signals; `None` signals no MTU (base 500).
         mtu: Option<u32>,
+        /// +ciris: the birthday socket the peer reached, when the path runs
+        /// on it rather than on the session's probe socket.
+        socket: Option<Arc<UdpSocket>>,
     },
 }
 
@@ -1100,6 +1324,9 @@ pub(crate) struct DirectLinkRuntime {
     /// +ciris: sessions whose peer acks sequenced keepalives (both ends run
     /// the two-sided commit), so their interface uses the fast liveness.
     fast_liveness: HashMap<SessionId, bool>,
+    /// +ciris: sessions whose own NAT allocates at random, from the probe:
+    /// their punch holds birthday sockets open.
+    birthday: HashMap<SessionId, bool>,
 }
 
 impl DirectLinkRuntime {
@@ -1114,6 +1341,7 @@ impl DirectLinkRuntime {
             reannounce: Vec::new(),
             timing: DirectUdpTiming::default(),
             fast_liveness: HashMap::new(),
+            birthday: HashMap::new(),
         }
     }
 
@@ -1132,6 +1360,7 @@ impl DirectLinkRuntime {
                 token,
                 start_delay_ms,
                 fast_liveness,
+                spray,
             } => {
                 self.fast_liveness.insert(session, fast_liveness);
                 self.start_punch(
@@ -1140,6 +1369,7 @@ impl DirectLinkRuntime {
                     alternates,
                     token,
                     Duration::from_millis(start_delay_ms),
+                    spray,
                 )
             }
             DirectLinkJob::Release { session } => self.release(&session),
@@ -1163,6 +1393,7 @@ impl DirectLinkRuntime {
                     public: None,
                     local: Vec::new(),
                     predicted: Vec::new(),
+                    birthday: false,
                 });
                 return;
             }
@@ -1193,6 +1424,9 @@ impl DirectLinkRuntime {
                 _ => None,
             };
             let predicted = steps.map(predict_ports).unwrap_or_default();
+            // Measured, moving, and with no steady step: a random allocator.
+            let birthday =
+                steps.is_some_and(|s| s.step1 != 0 && s.step2 != 0) && predicted.is_empty();
             log_probe_diag(
                 &session,
                 &socket,
@@ -1200,6 +1434,7 @@ impl DirectLinkRuntime {
                 &local,
                 steps,
                 predicted.len(),
+                birthday,
                 probe_start.elapsed().as_millis() as u64,
             );
             let _ = outcomes
@@ -1208,6 +1443,7 @@ impl DirectLinkRuntime {
                     public,
                     local,
                     predicted,
+                    birthday,
                 })
                 .await;
         });
@@ -1221,8 +1457,10 @@ impl DirectLinkRuntime {
         alternates: Vec<SocketAddr>,
         token: [u8; 32],
         start_delay: Duration,
+        spray: bool,
     ) {
         let outcomes = self.outcomes.clone();
+        let birthday = self.birthday.remove(&session).unwrap_or(false);
         let Some(socket) = self.sockets.get(&session).cloned() else {
             // No probe socket (it failed to bind, or was released): there is
             // no NAT mapping to punch from.
@@ -1231,6 +1469,7 @@ impl DirectLinkRuntime {
                 peer: None,
                 early: Vec::new(),
                 mtu: None,
+                socket: None,
             });
             return;
         };
@@ -1250,18 +1489,24 @@ impl DirectLinkRuntime {
             } else {
                 tracing::info!("direct link: punching toward {peer}");
             }
-            let seen = punch(&socket, &targets, &session, &token).await;
+            let extras = if birthday {
+                birthday_sockets(peer).await
+            } else {
+                Vec::new()
+            };
+            let seen = punch_with(&socket, extras, &targets, &session, &token, spray).await;
             match &seen {
-                Some(p) => tracing::info!("direct link: punch through to {}", p.peer),
+                Some((p, _)) => tracing::info!("direct link: punch through to {}", p.peer),
                 None => tracing::info!("direct link: punch toward {peer} failed"),
             }
-            let (peer, early, mtu) = match seen {
-                Some(mut p) => {
-                    let mtu = probe_path_mtu(&socket, p.peer, &session, &token, &mut p.early).await;
+            let (peer, early, mtu, winner) = match seen {
+                Some((mut p, winner)) => {
+                    let on = winner.as_deref().unwrap_or(&socket);
+                    let mtu = probe_path_mtu(on, p.peer, &session, &token, &mut p.early).await;
                     tracing::info!("direct link: path to {} carries {mtu:?}", p.peer);
-                    (Some(p.peer), p.early, mtu)
+                    (Some(p.peer), p.early, mtu, winner)
                 }
-                None => (None, Vec::new(), None),
+                None => (None, Vec::new(), None, None),
             };
             let _ = outcomes
                 .send(Outcome::Punched {
@@ -1269,10 +1514,19 @@ impl DirectLinkRuntime {
                     peer,
                     early,
                     mtu,
+                    socket: winner,
                 })
                 .await;
         });
         self.replace_task(session, task.abort_handle());
+    }
+
+    /// +ciris: the probe found this session's NAT to be a random allocator
+    /// (`birthday`); its punch holds birthday sockets open.
+    pub(crate) fn note_birthday(&mut self, session: SessionId, birthday: bool) {
+        if birthday {
+            self.birthday.insert(session, true);
+        }
     }
 
     fn replace_task(&mut self, session: SessionId, task: AbortHandle) {
@@ -1288,6 +1542,7 @@ impl DirectLinkRuntime {
         self.sockets.remove(session);
         self.tokens.remove(session);
         self.fast_liveness.remove(session);
+        self.birthday.remove(session);
     }
 
     /// The punch for `session` succeeded toward `peer`: build its interface
@@ -1301,9 +1556,12 @@ impl DirectLinkRuntime {
         early: Vec<Vec<u8>>,
         hw_mtu: Option<u32>,
         id: InterfaceId,
+        winner: Option<Arc<UdpSocket>>,
     ) -> Option<InterfaceHandle> {
         self.tasks.remove(&session);
-        let socket = self.sockets.remove(&session)?;
+        let probe_socket = self.sockets.remove(&session)?;
+        // +ciris: a birthday socket the peer reached carries the path.
+        let socket = winner.unwrap_or(probe_socket);
         let token = self.tokens.remove(&session)?;
         let timing = if self.fast_liveness.remove(&session).unwrap_or(false) {
             DirectUdpTiming::fast()
@@ -1549,6 +1807,107 @@ mod tests {
         let result = punch(&a, std::slice::from_ref(&advertised), &session, &token).await;
         peer.abort();
         assert_eq!(result, None);
+    }
+
+    /// A spray source that yields `ports` in turn, forever.
+    fn cycle(ports: Vec<u16>) -> Option<SprayPorts> {
+        let mut i = 0usize;
+        Some(Box::new(move || {
+            let p = ports[i % ports.len()];
+            i += 1;
+            p
+        }))
+    }
+
+    /// +ciris: the peer's NAT is random, so its real mapping is no address
+    /// it advertised or predicted, and its filter drops everything until it
+    /// is punched there. The spray finds it.
+    #[tokio::test]
+    async fn the_spray_reaches_a_filtered_peer_on_an_unadvertised_port() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        let advertised = loopback().await.local_addr().unwrap();
+        let (session, token) = ([13u8; 16], [14u8; 32]);
+        let peer = tokio::spawn(filtered_peer(b, session, token));
+        // Misses first, then the real mapping.
+        let mut ports: Vec<u16> = (0..40u16).map(|i| 50_000 + i).collect();
+        ports.retain(|p| *p != b_addr.port());
+        ports.push(b_addr.port());
+        let result = punch_with_ports(
+            &a,
+            Vec::new(),
+            std::slice::from_ref(&advertised),
+            &session,
+            &token,
+            cycle(ports),
+        )
+        .await;
+        peer.abort();
+        assert_eq!(
+            result.map(|(p, w)| (p.peer, w.is_none())),
+            Some((b_addr, true))
+        );
+    }
+
+    /// +ciris: behind a random NAT, the punch runs on whichever birthday
+    /// socket the peer reaches; both ends settle on that one pair, and the
+    /// socket comes back for the interface.
+    #[tokio::test]
+    async fn a_birthday_socket_the_peer_reaches_carries_the_path() {
+        let a = loopback().await;
+        let a_addr = a.local_addr().unwrap();
+        // B's probe socket cannot reach A at all (IPv6-only, A is IPv4): only
+        // a birthday socket can.
+        let Ok(b) = UdpSocket::bind("[::1]:0").await else {
+            return;
+        };
+        let mut extras = Vec::new();
+        for _ in 0..8 {
+            extras.push(Arc::new(loopback().await));
+        }
+        let extra_addrs: Vec<SocketAddr> = extras.iter().map(|e| e.local_addr().unwrap()).collect();
+        let b_advertised = b.local_addr().unwrap();
+        let (session, token) = ([15u8; 16], [16u8; 32]);
+        let spray_ports: Vec<u16> = extra_addrs.iter().map(|a| a.port()).collect();
+        // A knows B only by its advertised port, on the IPv4 side.
+        let to_b = [SocketAddr::new(a_addr.ip(), b_advertised.port())];
+        // A acks late punches once it is through, as its direct interface
+        // does.
+        let a_side = async {
+            let r =
+                punch_with_ports(&a, Vec::new(), &to_b, &session, &token, cycle(spray_ports)).await;
+            let mut buf = [0u8; 256];
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Ok((len, src))) =
+                tokio::time::timeout_at(until, a.recv_from(&mut buf)).await
+            {
+                if let Some((PunchKind::Punch, seq)) =
+                    wire::parse_punch_frame(&buf[..len], &session, &token)
+                {
+                    let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                    let _ = a.send_to(&ack, src).await;
+                }
+            }
+            r
+        };
+        let (ra, rb) = tokio::join!(
+            a_side,
+            punch_with_ports(
+                &b,
+                extras,
+                std::slice::from_ref(&a_addr),
+                &session,
+                &token,
+                None
+            )
+        );
+        let (pa, _) = ra.expect("A punches through");
+        let (pb, winner) = rb.expect("B punches through");
+        let winner = winner.expect("on a birthday socket");
+        assert_eq!(pb.peer, a_addr);
+        assert_eq!(pa.peer, winner.local_addr().unwrap());
+        assert!(extra_addrs.contains(&pa.peer));
     }
 
     /// Heard at its advertised address, the peer's mapping did not move: its

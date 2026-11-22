@@ -178,6 +178,9 @@ pub enum DirectLinkJob {
         token: [u8; 32],
         start_delay_ms: u64,
         fast_liveness: bool,
+        /// +ciris: spray the peer's public IP (its NAT is random); see
+        /// [`crate::direct_link::Step::Punch`].
+        spray: bool,
     },
     /// The session is over: drop its socket and any task still running.
     Release { session: SessionId },
@@ -214,6 +217,8 @@ struct PendingRequest {
     commit: bool,
     /// +ciris: the initiator's predicted ports.
     predicted: Vec<u16>,
+    /// +ciris: the initiator asked to be sprayed.
+    birthday: bool,
 }
 
 /// +ciris: a link this node proposed on, for proposing again.
@@ -577,24 +582,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         public: Option<SocketAddr>,
         local: Vec<SocketAddr>,
     ) -> crate::transport::TickOutput {
-        self.direct_link_probed_with_candidates(session, public, local, Vec::new())
+        self.direct_link_probed_with_candidates(session, public, local, Vec::new(), false)
     }
 
     /// +ciris — [`Self::direct_link_probed_with_local`], with the ports this
     /// node predicts its NAT will map toward the peer, sent to the peer to
-    /// punch (see [`wire::MAX_PREDICTED_PORTS`]).
+    /// punch (see [`wire::MAX_PREDICTED_PORTS`]), and whether its NAT is
+    /// random (`birthday`: the peer is asked to spray, see
+    /// [`wire::MAX_SPRAY_PORTS`]).
     pub fn direct_link_probed_with_candidates(
         &mut self,
         session: &SessionId,
         public: Option<SocketAddr>,
         local: Vec<SocketAddr>,
         predicted: Vec<u16>,
+        birthday: bool,
     ) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
         if let Some(link_id) = self.direct_links.link_of_session(session) {
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => match public {
-                    Some(addr) => s.probed_with_candidates(addr, local, predicted, now_ms),
+                    Some(addr) => {
+                        s.set_own_birthday(birthday);
+                        s.probed_with_candidates(addr, local, predicted, now_ms)
+                    }
                     None => s.probe_failed(),
                 },
                 None => Vec::new(),
@@ -886,6 +897,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             commit,
             host_payload,
             initiator_predicted,
+            initiator_birthday,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -1008,6 +1020,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             asked_at_ms: now_ms,
             commit,
             predicted: initiator_predicted,
+            birthday: initiator_birthday,
         };
         if ask_host {
             // Held: nothing probed, nothing sent, until the host answers.
@@ -1056,6 +1069,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         session.set_commit(request.commit);
         session.set_peer_predicted(request.predicted);
+        session.set_peer_birthday(request.birthday);
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
     }
@@ -1190,7 +1204,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         protocol,
                     });
                 }
-                Step::Punch { peer, alternates } => {
+                Step::Punch {
+                    peer,
+                    alternates,
+                    spray,
+                } => {
                     let token = *session.token();
                     let fast_liveness = session.commit();
                     // READY reaches the initiator one relay trip after the
@@ -1210,6 +1228,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         token,
                         start_delay_ms,
                         fast_liveness,
+                        spray,
                     });
                 }
                 // The attach already happened in `direct_link_punched`,

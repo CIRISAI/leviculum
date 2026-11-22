@@ -56,6 +56,16 @@ pub const MAX_LOCAL_CANDIDATES: usize = 4;
 /// bound is also the most extra targets one session can make it punch.
 pub const MAX_PREDICTED_PORTS: usize = 16;
 
+/// +ciris: the most distinct ports one punch sprays on a peer's public IP
+/// when the peer asked for it (`"b"`): its NAT allocates at random, and the
+/// peer holds [`MAX_BIRTHDAY_SOCKETS`] mappings open toward this node, one of
+/// which a spray this wide hits about three times in four.
+pub const MAX_SPRAY_PORTS: usize = 960;
+
+/// +ciris: the most extra sockets a node behind a random NAT opens toward
+/// the peer for one punch, each one mapping.
+pub const MAX_BIRTHDAY_SOCKETS: usize = 64;
+
 /// +ciris (leviculum#88): the largest host payload a REQUEST carries. Big
 /// enough for a hybrid-signed CIRIS contact grant (ML-DSA-65, about 6-8 KiB);
 /// the REQUEST must still fit the link's channel MDU.
@@ -144,6 +154,11 @@ pub enum Signal {
         /// most); empty when its NAT kept one mapping or showed no steady
         /// step.
         initiator_predicted: Vec<u16>,
+        /// +ciris: the initiator's NAT maps per destination at random, so
+        /// no port can be predicted: it opens extra sockets toward the
+        /// responder and asks the responder to spray its public IP
+        /// ([`MAX_SPRAY_PORTS`] at most) to hit one of them.
+        initiator_birthday: bool,
     },
     Accept {
         session: SessionId,
@@ -162,6 +177,8 @@ pub enum Signal {
         commit: bool,
         /// +ciris: the responder's predicted ports, as in REQUEST.
         responder_predicted: Vec<u16>,
+        /// +ciris: the responder's NAT is random, as in REQUEST.
+        responder_birthday: bool,
     },
     Complete {
         session: SessionId,
@@ -208,6 +225,7 @@ impl Signal {
                 commit,
                 host_payload,
                 initiator_predicted,
+                initiator_birthday,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
                 let local = !initiator_local.is_empty();
@@ -217,7 +235,8 @@ impl Signal {
                         + u8::from(local)
                         + u8::from(*commit)
                         + u8::from(host_payload.is_some())
-                        + u8::from(!initiator_predicted.is_empty()),
+                        + u8::from(!initiator_predicted.is_empty())
+                        + u8::from(*initiator_birthday),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
@@ -233,6 +252,7 @@ impl Signal {
                 }
                 write_extras(&mut buf, *commit, host_payload.as_deref());
                 write_predicted(&mut buf, initiator_predicted);
+                write_birthday(&mut buf, *initiator_birthday);
             }
             Signal::Accept { session } | Signal::Complete { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
@@ -250,13 +270,15 @@ impl Signal {
                 responder_local,
                 commit,
                 responder_predicted,
+                responder_birthday,
             } => {
                 let local = !responder_local.is_empty();
                 msgpack::write_fixmap_header(
                     &mut buf,
                     2 + u8::from(local)
                         + u8::from(*commit)
-                        + u8::from(!responder_predicted.is_empty()),
+                        + u8::from(!responder_predicted.is_empty())
+                        + u8::from(*responder_birthday),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
@@ -266,6 +288,7 @@ impl Signal {
                 }
                 write_extras(&mut buf, *commit, None);
                 write_predicted(&mut buf, responder_predicted);
+                write_birthday(&mut buf, *responder_birthday);
             }
         }
         buf
@@ -294,6 +317,7 @@ impl Signal {
                 commit: fields.commit,
                 host_payload: fields.host_payload,
                 initiator_predicted: fields.predicted,
+                initiator_birthday: fields.birthday,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -309,6 +333,7 @@ impl Signal {
                 responder_local: fields.local,
                 commit: fields.commit,
                 responder_predicted: fields.predicted,
+                responder_birthday: fields.birthday,
             },
             _ => Signal::Complete { session },
         };
@@ -328,6 +353,7 @@ struct Fields {
     commit: bool,
     host_payload: Option<Vec<u8>>,
     predicted: Vec<u16>,
+    birthday: bool,
 }
 
 impl Fields {
@@ -349,6 +375,7 @@ impl Fields {
                 b"l" => fields.local = read_local(data, &mut pos)?,
                 b"c" => fields.commit = read_bool(data, &mut pos)?,
                 b"q" => fields.predicted = read_predicted(data, &mut pos)?,
+                b"b" => fields.birthday = read_bool(data, &mut pos)?,
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -405,6 +432,15 @@ fn write_predicted(buf: &mut Vec<u8>, ports: &[u16]) {
     msgpack::write_array_header(buf, ports.len());
     for port in ports {
         msgpack::write_uint(buf, u64::from(*port));
+    }
+}
+
+/// +ciris: `"b"`, written only when set (see [`Signal::Request`]'s
+/// `initiator_birthday`); an older decoder skips it.
+fn write_birthday(buf: &mut Vec<u8>, birthday: bool) {
+    if birthday {
+        msgpack::write_fixstr(buf, "b");
+        msgpack::write_bool(buf, true);
     }
 }
 
@@ -865,6 +901,7 @@ mod tests {
             commit: false,
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
+            initiator_birthday: false,
         };
         let golden = hex(
             "83a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c404c6336417cd9c40",
@@ -884,6 +921,7 @@ mod tests {
             commit: false,
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
+            initiator_birthday: false,
         };
         let golden = hex(
             "84a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c41020010db800000000000000000000000105a17001",
@@ -913,6 +951,7 @@ mod tests {
                     responder_local: Vec::new(),
                     commit: false,
                     responder_predicted: alloc::vec::Vec::new(),
+                    responder_birthday: false,
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -955,6 +994,7 @@ mod tests {
                 responder_local: Vec::new(),
                 commit: false,
                 responder_predicted: alloc::vec::Vec::new(),
+                responder_birthday: false,
             })
         );
     }
@@ -973,6 +1013,7 @@ mod tests {
             commit: true,
             host_payload: None,
             initiator_predicted: many.clone(),
+            initiator_birthday: false,
         };
         let Ok(Signal::Request {
             initiator_predicted,
@@ -988,6 +1029,7 @@ mod tests {
             responder_local: Vec::new(),
             commit: false,
             responder_predicted: alloc::vec![0, 41_000, 41_000, 41_001],
+            responder_birthday: false,
         };
         let Ok(Signal::Ready {
             responder_predicted,
@@ -997,6 +1039,46 @@ mod tests {
             panic!("decodes");
         };
         assert_eq!(responder_predicted, [41_000, 41_001]);
+    }
+
+    /// +ciris: `"b"` rides REQUEST and READY only when set, and round-trips.
+    #[test]
+    fn the_birthday_flag_round_trips_and_is_absent_when_unset() {
+        let ready = |birthday| Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: Vec::new(),
+            commit: false,
+            responder_predicted: Vec::new(),
+            responder_birthday: birthday,
+        };
+        for birthday in [false, true] {
+            let bytes = ready(birthday).encode();
+            assert_eq!(
+                bytes.windows(2).any(|w| w == [0xa1, b'b']),
+                birthday,
+                "the key is written only when set"
+            );
+            assert_eq!(
+                Signal::decode(MSG_UPGRADE_READY, &bytes),
+                Ok(ready(birthday))
+            );
+        }
+        let request = Signal::Request {
+            session: SESSION,
+            facilitator: public_v6(),
+            initiator_public: public_v6(),
+            protocol: ProbeProtocol::Rnsp,
+            initiator_local: Vec::new(),
+            commit: true,
+            host_payload: None,
+            initiator_predicted: Vec::new(),
+            initiator_birthday: true,
+        };
+        assert_eq!(
+            Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
+            Ok(request)
+        );
     }
 
     /// +ciris: a signal with no predicted ports is byte for byte what it was
@@ -1010,6 +1092,7 @@ mod tests {
             responder_local: Vec::new(),
             commit: true,
             responder_predicted: Vec::new(),
+            responder_birthday: false,
         };
         let mut old = Vec::new();
         msgpack::write_fixmap_header(&mut old, 3);
@@ -1024,6 +1107,7 @@ mod tests {
             responder_local: Vec::new(),
             commit: true,
             responder_predicted: alloc::vec![41_000],
+            responder_birthday: false,
         };
         let bytes = with.encode();
         assert_eq!(bytes[0], 0x80 | 4, "one more map entry");
@@ -1044,6 +1128,7 @@ mod tests {
             commit: false,
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
+            initiator_birthday: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -1056,6 +1141,7 @@ mod tests {
             responder_local: many.clone(),
             commit: false,
             responder_predicted: alloc::vec::Vec::new(),
+            responder_birthday: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
@@ -1065,6 +1151,7 @@ mod tests {
                 responder_local: many[..MAX_LOCAL_CANDIDATES].to_vec(),
                 commit: false,
                 responder_predicted: alloc::vec::Vec::new(),
+                responder_birthday: false,
             })
         );
     }

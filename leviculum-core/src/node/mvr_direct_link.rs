@@ -899,6 +899,7 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         commit: false,
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
+        initiator_birthday: false,
     };
     let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
     assert!(pair
@@ -1140,6 +1141,7 @@ fn a_peer_cannot_propose_again_inside_the_cooldown() {
         commit: false,
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
+        initiator_birthday: false,
     };
     pair.a.transport.clock().advance(1_000);
     pair.b.transport.clock().advance(1_000);
@@ -1905,6 +1907,7 @@ fn a_session_already_punching_stays_busy() {
         commit: true,
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
+        initiator_birthday: false,
     };
     pair.b.transport.clock().advance(1_000);
     pair.a.transport.clock().advance(1_000);
@@ -1972,6 +1975,7 @@ fn an_old_style_link_initiators_busy_finds_the_responder_already_yielded() {
         commit: true,
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
+        initiator_birthday: false,
     };
     let busy = crate::direct_link::Signal::Reject {
         session: b_session,

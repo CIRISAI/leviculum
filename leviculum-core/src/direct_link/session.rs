@@ -156,6 +156,10 @@ pub enum Step {
     Punch {
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
+        /// +ciris: the peer's NAT is random and it asked to be sprayed: also
+        /// punch up to [`super::wire::MAX_SPRAY_PORTS`] random ports on its
+        /// public IP, until anything is heard from it.
+        spray: bool,
     },
     /// The direct path is up.
     Established,
@@ -194,6 +198,10 @@ pub struct Session {
     /// +ciris: the ports the peer predicts its NAT maps toward this node,
     /// on its public IP; punched beside its advertised address.
     peer_predicted: Vec<u16>,
+    /// +ciris: the peer's NAT is random and it asked to be sprayed.
+    peer_birthday: bool,
+    /// +ciris: this node's NAT is random; told to the peer.
+    own_birthday: bool,
 }
 
 impl Session {
@@ -220,6 +228,8 @@ impl Session {
             peer_committed: false,
             host_payload: None,
             peer_predicted: Vec::new(),
+            peer_birthday: false,
+            own_birthday: false,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -258,6 +268,8 @@ impl Session {
             peer_committed: false,
             host_payload: None,
             peer_predicted: Vec::new(),
+            peer_birthday: false,
+            own_birthday: false,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -302,6 +314,19 @@ impl Session {
     /// responder's host. Set before the probe answers.
     pub fn set_host_payload(&mut self, payload: Option<Vec<u8>>) {
         self.host_payload = payload;
+    }
+
+    /// +ciris: the initiator's REQUEST asked to be sprayed (a responder
+    /// only; READY carries the responder's flag to the initiator).
+    pub fn set_peer_birthday(&mut self, birthday: bool) {
+        self.peer_birthday = birthday;
+    }
+
+    /// +ciris: this node's NAT allocates at random (no port to predict), so
+    /// its REQUEST or READY asks the peer to spray. Set before the probe
+    /// answers.
+    pub fn set_own_birthday(&mut self, birthday: bool) {
+        self.own_birthday = birthday;
     }
 
     /// +ciris: the ports the initiator's REQUEST predicted (a responder
@@ -388,6 +413,7 @@ impl Session {
                     commit: self.commit,
                     host_payload: self.host_payload.take(),
                     initiator_predicted: predicted,
+                    initiator_birthday: self.own_birthday,
                 })]
             }
             Role::Responder => {
@@ -405,8 +431,13 @@ impl Session {
                         responder_local: local,
                         commit: self.commit,
                         responder_predicted: predicted,
+                        responder_birthday: self.own_birthday,
                     }),
-                    Step::Punch { peer, alternates },
+                    Step::Punch {
+                        peer,
+                        alternates,
+                        spray: self.peer_birthday,
+                    },
                 ]
             }
         }
@@ -463,6 +494,7 @@ impl Session {
                     responder_local,
                     commit,
                     responder_predicted,
+                    responder_birthday,
                     ..
                 },
             ) => {
@@ -479,9 +511,11 @@ impl Session {
                 self.peer_predicted
                     .truncate(super::wire::MAX_PREDICTED_PORTS);
                 push_predicted(&mut alternates, *responder_public, &self.peer_predicted);
+                self.peer_birthday = *responder_birthday;
                 alloc::vec![Step::Punch {
                     peer: *responder_public,
                     alternates,
+                    spray: self.peer_birthday,
                 }]
             }
             // +ciris (leviculum#89): the peer's half of the two-sided commit.
@@ -623,6 +657,7 @@ mod tests {
             commit: true,
             initiator_predicted: _,
             host_payload: None,
+            initiator_birthday: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -654,7 +689,8 @@ mod tests {
             b_steps[1],
             Step::Punch {
                 peer: a_pub(),
-                alternates: Vec::new()
+                alternates: Vec::new(),
+                spray: false,
             }
         );
 
@@ -663,7 +699,8 @@ mod tests {
             a_steps,
             [Step::Punch {
                 peer: b_pub(),
-                alternates: Vec::new()
+                alternates: Vec::new(),
+                spray: false,
             }]
         );
         assert_eq!(a.peer_public(), Some(b_pub()));
@@ -702,15 +739,47 @@ mod tests {
         let ip = |p: u16| SocketAddr::new(a_pub().ip(), p);
         assert!(b_steps.iter().any(|s| matches!(
             s,
-            Step::Punch { peer, alternates } if *peer == a_pub() && *alternates == [ip(5001), ip(5002)]
+            Step::Punch { peer, alternates, spray: _  } if *peer == a_pub() && *alternates == [ip(5001), ip(5002)]
         )));
         let _ = deliver(&[Step::Send(Signal::Accept { session: ID })], &mut a, 4);
         let a_steps = deliver(&b_steps, &mut a, 5);
         assert!(a_steps.iter().any(|s| matches!(
             s,
-            Step::Punch { peer, alternates }
+            Step::Punch { peer, alternates, spray: _  }
                 if *peer == b_pub() && *alternates == [SocketAddr::new(b_pub().ip(), 6003)]
         )));
+    }
+
+    /// +ciris: a node behind a random NAT asks to be sprayed, and only the
+    /// peer it asked sprays: REQUEST's flag makes the responder's punch
+    /// spray, READY's makes the initiator's.
+    #[test]
+    fn a_random_nat_asks_its_peer_to_spray() {
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        a.set_own_birthday(true);
+        let steps = a.probed_with_candidates(a_pub(), Vec::new(), Vec::new(), 1);
+        let Signal::Request {
+            initiator_birthday, ..
+        } = request_from(&steps)
+        else {
+            unreachable!()
+        };
+        assert!(*initiator_birthday);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 2);
+        b.set_peer_birthday(*initiator_birthday);
+        let b_steps = b.probed_with_candidates(b_pub(), Vec::new(), Vec::new(), 3);
+        assert!(b_steps
+            .iter()
+            .any(|s| matches!(s, Step::Punch { spray: true, .. })));
+        let _ = deliver(&[Step::Send(Signal::Accept { session: ID })], &mut a, 4);
+        let a_steps = deliver(&b_steps, &mut a, 5);
+        assert!(
+            a_steps
+                .iter()
+                .any(|s| matches!(s, Step::Punch { spray: false, .. })),
+            "B's NAT is not random: A does not spray"
+        );
     }
 
     #[test]
@@ -735,6 +804,7 @@ mod tests {
             commit: true,
             initiator_predicted: _,
             host_payload: None,
+            initiator_birthday: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -759,7 +829,8 @@ mod tests {
             b_steps[1],
             Step::Punch {
                 peer: a_pub,
-                alternates: alloc::vec![a_lan]
+                alternates: alloc::vec![a_lan],
+                spray: false,
             },
             "B punches A's public address and A's host candidate"
         );
@@ -768,7 +839,8 @@ mod tests {
             a_steps,
             [Step::Punch {
                 peer: b_pub,
-                alternates: alloc::vec![b_lan]
+                alternates: alloc::vec![b_lan],
+                spray: false,
             }],
             "A punches B's public address and B's host candidate"
         );
@@ -849,6 +921,7 @@ mod tests {
             responder_local: Vec::new(),
             commit: true,
             responder_predicted: alloc::vec::Vec::new(),
+            responder_birthday: false,
         };
         a.signal(&ready, 3);
         assert_eq!(a.phase(), Phase::Punching);
@@ -887,6 +960,7 @@ mod tests {
             responder_local: Vec::new(),
             commit: false,
             responder_predicted: alloc::vec::Vec::new(),
+            responder_birthday: false,
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);
