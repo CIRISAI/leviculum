@@ -603,6 +603,53 @@ async fn an_asking_host_refuses_and_the_proposer_hears_rejected() {
     assert_eq!(a.node.direct_link_interface(&link_id), None);
 }
 
+/// +ciris (third review N5): why a send right after the upgrade's signals
+/// can meet `PacingDelay`, and that this is the Channel working, not a fault.
+/// The upgrade signals (REQUEST, ACCEPT, READY, COMPLETE, REJECT) are Channel
+/// messages on the link, paced like any other: after each send the Channel
+/// holds the next for `pacing_interval_ms` = srtt / window. On a starved host
+/// the measured RTT is long and the window small, so the interval can reach
+/// hundreds of milliseconds; a `try_send` (which never waits, by contract)
+/// inside it reports `PacingDelay`. This witness: the first send after an
+/// upgrade either goes, or meets pacing only while the link reports a
+/// non-zero pacing interval, and goes once that interval has passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_send_after_an_upgrade_waits_at_most_one_pacing_interval() {
+    let (_t, _a, mut b, link_id, handle, _hash) =
+        linked_through_relay(DirectLinkSettings::default(), None).await;
+    b.node.propose_direct_link(&link_id).await.expect("propose");
+    let _ = next_event(&mut b.rx, Duration::from_secs(20), |ev| {
+        matches!(
+            ev,
+            NodeEvent::DirectLinkFailed { .. } | NodeEvent::DirectLinkEstablished { .. }
+        )
+    })
+    .await
+    .expect("the upgrade ends");
+    // The Channel clamps the pacing interval to at most one RTT
+    // (Channel::recalculate_pacing), and the interval in force is the one set
+    // at the last send, which later RTT samples may have changed: so the
+    // bound is one RTT from now, and nothing but pacing may hold it back.
+    let stats = b.node.link_stats(&link_id).expect("the link");
+    let rtt_ms = stats.rtt_ms().unwrap_or(0).max(stats.pacing_interval_ms());
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(2 * rtt_ms + 200);
+    loop {
+        match handle.try_send(b"first after the upgrade").await {
+            Ok(()) => break,
+            Err(leviculum_std::Error::Send(leviculum_core::node::SendError::PacingDelay {
+                ..
+            })) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "paced past one RTT ({rtt_ms} ms) after the upgrade"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(e) => panic!("the first send after an upgrade: {e:?}"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_upgrade_leaves_the_relayed_link_working() {
     // A runs the default policy: refuse.

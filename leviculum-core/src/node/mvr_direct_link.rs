@@ -388,6 +388,37 @@ fn only_a_node_answering_identified_peers_sprays() {
     }
 }
 
+/// +ciris (third review, the gate): escalation follows trust in the peer,
+/// not the answer policy. A initiated the link to a peer it chose, so its
+/// punch may escalate even under the default Reject policy (which only says
+/// how A answers); the host's decision overrides the rule either way.
+#[test]
+fn escalation_is_decided_by_trust_in_the_peer_not_the_answer_policy() {
+    for (host, escalates) in [(None, true), (Some(false), false), (Some(true), true)] {
+        let mut pair = Pair::new();
+        pair.configure(DirectLinkPolicy::AcceptAll); // A: Reject; B: accept_all
+        if let Some(h) = host {
+            pair.a.set_direct_link_escalation(&pair.link, Some(h));
+        }
+        pair.propose();
+        let session = only_probe(&pair.a.take_direct_link_jobs());
+        let out = pair.a.direct_link_probed(&session, Some(a_public()));
+        pair.pump_from_a(packets(&out));
+        let _ = only_probe(&pair.b.take_direct_link_jobs());
+        let out = pair.b.direct_link_probed(&session, Some(b_public()));
+        // B answers under accept_all: it never escalates.
+        match pair.b.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { escalate, .. }] => assert!(!*escalate, "accept_all"),
+            other => panic!("expected one punch, got {other:?}"),
+        }
+        pair.pump_from_b(packets(&out));
+        match pair.a.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { escalate, .. }] => assert_eq!(*escalate, escalates, "{host:?}"),
+            other => panic!("expected one punch, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_responder_with_no_facilitator_of_its_own_refuses() {
     let mut pair = Pair::new();

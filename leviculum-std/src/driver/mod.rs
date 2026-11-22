@@ -4215,6 +4215,16 @@ impl ReticulumNode {
             .map_err(|_| Error::NotRunning)
     }
 
+    /// +ciris (third review, the gate): the host's trust decision for one
+    /// link: may a punch on it escalate (knocks, spray, birthday sockets)?
+    /// `None` returns the link to the default rule (see
+    /// `NodeCore::direct_link_escalation_allowed`). Takes the core lock.
+    pub fn set_direct_link_escalation(&self, link_id: &LinkId, allowed: Option<bool>) {
+        self.inner
+            .lock_recover()
+            .set_direct_link_escalation(link_id, allowed);
+    }
+
     /// Turn the background retry of this node's failed direct-link
     /// proposals off or back on (+ciris; on by default). A proposal that
     /// failed on the punch, a timeout, the probe, a busy peer or a crossing,

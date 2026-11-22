@@ -302,6 +302,11 @@ pub(crate) struct DirectLinks {
     committing: BTreeMap<LinkId, (SessionId, usize, bool)>,
     /// +ciris: links this node proposed on, and their retry schedule.
     pub(super) retries: BTreeMap<LinkId, Retry>,
+    /// +ciris (third review, the gate): the host's decision, per link,
+    /// whether this node may escalate a punch toward that peer (knocks,
+    /// spray, birthday sockets). Absent: the default rule
+    /// ([`NodeCore::direct_link_escalation_allowed`]).
+    escalation_trust: BTreeMap<LinkId, bool>,
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
     pub(super) jobs: VecDeque<DirectLinkJob>,
@@ -438,6 +443,47 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// +ciris: stop or resume retrying failed proposals (on by default).
     /// Off, a failed upgrade stays failed until the host proposes again.
+    /// +ciris (third review, the gate): the host's trust decision for one
+    /// link: may a punch on it escalate (knock the peer's predicted ports,
+    /// spray its IP, hold birthday sockets open toward it)? `None` returns
+    /// the link to the default rule. CIRIS answers it from consent (own
+    /// nodes, mutual contacts, serve seats: the only peers that may hold a
+    /// link at all, CC 5.4.6).
+    pub fn set_direct_link_escalation(&mut self, link_id: &LinkId, allowed: Option<bool>) {
+        let link_id = self.resolve_link_id(link_id);
+        match allowed {
+            Some(a) => {
+                self.direct_links.escalation_trust.insert(link_id, a);
+            }
+            None => {
+                self.direct_links.escalation_trust.remove(&link_id);
+            }
+        }
+    }
+
+    /// +ciris (third review, the gate): whether a punch on `link_id`, in
+    /// `role`, may escalate. Decided by trust in the PEER, not by the answer
+    /// policy: the host's decision when it gave one; otherwise never under
+    /// accept_all; yes when this node initiated the link to a peer it chose;
+    /// under identified_only, yes for an identified peer; under ask_host, yes
+    /// for a request the host accepted (the session exists only then).
+    pub fn direct_link_escalation_allowed(&self, link_id: &LinkId, role: Role) -> bool {
+        let link_id = self.resolve_link_id(link_id);
+        if let Some(a) = self.direct_links.escalation_trust.get(&link_id) {
+            return *a;
+        }
+        let Some(link) = self.links.get(&link_id) else {
+            return false;
+        };
+        match self.direct_links.config.policy {
+            DirectLinkPolicy::AcceptAll => false,
+            _ if link.is_initiator() => true,
+            DirectLinkPolicy::IdentifiedOnly => link.remote_identity().is_some(),
+            DirectLinkPolicy::AskHost => role == Role::Responder,
+            DirectLinkPolicy::Reject => false,
+        }
+    }
+
     pub fn set_direct_link_retry(&mut self, enabled: bool) {
         self.direct_links.retry_off = !enabled;
         if !enabled {
@@ -1243,14 +1289,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     predicted,
                     spray,
                 } => {
-                    // +ciris (review item 2): every escalated send (knocks to
-                    // predicted ports, the spray, birthday sockets) goes to an
-                    // IP the peer reported, so only a node that answers
-                    // identified peers escalates: never under accept_all.
-                    let escalate = matches!(
-                        self.direct_links.config.policy,
-                        DirectLinkPolicy::IdentifiedOnly | DirectLinkPolicy::AskHost
-                    );
+                    // +ciris (third review, the gate): every escalated send
+                    // (knocks to predicted ports, the spray, birthday sockets)
+                    // goes to an IP the peer reported, so it is decided by
+                    // trust in the peer, not by how this node answers.
+                    let escalate = self.direct_link_escalation_allowed(&link_id, session.role());
                     let spray = spray && escalate;
                     let predicted = if escalate { predicted } else { Vec::new() };
                     let token = *session.token();
@@ -1651,6 +1694,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             });
         }
         self.direct_links.last_proposal_ms.remove(link_id);
+        self.direct_links.escalation_trust.remove(link_id);
         self.direct_links.peer_holding.remove(link_id);
         self.direct_links.mtu_before_move.remove(link_id);
         self.direct_links.retries.remove(link_id);

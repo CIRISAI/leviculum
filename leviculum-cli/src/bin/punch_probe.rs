@@ -74,11 +74,11 @@ enum Role {
         /// Re-announce this often.
         #[arg(long, default_value_t = 120)]
         announce_secs: u64,
-        /// Derive the throwaway listener identity from this string instead
-        /// of a random one, so a dialer can know the destination before the
-        /// listener prints it (`whois`). Test identities only.
+        /// This listener's throwaway identity, a private key `keygen` wrote
+        /// (never derived from a seed: third review C). Without one, a random
+        /// identity. Its destination and public key: `whois`.
         #[arg(long)]
-        seed: Option<String>,
+        identity_file: Option<std::path::PathBuf>,
         /// Accept a direct link only from the dialer with this identity hash
         /// (hex, from `keygen`): ask_host with an allowlist, never accept_all
         /// on a public destination. Only the public hash is ever handed out.
@@ -97,10 +97,11 @@ enum Role {
         #[arg(long)]
         out: std::path::PathBuf,
     },
-    /// Print the destination and key `listen --seed` will use; no network.
+    /// Print the destination and public signing key `listen
+    /// --identity-file` will use (both public); no network.
     Whois {
         #[arg(long)]
-        seed: String,
+        identity_file: std::path::PathBuf,
     },
     /// Link to a listener and propose a direct link repeatedly.
     Dial {
@@ -163,24 +164,22 @@ impl<S: tracing::Subscriber> Layer<S> for DiagLayer {
     }
 }
 
-/// The listener's identity: random, or derived from `seed` (two SHA-256
-/// halves of the seed string make the 64 private-key bytes).
-fn listener_identity(seed: Option<&str>) -> Identity {
-    use sha2::{Digest, Sha256};
-    match seed {
-        None => Identity::generate(&mut rand_core::OsRng),
-        Some(seed) => {
-            let mut bytes = [0u8; 64];
-            bytes[..32].copy_from_slice(&Sha256::digest(format!("punch-probe/x25519/{seed}")));
-            bytes[32..].copy_from_slice(&Sha256::digest(format!("punch-probe/ed25519/{seed}")));
-            Identity::from_private_key_bytes(&bytes).expect("64 key bytes")
-        }
-    }
+/// An identity from a key file `keygen` wrote, or a clear error.
+fn identity_from_file(path: &std::path::Path) -> Result<Identity, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read the key file: {e}"))?;
+    let bytes = unhex::<64>(&text).map_err(|e| format!("the key file is not a key: {e}"))?;
+    Identity::from_private_key_bytes(&bytes).map_err(|_| "the key file is not a key".to_string())
 }
 
-/// The `ciris.punchprobe` destination and signing key for a listener.
-fn listener_destination(seed: Option<&str>) -> (DestinationHash, [u8; 32]) {
-    let identity = listener_identity(seed);
+/// Exit with a one-line error (no panic, no address).
+fn fail(role: &str, error: &str) -> ! {
+    out(json!({"role": role, "kind": "error", "error": error}));
+    std::process::exit(2);
+}
+
+/// The `ciris.punchprobe` destination and signing key for an identity.
+fn listener_destination(identity: Identity) -> (DestinationHash, [u8; 32]) {
     let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
     let dest = Destination::new(
         Some(identity),
@@ -354,12 +353,32 @@ async fn main() {
     if let Role::Keygen { out: path } = &cli.role {
         let identity = Identity::generate(&mut rand_core::OsRng);
         let key = identity.private_key_bytes().expect("a private key");
-        std::fs::write(path, hex(&key)).expect("write the key file");
+        // 0600 from creation (third review C): never readable by others.
+        use std::io::Write;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path);
+        match file.and_then(|mut f| f.write_all(hex(&key).as_bytes())) {
+            Ok(()) => {}
+            Err(e) => fail("keygen", &format!("cannot write the key file: {e}")),
+        }
         out(json!({"kind": "keygen", "hash": hex(identity.hash())}));
         return;
     }
-    if let Role::Whois { seed } = &cli.role {
-        let (hash, key) = listener_destination(Some(seed));
+    if let Role::Whois { identity_file } = &cli.role {
+        let identity = identity_from_file(identity_file).unwrap_or_else(|e| fail("whois", &e));
+        let (hash, key) = listener_destination(identity);
         out(json!({"kind": "whois", "dest": hex(hash.as_bytes()), "key": hex(&key)}));
         return;
     }
@@ -407,10 +426,19 @@ async fn main() {
         Role::Listen {
             duration_secs,
             announce_secs,
-            seed,
+            identity_file,
             allow,
             allow_file,
         } => {
+            // Somebody must be admissible, and what is named must parse.
+            if allow.is_none() && allow_file.is_none() {
+                fail(role, "listen needs --allow HASH or --allow-file PATH");
+            }
+            if let Some(a) = &allow {
+                if unhex::<16>(a).is_err() {
+                    fail(role, "--allow must be a 16-byte identity hash in hex");
+                }
+            }
             // Read on every request (a dialer's hash may arrive mid-run).
             let allowed = move || -> Vec<[u8; 16]> {
                 let mut list: Vec<String> = allow.iter().cloned().collect();
@@ -425,7 +453,10 @@ async fn main() {
                 }
                 list.iter().filter_map(|h| unhex::<16>(h).ok()).collect()
             };
-            let identity = listener_identity(seed.as_deref());
+            let identity = match &identity_file {
+                Some(f) => identity_from_file(f).unwrap_or_else(|e| fail(role, &e)),
+                None => Identity::generate(&mut rand_core::OsRng),
+            };
             let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
             let mut dest = Destination::new(
                 Some(identity),
@@ -481,10 +512,7 @@ async fn main() {
             spacing_secs,
             identity_file,
         } => {
-            let key_hex = std::fs::read_to_string(&identity_file).expect("--identity-file");
-            let me =
-                Identity::from_private_key_bytes(&unhex::<64>(&key_hex).expect("a 64-byte key"))
-                    .expect("a private key");
+            let me = identity_from_file(&identity_file).unwrap_or_else(|e| fail(role, &e));
             let hash = DestinationHash::new(unhex::<16>(&to).expect("--to"));
             let key = unhex::<32>(&key).expect("--key");
             let t = Instant::now();

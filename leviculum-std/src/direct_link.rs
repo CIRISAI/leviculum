@@ -429,12 +429,13 @@ pub(crate) async fn punch_with(
     token: &[u8; 32],
     plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
-    let esc = Escalation::new(
+    let mut esc = Escalation::new(
         knock_budget(),
         plan.pair,
         plan.escalate,
         plan.birthday_after,
     );
+    esc.birthday_max = plan.birthday_max;
     let spray: Option<SprayPorts> = (plan.spray && plan.escalate).then(|| {
         let mut rng = rand_core::OsRng;
         Box::new(move || spray_port(&mut rng)) as SprayPorts
@@ -463,6 +464,9 @@ pub(crate) struct PunchPlan {
     /// When the birthday phase may open: BIRTHDAY_AFTER on two-observer
     /// evidence, ESCALATE_AFTER on own evidence alone (Eric's fallback).
     pub(crate) birthday_after: Duration,
+    /// How many birthday sockets: MAX_BIRTHDAY_SOCKETS on two-observer
+    /// evidence, FALLBACK_BIRTHDAY_SOCKETS on own evidence (N1c).
+    pub(crate) birthday_max: usize,
 }
 
 impl PunchPlan {
@@ -475,6 +479,7 @@ impl PunchPlan {
             escalate: false,
             pair: [0u8; 16],
             birthday_after: BIRTHDAY_AFTER,
+            birthday_max: 0,
         }
     }
 }
@@ -489,6 +494,9 @@ pub(crate) struct Escalation {
     pair: [u8; 16],
     allowed: bool,
     pub(crate) birthday_after: Duration,
+    /// How many birthday sockets this punch may hold: 128 on two-observer
+    /// evidence, 32 on own evidence alone (third review N1c).
+    pub(crate) birthday_max: usize,
     /// `None` until the first escalated send; then whether the pair's
     /// allowance granted this punch.
     granted: Arc<std::sync::Mutex<Option<bool>>>,
@@ -506,31 +514,34 @@ impl Escalation {
             pair,
             allowed,
             birthday_after,
+            birthday_max: wire::MAX_BIRTHDAY_SOCKETS,
             granted: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Is this punch granted its pair's allowance toward `ip`? Decided once,
+    /// at the first ask (a send, or the birthday phase before it binds
+    /// anything: third review N1b).
+    pub(crate) fn grant(&self, ip: std::net::IpAddr) -> bool {
+        if !self.allowed {
+            return false;
+        }
+        let mut g = self.granted.lock().unwrap_or_else(|e| e.into_inner());
+        match *g {
+            Some(ok) => ok,
+            None => {
+                let ok = self
+                    .budget
+                    .escalate(self.pair, ip, std::time::Instant::now());
+                *g = Some(ok);
+                ok
+            }
         }
     }
 
     /// May one escalated datagram go to `ip` now?
     pub(crate) fn send(&self, ip: std::net::IpAddr) -> bool {
-        if !self.allowed {
-            return false;
-        }
-        let now = std::time::Instant::now();
-        {
-            let mut g = self.granted.lock().unwrap_or_else(|e| e.into_inner());
-            match *g {
-                Some(false) => return false,
-                Some(true) => {}
-                None => {
-                    let ok = self.budget.escalate(self.pair, ip, now);
-                    *g = Some(ok);
-                    if !ok {
-                        return false;
-                    }
-                }
-            }
-        }
-        self.budget.take(ip, now)
+        self.grant(ip) && self.budget.take(self.pair, ip, std::time::Instant::now())
     }
 
     /// Whether the pair's allowance refused this punch.
@@ -552,14 +563,27 @@ pub(crate) const BUDGET_WINDOW: Duration = Duration::from_secs(300);
 /// Birthday punches one session sends at most: every socket, every
 /// BIRTHDAY_REFRESH, for the whole window.
 pub(crate) const BIRTHDAY_SENDS_MAX: u32 = wire::MAX_BIRTHDAY_SOCKETS as u32 * 20;
-/// +ciris (review item 2): escalated datagrams one target (an IPv4 address,
-/// an IPv6 /64) may receive per [`BUDGET_WINDOW`] from this process, all
-/// pairs together: three full escalations.
-pub(crate) const TARGET_VOLUME: u32 = 3 * (wire::MAX_SPRAY_PORTS as u32 + BIRTHDAY_SENDS_MAX);
+/// Escalated datagrams one escalation sends at most: the spray and the
+/// birthday punches.
+pub(crate) const ESCALATION_SENDS: u32 = wire::MAX_SPRAY_PORTS as u32 + BIRTHDAY_SENDS_MAX;
+/// +ciris (third review, B): escalated datagrams one PAIR may send one target
+/// per window: its own three escalations.
+pub(crate) const PAIR_TARGET_VOLUME: u32 = PAIR_ESCALATIONS as u32 * ESCALATION_SENDS;
+/// +ciris (review item 2, third review B): escalated datagrams one target (an
+/// IPv4 address, an IPv6 /64) may receive per window from this process, all
+/// pairs together: a ceiling over the pairs' shares, so no one pair can
+/// exhaust a shared (CGNAT) address for the others.
+pub(crate) const TARGET_VOLUME: u32 = 2 * PAIR_TARGET_VOLUME;
 /// +ciris (review item 2): escalated datagrams per second the whole process
 /// may send: room for three concurrent escalations (each about 220 knocks
-/// and 256 birthday punches a second) without starving one another.
+/// and 256 birthday punches a second).
 pub(crate) const ESCALATED_GLOBAL_PPS: u32 = 1_500;
+/// +ciris (third review, N3): one escalation's rate, the floor of a pair's
+/// fair share of the global ceiling.
+pub(crate) const PAIR_FLOOR_PPS: u32 =
+    SPRAY_PER_TICK as u32 * 10 + wire::MAX_BIRTHDAY_SOCKETS as u32 * 2;
+/// How recently a pair must have sent to count as active for the fair share.
+const ACTIVE_PAIR: Duration = Duration::from_secs(2);
 
 /// A budget key: an IPv4 address, or an IPv6 /64 (one subscriber's prefix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -584,7 +608,71 @@ impl Target {
     }
 }
 
-/// +ciris (review item 2): the process-wide budget for escalated sends.
+/// +ciris (third review, item 2): a count over a sliding [`BUDGET_WINDOW`],
+/// two buckets: the previous window's count weighted by how much of it is
+/// still inside, plus the current one's (no 2x burst at a boundary).
+#[derive(Debug, Clone, Copy)]
+struct Sliding {
+    start: std::time::Instant,
+    cur: u32,
+    prev: u32,
+}
+
+impl Sliding {
+    fn new(now: std::time::Instant) -> Self {
+        Sliding {
+            start: now,
+            cur: 0,
+            prev: 0,
+        }
+    }
+
+    fn roll(&mut self, now: std::time::Instant) {
+        let gone = now.saturating_duration_since(self.start);
+        if gone >= 2 * BUDGET_WINDOW {
+            *self = Sliding::new(now);
+        } else if gone >= BUDGET_WINDOW {
+            self.prev = self.cur;
+            self.cur = 0;
+            self.start += BUDGET_WINDOW;
+        }
+    }
+
+    fn estimate(&mut self, now: std::time::Instant) -> f64 {
+        self.roll(now);
+        let into = now.saturating_duration_since(self.start).as_secs_f64();
+        let left = (1.0 - into / BUDGET_WINDOW.as_secs_f64()).max(0.0);
+        f64::from(self.prev) * left + f64::from(self.cur)
+    }
+
+    fn idle(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.start) >= 2 * BUDGET_WINDOW
+    }
+}
+
+/// A token bucket: `rate` a second, `rate` deep.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl Bucket {
+    fn take(&mut self, rate: f64, now: std::time::Instant) -> bool {
+        let gained = now.saturating_duration_since(self.at).as_secs_f64() * rate;
+        self.tokens = (self.tokens + gained).min(rate);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// +ciris: the process-wide budget for escalated sends (review item 2,
+/// third review B, N3).
 pub(crate) struct KnockBudget {
     inner: std::sync::Mutex<KnockBudgetInner>,
 }
@@ -592,10 +680,13 @@ pub(crate) struct KnockBudget {
 struct KnockBudgetInner {
     /// Escalations started per (pair, target), with when.
     pairs: HashMap<([u8; 16], Target), Vec<std::time::Instant>>,
-    /// Datagrams per target in the current window: (window start, count).
-    volume: HashMap<Target, (std::time::Instant, u32)>,
-    tokens: f64,
-    refilled: Option<std::time::Instant>,
+    /// Datagrams per target, all pairs (the ceiling).
+    volume: HashMap<Target, Sliding>,
+    /// Datagrams per (pair, target): each pair's share of a target.
+    pair_volume: HashMap<([u8; 16], Target), Sliding>,
+    /// Each pair's rate bucket: a fair share of the global ceiling.
+    pair_rate: HashMap<[u8; 16], Bucket>,
+    global: Bucket,
 }
 
 impl KnockBudget {
@@ -604,8 +695,12 @@ impl KnockBudget {
             inner: std::sync::Mutex::new(KnockBudgetInner {
                 pairs: HashMap::new(),
                 volume: HashMap::new(),
-                tokens: f64::from(ESCALATED_GLOBAL_PPS),
-                refilled: None,
+                pair_volume: HashMap::new(),
+                pair_rate: HashMap::new(),
+                global: Bucket {
+                    tokens: f64::from(ESCALATED_GLOBAL_PPS),
+                    at: std::time::Instant::now(),
+                },
             }),
         }
     }
@@ -630,31 +725,65 @@ impl KnockBudget {
         true
     }
 
-    /// One escalated datagram toward `ip`: the target's volume, then the
-    /// global ceiling.
-    pub(crate) fn take(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+    /// One escalated datagram from `pair` toward `ip`: the pair's share of
+    /// the target, the target's ceiling, the pair's fair share of the global
+    /// rate, then the global ceiling.
+    pub(crate) fn take(
+        &self,
+        pair: [u8; 16],
+        ip: std::net::IpAddr,
+        now: std::time::Instant,
+    ) -> bool {
         let mut b = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Prune what nothing refers to any more (third review, item 2).
+        b.volume.retain(|_, w| !w.idle(now));
+        b.pair_volume.retain(|_, w| !w.idle(now));
+        b.pair_rate
+            .retain(|_, k| now.saturating_duration_since(k.at) < BUDGET_WINDOW);
         let key = Target::of(ip);
-        let (start, count) = b.volume.get(&key).copied().unwrap_or((now, 0));
-        let (start, count) = if now.saturating_duration_since(start) >= BUDGET_WINDOW {
-            (now, 0)
-        } else {
-            (start, count)
-        };
-        if count >= TARGET_VOLUME {
+        let pk = (pair, key);
+        if b.pair_volume
+            .entry(pk)
+            .or_insert_with(|| Sliding::new(now))
+            .estimate(now)
+            >= f64::from(PAIR_TARGET_VOLUME)
+        {
             return false;
         }
-        let cap = f64::from(ESCALATED_GLOBAL_PPS);
-        if let Some(at) = b.refilled {
-            let gained = now.saturating_duration_since(at).as_secs_f64() * cap;
-            b.tokens = (b.tokens + gained).min(cap);
-        }
-        b.refilled = Some(now);
-        if b.tokens < 1.0 {
+        if b.volume
+            .entry(key)
+            .or_insert_with(|| Sliding::new(now))
+            .estimate(now)
+            >= f64::from(TARGET_VOLUME)
+        {
             return false;
         }
-        b.tokens -= 1.0;
-        b.volume.insert(key, (start, count + 1));
+        let active = b
+            .pair_rate
+            .iter()
+            .filter(|(p, k)| **p != pair && now.saturating_duration_since(k.at) < ACTIVE_PAIR)
+            .count()
+            + 1;
+        let share = (f64::from(ESCALATED_GLOBAL_PPS) / active as f64)
+            .max(f64::from(PAIR_FLOOR_PPS))
+            .min(f64::from(ESCALATED_GLOBAL_PPS));
+        // A new pair's bucket starts full at its share.
+        let mine = b.pair_rate.entry(pair).or_insert(Bucket {
+            tokens: share,
+            at: now,
+        });
+        if !mine.take(share, now) {
+            return false;
+        }
+        if !b.global.take(f64::from(ESCALATED_GLOBAL_PPS), now) {
+            return false;
+        }
+        if let Some(w) = b.pair_volume.get_mut(&pk) {
+            w.cur += 1;
+        }
+        if let Some(w) = b.volume.get_mut(&key) {
+            w.cur += 1;
+        }
         true
     }
 }
@@ -760,6 +889,10 @@ pub(crate) const ESCALATE_AFTER: Duration = Duration::from_millis(1_500);
 /// open when the spray arrives.
 pub(crate) const BIRTHDAY_AFTER: Duration = Duration::from_millis(1_000);
 
+/// +ciris (third review N1c): birthday sockets a punch holds on own evidence
+/// alone (no observer could classify the NAT).
+pub(crate) const FALLBACK_BIRTHDAY_SOCKETS: usize = 32;
+
 /// How often each birthday socket repeats its punch toward the peer. With
 /// the knock fix the peer's knock only opens its filter, and the next of
 /// these punches is what gets through, so this is the added latency.
@@ -825,14 +958,19 @@ async fn punch_birthday(
         };
         match early {
             Some(r) => BirthdayEnd::Primary(r),
-            // Heard already at the gate (review item 6), or not allowed to
-            // escalate at all (review item 2): nothing to open.
-            None if primary_heard.load(std::sync::atomic::Ordering::SeqCst) || !esc.allowed() => {
+            // Heard already at the gate (review item 6), not allowed to
+            // escalate (the trust gate), or the pair's allowance refused
+            // before anything is bound (third review N1b): nothing to open.
+            None if primary_heard.load(std::sync::atomic::Ordering::SeqCst)
+                || !esc.grant(peer.ip()) =>
+            {
                 BirthdayEnd::Primary((&mut primary).await)
             }
             None => {
                 (opened, permits) = match extras {
-                    Extras::Open => birthday_sockets(peer, birthday_permits()).await,
+                    Extras::Open => {
+                        birthday_sockets(peer, birthday_permits(), esc.birthday_max).await
+                    }
                     #[cfg(test)]
                     Extras::Given(given) => {
                         let n = given.len();
@@ -1187,6 +1325,7 @@ async fn punch_inner(
 async fn birthday_sockets(
     peer: SocketAddr,
     permits: &Arc<tokio::sync::Semaphore>,
+    max: usize,
 ) -> (
     Vec<Arc<UdpSocket>>,
     Vec<Option<tokio::sync::OwnedSemaphorePermit>>,
@@ -1198,7 +1337,7 @@ async fn birthday_sockets(
     };
     let mut out = Vec::with_capacity(wire::MAX_BIRTHDAY_SOCKETS);
     let mut held = Vec::with_capacity(wire::MAX_BIRTHDAY_SOCKETS);
-    for _ in 0..wire::MAX_BIRTHDAY_SOCKETS {
+    for _ in 0..max.min(wire::MAX_BIRTHDAY_SOCKETS) {
         let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
             break;
         };
@@ -2019,6 +2158,7 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     tracing::info!("direct link: facilitator listening (udp)");
     let task = tokio::spawn(async move {
         let mut buf = [0u8; 576];
+        let mut limit = ReplyLimit::new();
         loop {
             let (len, src) = match socket.recv_from(&mut buf).await {
                 Ok(r) => r,
@@ -2027,6 +2167,11 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
                     continue;
                 }
             };
+            // A stateless responder must not be a reflector (third review
+            // N4): at most FACILITATOR_REPLIES_PER_SEC replies per source.
+            if !limit.allow(src.ip(), std::time::Instant::now()) {
+                continue;
+            }
             let request = &buf[..len];
             let answer = if let Some(nonce) = wire::parse_rnsp_request(request) {
                 wire::rnsp_response(&nonce, &src)
@@ -2039,6 +2184,45 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
         }
     });
     Ok(task.abort_handle())
+}
+
+/// +ciris (third review N4): replies a facilitator port sends one source
+/// address per second at most (an honest prober sends a handful per
+/// proposal), and how many sources it tracks before it forgets the idlest.
+pub(crate) const FACILITATOR_REPLIES_PER_SEC: f64 = 10.0;
+const FACILITATOR_SOURCES: usize = 4_096;
+
+/// Per-source reply buckets for a facilitator port.
+pub(crate) struct ReplyLimit {
+    sources: HashMap<std::net::IpAddr, Bucket>,
+}
+
+impl ReplyLimit {
+    pub(crate) fn new() -> Self {
+        ReplyLimit {
+            sources: HashMap::new(),
+        }
+    }
+
+    /// May this source get a reply now?
+    pub(crate) fn allow(&mut self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+        if self.sources.len() >= FACILITATOR_SOURCES && !self.sources.contains_key(&ip) {
+            // Forget sources idle for a while; if none, refuse the newcomer
+            // rather than grow without bound.
+            self.sources
+                .retain(|_, b| now.saturating_duration_since(b.at) < Duration::from_secs(10));
+            if self.sources.len() >= FACILITATOR_SOURCES {
+                return false;
+            }
+        }
+        self.sources
+            .entry(ip)
+            .or_insert(Bucket {
+                tokens: FACILITATOR_REPLIES_PER_SEC,
+                at: now,
+            })
+            .take(FACILITATOR_REPLIES_PER_SEC, now)
+    }
 }
 
 /// Aborts a task when dropped: ties the facilitator's lifetime to the event
@@ -2271,7 +2455,16 @@ impl DirectLinkRuntime {
                 (true, Some(p)) => allocation_steps(server, protocol, p.port()).await,
                 _ => None,
             };
-            let (predicted, birthday, evidence) = decide(class, steps);
+            // The fallback ends once a usable second observer is resolved
+            // (third review N1d): then only two-observer evidence counts.
+            let observer_resolved =
+                observer2.is_some_and(|(s2, _)| second_observer_usable(server, s2));
+            let (predicted, birthday, evidence) = if observer_resolved && class == NatClass::Unknown
+            {
+                (Vec::new(), false, EdmEvidence::None)
+            } else {
+                decide(class, steps)
+            };
             log_probe_diag(
                 &session,
                 &socket,
@@ -2319,11 +2512,17 @@ impl DirectLinkRuntime {
             spray,
             escalate,
             pair: link,
-            // Own evidence alone waits out the full silence gate.
+            // Own evidence alone waits out the full silence gate, and holds
+            // fewer sockets (third review N1c).
             birthday_after: if evidence == EdmEvidence::TwoObserver {
                 BIRTHDAY_AFTER
             } else {
                 ESCALATE_AFTER
+            },
+            birthday_max: if evidence == EdmEvidence::TwoObserver {
+                wire::MAX_BIRTHDAY_SOCKETS
+            } else {
+                FALLBACK_BIRTHDAY_SOCKETS
             },
         };
         let Some(socket) = self.sockets.get(&session).cloned() else {
@@ -2957,16 +3156,30 @@ mod tests {
             budget.escalate(pair, ip, t0 + BUDGET_WINDOW),
             "after the window"
         );
-        // The target's volume, shared by all pairs, spread over time so the
-        // global ceiling never binds.
-        let mut sent = 0u32;
-        for i in 0..(TARGET_VOLUME + 10) {
-            let at = t0 + Duration::from_millis(u64::from(i)); // 1000/s, under the ceiling
-            if budget.take(ip, at) {
-                sent += 1;
-            }
-        }
-        assert_eq!(sent, TARGET_VOLUME, "one window's volume to one target");
+        // One pair gets its share of the target, never the whole of it; a
+        // second pair the rest, up to the target's ceiling (third review B).
+        // Spread over time so no rate binds.
+        let send = |pair: [u8; 16], n: u32, from: u64| {
+            (0..n)
+                .filter(|i| budget.take(pair, ip, t0 + Duration::from_millis(from + u64::from(*i))))
+                .count() as u32
+        };
+        assert_eq!(
+            send(pair, PAIR_TARGET_VOLUME + 10, 0),
+            PAIR_TARGET_VOLUME,
+            "one pair's share"
+        );
+        let off = 2 * u64::from(PAIR_TARGET_VOLUME + 10);
+        assert_eq!(
+            send(other_pair, PAIR_TARGET_VOLUME + 10, off),
+            TARGET_VOLUME - PAIR_TARGET_VOLUME,
+            "the target's ceiling over both"
+        );
+        assert_eq!(
+            send([7u8; 16], 10, 2 * off),
+            0,
+            "a third pair finds the target full"
+        );
         // IPv6 is one target per /64.
         let a: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
         let b: std::net::IpAddr = "2001:db8:1:2::ffff".parse().unwrap();
@@ -2975,6 +3188,43 @@ mod tests {
         assert_ne!(Target::of(a), Target::of(c));
         let mapped: std::net::IpAddr = "::ffff:198.51.100.7".parse().unwrap();
         assert_eq!(Target::of(mapped), Target::of(ip));
+    }
+
+    /// +ciris (third review N3): concurrent pairs share the global ceiling
+    /// fairly: one busy pair cannot take another's floor.
+    #[test]
+    fn concurrent_pairs_each_keep_their_fair_share() {
+        let budget = KnockBudget::new();
+        let t0 = std::time::Instant::now();
+        let ip = |i: u8| std::net::IpAddr::from([198, 51, 100, i]);
+        let (greedy, honest) = ([10u8; 16], [11u8; 16]);
+        // Both active at t0; the greedy one tries to send a whole ceiling.
+        assert!(budget.take(honest, ip(2), t0));
+        let greedy_got = (0..ESCALATED_GLOBAL_PPS)
+            .filter(|_| budget.take(greedy, ip(1), t0))
+            .count() as u32;
+        assert!(
+            greedy_got < ESCALATED_GLOBAL_PPS,
+            "the greedy pair is held to its share"
+        );
+        let honest_got = (0..PAIR_FLOOR_PPS / 2)
+            .filter(|_| budget.take(honest, ip(2), t0 + Duration::from_millis(300)))
+            .count() as u32;
+        assert!(honest_got > 0, "the honest pair still sends");
+    }
+
+    /// +ciris (third review, item 2): the window slides: a burst at the end
+    /// of one window still counts at the start of the next.
+    #[test]
+    fn the_volume_window_slides() {
+        let t0 = std::time::Instant::now();
+        let mut w = Sliding::new(t0);
+        w.cur = 1_000;
+        let just_after = t0 + BUDGET_WINDOW + Duration::from_secs(1);
+        let est = w.estimate(just_after);
+        assert!(est > 990.0, "the previous window still counts: {est}");
+        let est = w.estimate(t0 + 2 * BUDGET_WINDOW - Duration::from_secs(1));
+        assert!(est < 10.0, "and fades as it slides out: {est}");
     }
 
     /// The global ceiling: room for three concurrent escalations (each about
@@ -2989,14 +3239,14 @@ mod tests {
             .map(|i| std::net::IpAddr::from([198, 51, 100, i]))
             .collect();
         let taken = (0..2 * ESCALATED_GLOBAL_PPS as usize)
-            .filter(|i| budget.take(ips[i % ips.len()], t0))
+            .filter(|i| budget.take([8u8; 16], ips[i % ips.len()], t0))
             .count();
         assert_eq!(
             taken as u32, ESCALATED_GLOBAL_PPS,
             "one second's worth at once"
         );
         assert!(
-            budget.take(ips[0], t0 + Duration::from_millis(10)),
+            budget.take([8u8; 16], ips[0], t0 + Duration::from_millis(10)),
             "refills"
         );
     }
@@ -3029,9 +3279,9 @@ mod tests {
     async fn no_birthday_sockets_without_a_permit() {
         let sem = Arc::new(tokio::sync::Semaphore::new(3));
         let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        let (some, permits) = birthday_sockets(peer, &sem).await;
+        let (some, permits) = birthday_sockets(peer, &sem, wire::MAX_BIRTHDAY_SOCKETS).await;
         assert_eq!((some.len(), permits.len()), (3, 3), "as many as permits");
-        let (none, _) = birthday_sockets(peer, &sem).await;
+        let (none, _) = birthday_sockets(peer, &sem, wire::MAX_BIRTHDAY_SOCKETS).await;
         assert!(none.is_empty(), "the permits are held");
         drop((some, permits));
         assert_eq!(sem.available_permits(), 3, "released with the sockets");
@@ -3300,6 +3550,20 @@ mod tests {
         assert_eq!(diag.sprayed, 0);
         assert!(diag.knocks_refused > 0);
         assert_eq!(diag.knocks, 0);
+    }
+
+    /// +ciris (third review N4): a facilitator answers one source at most
+    /// FACILITATOR_REPLIES_PER_SEC a second; others are not held back by it.
+    #[test]
+    fn a_facilitator_limits_replies_per_source() {
+        let mut limit = ReplyLimit::new();
+        let t0 = std::time::Instant::now();
+        let a: std::net::IpAddr = "198.51.100.1".parse().unwrap();
+        let b: std::net::IpAddr = "198.51.100.2".parse().unwrap();
+        let got = (0..100).filter(|_| limit.allow(a, t0)).count();
+        assert_eq!(got as f64, FACILITATOR_REPLIES_PER_SEC);
+        assert!(limit.allow(b, t0), "another source is unaffected");
+        assert!(limit.allow(a, t0 + Duration::from_secs(1)), "it refills");
     }
 
     /// The two allocation probes run at once: order them by distance from

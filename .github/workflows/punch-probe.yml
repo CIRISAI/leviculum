@@ -25,9 +25,6 @@ on:
         description: "listener signing key (hex); dial only"
         required: false
         default: ""
-      seed_tag:
-        description: "listening runner identity tag (public; its destination is derived from it): <tag>-<os>"
-        required: true
       allow:
         description: "listen only: the dialer's PUBLIC identity hash (from `punch-probe keygen`)"
         required: false
@@ -77,28 +74,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build punch-probe
         run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
-      - name: dialer keygen
-        if: inputs.role != 'listen'
+      # Every runner makes its own throwaway identity here (third review C):
+      # the private key never leaves the runner (0600, removed when the run
+      # step exits); only public values are published, mid-run, as an
+      # artifact: a dialer's identity hash (the listener admits exactly it),
+      # or a listener's destination and public signing key (to dial it).
+      - name: keygen
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           JOB: ${{ matrix.job }}
+          IN_ROLE: ${{ inputs.role }}
         run: |
-          "target/$TARGET/release/punch-probe" --relay unused keygen --out "$RUNNER_TEMP/dialer.key" \
-            | tee "dialer-hash-$JOB.json"
-      - name: publish the dialer's public hash
-        if: inputs.role != 'listen'
+          bin="target/$TARGET/release/punch-probe"
+          "$bin" --relay unused keygen --out "$RUNNER_TEMP/runner.key" > "keygen-$JOB.json"
+          if [ "$IN_ROLE" = "listen" ]; then
+            "$bin" --relay unused whois --identity-file "$RUNNER_TEMP/runner.key" | tee "public-$JOB.json"
+          else
+            tee "public-$JOB.json" < "keygen-$JOB.json"
+          fi
+      - name: publish the public identity
         uses: actions/upload-artifact@v4
         with:
-          name: dialer-hash-${{ matrix.job }}
-          path: dialer-hash-${{ matrix.job }}.json
+          name: public-${{ matrix.job }}
+          path: public-${{ matrix.job }}.json
       - name: run
         shell: bash
         env:
           IN_ROLE: ${{ inputs.role }}
           IN_DEST: ${{ inputs.dest }}
           IN_KEY: ${{ inputs.key }}
-          IN_SEED_TAG: ${{ inputs.seed_tag }}
           IN_ALLOW: ${{ inputs.allow }}
           IN_RELAY: ${{ inputs.relay }}
           IN_ATTEMPTS: ${{ inputs.attempts }}
@@ -109,7 +114,8 @@ jobs:
           TARGET: ${{ matrix.target }}
           ATTEMPTS_OVERRIDE: ${{ matrix.attempts }}
         run: |
-          ROLE=$IN_ROLE DEST=$IN_DEST KEY=$IN_KEY SEED_TAG=$IN_SEED_TAG RELAY=$IN_RELAY
+          trap 'rm -f "$RUNNER_TEMP/runner.key"' EXIT
+          ROLE=$IN_ROLE DEST=$IN_DEST KEY=$IN_KEY RELAY=$IN_RELAY
           ATTEMPTS=$IN_ATTEMPTS LISTEN_SECS=$IN_LISTEN_SECS STUN=$IN_STUN FAC2=$IN_FAC2
           if [ -n "$ATTEMPTS_OVERRIDE" ]; then ATTEMPTS=$ATTEMPTS_OVERRIDE; fi
           extra=()
@@ -119,16 +125,12 @@ jobs:
           out="punch-probe-$JOB.jsonl"
           if [ "$ROLE" = "listen" ]; then
             "$bin" --relay "$RELAY" "${extra[@]}" listen --duration-secs "$LISTEN_SECS" \
-              --seed "$SEED_TAG-$JOB" --allow "$IN_ALLOW" | tee "$out"
+              --identity-file "$RUNNER_TEMP/runner.key" --allow "$IN_ALLOW" | tee "$out"
           else
-            # The dialer's keypair was made on THIS runner (step "dialer
-            # keygen"); its private key never leaves it. Only the public hash
-            # was published (the dialer-hash artifact, uploaded mid-run), and
-            # the listener admits exactly that identity. The dialer retries a
-            # proposal the listener refuses by policy until it is admitted.
+            # The dialer retries a proposal the listener refuses by policy
+            # until it is admitted (its hash appended to the allow-file).
             "$bin" --relay "$RELAY" "${extra[@]}" dial --to "$DEST" --key "$KEY" \
-              --attempts "$ATTEMPTS" --identity-file "$RUNNER_TEMP/dialer.key" | tee "$out"
-            rm -f "$RUNNER_TEMP/dialer.key"
+              --attempts "$ATTEMPTS" --identity-file "$RUNNER_TEMP/runner.key" | tee "$out"
           fi
       - uses: actions/upload-artifact@v4
         if: always()
