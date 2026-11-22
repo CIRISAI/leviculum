@@ -77,6 +77,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build punch-probe
         run: cargo build --release -p leviculum-cli --no-default-features --bin punch-probe
+      - name: dialer keygen
+        if: inputs.role != 'listen'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          JOB: ${{ matrix.job }}
+        run: |
+          "target/$TARGET/release/punch-probe" --relay unused keygen --out "$RUNNER_TEMP/dialer.key" \
+            | tee "dialer-hash-$JOB.json"
+      - name: publish the dialer's public hash
+        if: inputs.role != 'listen'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dialer-hash-${{ matrix.job }}
+          path: dialer-hash-${{ matrix.job }}.json
       - name: run
         shell: bash
         env:
@@ -85,9 +100,6 @@ jobs:
           IN_KEY: ${{ inputs.key }}
           IN_SEED_TAG: ${{ inputs.seed_tag }}
           IN_ALLOW: ${{ inputs.allow }}
-          # dial only: the dialer's private key, from a repository secret if
-          # one is set for the run (never an input, never in the log).
-          DIALER_KEY: ${{ secrets.PUNCH_PROBE_DIALER_KEY }}
           IN_RELAY: ${{ inputs.relay }}
           IN_ATTEMPTS: ${{ inputs.attempts }}
           IN_LISTEN_SECS: ${{ inputs.listen_secs }}
@@ -109,15 +121,14 @@ jobs:
             "$bin" --relay "$RELAY" "${extra[@]}" listen --duration-secs "$LISTEN_SECS" \
               --seed "$SEED_TAG-$JOB" --allow "$IN_ALLOW" | tee "$out"
           else
-            if [ -z "$DIALER_KEY" ]; then
-              echo "dial needs the PUNCH_PROBE_DIALER_KEY secret (the listener allows its hash)" >&2
-              exit 2
-            fi
-            keyfile="$RUNNER_TEMP/dialer.key"
-            printf '%s' "$DIALER_KEY" > "$keyfile"
+            # The dialer's keypair was made on THIS runner (step "dialer
+            # keygen"); its private key never leaves it. Only the public hash
+            # was published (the dialer-hash artifact, uploaded mid-run), and
+            # the listener admits exactly that identity. The dialer retries a
+            # proposal the listener refuses by policy until it is admitted.
             "$bin" --relay "$RELAY" "${extra[@]}" dial --to "$DEST" --key "$KEY" \
-              --attempts "$ATTEMPTS" --identity-file "$keyfile" | tee "$out"
-            rm -f "$keyfile"
+              --attempts "$ATTEMPTS" --identity-file "$RUNNER_TEMP/dialer.key" | tee "$out"
+            rm -f "$RUNNER_TEMP/dialer.key"
           fi
       - uses: actions/upload-artifact@v4
         if: always()

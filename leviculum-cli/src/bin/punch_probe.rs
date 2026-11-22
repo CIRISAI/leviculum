@@ -83,7 +83,12 @@ enum Role {
         /// (hex, from `keygen`): ask_host with an allowlist, never accept_all
         /// on a public destination. Only the public hash is ever handed out.
         #[arg(long)]
-        allow: String,
+        allow: Option<String>,
+        /// A file of allowed identity hashes (hex, one a line), re-read on
+        /// every request: a dialing runner's hash is appended once it has
+        /// published it. Starts empty: nobody is admitted until then.
+        #[arg(long)]
+        allow_file: Option<std::path::PathBuf>,
     },
     /// Make a random throwaway identity for one run: its private key goes to
     /// `--out` (keep it off the run log and out of git), its public hash to
@@ -404,8 +409,22 @@ async fn main() {
             announce_secs,
             seed,
             allow,
+            allow_file,
         } => {
-            let allowed = unhex::<16>(&allow).expect("--allow: a 16-byte identity hash");
+            // Read on every request (a dialer's hash may arrive mid-run).
+            let allowed = move || -> Vec<[u8; 16]> {
+                let mut list: Vec<String> = allow.iter().cloned().collect();
+                if let Some(f) = &allow_file {
+                    list.extend(
+                        std::fs::read_to_string(f)
+                            .unwrap_or_default()
+                            .lines()
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty()),
+                    );
+                }
+                list.iter().filter_map(|h| unhex::<16>(h).ok()).collect()
+            };
             let identity = listener_identity(seed.as_deref());
             let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
             let mut dest = Destination::new(
@@ -436,7 +455,7 @@ async fn main() {
                     }
                     ev = rx.recv() => match ev {
                         Some(NodeEvent::DirectLinkRequested { link_id, peer_identity, .. }) => {
-                            let ok = peer_identity == Some(allowed);
+                            let ok = peer_identity.is_some_and(|p| allowed().contains(&p));
                             let r = if ok {
                                 node.accept_direct_link(&link_id).await
                             } else {
@@ -480,7 +499,11 @@ async fn main() {
                 std::process::exit(3);
             }
             let mut link = None;
-            for attempt in 1..=attempts {
+            let mut attempt = 1;
+            // Proposals refused by policy (the listener has not admitted this
+            // dialer's hash yet): retried, not counted, at most this often.
+            let mut not_admitted = 0u32;
+            while attempt <= attempts {
                 // (Re)open the link when there is none.
                 if link.is_none() {
                     let t = Instant::now();
@@ -512,6 +535,9 @@ async fn main() {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 let Some((link_id, _handle)) = &link else {
+                    // No link this round: the attempt is spent (a while loop
+                    // must advance here, or it would spin).
+                    attempt += 1;
                     continue;
                 };
                 let link_id = *link_id;
@@ -559,6 +585,14 @@ async fn main() {
                 while let Ok(d) = diag_rx.try_recv() {
                     diags.push(Value::Object(d));
                 }
+                let refused_by_policy = failure == json!("Rejected(1)");
+                if refused_by_policy && not_admitted < 10 {
+                    not_admitted += 1;
+                    out(json!({"role": role, "kind": "not_admitted", "tries": not_admitted}));
+                    let next = proposed_at + Duration::from_secs(61);
+                    tokio::time::sleep_until(next.into()).await;
+                    continue;
+                }
                 out(json!({
                     "role": role, "kind": "attempt", "attempt": attempt,
                     "outcome": outcome, "failure": failure,
@@ -573,6 +607,7 @@ async fn main() {
                     let next = proposed_at + Duration::from_secs(spacing_secs.max(61));
                     tokio::time::sleep_until(next.into()).await;
                 }
+                attempt += 1;
             }
         }
     }
