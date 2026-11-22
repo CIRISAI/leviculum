@@ -28,6 +28,17 @@ Leviculum provides the same functionality as Python Reticulum but compiled to na
 
 The protocol core (`leviculum-core`) compiles as `no_std` with only `alloc`, so it runs on microcontrollers. The same code powers the Linux daemon, a future Android app, and embedded firmware.
 
+## This fork: CIRISAI/leviculum (`+ciris`)
+
+This is the CIRIS fork of [Leviculum](https://codeberg.org/Lew_Palm/leviculum). Releases are tagged `vX.Y.Z+ciris.N`; every fork-only change is marked `+ciris` in its doc comment, so it can be traced and offered back upstream. The main addition is **direct links: NAT traversal for Reticulum links**. Two nodes that share a Reticulum link (over a TCP or UDP transport node, or any relay) can move it onto a direct UDP path between them. Once it has moved, its traffic no longer crosses the relay; if the direct path dies, the link falls back to the relayed path.
+
+- **Wire-compatible with rns-rs** direct links (leviculum#70): UDP hole punching coordinated over the existing link, with a facilitator probe for each side's public mapping. The fork's additions are extra keys an rns-rs decoder skips.
+- **Two-sided commit** (leviculum#89): each side tells the other how its punch went, and the link moves only when both succeeded.
+- **NAT classification** from any two peers (#100), and **router port mapping** (UPnP-IGD / NAT-PMP / PCP) on by default (#101), from v0.35.0+ciris.2.
+- **Port prediction** for NATs that allocate ports in sequence: the side whose NAT did not keep its port measures the allocation step and advertises the next 16 ports it expects to use. The peer punches them only if it has heard nothing after 1.5 s.
+- **Birthday spray** for symmetric NATs that allocate ports at random. When nothing has been heard for 1 s, the random side opens up to 128 sockets toward the peer's stable address, one punch a second each. When nothing has been heard for 1.5 s, the peer sends to at most 960 random ports on the random side's IP, 32 every 100 ms (so at most 3 s), and stops at the first answer. Collision odds follow the birthday paradox, about 85% over a full 16-bit port range ([Tailscale, "How NAT traversal works"](https://tailscale.com/blog/how-nat-traversal-works), "The benefits of birthdays"). It runs only when the peer says its NAT allocates at random, and the traffic flows only between the two peers. Both counts are hard caps.
+- **Diagnostics without addresses:** one INFO line per punch and per facilitator probe, on target `direct_link_diag`, in counts and classes only. `punch-probe` (in `leviculum-cli`) runs the same attempt live between two machines over a relay.
+
 ## Status
 
 Leviculum is in active development. The protocol implementation is functionally complete: routing, path discovery, link establishment, encrypted channels, file transfer, forward secrecy ratchets, and LoRa radio support all work and are tested against Python Reticulum on real hardware. (One caveat: sending files larger than one megabyte as multiple segments is not implemented yet — Codeberg #27; receiving multi-segment transfers works.) It is not yet production-ready.

@@ -58,13 +58,16 @@ pub const MAX_PREDICTED_PORTS: usize = 16;
 
 /// +ciris: the most distinct ports one punch sprays on a peer's public IP
 /// when the peer asked for it (`"b"`): its NAT allocates at random, and the
-/// peer holds [`MAX_BIRTHDAY_SOCKETS`] mappings open toward this node, one of
-/// which a spray this wide hits about three times in four.
+/// peer holds [`MAX_BIRTHDAY_SOCKETS`] mappings open toward this node. Over
+/// a full 16-bit range a spray this wide hits one with probability
+/// 1 - exp(-128 * 960 / 64512), about 85% (more on a NAT with a narrower
+/// pool). A hard cap, as approved: no more than this, and only on the
+/// direct path.
 pub const MAX_SPRAY_PORTS: usize = 960;
 
 /// +ciris: the most extra sockets a node behind a random NAT opens toward
-/// the peer for one punch, each one mapping.
-pub const MAX_BIRTHDAY_SOCKETS: usize = 64;
+/// the peer for one punch, each one mapping. A hard cap.
+pub const MAX_BIRTHDAY_SOCKETS: usize = 128;
 
 /// +ciris (leviculum#88): the largest host payload a REQUEST carries. Big
 /// enough for a hybrid-signed CIRIS contact grant (ML-DSA-65, about 6-8 KiB);

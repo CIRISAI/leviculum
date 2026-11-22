@@ -122,10 +122,17 @@ pub(crate) fn write_nil(buf: &mut Vec<u8>) {
     buf.push(0xc0);
 }
 
-/// Write a fixarray header (count ≤ 15).
+/// Write an array header for `count` elements: a fixarray up to 15, and
+/// past that the wider form [`write_array_header`] writes. Never a header
+/// that misstates the count: past 15 the fixarray byte would overflow into
+/// another type, and a `debug_assert!` alone let a release build send that
+/// malformed frame (+ciris).
 pub(crate) fn write_fixarray_header(buf: &mut Vec<u8>, count: usize) {
-    debug_assert!(count <= 15);
-    buf.push(0x90 | (count as u8));
+    if count <= 15 {
+        buf.push(0x90 | (count as u8));
+    } else {
+        write_array_header(buf, count);
+    }
 }
 
 /// Write an array header of any length, in the compact form Python
@@ -875,6 +882,22 @@ mod tests {
         let mut pos = 0;
         let count = read_fixarray_len(&buf, &mut pos).unwrap();
         assert_eq!(count, 2);
+    }
+
+    /// +ciris: past 15 elements the header widens to array16 instead of
+    /// overflowing the fixarray byte, in release builds too.
+    #[test]
+    fn a_fixarray_header_past_15_widens_instead_of_corrupting() {
+        for count in [15usize, 16, 300] {
+            let mut buf = Vec::new();
+            write_fixarray_header(&mut buf, count);
+            let mut pos = 0;
+            assert_eq!(read_array_len(&buf, &mut pos), Some(count));
+            assert_eq!(pos, buf.len());
+        }
+        let mut buf = Vec::new();
+        write_fixarray_header(&mut buf, 16);
+        assert_eq!(buf, [0xdc, 0x00, 0x10]);
     }
 
     #[test]

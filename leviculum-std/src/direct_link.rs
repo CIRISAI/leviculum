@@ -323,64 +323,94 @@ pub(crate) async fn punch(
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
-    punch_with(socket, Vec::new(), targets, session, token, false)
+    punch_with(socket, false, targets, session, token, false)
         .await
         .map(|(p, _)| p)
 }
 
 /// +ciris — [`punch`], with the two halves of the birthday approach for a
-/// peer pair where one NAT maps per destination at random:
-/// - `extras` (this node's NAT is the random one): more sockets, each
-///   sending one punch a second toward the peer's advertised address so its
-///   mapping stays open. The first one the peer reaches (its spray hit that
-///   mapping) becomes the punch socket for the rest of the window, and is
-///   returned so the interface runs on it.
+/// peer pair where one NAT maps per destination at random. Both start only
+/// after [`ESCALATE_AFTER`] (or [`BIRTHDAY_AFTER`]) with nothing heard, so a
+/// pair that reaches each other at once never sprays or opens a socket more:
+/// - `birthday` (this node's NAT is the random one): up to
+///   [`wire::MAX_BIRTHDAY_SOCKETS`] more sockets, each sending one punch a
+///   [`BIRTHDAY_REFRESH`] toward the peer's advertised address so its own
+///   mapping stays open. The first one the peer reaches becomes the punch
+///   socket for the rest of the window and is returned, so the interface
+///   runs on it; every other one is closed.
 /// - `spray` (the peer's NAT is the random one): also punch random ports on
 ///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is heard
 ///   from it or [`wire::MAX_SPRAY_PORTS`] are used.
 pub(crate) async fn punch_with(
     socket: &UdpSocket,
-    extras: Vec<Arc<UdpSocket>>,
+    birthday: bool,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
     spray: bool,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
-    // Logged when dropped, so a punch the session aborts (the peer's REJECT
-    // arrived first) still says what it saw.
     let spray: Option<SprayPorts> = spray.then(|| {
         let mut rng = rand_core::OsRng;
         Box::new(move || spray_port(&mut rng)) as SprayPorts
     });
+    let extras = birthday.then_some(Extras::Open);
     punch_with_ports(socket, extras, targets, session, token, spray).await
 }
 
 /// Where a spray draws its ports: random in production, fixed in tests.
 pub(crate) type SprayPorts = Box<dyn FnMut() -> u16 + Send>;
 
-/// [`punch_with`], with the spray's port source given.
+/// Where a punch from behind a random NAT gets its birthday sockets.
+pub(crate) enum Extras {
+    /// Bind [`wire::MAX_BIRTHDAY_SOCKETS`] when they are needed.
+    Open,
+    /// These, already bound (tests).
+    #[cfg(test)]
+    Given(Vec<Arc<UdpSocket>>),
+}
+
+/// [`punch_with`], with the spray's port source and the birthday sockets
+/// given.
 pub(crate) async fn punch_with_ports(
     socket: &UdpSocket,
-    extras: Vec<Arc<UdpSocket>>,
+    extras: Option<Extras>,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
     spray: Option<SprayPorts>,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let mut diag = PunchDiag::new(targets, *session);
-    diag.birthday_sockets = extras.len();
-    let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
-    let result = if extras.is_empty() {
-        punch_inner(
-            socket, targets, session, token, &mut diag, deadline, spray, None,
+    let now = tokio::time::Instant::now();
+    let deadline = now + PUNCH_WINDOW;
+    let escalate_at = now + ESCALATE_AFTER;
+    let result = match extras {
+        None => punch_inner(
+            socket,
+            targets,
+            session,
+            token,
+            &mut diag,
+            deadline,
+            escalate_at,
+            spray,
+            None,
         )
         .await
-        .map(|p| (p, None))
-    } else {
-        punch_birthday(
-            socket, extras, targets, session, token, &mut diag, deadline, spray,
-        )
-        .await
+        .map(|p| (p, None)),
+        Some(extras) => {
+            punch_birthday(
+                socket,
+                extras,
+                targets,
+                session,
+                token,
+                &mut diag,
+                deadline,
+                escalate_at,
+                spray,
+            )
+            .await
+        }
     };
     diag.finish(if result.is_some() {
         "punched"
@@ -393,66 +423,112 @@ pub(crate) async fn punch_with_ports(
 /// Random ports sprayed on the peer's IP per punch tick (see [`punch_with`]).
 pub(crate) const SPRAY_PER_TICK: usize = 32;
 
+/// How long a punch hears nothing before it punches the peer's predicted
+/// ports and sprays: a pair that reaches each other does so well inside it
+/// (7 to 567 ms in every clean live sample), so it never does either.
+pub(crate) const ESCALATE_AFTER: Duration = Duration::from_millis(1_500);
+
+/// How long a punch from behind a random NAT hears nothing before it opens
+/// its birthday sockets: before the peer starts spraying, so each mapping is
+/// open when the spray arrives.
+pub(crate) const BIRTHDAY_AFTER: Duration = Duration::from_millis(1_000);
+
 /// How often each birthday socket repeats its punch toward the peer.
 const BIRTHDAY_REFRESH: Duration = Duration::from_secs(1);
 
-/// Punch from `socket` while the `extras` hold mappings open; switch to the
-/// first extra the peer reaches.
+/// How a birthday punch ended, before the diag is free to be written.
+enum BirthdayEnd {
+    Primary(Option<Punched>),
+    Hit {
+        index: usize,
+        src: SocketAddr,
+        seq: Option<u32>,
+    },
+    /// The window closed with every birthday socket open and none reached.
+    Expired,
+}
+
+/// Punch from `socket`; past [`BIRTHDAY_AFTER`] with nothing heard, hold
+/// birthday sockets open too and switch to the first one the peer reaches.
 #[allow(clippy::too_many_arguments)]
 async fn punch_birthday(
     socket: &UdpSocket,
-    extras: Vec<Arc<UdpSocket>>,
+    extras: Extras,
     targets: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
     diag: &mut PunchDiag,
     deadline: tokio::time::Instant,
+    escalate_at: tokio::time::Instant,
     spray: Option<SprayPorts>,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let peer = canonical(*targets.first()?);
-    let (hit_tx, mut hit_rx) = mpsc::channel::<(usize, SocketAddr, Option<u32>)>(1);
-    let mut tasks = Vec::with_capacity(extras.len());
-    for (index, extra) in extras.iter().enumerate() {
-        let (extra, hit_tx, session, token) = (Arc::clone(extra), hit_tx.clone(), *session, *token);
-        tasks.push(AbortOnDrop(
-            tokio::spawn(async move {
-                let frame = wire::punch_frame(PunchKind::Punch, &session, &token, 0);
-                let mut refresh = tokio::time::interval(BIRTHDAY_REFRESH);
-                let mut buf = [0u8; 512];
-                loop {
-                    tokio::select! {
-                        _ = refresh.tick() => {
-                            let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
-                        }
-                        r = extra.recv_from(&mut buf) => {
-                            let Ok((len, src)) = r else { continue };
-                            let seq = match wire::parse_punch_frame(&buf[..len], &session, &token) {
-                                Some((PunchKind::Punch, seq)) => Some(seq),
-                                Some((PunchKind::Ack, _)) => None,
-                                None => continue,
-                            };
-                            let _ = hit_tx.send((index, canonical(src), seq)).await;
-                            return;
-                        }
-                    }
+    let mut opened: Vec<Arc<UdpSocket>> = Vec::new();
+    let end = {
+        let primary = punch_inner(
+            socket,
+            targets,
+            session,
+            token,
+            diag,
+            deadline,
+            escalate_at,
+            spray,
+            None,
+        );
+        tokio::pin!(primary);
+        let early = tokio::select! {
+            r = &mut primary => Some(r),
+            _ = tokio::time::sleep(BIRTHDAY_AFTER) => None,
+        };
+        match early {
+            Some(r) => BirthdayEnd::Primary(r),
+            None => {
+                opened = match extras {
+                    Extras::Open => birthday_sockets(peer).await,
+                    #[cfg(test)]
+                    Extras::Given(given) => given,
+                };
+                opened.truncate(wire::MAX_BIRTHDAY_SOCKETS);
+                let (hit_tx, mut hit_rx) = mpsc::channel::<(usize, SocketAddr, Option<u32>)>(1);
+                let mut tasks = Vec::with_capacity(opened.len());
+                for (index, extra) in opened.iter().enumerate() {
+                    tasks.push(birthday_task(
+                        index,
+                        Arc::clone(extra),
+                        peer,
+                        hit_tx.clone(),
+                        *session,
+                        *token,
+                    ));
                 }
-            })
-            .abort_handle(),
-        ));
-    }
-    drop(hit_tx);
-    let (index, src, seq) = tokio::select! {
-        r = punch_inner(socket, targets, session, token, diag, deadline, spray, None) => {
-            return r.map(|p| (p, None));
+                drop(hit_tx);
+                let end = tokio::select! {
+                    r = &mut primary => BirthdayEnd::Primary(r),
+                    hit = hit_rx.recv() => match hit {
+                        Some((index, src, seq)) => BirthdayEnd::Hit { index, src, seq },
+                        None => BirthdayEnd::Expired,
+                    },
+                };
+                // Every birthday task stops here, whichever way it went.
+                drop(tasks);
+                end
+            }
         }
-        Some(hit) = hit_rx.recv() => hit,
     };
-    // The peer reached the mapping of extra `index`: stop the others, ack
-    // the punch that got through, and punch on from there.
-    drop(tasks);
-    let winner = Arc::clone(&extras[index]);
-    drop(extras);
+    diag.birthday_sockets = opened.len();
+    diag.birthday_pps = opened.len() as u32 / BIRTHDAY_REFRESH.as_secs().max(1) as u32;
+    let (index, src, seq) = match end {
+        BirthdayEnd::Primary(r) => return r.map(|p| (p, None)),
+        BirthdayEnd::Expired => return None,
+        BirthdayEnd::Hit { index, src, seq } => (index, src, seq),
+    };
+    // The peer reached the mapping of birthday socket `index`: close every
+    // other one, ack the punch that got through, and punch on from there.
+    let winner = Arc::clone(&opened[index]);
+    drop(opened);
     diag.birthday_switched = true;
+    diag.birthday_winner = Some(index);
     if let Some(seq) = seq {
         let ack = wire::punch_frame(PunchKind::Ack, session, token, seq);
         let _ = winner.send_to(&ack, on_socket(&winner, src)).await;
@@ -461,9 +537,49 @@ async fn punch_birthday(
     // ack and then only ack, never punch again, so it must not be needed
     // twice.
     let seed = seq.is_some().then_some(src);
-    punch_inner(&winner, targets, session, token, diag, deadline, None, seed)
-        .await
-        .map(|p| (p, Some(winner)))
+    let now = tokio::time::Instant::now();
+    punch_inner(
+        &winner, targets, session, token, diag, deadline, now, None, seed,
+    )
+    .await
+    .map(|p| (p, Some(winner)))
+}
+
+/// One birthday socket: a punch toward `peer` every [`BIRTHDAY_REFRESH`],
+/// and the first valid frame back reported on `hit`.
+fn birthday_task(
+    index: usize,
+    extra: Arc<UdpSocket>,
+    peer: SocketAddr,
+    hit: mpsc::Sender<(usize, SocketAddr, Option<u32>)>,
+    session: SessionId,
+    token: [u8; 32],
+) -> AbortOnDrop {
+    AbortOnDrop(
+        tokio::spawn(async move {
+            let frame = wire::punch_frame(PunchKind::Punch, &session, &token, 0);
+            let mut refresh = tokio::time::interval(BIRTHDAY_REFRESH);
+            let mut buf = [0u8; 512];
+            loop {
+                tokio::select! {
+                    _ = refresh.tick() => {
+                        let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
+                    }
+                    r = extra.recv_from(&mut buf) => {
+                        let Ok((len, src)) = r else { continue };
+                        let seq = match wire::parse_punch_frame(&buf[..len], &session, &token) {
+                            Some((PunchKind::Punch, seq)) => Some(seq),
+                            Some((PunchKind::Ack, _)) => None,
+                            None => continue,
+                        };
+                        let _ = hit.send((index, canonical(src), seq)).await;
+                        return;
+                    }
+                }
+            }
+        })
+        .abort_handle(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -474,7 +590,8 @@ async fn punch_inner(
     token: &[u8; 32],
     diag: &mut PunchDiag,
     deadline: tokio::time::Instant,
-    mut spray: Option<SprayPorts>,
+    escalate_at: tokio::time::Instant,
+    spray: Option<SprayPorts>,
     seed_heard: Option<SocketAddr>,
 ) -> Option<Punched> {
     let mut targets: Vec<SocketAddr> = alloc_targets(
@@ -484,7 +601,22 @@ async fn punch_inner(
             .map(|a| canonical(*a))
             .collect::<Vec<_>>(),
     );
-    let advertised = targets.len();
+    // +ciris: the peer's predicted ports (on its public IP), held back until
+    // nothing has been heard for ESCALATE_AFTER; then punched beside the
+    // rest, with the spray.
+    let public = targets[0];
+    let mut held: Vec<SocketAddr> = Vec::new();
+    targets.retain(|t| {
+        let predicted = *t != public && t.ip() == public.ip();
+        if predicted {
+            held.push(*t);
+        }
+        !predicted
+    });
+    let mut pending_spray = spray;
+    let mut spray: Option<SprayPorts> = None;
+    let mut escalated = false;
+    let advertised = targets.len() + held.len();
     // Addresses a punch actually left for; only an ack from one counts.
     let mut punched: Vec<SocketAddr> = Vec::new();
     // Addresses a valid punch came from (each acked at once), and those an
@@ -514,6 +646,19 @@ async fn punch_inner(
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => return None,
             _ = tick.tick() => {
+                if !escalated && tokio::time::Instant::now() >= escalate_at {
+                    escalated = true;
+                    if heard.is_empty() {
+                        diag.escalated = true;
+                        targets.append(&mut held);
+                        spray = pending_spray.take();
+                    } else {
+                        // Heard already: the peer's mapping did not move.
+                        diag.predicted_dropped += held.len();
+                        held.clear();
+                        pending_spray = None;
+                    }
+                }
                 let frame = wire::punch_frame(PunchKind::Punch, session, token, seq);
                 seq = seq.wrapping_add(1) % wire::KEEPALIVE_SEQ;
                 for target in &targets {
@@ -807,6 +952,13 @@ pub(crate) struct PunchDiag {
     pub(crate) birthday_sockets: usize,
     /// The peer reached one of them, which became the punch socket.
     pub(crate) birthday_switched: bool,
+    /// Which one (its index among them, not a port).
+    pub(crate) birthday_winner: Option<usize>,
+    /// The datagrams a second they send together toward the peer.
+    pub(crate) birthday_pps: u32,
+    /// Nothing was heard for ESCALATE_AFTER: predicted ports and the spray
+    /// started.
+    pub(crate) escalated: bool,
     pub(crate) peer_reflexive: usize,
     pub(crate) punched: usize,
     pub(crate) send_errors: u32,
@@ -850,6 +1002,9 @@ impl PunchDiag {
             sprayed: 0,
             birthday_sockets: 0,
             birthday_switched: false,
+            birthday_winner: None,
+            birthday_pps: 0,
+            escalated: false,
             host,
             peer_reflexive: 0,
             punched: 0,
@@ -945,6 +1100,9 @@ impl PunchDiag {
             sprayed = self.sprayed,
             birthday_sockets = self.birthday_sockets,
             birthday_switched = self.birthday_switched,
+            birthday_winner = self.birthday_winner.map_or(-1, |i| i as i64),
+            birthday_pps = self.birthday_pps,
+            escalated = self.escalated,
             targets_peer_reflexive = self.peer_reflexive,
             public_family = match self.public { Some(a) if a.is_ipv6() => "v6", Some(_) => "v4", None => "none" },
             punched = self.punched,
@@ -1489,12 +1647,7 @@ impl DirectLinkRuntime {
             } else {
                 tracing::info!("direct link: punching toward {peer}");
             }
-            let extras = if birthday {
-                birthday_sockets(peer).await
-            } else {
-                Vec::new()
-            };
-            let seen = punch_with(&socket, extras, &targets, &session, &token, spray).await;
+            let seen = punch_with(&socket, birthday, &targets, &session, &token, spray).await;
             match &seen {
                 Some((p, _)) => tracing::info!("direct link: punch through to {}", p.peer),
                 None => tracing::info!("direct link: punch toward {peer} failed"),
@@ -1836,7 +1989,7 @@ mod tests {
         ports.push(b_addr.port());
         let result = punch_with_ports(
             &a,
-            Vec::new(),
+            None,
             std::slice::from_ref(&advertised),
             &session,
             &token,
@@ -1848,6 +2001,39 @@ mod tests {
             result.map(|(p, w)| (p.peer, w.is_none())),
             Some((b_addr, true))
         );
+    }
+
+    /// +ciris: a pair that reaches each other at once never escalates: a
+    /// bystander that both the spray and a predicted port point at hears
+    /// nothing, though both were armed.
+    #[tokio::test]
+    async fn an_easy_pair_never_sprays_or_punches_predicted_ports() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let bystander = loopback().await;
+        let (a_addr, b_addr, by) = (
+            a.local_addr().unwrap(),
+            b.local_addr().unwrap(),
+            bystander.local_addr().unwrap(),
+        );
+        let (session, token) = ([17u8; 16], [18u8; 32]);
+        let to_b = [b_addr, by];
+        let (ra, rb) = tokio::join!(
+            punch_with_ports(&a, None, &to_b, &session, &token, cycle(vec![by.port()])),
+            punch(&b, std::slice::from_ref(&a_addr), &session, &token)
+        );
+        assert_eq!(
+            (ra.map(|(p, _)| p.peer), rb.map(|p| p.peer)),
+            (Some(b_addr), Some(a_addr))
+        );
+        // Past the escalation point, in case anything was still due.
+        let mut buf = [0u8; 256];
+        let heard = tokio::time::timeout(
+            ESCALATE_AFTER + Duration::from_millis(300),
+            bystander.recv_from(&mut buf),
+        )
+        .await;
+        assert!(heard.is_err(), "the bystander was punched");
     }
 
     /// +ciris: behind a random NAT, the punch runs on whichever birthday
@@ -1875,8 +2061,7 @@ mod tests {
         // A acks late punches once it is through, as its direct interface
         // does.
         let a_side = async {
-            let r =
-                punch_with_ports(&a, Vec::new(), &to_b, &session, &token, cycle(spray_ports)).await;
+            let r = punch_with_ports(&a, None, &to_b, &session, &token, cycle(spray_ports)).await;
             let mut buf = [0u8; 256];
             let until = tokio::time::Instant::now() + Duration::from_secs(3);
             while let Ok(Ok((len, src))) =
@@ -1895,7 +2080,7 @@ mod tests {
             a_side,
             punch_with_ports(
                 &b,
-                extras,
+                Some(Extras::Given(extras)),
                 std::slice::from_ref(&a_addr),
                 &session,
                 &token,
