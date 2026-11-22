@@ -97,7 +97,7 @@ jobs:
           bin="target/${{ matrix.target }}/release/punch-probe"
           if [ "$ROLE" = "listen" ]; then
             "$bin" --relay "$RELAY" "${stun_arg[@]}" listen --duration-secs "$LISTEN_SECS" \
-              | tee "punch-probe-${{ matrix.os }}-${{ matrix.job }}.jsonl"
+              --seed "$SEED_TAG-${{ matrix.job }}" | tee "punch-probe-${{ matrix.os }}-${{ matrix.job }}.jsonl"
           else
             "$bin" --relay "$RELAY" "${stun_arg[@]}" dial --to "$DEST" --key "$KEY" --attempts "$ATTEMPTS" \
               | tee "punch-probe-${{ matrix.os }}-${{ matrix.job }}.jsonl"
