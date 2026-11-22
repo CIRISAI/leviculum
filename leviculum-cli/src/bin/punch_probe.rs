@@ -65,6 +65,16 @@ enum Role {
         /// Re-announce this often.
         #[arg(long, default_value_t = 120)]
         announce_secs: u64,
+        /// Derive the throwaway listener identity from this string instead
+        /// of a random one, so a dialer can know the destination before the
+        /// listener prints it (`whois`). Test identities only.
+        #[arg(long)]
+        seed: Option<String>,
+    },
+    /// Print the destination and key `listen --seed` will use; no network.
+    Whois {
+        #[arg(long)]
+        seed: String,
     },
     /// Link to a listener and propose a direct link repeatedly.
     Dial {
@@ -120,6 +130,36 @@ impl<S: tracing::Subscriber> Layer<S> for DiagLayer {
         fields.0.remove("message");
         let _ = self.0.send(fields.0);
     }
+}
+
+/// The listener's identity: random, or derived from `seed` (two SHA-256
+/// halves of the seed string make the 64 private-key bytes).
+fn listener_identity(seed: Option<&str>) -> Identity {
+    use sha2::{Digest, Sha256};
+    match seed {
+        None => Identity::generate(&mut rand_core::OsRng),
+        Some(seed) => {
+            let mut bytes = [0u8; 64];
+            bytes[..32].copy_from_slice(&Sha256::digest(format!("punch-probe/x25519/{seed}")));
+            bytes[32..].copy_from_slice(&Sha256::digest(format!("punch-probe/ed25519/{seed}")));
+            Identity::from_private_key_bytes(&bytes).expect("64 key bytes")
+        }
+    }
+}
+
+/// The `ciris.punchprobe` destination and signing key for a listener.
+fn listener_destination(seed: Option<&str>) -> (DestinationHash, [u8; 32]) {
+    let identity = listener_identity(seed);
+    let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
+    let dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "ciris",
+        &["punchprobe"],
+    )
+    .expect("destination");
+    (*dest.hash(), key)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -280,9 +320,15 @@ async fn main() {
         registry.init();
     }
 
+    if let Role::Whois { seed } = &cli.role {
+        let (hash, key) = listener_destination(Some(seed));
+        out(json!({"kind": "whois", "dest": hex(hash.as_bytes()), "key": hex(&key)}));
+        return;
+    }
     let role = match cli.role {
         Role::Listen { .. } => "listen",
         Role::Dial { .. } => "dial",
+        Role::Whois { .. } => unreachable!(),
     };
     let Some(relay) = resolve_v4(&cli.relay).await else {
         out(json!({"role": role, "kind": "error", "error": "relay does not resolve"}));
@@ -310,11 +356,13 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     match cli.role {
+        Role::Whois { .. } => unreachable!(),
         Role::Listen {
             duration_secs,
             announce_secs,
+            seed,
         } => {
-            let identity = Identity::generate(&mut rand_core::OsRng);
+            let identity = listener_identity(seed.as_deref());
             let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
             let mut dest = Destination::new(
                 Some(identity),
