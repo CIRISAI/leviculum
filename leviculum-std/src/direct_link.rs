@@ -464,6 +464,9 @@ async fn punch_birthday(
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let peer = canonical(*targets.first()?);
     let mut opened: Vec<Arc<UdpSocket>> = Vec::new();
+    // Written the moment the sockets are bound, while `diag` is lent to the
+    // primary punch, so a punch the peer's REJECT aborts still logs them.
+    let open_count = Arc::clone(&diag.birthday_open);
     let end = {
         let primary = punch_inner(
             socket,
@@ -490,6 +493,7 @@ async fn punch_birthday(
                     Extras::Given(given) => given,
                 };
                 opened.truncate(wire::MAX_BIRTHDAY_SOCKETS);
+                open_count.store(opened.len(), std::sync::atomic::Ordering::Relaxed);
                 let (hit_tx, mut hit_rx) = mpsc::channel::<(usize, SocketAddr, Option<u32>)>(1);
                 let mut tasks = Vec::with_capacity(opened.len());
                 for (index, extra) in opened.iter().enumerate() {
@@ -516,8 +520,6 @@ async fn punch_birthday(
             }
         }
     };
-    diag.birthday_sockets = opened.len();
-    diag.birthday_pps = opened.len() as u32 / BIRTHDAY_REFRESH.as_secs().max(1) as u32;
     let (index, src, seq) = match end {
         BirthdayEnd::Primary(r) => return r.map(|p| (p, None)),
         BirthdayEnd::Expired => return None,
@@ -949,13 +951,13 @@ pub(crate) struct PunchDiag {
     /// Random ports sprayed on the peer's IP.
     pub(crate) sprayed: usize,
     /// Extra sockets held open toward the peer (this NAT is random).
-    pub(crate) birthday_sockets: usize,
+    /// Shared with the birthday block, which writes it while the diag is
+    /// lent to the primary punch.
+    pub(crate) birthday_open: Arc<std::sync::atomic::AtomicUsize>,
     /// The peer reached one of them, which became the punch socket.
     pub(crate) birthday_switched: bool,
     /// Which one (its index among them, not a port).
     pub(crate) birthday_winner: Option<usize>,
-    /// The datagrams a second they send together toward the peer.
-    pub(crate) birthday_pps: u32,
     /// Nothing was heard for ESCALATE_AFTER: predicted ports and the spray
     /// started.
     pub(crate) escalated: bool,
@@ -1000,10 +1002,9 @@ impl PunchDiag {
             predicted: host.iter().filter(is_predicted).count(),
             predicted_dropped: 0,
             sprayed: 0,
-            birthday_sockets: 0,
+            birthday_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             birthday_switched: false,
             birthday_winner: None,
-            birthday_pps: 0,
             escalated: false,
             host,
             peer_reflexive: 0,
@@ -1071,6 +1072,17 @@ impl PunchDiag {
         format!("[{}]", words.join(","))
     }
 
+    /// Birthday sockets held open toward the peer (this NAT is random).
+    pub(crate) fn birthday_sockets(&self) -> usize {
+        self.birthday_open
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The datagrams a second those sockets send together toward the peer.
+    pub(crate) fn birthday_pps(&self) -> u32 {
+        (self.birthday_sockets() as u64 / BIRTHDAY_REFRESH.as_secs().max(1)) as u32
+    }
+
     /// Log the line with `outcome`, once.
     pub(crate) fn finish(&mut self, outcome: &'static str) {
         if !self.logged {
@@ -1098,10 +1110,10 @@ impl PunchDiag {
             targets_predicted = self.predicted,
             predicted_dropped = self.predicted_dropped,
             sprayed = self.sprayed,
-            birthday_sockets = self.birthday_sockets,
+            birthday_sockets = self.birthday_sockets(),
             birthday_switched = self.birthday_switched,
             birthday_winner = self.birthday_winner.map_or(-1, |i| i as i64),
-            birthday_pps = self.birthday_pps,
+            birthday_pps = self.birthday_pps(),
             escalated = self.escalated,
             targets_peer_reflexive = self.peer_reflexive,
             public_family = match self.public { Some(a) if a.is_ipv6() => "v6", Some(_) => "v4", None => "none" },
@@ -2034,6 +2046,40 @@ mod tests {
         )
         .await;
         assert!(heard.is_err(), "the bystander was punched");
+    }
+
+    /// +ciris: a hard side whose punch the peer's REJECT aborts (the session
+    /// drops it mid-window) still knows how many birthday sockets it held,
+    /// which is what its "aborted" line logs: the count is written the moment
+    /// they are bound, not after the birthday block ends.
+    #[tokio::test]
+    async fn an_aborted_birthday_punch_still_logs_its_sockets() {
+        let b = loopback().await;
+        let nobody = loopback().await.local_addr().unwrap();
+        let mut extras = Vec::new();
+        for _ in 0..5 {
+            extras.push(Arc::new(loopback().await));
+        }
+        let (session, token) = ([19u8; 16], [20u8; 32]);
+        let mut diag = PunchDiag::new(std::slice::from_ref(&nobody), session);
+        let now = tokio::time::Instant::now();
+        let punching = punch_birthday(
+            &b,
+            Extras::Given(extras),
+            std::slice::from_ref(&nobody),
+            &session,
+            &token,
+            &mut diag,
+            now + PUNCH_WINDOW,
+            now + ESCALATE_AFTER,
+            None,
+        );
+        // Past BIRTHDAY_AFTER, then dropped as the session does on REJECT.
+        let r = tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(500), punching).await;
+        assert!(r.is_err(), "still punching when dropped");
+        assert_eq!(diag.birthday_sockets(), 5);
+        assert_eq!(diag.birthday_pps(), 5);
+        assert!(!diag.logged, "the drop is what logs it, as \"aborted\"");
     }
 
     /// +ciris: behind a random NAT, the punch runs on whichever birthday
