@@ -81,3 +81,7 @@ scripts/deploy-*.fish
 # CI-generated bench report (deployed to Pages, not committed)
 /bench-site/
 /bench_results.json
+
+# +ciris: punch-probe run inputs that may hold a secret (a dialer key, a seed); never committed.
+.github/punch-probe.env
+*.punch-probe.key

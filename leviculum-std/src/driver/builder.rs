@@ -1250,16 +1250,15 @@ impl ReticulumNodeBuilder {
         node_core.set_datagram_sink_reserve(leviculum_core::node::datagram_sink_reserve_for(
             data_channel_capacity,
         ));
-        // The facilitator address is resolved again at each proposal (a DNS
-        // change is picked up); +ciris (CC 5.4.6) it is also resolved here,
-        // because a responder probes its OWN facilitator, never the one a
-        // peer's REQUEST names, and a node may answer before it proposes.
+        // The facilitator address is resolved at each proposal and, +ciris
+        // (CC 5.4.6, re-review A), by the event loop in the background: at
+        // start, again every RESOLVE_REFRESH, and every RESOLVE_RETRY while it
+        // does not resolve, because a responder probes its OWN facilitator
+        // and a node may answer before it ever proposes. Never here: a
+        // blocking lookup inside an async build.
         node_core.set_direct_link_config(leviculum_core::node::DirectLinkConfig {
             policy: direct_link.policy,
-            facilitator: direct_link
-                .facilitator
-                .as_deref()
-                .and_then(crate::direct_link::resolve_facilitator_sync),
+            facilitator: None,
             protocol: direct_link.protocol,
         });
         // +ciris (leviculum#91): the relay table is off in core (boards);

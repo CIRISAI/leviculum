@@ -54,6 +54,12 @@ pub struct DirectLinkSettings {
     pub facilitator2: Option<String>,
     /// How to probe `facilitator2`.
     pub protocol2: ProbeProtocol,
+    /// +ciris (review item 6): a node running a facilitator also answers
+    /// probes on the next UDP port (`facilitator_port + 1`): the second
+    /// observer probers derive from its dial. UDP and probes only. Off by
+    /// default; a facilitator meant to be both observers (the canonical)
+    /// turns it on (`probe_second_port = yes`).
+    pub facilitator_second_port: bool,
 }
 
 impl DirectLinkSettings {
@@ -108,6 +114,14 @@ impl DirectLinkSettings {
                 .as_ref()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            facilitator_second_port: matches!(
+                config
+                    .direct_link
+                    .probe_second_port
+                    .as_deref()
+                    .map(str::trim),
+                Some("yes" | "true" | "on" | "1")
+            ),
             protocol2: match config.direct_link.probe_protocol2.as_deref().map(str::trim) {
                 None | Some("") | Some("rnsp") => ProbeProtocol::Rnsp,
                 Some("stun") => ProbeProtocol::Stun,
@@ -156,6 +170,10 @@ pub struct DirectLinkKeys {
     /// How to probe `probe_addr2`: `rnsp` (default) or `stun`.
     #[serde(default)]
     pub probe_protocol2: Option<String>,
+    /// +ciris: `yes` runs the facilitator's second probe port (udp) too
+    /// (see `DirectLinkSettings::facilitator_second_port`).
+    #[serde(default)]
+    pub probe_second_port: Option<String>,
     /// An INI `probe_port` that did not parse, kept so validation refuses it
     /// (TOML rejects a bad value while parsing).
     #[serde(skip)]
@@ -188,6 +206,9 @@ pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &s
         "probe_protocol2" => {
             config.direct_link.probe_protocol2 = Some(value.trim().to_ascii_lowercase())
         }
+        "probe_second_port" => {
+            config.direct_link.probe_second_port = Some(value.trim().to_ascii_lowercase())
+        }
         _ => {}
     }
 }
@@ -196,27 +217,29 @@ pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &s
 /// The peer probes that address too, so it has to be an IP, not a name.
 pub(crate) async fn resolve_facilitator(addr: &str) -> io::Result<SocketAddr> {
     // IPv4 first: it is what NATs punch most reliably and what most
-    // facilitators serve. An IPv6-only facilitator is used as such.
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr).await?.collect();
+    // facilitators serve. An IPv6-only facilitator is used as such. Bounded
+    // (re-review items 8, A): a resolver that hangs must not hold a session.
+    let lookup = tokio::net::lookup_host(addr);
+    let resolved: Vec<SocketAddr> = tokio::time::timeout(RESOLVE_TIMEOUT, lookup)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the facilitator did not resolve"))??
+        .collect();
+    // No address or name in the error: it can reach the INFO log (review 9).
     resolved
         .iter()
         .find(|a| a.is_ipv4())
         .or_else(|| resolved.first())
         .copied()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{addr} has no address")))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the facilitator has no address"))
 }
 
-/// [`resolve_facilitator`], blocking: for the builder, before any runtime
-/// work. `None` when it does not resolve (the next proposal tries again).
-pub(crate) fn resolve_facilitator_sync(addr: &str) -> Option<SocketAddr> {
-    use std::net::ToSocketAddrs;
-    let resolved: Vec<SocketAddr> = addr.to_socket_addrs().ok()?.collect();
-    resolved
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| resolved.first())
-        .copied()
-}
+/// +ciris (re-review items 8, A): how long one facilitator lookup may take.
+pub(crate) const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+/// +ciris (re-review items 8, A): how often a resolved facilitator (and the
+/// second observer) is looked up again, in the background.
+pub(crate) const RESOLVE_REFRESH: Duration = Duration::from_secs(300);
+/// +ciris (re-review A): how soon an unresolved one is tried again.
+pub(crate) const RESOLVE_RETRY: Duration = Duration::from_secs(30);
 
 // Probe
 
@@ -380,7 +403,7 @@ pub(crate) async fn punch(
     session: &SessionId,
     token: &[u8; 32],
 ) -> Option<Punched> {
-    punch_with(socket, false, targets, &[], session, token, false)
+    punch_with(socket, targets, &[], session, token, PunchPlan::plain())
         .await
         .map(|(p, _)| p)
 }
@@ -400,48 +423,177 @@ pub(crate) async fn punch(
 ///   from it or [`wire::MAX_SPRAY_PORTS`] are used.
 pub(crate) async fn punch_with(
     socket: &UdpSocket,
-    birthday: bool,
     targets: &[SocketAddr],
     predicted: &[SocketAddr],
     session: &SessionId,
     token: &[u8; 32],
-    spray: bool,
+    plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
-    let spray: Option<SprayPorts> = spray.then(|| {
+    let esc = Escalation::new(
+        knock_budget(),
+        plan.pair,
+        plan.escalate,
+        plan.birthday_after,
+    );
+    let spray: Option<SprayPorts> = (plan.spray && plan.escalate).then(|| {
         let mut rng = rand_core::OsRng;
         Box::new(move || spray_port(&mut rng)) as SprayPorts
     });
-    let extras = birthday.then_some(Extras::Open);
+    let predicted: &[SocketAddr] = if plan.escalate { predicted } else { &[] };
+    let extras = (plan.birthday && plan.escalate).then_some(Extras::Open);
     punch_with_ports(
-        socket,
-        extras,
-        targets,
-        predicted,
-        session,
-        token,
-        spray,
-        knock_budget(),
+        socket, extras, targets, predicted, session, token, spray, &esc,
     )
     .await
 }
 
-/// +ciris (review item 2): how often one node may spray one target IP. The
-/// IP is the peer's own report ("a"), so without this a peer, or many cheap
-/// links, could aim a node's spray at a victim.
-pub(crate) const SPRAY_IP_COOLDOWN: Duration = Duration::from_secs(300);
-/// +ciris (review item 2): knocks (spray and predicted ports) per second
-/// the whole process may send, all sessions together.
-pub(crate) const KNOCK_GLOBAL_PPS: u32 = 400;
+/// +ciris: what a punch may do beyond punching its targets.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PunchPlan {
+    /// This node's NAT is random (two-observer or own-evidence): hold
+    /// birthday sockets open once silent past `birthday_after`.
+    pub(crate) birthday: bool,
+    /// The peer hinted its NAT is random ("b"): knock random ports on its
+    /// IP once silent past ESCALATE_AFTER.
+    pub(crate) spray: bool,
+    /// The policy gate: only a node answering identified peers escalates.
+    pub(crate) escalate: bool,
+    /// The budget's pair key (the link).
+    pub(crate) pair: [u8; 16],
+    /// When the birthday phase may open: BIRTHDAY_AFTER on two-observer
+    /// evidence, ESCALATE_AFTER on own evidence alone (Eric's fallback).
+    pub(crate) birthday_after: Duration,
+}
 
-/// +ciris (review item 2): the process-wide budget for knocks: one spray per
-/// target IP per [`SPRAY_IP_COOLDOWN`], and at most [`KNOCK_GLOBAL_PPS`]
-/// knocks a second (a token bucket of that depth).
+impl PunchPlan {
+    /// Punch the targets, nothing more.
+    #[cfg(test)]
+    pub(crate) fn plain() -> Self {
+        PunchPlan {
+            birthday: false,
+            spray: false,
+            escalate: false,
+            pair: [0u8; 16],
+            birthday_after: BIRTHDAY_AFTER,
+        }
+    }
+}
+
+/// +ciris (review item 2): every escalated send (a knock to a predicted or
+/// random port, a birthday socket's punch) passes here: the policy gate, the
+/// pair's allowance (decided once per punch, at its first escalated send),
+/// then the target's volume and the global ceiling, per datagram.
+#[derive(Clone)]
+pub(crate) struct Escalation {
+    budget: &'static KnockBudget,
+    pair: [u8; 16],
+    allowed: bool,
+    pub(crate) birthday_after: Duration,
+    /// `None` until the first escalated send; then whether the pair's
+    /// allowance granted this punch.
+    granted: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl Escalation {
+    pub(crate) fn new(
+        budget: &'static KnockBudget,
+        pair: [u8; 16],
+        allowed: bool,
+        birthday_after: Duration,
+    ) -> Self {
+        Escalation {
+            budget,
+            pair,
+            allowed,
+            birthday_after,
+            granted: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// May one escalated datagram go to `ip` now?
+    pub(crate) fn send(&self, ip: std::net::IpAddr) -> bool {
+        if !self.allowed {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        {
+            let mut g = self.granted.lock().unwrap_or_else(|e| e.into_inner());
+            match *g {
+                Some(false) => return false,
+                Some(true) => {}
+                None => {
+                    let ok = self.budget.escalate(self.pair, ip, now);
+                    *g = Some(ok);
+                    if !ok {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.budget.take(ip, now)
+    }
+
+    /// Whether the pair's allowance refused this punch.
+    #[cfg(test)]
+    pub(crate) fn refused(&self) -> bool {
+        *self.granted.lock().unwrap_or_else(|e| e.into_inner()) == Some(false)
+    }
+
+    pub(crate) fn allowed(&self) -> bool {
+        self.allowed
+    }
+}
+
+/// +ciris (review item 2): escalations one pair (link, target) may start per
+/// [`BUDGET_WINDOW`]: retries after a birthday miss can spray again.
+pub(crate) const PAIR_ESCALATIONS: usize = 3;
+/// +ciris (review item 2): the budget's window.
+pub(crate) const BUDGET_WINDOW: Duration = Duration::from_secs(300);
+/// Birthday punches one session sends at most: every socket, every
+/// BIRTHDAY_REFRESH, for the whole window.
+pub(crate) const BIRTHDAY_SENDS_MAX: u32 = wire::MAX_BIRTHDAY_SOCKETS as u32 * 20;
+/// +ciris (review item 2): escalated datagrams one target (an IPv4 address,
+/// an IPv6 /64) may receive per [`BUDGET_WINDOW`] from this process, all
+/// pairs together: three full escalations.
+pub(crate) const TARGET_VOLUME: u32 = 3 * (wire::MAX_SPRAY_PORTS as u32 + BIRTHDAY_SENDS_MAX);
+/// +ciris (review item 2): escalated datagrams per second the whole process
+/// may send: room for three concurrent escalations (each about 220 knocks
+/// and 256 birthday punches a second) without starving one another.
+pub(crate) const ESCALATED_GLOBAL_PPS: u32 = 1_500;
+
+/// A budget key: an IPv4 address, or an IPv6 /64 (one subscriber's prefix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Target {
+    V4([u8; 4]),
+    V6([u8; 8]),
+}
+
+impl Target {
+    pub(crate) fn of(ip: std::net::IpAddr) -> Self {
+        match ip {
+            std::net::IpAddr::V4(v4) => Target::V4(v4.octets()),
+            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => Target::V4(v4.octets()),
+                None => {
+                    let mut p = [0u8; 8];
+                    p.copy_from_slice(&v6.octets()[..8]);
+                    Target::V6(p)
+                }
+            },
+        }
+    }
+}
+
+/// +ciris (review item 2): the process-wide budget for escalated sends.
 pub(crate) struct KnockBudget {
     inner: std::sync::Mutex<KnockBudgetInner>,
 }
 
 struct KnockBudgetInner {
-    sprayed: HashMap<std::net::IpAddr, std::time::Instant>,
+    /// Escalations started per (pair, target), with when.
+    pairs: HashMap<([u8; 16], Target), Vec<std::time::Instant>>,
+    /// Datagrams per target in the current window: (window start, count).
+    volume: HashMap<Target, (std::time::Instant, u32)>,
     tokens: f64,
     refilled: Option<std::time::Instant>,
 }
@@ -450,44 +602,64 @@ impl KnockBudget {
     pub(crate) fn new() -> Self {
         KnockBudget {
             inner: std::sync::Mutex::new(KnockBudgetInner {
-                sprayed: HashMap::new(),
-                tokens: f64::from(KNOCK_GLOBAL_PPS),
+                pairs: HashMap::new(),
+                volume: HashMap::new(),
+                tokens: f64::from(ESCALATED_GLOBAL_PPS),
                 refilled: None,
             }),
         }
     }
 
-    /// May a spray start toward `ip` now? Records it if so.
-    pub(crate) fn spray_permit(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+    /// May the pair start an escalation toward `ip` now? Records it if so.
+    pub(crate) fn escalate(
+        &self,
+        pair: [u8; 16],
+        ip: std::net::IpAddr,
+        now: std::time::Instant,
+    ) -> bool {
         let mut b = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        b.sprayed
-            .retain(|_, at| now.saturating_duration_since(*at) < SPRAY_IP_COOLDOWN);
-        if b.sprayed.contains_key(&ip) {
+        b.pairs.retain(|_, starts| {
+            starts.retain(|at| now.saturating_duration_since(*at) < BUDGET_WINDOW);
+            !starts.is_empty()
+        });
+        let starts = b.pairs.entry((pair, Target::of(ip))).or_default();
+        if starts.len() >= PAIR_ESCALATIONS {
             return false;
         }
-        b.sprayed.insert(ip, now);
+        starts.push(now);
         true
     }
 
-    /// Take one knock from the global bucket.
-    pub(crate) fn take(&self, now: std::time::Instant) -> bool {
+    /// One escalated datagram toward `ip`: the target's volume, then the
+    /// global ceiling.
+    pub(crate) fn take(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
         let mut b = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let cap = f64::from(KNOCK_GLOBAL_PPS);
+        let key = Target::of(ip);
+        let (start, count) = b.volume.get(&key).copied().unwrap_or((now, 0));
+        let (start, count) = if now.saturating_duration_since(start) >= BUDGET_WINDOW {
+            (now, 0)
+        } else {
+            (start, count)
+        };
+        if count >= TARGET_VOLUME {
+            return false;
+        }
+        let cap = f64::from(ESCALATED_GLOBAL_PPS);
         if let Some(at) = b.refilled {
             let gained = now.saturating_duration_since(at).as_secs_f64() * cap;
             b.tokens = (b.tokens + gained).min(cap);
         }
         b.refilled = Some(now);
-        if b.tokens >= 1.0 {
-            b.tokens -= 1.0;
-            true
-        } else {
-            false
+        if b.tokens < 1.0 {
+            return false;
         }
+        b.tokens -= 1.0;
+        b.volume.insert(key, (start, count + 1));
+        true
     }
 }
 
-/// The process's knock budget.
+/// The process's budget for escalated sends.
 pub(crate) fn knock_budget() -> &'static KnockBudget {
     static BUDGET: std::sync::OnceLock<KnockBudget> = std::sync::OnceLock::new();
     BUDGET.get_or_init(KnockBudget::new)
@@ -523,9 +695,11 @@ pub(crate) async fn punch_with_ports(
     session: &SessionId,
     token: &[u8; 32],
     spray: Option<SprayPorts>,
-    budget: &KnockBudget,
+    esc: &Escalation,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let mut diag = PunchDiag::new(targets, predicted, *session);
+    diag.escalation = Some(Arc::clone(&esc.granted));
+    diag.escalation_allowed = esc.allowed();
     let now = tokio::time::Instant::now();
     let deadline = now + PUNCH_WINDOW;
     let escalate_at = now + ESCALATE_AFTER;
@@ -541,7 +715,7 @@ pub(crate) async fn punch_with_ports(
             escalate_at,
             spray,
             None,
-            budget,
+            esc,
         )
         .await
         .map(|p| (p, None)),
@@ -557,7 +731,7 @@ pub(crate) async fn punch_with_ports(
                 deadline,
                 escalate_at,
                 spray,
-                budget,
+                esc,
             )
             .await
         }
@@ -615,7 +789,7 @@ async fn punch_birthday(
     deadline: tokio::time::Instant,
     escalate_at: tokio::time::Instant,
     spray: Option<SprayPorts>,
-    budget: &KnockBudget,
+    esc: &Escalation,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let peer = canonical(*targets.first()?);
     let mut opened: Vec<Arc<UdpSocket>> = Vec::new();
@@ -640,17 +814,20 @@ async fn punch_birthday(
             escalate_at,
             spray,
             None,
-            budget,
+            esc,
         );
         tokio::pin!(primary);
+        // BIRTHDAY_AFTER on two-observer evidence; ESCALATE_AFTER when the
+        // only evidence is our own (silence and random steps).
         let early = tokio::select! {
             r = &mut primary => Some(r),
-            _ = tokio::time::sleep(BIRTHDAY_AFTER) => None,
+            _ = tokio::time::sleep(esc.birthday_after) => None,
         };
         match early {
             Some(r) => BirthdayEnd::Primary(r),
-            // Heard already at the gate: nothing to open (review item 6).
-            None if primary_heard.load(std::sync::atomic::Ordering::SeqCst) => {
+            // Heard already at the gate (review item 6), or not allowed to
+            // escalate at all (review item 2): nothing to open.
+            None if primary_heard.load(std::sync::atomic::Ordering::SeqCst) || !esc.allowed() => {
                 BirthdayEnd::Primary((&mut primary).await)
             }
             None => {
@@ -674,6 +851,7 @@ async fn punch_birthday(
                         hit_tx.clone(),
                         *session,
                         *token,
+                        esc.clone(),
                     ));
                 }
                 drop(hit_tx);
@@ -734,7 +912,7 @@ async fn punch_birthday(
         now,
         None,
         seed,
-        budget,
+        esc,
     )
     .await
     .map(|p| (p, Some(winner)))
@@ -749,6 +927,7 @@ fn birthday_task(
     hit: mpsc::Sender<(usize, SocketAddr, Option<u32>)>,
     session: SessionId,
     token: [u8; 32],
+    esc: Escalation,
 ) -> AbortOnDrop {
     AbortOnDrop(
         tokio::spawn(async move {
@@ -758,7 +937,11 @@ fn birthday_task(
             loop {
                 tokio::select! {
                     _ = refresh.tick() => {
-                        let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
+                        // Each birthday punch is an escalated send toward the
+                        // peer's IP: spent from the same budget (re-review 2).
+                        if esc.send(peer.ip()) {
+                            let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
+                        }
                     }
                     r = extra.recv_from(&mut buf) => {
                         let Ok((len, src)) = r else { continue };
@@ -789,7 +972,7 @@ async fn punch_inner(
     escalate_at: tokio::time::Instant,
     spray: Option<SprayPorts>,
     seed_heard: Option<SocketAddr>,
-    budget: &KnockBudget,
+    esc: &Escalation,
 ) -> Option<Punched> {
     let mut targets: Vec<SocketAddr> = alloc_targets(
         canonical(*targets.first()?),
@@ -804,7 +987,6 @@ async fn punch_inner(
     // that may be anyone's on the peer's NAT, and carries no token. Only the
     // advertised address, host candidates and sources that proved the token
     // get tokened punches.
-    let public = targets[0];
     let mut held: Vec<SocketAddr> = predicted
         .iter()
         .map(|a| canonical(*a))
@@ -850,15 +1032,9 @@ async fn punch_inner(
                     if heard.is_empty() {
                         diag.escalated = true;
                         knocking.append(&mut held);
-                        // One spray per target IP per SPRAY_IP_COOLDOWN, in
-                        // the whole process (review item 2).
-                        spray = pending_spray.take().filter(|_| {
-                            let ok = budget.spray_permit(public.ip(), std::time::Instant::now());
-                            if !ok {
-                                diag.spray_refused = true;
-                            }
-                            ok
-                        });
+                        // Every knock is spent from the budget as it goes
+                        // (review B: per datagram, not per escalation).
+                        spray = pending_spray.take();
                     } else {
                         // Heard already: the peer's mapping did not move.
                         diag.predicted_dropped += held.len();
@@ -884,11 +1060,11 @@ async fn punch_inner(
                     knocking.clear();
                 }
                 for addr in &knocking {
-                    if !budget.take(std::time::Instant::now()) {
+                    if !esc.send(addr.ip()) {
                         diag.knocks_refused += 1;
                         break;
                     }
-                    let mut pad = [0u8; 12];
+                    let mut pad = [0u8; wire::KNOCK_LEN];
                     rng.fill_bytes(&mut pad);
                     if socket.send_to(&wire::knock_frame(&pad), on_socket(socket, *addr)).await.is_err() {
                         diag.send_errors += 1;
@@ -910,15 +1086,18 @@ async fn punch_inner(
                         draws += 1;
                         let port = next_port();
                         let addr = SocketAddr::new(peer_ip, port);
-                        if targets.contains(&addr) || knocking.contains(&addr) || !sprayed.insert(addr) {
+                        if targets.contains(&addr) || knocking.contains(&addr) || sprayed.contains(&addr) {
                             continue;
                         }
-                        if !budget.take(std::time::Instant::now()) {
+                        // The budget first: a refused port is not "sprayed"
+                        // (re-review item 7).
+                        if !esc.send(addr.ip()) {
                             diag.knocks_refused += 1;
                             break;
                         }
+                        sprayed.insert(addr);
                         sent_now += 1;
-                        let mut pad = [0u8; 12];
+                        let mut pad = [0u8; wire::KNOCK_LEN];
                         rng.fill_bytes(&mut pad);
                         if socket.send_to(&wire::knock_frame(&pad), on_socket(socket, addr)).await.is_err() {
                             diag.send_errors += 1;
@@ -1144,6 +1323,66 @@ pub(crate) fn classify_nat(
     }
 }
 
+/// +ciris (Eric's ruling on review item 6): on what evidence this node holds
+/// its NAT to be a random endpoint-dependent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdmEvidence {
+    /// The session socket's mapping moved between two observers. (Two ports
+    /// on one IP detect a port-dependent mapping, not an address-only one.)
+    TwoObserver,
+    /// No observer could tell; our own allocation probes look random. The
+    /// birthday phase then opens only once the punch has been silent past
+    /// ESCALATE_AFTER, the rest of the evidence.
+    FallbackSilenceRandom,
+    /// Nothing says the NAT is random.
+    None,
+}
+
+impl EdmEvidence {
+    /// The word logged.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdmEvidence::TwoObserver => "two_observer",
+            EdmEvidence::FallbackSilenceRandom => "fallback_silence_random",
+            EdmEvidence::None => "none",
+        }
+    }
+}
+
+/// +ciris (re-review 6): a second observer is compared only within the
+/// facilitator's address family, and only if it is another endpoint.
+pub(crate) fn second_observer_usable(first: SocketAddr, second: SocketAddr) -> bool {
+    let (a, b) = (canonical(first), canonical(second));
+    a.is_ipv4() == b.is_ipv4() && a != b
+}
+
+/// What this node advertises and on what evidence: two-observer EDM as
+/// [`advertise`]; with no observer able to tell, "b" alone when our own
+/// steps look random (the fallback), never "q".
+pub(crate) fn decide(
+    class: NatClass,
+    steps: Option<AllocationSteps>,
+) -> (Vec<u16>, bool, EdmEvidence) {
+    match class {
+        NatClass::EndpointDependent => {
+            let (q, b) = advertise(class, steps);
+            let evidence = if b {
+                EdmEvidence::TwoObserver
+            } else {
+                EdmEvidence::None
+            };
+            (q, b, evidence)
+        }
+        NatClass::Unknown => match steps {
+            Some(s) if predict_ports(s).is_empty() && s.step1 != 0 && s.step2 != 0 => {
+                (Vec::new(), true, EdmEvidence::FallbackSilenceRandom)
+            }
+            _ => (Vec::new(), false, EdmEvidence::None),
+        },
+        _ => (Vec::new(), false, EdmEvidence::None),
+    }
+}
+
 /// What to advertise: predicted ports ("q") only for an endpoint-dependent
 /// NAT that allocates in steady steps, "b" only for one that allocates at
 /// random; neither otherwise (review items 6 and the f46a9da nit).
@@ -1288,7 +1527,12 @@ pub(crate) struct PunchDiag {
     pub(crate) knocks: u32,
     pub(crate) knocks_refused: u32,
     pub(crate) rx_knocks: u32,
-    pub(crate) spray_refused: bool,
+    /// The punch's escalation decision, shared with its Escalation: `None`
+    /// until the first escalated send, then whether the pair's allowance
+    /// granted it.
+    pub(crate) escalation: Option<Arc<std::sync::Mutex<Option<bool>>>>,
+    /// The policy gate let this punch escalate.
+    pub(crate) escalation_allowed: bool,
     /// The peer reached one of them, which became the punch socket.
     pub(crate) birthday_switched: bool,
     /// Which one (its index among them, not a port).
@@ -1342,7 +1586,8 @@ impl PunchDiag {
             knocks: 0,
             knocks_refused: 0,
             rx_knocks: 0,
-            spray_refused: false,
+            escalation: None,
+            escalation_allowed: false,
             birthday_switched: false,
             birthday_winner: None,
             escalated: false,
@@ -1461,7 +1706,10 @@ impl PunchDiag {
             knocks = self.knocks,
             knocks_refused = self.knocks_refused,
             rx_knocks = self.rx_knocks,
-            spray_refused = self.spray_refused,
+            escalation_allowed = self.escalation_allowed,
+            escalation_refused = self.escalation.as_ref().is_some_and(|g| {
+                *g.lock().unwrap_or_else(|e| e.into_inner()) == Some(false)
+            }),
             birthday_winner = self.birthday_winner.map_or(-1, |i| i as i64),
             birthday_pps = self.birthday_pps(),
             escalated = self.escalated,
@@ -1511,6 +1759,7 @@ fn log_probe_diag(
     public: Option<SocketAddr>,
     local: &[SocketAddr],
     class: NatClass,
+    evidence: EdmEvidence,
     steps: Option<AllocationSteps>,
     predicted: usize,
     birthday: bool,
@@ -1549,6 +1798,7 @@ fn log_probe_diag(
             NatClass::EndpointDependent => "endpoint_dependent",
             NatClass::Unknown => "unknown",
         },
+        edm_evidence = evidence.as_str(),
         alloc_measured = steps.is_some(),
         alloc_step1 = steps.map_or(0, |s| s.step1),
         alloc_step2 = steps.map_or(0, |s| s.step2),
@@ -1613,6 +1863,10 @@ pub(crate) async fn probe_path_mtu(
                 let frame = &buf[..len];
                 if wire::is_mtu_probe(frame) {
                     answer_mtu_probe(socket, frame, src, session, token).await;
+                    continue;
+                }
+                // +ciris (re-review D/E): a knock is never data.
+                if wire::is_knock(frame) {
                     continue;
                 }
                 match wire::parse_punch_frame(frame, session, token) {
@@ -1761,10 +2015,8 @@ fn host_candidates(socket: &UdpSocket, server: SocketAddr) -> Vec<SocketAddr> {
 /// address its datagram arrived from. Stateless; runs until aborted.
 pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
-    tracing::info!(
-        port = socket.local_addr()?.port(),
-        "direct link: facilitator listening"
-    );
+    // By role, never by number (the no-addresses rule covers ports).
+    tracing::info!("direct link: facilitator listening (udp)");
     let task = tokio::spawn(async move {
         let mut buf = [0u8; 576];
         loop {
@@ -1814,6 +2066,8 @@ pub(crate) enum Outcome {
         predicted: Vec<u16>,
         /// +ciris: this node's NAT allocates at random (birthday approach).
         birthday: bool,
+        /// +ciris: on what evidence (two observers, or own evidence alone).
+        evidence: EdmEvidence,
     },
     Punched {
         session: SessionId,
@@ -1853,11 +2107,12 @@ pub(crate) struct DirectLinkRuntime {
     fast_liveness: HashMap<SessionId, bool>,
     /// +ciris: sessions whose own NAT allocates at random, from the probe:
     /// their punch holds birthday sockets open.
-    birthday: HashMap<SessionId, bool>,
-    /// +ciris (review item 6): the second observer the session socket also
-    /// probes, to tell an endpoint-dependent NAT from one that keeps a
-    /// mapping per socket. `None`: no "q", no "b".
-    observer2: Option<(String, ProbeProtocol)>,
+    birthday: HashMap<SessionId, EdmEvidence>,
+    /// +ciris (review item 6, re-review 8): the second observer the session
+    /// socket also probes, resolved in the background and cached. `None`
+    /// until it resolves (or none configured): the fallback decides alone.
+    observer2: Arc<std::sync::Mutex<Option<(SocketAddr, ProbeProtocol)>>>,
+    observer2_resolver: Option<AbortOnDrop>,
 }
 
 impl DirectLinkRuntime {
@@ -1873,13 +2128,41 @@ impl DirectLinkRuntime {
             timing: DirectUdpTiming::default(),
             fast_liveness: HashMap::new(),
             birthday: HashMap::new(),
-            observer2: None,
+            observer2: Arc::new(std::sync::Mutex::new(None)),
+            observer2_resolver: None,
         }
     }
 
-    /// +ciris (review item 6): the second observer, from the settings.
+    /// +ciris (review item 6, re-review 8): the second observer, from the
+    /// settings: resolved now and every RESOLVE_REFRESH (RESOLVE_RETRY while
+    /// it does not resolve), each lookup bounded.
     pub(crate) fn set_second_observer(&mut self, observer: Option<(String, ProbeProtocol)>) {
-        self.observer2 = observer;
+        self.observer2_resolver = None;
+        *self.observer2.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let Some((addr, protocol)) = observer else {
+            return;
+        };
+        let cache = Arc::clone(&self.observer2);
+        self.observer2_resolver = Some(AbortOnDrop(
+            tokio::spawn(async move {
+                loop {
+                    let wait = match resolve_facilitator(&addr).await {
+                        Ok(server2) => {
+                            *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some((server2, protocol));
+                            RESOLVE_REFRESH
+                        }
+                        Err(_) => RESOLVE_RETRY,
+                    };
+                    tokio::time::sleep(wait).await;
+                }
+            })
+            .abort_handle(),
+        ));
+    }
+
+    fn observer2_cached(&self) -> Option<(SocketAddr, ProbeProtocol)> {
+        *self.observer2.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Start (or stop) whatever a node job asks for.
@@ -1895,6 +2178,8 @@ impl DirectLinkRuntime {
                 peer,
                 alternates,
                 predicted,
+                escalate,
+                link,
                 token,
                 start_delay_ms,
                 fast_liveness,
@@ -1909,6 +2194,8 @@ impl DirectLinkRuntime {
                     token,
                     Duration::from_millis(start_delay_ms),
                     spray,
+                    escalate,
+                    link,
                 )
             }
             DirectLinkJob::Release { session } => self.release(&session),
@@ -1933,12 +2220,15 @@ impl DirectLinkRuntime {
                     local: Vec::new(),
                     predicted: Vec::new(),
                     birthday: false,
+                    evidence: EdmEvidence::None,
                 });
                 return;
             }
         };
         self.sockets.insert(session, Arc::clone(&socket));
-        let observer2 = self.observer2.clone();
+        // Resolved in the background and cached (re-review item 8): never
+        // a lookup per session.
+        let observer2 = self.observer2_cached();
         let task = tokio::spawn(async move {
             let probe_start = tokio::time::Instant::now();
             let public = match probe(&socket, server, protocol).await {
@@ -1953,33 +2243,42 @@ impl DirectLinkRuntime {
             };
             let local = host_candidates(&socket, server);
             // +ciris (review item 6): the same session socket toward a second
-            // observer, when one is configured; never a third party chosen
-            // here (no STUN default).
-            let second = match (&observer2, public) {
-                (Some((addr2, protocol2)), Some(_)) => match resolve_facilitator(addr2).await {
-                    Ok(server2) if canonical(server2) != canonical(server) => {
-                        probe_with(&socket, server2, *protocol2, 2, ALLOCATION_DEADLINE / 2)
-                            .await
-                            .ok()
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
-            let class = classify_nat(public, second, &local);
-            let steps = match (class, public) {
-                (NatClass::EndpointDependent, Some(p)) => {
-                    allocation_steps(server, protocol, p.port()).await
+            // observer (the facilitator's second probe port, or one the
+            // operator configured); never a third party chosen here. Only
+            // the same address family as the facilitator, and another
+            // endpoint (re-review 6): across families nothing is compared.
+            let second = match (observer2, public) {
+                (Some((server2, protocol2)), Some(_))
+                    if second_observer_usable(server, server2) =>
+                {
+                    probe_with(&socket, server2, protocol2, 2, ALLOCATION_DEADLINE / 2)
+                        .await
+                        .ok()
                 }
                 _ => None,
             };
-            let (predicted, birthday) = advertise(class, steps);
+            let class = classify_nat(public, second, &local);
+            // Our own allocation steps: on two-observer EDM, and as the
+            // fallback's evidence when no observer could tell (a NAT that
+            // did not keep the port and is not "no NAT").
+            let local_port = socket.local_addr().map(|a| a.port()).ok();
+            let measure = match (class, public) {
+                (NatClass::EndpointDependent, Some(_)) => true,
+                (NatClass::Unknown, Some(p)) => Some(p.port()) != local_port,
+                _ => false,
+            };
+            let steps = match (measure, public) {
+                (true, Some(p)) => allocation_steps(server, protocol, p.port()).await,
+                _ => None,
+            };
+            let (predicted, birthday, evidence) = decide(class, steps);
             log_probe_diag(
                 &session,
                 &socket,
                 public,
                 &local,
                 class,
+                evidence,
                 steps,
                 predicted.len(),
                 birthday,
@@ -1992,6 +2291,7 @@ impl DirectLinkRuntime {
                     local,
                     predicted,
                     birthday,
+                    evidence,
                 })
                 .await;
         });
@@ -2008,9 +2308,24 @@ impl DirectLinkRuntime {
         token: [u8; 32],
         start_delay: Duration,
         spray: bool,
+        escalate: bool,
+        link: [u8; 16],
     ) {
         let outcomes = self.outcomes.clone();
-        let birthday = self.birthday.remove(&session).unwrap_or(false);
+        let evidence = self.birthday.remove(&session).unwrap_or(EdmEvidence::None);
+        let birthday = evidence != EdmEvidence::None;
+        let plan = PunchPlan {
+            birthday,
+            spray,
+            escalate,
+            pair: link,
+            // Own evidence alone waits out the full silence gate.
+            birthday_after: if evidence == EdmEvidence::TwoObserver {
+                BIRTHDAY_AFTER
+            } else {
+                ESCALATE_AFTER
+            },
+        };
         let Some(socket) = self.sockets.get(&session).cloned() else {
             // No probe socket (it failed to bind, or was released): there is
             // no NAT mapping to punch from.
@@ -2038,10 +2353,7 @@ impl DirectLinkRuntime {
                 birthday,
                 "direct link: punching"
             );
-            let seen = punch_with(
-                &socket, birthday, &targets, &predicted, &session, &token, spray,
-            )
-            .await;
+            let seen = punch_with(&socket, &targets, &predicted, &session, &token, plan).await;
             match &seen {
                 Some((_, winner)) => tracing::info!(
                     on_birthday_socket = winner.is_some(),
@@ -2073,11 +2385,11 @@ impl DirectLinkRuntime {
 
     /// +ciris: the probe found this session's NAT to be a random allocator
     /// (`birthday`); its punch holds birthday sockets open.
-    pub(crate) fn note_birthday(&mut self, session: SessionId, birthday: bool) {
+    pub(crate) fn note_birthday(&mut self, session: SessionId, evidence: EdmEvidence) {
         // Only for a session still holding its socket: one released while
         // its probe ran would never be removed again (review item 9).
-        if birthday && self.sockets.contains_key(&session) {
-            self.birthday.insert(session, true);
+        if evidence != EdmEvidence::None && self.sockets.contains_key(&session) {
+            self.birthday.insert(session, evidence);
         }
     }
 
@@ -2177,8 +2489,14 @@ mod tests {
     /// A knock budget of a test's own: the process one is shared by every
     /// test running at once, and its per-IP cooldown would refuse each
     /// loopback spray after the first.
-    fn test_budget() -> &'static KnockBudget {
-        Box::leak(Box::new(KnockBudget::new()))
+    fn test_budget() -> &'static Escalation {
+        let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
+        Box::leak(Box::new(Escalation::new(
+            budget,
+            [9u8; 16],
+            true,
+            BIRTHDAY_AFTER,
+        )))
     }
 
     async fn loopback() -> UdpSocket {
@@ -2615,27 +2933,94 @@ mod tests {
 
     /// +ciris (review item 2): one spray per target IP per cooldown, and a
     /// global ceiling on knocks a second.
+    /// +ciris (re-review 2, B): the escalation allowance is per pair (link,
+    /// target), 3 per window; the volume per target (v4 address, v6 /64) is
+    /// shared by every pair; the global ceiling covers every escalated send.
     #[test]
-    fn the_knock_budget_limits_sprays_per_ip_and_knocks_per_second() {
+    fn the_budget_allows_three_escalations_per_pair_and_caps_each_target() {
         let budget = KnockBudget::new();
         let t0 = std::time::Instant::now();
         let ip: std::net::IpAddr = "198.51.100.7".parse().unwrap();
-        let other: std::net::IpAddr = "198.51.100.8".parse().unwrap();
-        assert!(budget.spray_permit(ip, t0));
+        let (pair, other_pair) = ([1u8; 16], [2u8; 16]);
+        for _ in 0..PAIR_ESCALATIONS {
+            assert!(budget.escalate(pair, ip, t0));
+        }
         assert!(
-            !budget.spray_permit(ip, t0 + Duration::from_secs(60)),
-            "within the cooldown"
+            !budget.escalate(pair, ip, t0 + Duration::from_secs(60)),
+            "3 per window"
         );
-        assert!(budget.spray_permit(other, t0), "another IP");
-        assert!(budget.spray_permit(ip, t0 + SPRAY_IP_COOLDOWN), "after it");
-        let taken = (0..2 * KNOCK_GLOBAL_PPS)
-            .filter(|_| budget.take(t0))
+        assert!(
+            budget.escalate(other_pair, ip, t0),
+            "another pair keeps its own"
+        );
+        assert!(
+            budget.escalate(pair, ip, t0 + BUDGET_WINDOW),
+            "after the window"
+        );
+        // The target's volume, shared by all pairs, spread over time so the
+        // global ceiling never binds.
+        let mut sent = 0u32;
+        for i in 0..(TARGET_VOLUME + 10) {
+            let at = t0 + Duration::from_millis(u64::from(i)); // 1000/s, under the ceiling
+            if budget.take(ip, at) {
+                sent += 1;
+            }
+        }
+        assert_eq!(sent, TARGET_VOLUME, "one window's volume to one target");
+        // IPv6 is one target per /64.
+        let a: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: std::net::IpAddr = "2001:db8:1:2::ffff".parse().unwrap();
+        let c: std::net::IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(Target::of(a), Target::of(b));
+        assert_ne!(Target::of(a), Target::of(c));
+        let mapped: std::net::IpAddr = "::ffff:198.51.100.7".parse().unwrap();
+        assert_eq!(Target::of(mapped), Target::of(ip));
+    }
+
+    /// The global ceiling: room for three concurrent escalations (each about
+    /// 220 knocks and 256 birthday punches a second), refilling with time.
+    #[test]
+    fn the_global_ceiling_fits_three_concurrent_escalations() {
+        let per_escalation = SPRAY_PER_TICK as u32 * 10 + (wire::MAX_BIRTHDAY_SOCKETS as u32 * 2);
+        assert!(ESCALATED_GLOBAL_PPS >= 3 * per_escalation);
+        let budget = KnockBudget::new();
+        let t0 = std::time::Instant::now();
+        let ips: Vec<std::net::IpAddr> = (1..=200u8)
+            .map(|i| std::net::IpAddr::from([198, 51, 100, i]))
+            .collect();
+        let taken = (0..2 * ESCALATED_GLOBAL_PPS as usize)
+            .filter(|i| budget.take(ips[i % ips.len()], t0))
             .count();
-        assert_eq!(taken as u32, KNOCK_GLOBAL_PPS, "one bucket's worth at once");
-        assert!(
-            budget.take(t0 + Duration::from_millis(10)),
-            "refills with time"
+        assert_eq!(
+            taken as u32, ESCALATED_GLOBAL_PPS,
+            "one second's worth at once"
         );
+        assert!(
+            budget.take(ips[0], t0 + Duration::from_millis(10)),
+            "refills"
+        );
+    }
+
+    /// +ciris (re-review 2): no escalated send at all under a policy that
+    /// may not escalate, and a pair whose allowance is spent sends nothing
+    /// more; the decision is taken once per punch, at its first send.
+    #[test]
+    fn an_escalation_is_gated_by_policy_and_by_the_pair_allowance() {
+        let ip: std::net::IpAddr = "198.51.100.9".parse().unwrap();
+        let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
+        let gated = Escalation::new(budget, [3u8; 16], false, BIRTHDAY_AFTER);
+        assert!(!gated.send(ip), "accept_all never escalates");
+        for _ in 0..PAIR_ESCALATIONS {
+            let esc = Escalation::new(budget, [4u8; 16], true, BIRTHDAY_AFTER);
+            assert!(
+                esc.send(ip) && esc.send(ip),
+                "a granted punch keeps sending"
+            );
+            assert!(!esc.refused());
+        }
+        let spent = Escalation::new(budget, [4u8; 16], true, BIRTHDAY_AFTER);
+        assert!(!spent.send(ip));
+        assert!(spent.refused());
     }
 
     /// +ciris (review item 3): birthday sockets are counted process-wide; with
@@ -2769,6 +3154,152 @@ mod tests {
             advertise(NatClass::EndpointDependent, None),
             (vec![], false)
         );
+    }
+
+    /// +ciris (Eric's ruling, item 6): with no observer able to tell, our
+    /// own random allocation steps are the evidence: "b", and the birthday
+    /// phase gated on the full silence gate; steady steps advertise nothing
+    /// (never "q" without two observers).
+    #[test]
+    fn the_own_evidence_fallback_needs_random_steps() {
+        let random = steps_from(40000, 51234, 33310);
+        let steady = steps_from(40000, 40001, 40002);
+        assert_eq!(
+            decide(NatClass::Unknown, Some(random)),
+            (vec![], true, EdmEvidence::FallbackSilenceRandom)
+        );
+        assert_eq!(
+            decide(NatClass::Unknown, Some(steady)),
+            (vec![], false, EdmEvidence::None)
+        );
+        assert_eq!(
+            decide(NatClass::Unknown, None),
+            (vec![], false, EdmEvidence::None)
+        );
+        assert_eq!(
+            decide(NatClass::EndpointDependent, Some(random)),
+            (vec![], true, EdmEvidence::TwoObserver)
+        );
+        let (q, b, e) = decide(NatClass::EndpointDependent, Some(steady));
+        assert!(!q.is_empty() && !b && e == EdmEvidence::None);
+        assert_eq!(
+            decide(NatClass::EndpointIndependent, Some(random)),
+            (vec![], false, EdmEvidence::None)
+        );
+    }
+
+    /// +ciris (re-review 6): a second observer of the other address family,
+    /// or the facilitator itself, is never compared.
+    #[test]
+    fn a_second_observer_counts_only_in_the_same_family() {
+        let v4: SocketAddr = "203.0.113.7:4242".parse().unwrap();
+        let v4b: SocketAddr = "203.0.113.7:4243".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::7]:4243".parse().unwrap();
+        let mapped: SocketAddr = "[::ffff:203.0.113.7]:4243".parse().unwrap();
+        assert!(second_observer_usable(v4, v4b));
+        assert!(second_observer_usable(v4, mapped));
+        assert!(!second_observer_usable(v4, v6));
+        assert!(!second_observer_usable(v4, v4));
+    }
+
+    /// +ciris (the server's condition on dial + 1): the prober sends the
+    /// facilitator's second probe port (udp) probes and nothing else.
+    #[tokio::test]
+    async fn the_second_probe_port_gets_probes_only() {
+        let first = loopback().await;
+        let first_addr = first.local_addr().unwrap();
+        let second = Arc::new(loopback().await);
+        let second_addr = second.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        // The facilitator answers on the first port; the second records.
+        let answer = tokio::spawn(async move {
+            let mut buf = [0u8; 576];
+            loop {
+                let Ok((len, src)) = first.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) {
+                    let _ = first.send_to(&wire::rnsp_response(&nonce, &src), src).await;
+                }
+            }
+        });
+        let record = {
+            let (second, seen) = (Arc::clone(&second), Arc::clone(&seen));
+            tokio::spawn(async move {
+                let mut buf = [0u8; 576];
+                loop {
+                    let Ok((len, src)) = second.recv_from(&mut buf).await else {
+                        continue;
+                    };
+                    seen.lock().unwrap().push(buf[..len].to_vec());
+                    if let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) {
+                        let _ = second
+                            .send_to(&wire::rnsp_response(&nonce, &src), src)
+                            .await;
+                    }
+                }
+            })
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut rt = DirectLinkRuntime::new(tx);
+        *rt.observer2.lock().unwrap() = Some((second_addr, ProbeProtocol::Rnsp));
+        rt.run(DirectLinkJob::Probe {
+            session: [31u8; 16],
+            server: first_addr,
+            protocol: ProbeProtocol::Rnsp,
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        answer.abort();
+        record.abort();
+        assert!(matches!(
+            outcome,
+            Ok(Some(Outcome::Probed {
+                public: Some(_),
+                ..
+            }))
+        ));
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "the second port was probed");
+        assert!(
+            seen.iter().all(|f| wire::parse_rnsp_request(f).is_some()),
+            "only RNSP probes"
+        );
+    }
+
+    /// +ciris (re-review 7): a knock the budget refuses is not counted as
+    /// sprayed (it never left).
+    #[tokio::test]
+    async fn a_refused_knock_is_not_counted_as_sprayed() {
+        let a = loopback().await;
+        let advertised = loopback().await.local_addr().unwrap();
+        let (session, token) = ([33u8; 16], [34u8; 32]);
+        let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
+        let ip = advertised.ip();
+        for _ in 0..PAIR_ESCALATIONS {
+            assert!(budget.escalate([5u8; 16], ip, std::time::Instant::now()));
+        }
+        let esc = Escalation::new(budget, [5u8; 16], true, BIRTHDAY_AFTER);
+        let mut diag = PunchDiag::new(std::slice::from_ref(&advertised), &[], session);
+        let now = tokio::time::Instant::now();
+        let r = punch_inner(
+            &a,
+            std::slice::from_ref(&advertised),
+            &[],
+            &session,
+            &token,
+            &mut diag,
+            now + Duration::from_millis(600),
+            now,
+            cycle(vec![50_001, 50_002, 50_003]),
+            None,
+            &esc,
+        )
+        .await;
+        assert!(r.is_none());
+        assert!(esc.refused());
+        assert_eq!(diag.sprayed, 0);
+        assert!(diag.knocks_refused > 0);
+        assert_eq!(diag.knocks, 0);
     }
 
     /// The two allocation probes run at once: order them by distance from
@@ -3203,6 +3734,7 @@ mod tests {
                 facilitator_port: Some(4343),
                 facilitator2: Some("rns2.example.org:4343".into()),
                 protocol2: ProbeProtocol::Rnsp,
+                facilitator_second_port: false,
             }
         );
         assert!(on.active());

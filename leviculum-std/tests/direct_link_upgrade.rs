@@ -6,7 +6,10 @@
 //!        └──────────────── punched UDP, after the upgrade ─────────┘
 //! ```
 //!
-//! Real nodes, real sockets, loopback. There is no NAT on loopback, so the
+//! Real nodes, real sockets, loopback. Sends use `LinkHandle::send`, which
+//! waits out the channel's pacing: right after the upgrade's signals a bare
+//! `try_send` can meet `PacingDelay` on a busy or single-CPU host (3 in 10
+//! suite runs pinned to one CPU, on the old code too). There is no NAT on loopback, so the
 //! facilitator reports each socket's own address; everything else (probe,
 //! signals over the relayed link, punch, the link moving onto the new
 //! interface) runs exactly as it would across two NATs that allow a punch.
@@ -235,7 +238,7 @@ async fn linked_through_relay_with(
         .await_link_established(&link_id)
         .await
         .expect("link through the relay");
-    handle.try_send(b"relayed").await.expect("send");
+    handle.send(b"relayed").await.expect("send");
     assert!(
         next_event(&mut a.rx, Duration::from_secs(8), received(b"relayed"))
             .await
@@ -314,7 +317,7 @@ async fn a_link_born_on_the_punched_path_runs_at_its_mtu() {
 
     // And a payload past the base MDU crosses it.
     let big = vec![0xA5u8; 1200];
-    born.try_send(&big).await.expect("send a 1200-byte message");
+    born.send(&big).await.expect("send a 1200-byte message");
     assert!(
         next_event(&mut a.rx, Duration::from_secs(8), |ev| matches!(
             ev,
@@ -489,10 +492,7 @@ async fn upgrade_and_drop_relay(
         t.node.stop().await.expect("stop relay");
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    handle
-        .try_send(b"direct")
-        .await
-        .expect("send after relay gone");
+    handle.send(b"direct").await.expect("send after relay gone");
     assert!(
         next_event(&mut a.rx, Duration::from_secs(8), received(b"direct"))
             .await
@@ -562,7 +562,7 @@ async fn an_asking_host_accepts_and_a_retired_link_returns_to_the_relay() {
     );
     assert_eq!(b.node.direct_link_interface(&link_id), None);
     assert_eq!(a.node.direct_link_interface(&link_id), None);
-    handle.try_send(b"after retire").await.expect("send");
+    handle.send(b"after retire").await.expect("send");
     assert!(
         next_event(&mut a.rx, Duration::from_secs(8), received(b"after retire"))
             .await
@@ -630,7 +630,7 @@ async fn a_refused_upgrade_leaves_the_relayed_link_working() {
     );
     assert_eq!(b.node.direct_link_interface(&link_id), None);
 
-    handle.try_send(b"still relayed").await.expect("send");
+    handle.send(b"still relayed").await.expect("send");
     assert!(
         next_event(
             &mut a.rx,
@@ -716,10 +716,7 @@ async fn interop_rns_rs_peer_accepts_our_proposal() {
         ),
         "upgrade with rns-rs: {outcome:?}"
     );
-    handle
-        .try_send(b"hello-from-leviculum")
-        .await
-        .expect("send");
+    handle.send(b"hello-from-leviculum").await.expect("send");
     if let Ok(pid) = std::env::var("LEVICULUM_INTEROP_RELAY_PID") {
         std::process::Command::new("kill")
             .arg(pid)
@@ -727,7 +724,7 @@ async fn interop_rns_rs_peer_accepts_our_proposal() {
             .unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
         handle
-            .try_send(b"relay-gone")
+            .send(b"relay-gone")
             .await
             .expect("send after relay gone");
     }

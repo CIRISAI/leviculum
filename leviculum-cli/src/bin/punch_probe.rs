@@ -79,11 +79,18 @@ enum Role {
         /// listener prints it (`whois`). Test identities only.
         #[arg(long)]
         seed: Option<String>,
-        /// Accept a direct link only from the dialer whose identity
-        /// `dial --seed` derives from this (ask_host with an allowlist; never
-        /// accept_all on a public destination).
+        /// Accept a direct link only from the dialer with this identity hash
+        /// (hex, from `keygen`): ask_host with an allowlist, never accept_all
+        /// on a public destination. Only the public hash is ever handed out.
         #[arg(long)]
-        allow_seed: String,
+        allow: String,
+    },
+    /// Make a random throwaway identity for one run: its private key goes to
+    /// `--out` (keep it off the run log and out of git), its public hash to
+    /// stdout.
+    Keygen {
+        #[arg(long)]
+        out: std::path::PathBuf,
     },
     /// Print the destination and key `listen --seed` will use; no network.
     Whois {
@@ -103,11 +110,11 @@ enum Role {
         /// Seconds between proposals; leviculum refuses under 60.
         #[arg(long, default_value_t = 70)]
         spacing_secs: u64,
-        /// Derive this dialer's throwaway identity from this string; it
+        /// This dialer's throwaway identity, a private key `keygen` wrote; it
         /// identifies itself on the link, so the listener's allowlist
-        /// (`listen --allow-seed`) admits it.
+        /// (`listen --allow`) admits it.
         #[arg(long)]
-        seed: String,
+        identity_file: std::path::PathBuf,
     },
 }
 
@@ -339,6 +346,13 @@ async fn main() {
         registry.init();
     }
 
+    if let Role::Keygen { out: path } = &cli.role {
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let key = identity.private_key_bytes().expect("a private key");
+        std::fs::write(path, hex(&key)).expect("write the key file");
+        out(json!({"kind": "keygen", "hash": hex(identity.hash())}));
+        return;
+    }
     if let Role::Whois { seed } = &cli.role {
         let (hash, key) = listener_destination(Some(seed));
         out(json!({"kind": "whois", "dest": hex(hash.as_bytes()), "key": hex(&key)}));
@@ -347,7 +361,7 @@ async fn main() {
     let role = match cli.role {
         Role::Listen { .. } => "listen",
         Role::Dial { .. } => "dial",
-        Role::Whois { .. } => unreachable!(),
+        Role::Whois { .. } | Role::Keygen { .. } => unreachable!(),
     };
     let Some(relay) = resolve_v4(&cli.relay).await else {
         out(json!({"role": role, "kind": "error", "error": "relay does not resolve"}));
@@ -367,6 +381,7 @@ async fn main() {
             protocol: ProbeProtocol::Rnsp,
             facilitator_port: None,
             facilitator2: cli.facilitator2.clone(),
+            facilitator_second_port: false,
             protocol2: if cli.protocol2 == "rnsp" {
                 ProbeProtocol::Rnsp
             } else {
@@ -383,14 +398,14 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     match cli.role {
-        Role::Whois { .. } => unreachable!(),
+        Role::Whois { .. } | Role::Keygen { .. } => unreachable!(),
         Role::Listen {
             duration_secs,
             announce_secs,
             seed,
-            allow_seed,
+            allow,
         } => {
-            let allowed = *listener_identity(Some(&allow_seed)).hash();
+            let allowed = unhex::<16>(&allow).expect("--allow: a 16-byte identity hash");
             let identity = listener_identity(seed.as_deref());
             let key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
             let mut dest = Destination::new(
@@ -445,9 +460,12 @@ async fn main() {
             key,
             attempts,
             spacing_secs,
-            seed,
+            identity_file,
         } => {
-            let me = listener_identity(Some(&seed));
+            let key_hex = std::fs::read_to_string(&identity_file).expect("--identity-file");
+            let me =
+                Identity::from_private_key_bytes(&unhex::<64>(&key_hex).expect("a 64-byte key"))
+                    .expect("a private key");
             let hash = DestinationHash::new(unhex::<16>(&to).expect("--to"));
             let key = unhex::<32>(&key).expect("--key");
             let t = Instant::now();

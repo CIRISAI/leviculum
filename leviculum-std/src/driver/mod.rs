@@ -5208,12 +5208,59 @@ async fn run_event_loop(
         Some(port) => match crate::direct_link::spawn_facilitator(port).await {
             Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),
             Err(e) => {
-                tracing::warn!("direct link: cannot run a facilitator on UDP {port}: {e}");
+                // No port number in the line (the no-addresses rule).
+                tracing::warn!("direct link: cannot run a facilitator: {e}");
                 None
             }
         },
         None => None,
     };
+    // +ciris: the facilitator's second probe port (udp), the second
+    // observer of a prober's NAT (review item 6, Eric's ruling: dial + 1).
+    // UDP only, RNSP/STUN probes only: on the canonical the same TCP number
+    // is another service.
+    let _facilitator2 = match direct_link.facilitator_port.and_then(|p| p.checked_add(1)) {
+        Some(port2) if direct_link.facilitator_second_port => {
+            match crate::direct_link::spawn_facilitator(port2).await {
+                Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),
+                Err(e) => {
+                    tracing::warn!(
+                        "direct link: cannot run the facilitator second probe port (udp): {e}"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    // +ciris (CC 5.4.6, re-review A): this node's own facilitator, resolved
+    // in the background (bounded), so a node that only ever answers has one
+    // to probe: at start, every RESOLVE_REFRESH, every RESOLVE_RETRY while
+    // it does not resolve.
+    let _facilitator_resolver = direct_link.facilitator.clone().map(|addr| {
+        let inner = Arc::clone(&inner);
+        crate::direct_link::AbortOnDrop(
+            tokio::spawn(async move {
+                loop {
+                    let wait = match crate::direct_link::resolve_facilitator(&addr).await {
+                        Ok(facilitator) => {
+                            let mut core = inner.lock_recover();
+                            let mut config = core.direct_link_config();
+                            config.facilitator = Some(facilitator);
+                            core.set_direct_link_config(config);
+                            crate::direct_link::RESOLVE_REFRESH
+                        }
+                        Err(e) => {
+                            tracing::info!("direct link: {e}; trying again");
+                            crate::direct_link::RESOLVE_RETRY
+                        }
+                    };
+                    tokio::time::sleep(wait).await;
+                }
+            })
+            .abort_handle(),
+        )
+    });
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -5601,8 +5648,9 @@ async fn run_event_loop(
                         local,
                         predicted,
                         birthday,
+                        evidence,
                     } => {
-                        direct_links.note_birthday(session, birthday);
+                        direct_links.note_birthday(session, evidence);
                         Some(inner.lock_recover().direct_link_probed_with_candidates(
                             &session, public, local, predicted, birthday,
                         ))

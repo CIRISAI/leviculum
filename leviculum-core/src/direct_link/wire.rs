@@ -805,27 +805,26 @@ pub fn punch_frame_kind(data: &[u8]) -> Option<PunchKind> {
     }
 }
 
-/// +ciris (review item 1): the magic of a knock.
-const KNOCK_MAGIC: &[u8; 4] = b"RNSK";
-/// +ciris: length of a knock: the magic and 12 random bytes.
-pub const KNOCK_LEN: usize = 4 + 12;
+/// +ciris: length of a knock: 16 random bytes. Recognised by its length
+/// alone, which no other datagram on a punch or direct socket has: a punch or
+/// ack frame is [`PUNCH_FRAME_LEN`] (56), an MTU probe larger, an RNSP
+/// request 21, a STUN request 20, and no Reticulum packet is shorter than 19
+/// (a 2-byte header, a 16-byte address, the context byte).
+pub const KNOCK_LEN: usize = 16;
 
-/// +ciris (review item 1): a knock, sent to ports that may belong to anyone
-/// on the peer's NAT (the spray, the predicted ports). Its only job is to
-/// open this node's own NAT filter toward that port, so the peer's tokened
-/// punch from it gets in. It carries no session id and no token, nothing a
-/// stranger on that IP could tie to a session or replay: the magic and
-/// `pad` (random per knock). A peer ignores it.
-pub fn knock_frame(pad: &[u8; 12]) -> [u8; KNOCK_LEN] {
-    let mut out = [0u8; KNOCK_LEN];
-    out[..4].copy_from_slice(KNOCK_MAGIC);
-    out[4..].copy_from_slice(pad);
-    out
+/// +ciris (review items 1, D/E): a knock, sent to ports that may belong to
+/// anyone on the peer's NAT (the spray, the predicted ports). Its only job is
+/// to open this node's own NAT filter toward that port, so the peer's tokened
+/// punch from it gets in. It is `pad`, 16 random bytes: no session id, no
+/// token and no fixed magic, nothing a stranger on that IP could tie to a
+/// session, replay or fingerprint as leviculum. A peer ignores it.
+pub fn knock_frame(pad: &[u8; KNOCK_LEN]) -> [u8; KNOCK_LEN] {
+    *pad
 }
 
 /// +ciris: whether `data` is a knock (never a punch, an ack or data).
 pub fn is_knock(data: &[u8]) -> bool {
-    data.len() == KNOCK_LEN && &data[..4] == KNOCK_MAGIC
+    data.len() == KNOCK_LEN
 }
 
 /// +ciris (leviculum#104): the magic of a path-MTU probe.
@@ -1074,16 +1073,19 @@ mod tests {
     #[test]
     fn a_knock_carries_no_session_and_no_token() {
         let token = [0xA7u8; 32];
-        let pad = [0x5Cu8; 12];
+        let pad = [0x5Cu8; KNOCK_LEN];
         let knock = knock_frame(&pad);
+        // Nothing but the random pad: no session, no token, no magic.
+        assert_eq!(knock, pad);
         assert!(is_knock(&knock));
         assert_eq!(punch_frame_kind(&knock), None);
         assert_eq!(parse_punch_frame(&knock, &SESSION, &token), None);
-        for needle in [&SESSION[..4], &token[..4]] {
-            assert!(!knock.windows(4).any(|w| w == needle), "leaks {needle:?}");
-        }
+        // Told apart by length from every other frame on these sockets.
         let punch = punch_frame(PunchKind::Punch, &SESSION, &token, 1);
         assert!(!is_knock(&punch));
+        assert!(!is_knock(&rnsp_request(&[1u8; 16])));
+        assert!(!is_knock(&stun_binding_request(&[1u8; 12])));
+        assert!(!is_knock(&[0u8; 19]), "the shortest Reticulum packet");
     }
 
     /// +ciris: `"b"` rides REQUEST and READY only when set, and round-trips.

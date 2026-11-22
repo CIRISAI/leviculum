@@ -221,6 +221,10 @@ async fn direct_io_task(
                     continue;
                 }
                 let frame = &buf[..len];
+                // +ciris (re-review D/E): a knock is never data; drop it.
+                if wire::is_knock(frame) {
+                    continue;
+                }
                 // +ciris (leviculum#104): the peer probing the path's MTU.
                 if wire::is_mtu_probe(frame) {
                     if let Some(seq) = wire::parse_mtu_probe(frame, &session, &token) {
@@ -274,8 +278,9 @@ async fn direct_io_task(
             }
             _ = keepalive_tick.tick() => {
                 if last_heard.elapsed() >= timing.inactivity {
+                    // No address in the line (review item 9).
                     tracing::info!(
-                        "{name}: nothing from {peer} for {:?}, direct path down",
+                        "{name}: nothing from the peer for {:?}, direct path down",
                         timing.inactivity
                     );
                     return;

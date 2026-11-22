@@ -178,6 +178,14 @@ pub enum DirectLinkJob {
         /// +ciris: the peer's predicted ports, knocked only (see
         /// [`crate::direct_link::Step::Punch`]).
         predicted: Vec<SocketAddr>,
+        /// +ciris (review item 2): whether this punch may escalate at all
+        /// (knock predicted ports, spray, open birthday sockets): only a node
+        /// answering identified peers (identified_only, ask_host), never
+        /// accept_all. False clears `predicted` and `spray`.
+        escalate: bool,
+        /// +ciris (review item 2): the link, as the escalation budget's pair
+        /// key (one peer per link).
+        link: [u8; 16],
         token: [u8; 32],
         start_delay_ms: u64,
         fast_liveness: bool,
@@ -1235,14 +1243,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     predicted,
                     spray,
                 } => {
-                    // +ciris (review item 2): the knock spray goes to an IP
-                    // the peer reported itself, so only a node that answers
-                    // identified peers sprays: never under accept_all.
-                    let spray = spray
-                        && matches!(
-                            self.direct_links.config.policy,
-                            DirectLinkPolicy::IdentifiedOnly | DirectLinkPolicy::AskHost
-                        );
+                    // +ciris (review item 2): every escalated send (knocks to
+                    // predicted ports, the spray, birthday sockets) goes to an
+                    // IP the peer reported, so only a node that answers
+                    // identified peers escalates: never under accept_all.
+                    let escalate = matches!(
+                        self.direct_links.config.policy,
+                        DirectLinkPolicy::IdentifiedOnly | DirectLinkPolicy::AskHost
+                    );
+                    let spray = spray && escalate;
+                    let predicted = if escalate { predicted } else { Vec::new() };
                     let token = *session.token();
                     let fast_liveness = session.commit();
                     // READY reaches the initiator one relay trip after the
@@ -1260,6 +1270,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         peer,
                         alternates,
                         predicted,
+                        escalate,
+                        link: *link_id.as_bytes(),
                         token,
                         start_delay_ms,
                         fast_liveness,
