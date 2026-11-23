@@ -1,7 +1,7 @@
 --------------------------- MODULE DirectLinkPunch ---------------------------
 (***************************************************************************)
 (* The direct-link punch of leviculum (+ciris), as the code does it at the *)
-(* head of diag/punch-telemetry after the review fixes (d4ff59e): two     *)
+(* head of diag/punch-telemetry after the third review (2cf992a): two     *)
 (* nodes A and B share a relayed RNS link; A proposes; each probes ITS OWN *)
 (* facilitator; both punch; the link moves only when both punches         *)
 (* succeeded (the two-sided commit, #89).                                 *)
@@ -34,10 +34,20 @@ CONSTANTS
                          \* >= 2 classifies endpoint-dependent (review item 6)
     Pooling,             \* "paired" | "arbitrary" (RFC 4787 4.1)
     Stranger,            \* another host holds a port on the hard side's IP
-    PolicyB,             \* "ask_host" | "accept_all" | "reject"
+    PolicyB,             \* "ask_host" | "identified_only" | "accept_all" | "reject"
+                         \* (A, the proposer, runs ask_host)
+    HostTrustA, HostTrustB, \* the host's escalation decision for the link
+                         \* (core set_direct_link_escalation): "unset" |
+                         \* "allow" | "deny"
+    PeerIdentified,      \* the link's remote identity is known (LINKIDENTIFY)
+    KF,                  \* birthday sockets on own evidence alone (the
+                         \* fallback; 32 in the code against K's 128)
     Glare, BInitiatedLink,
     RelayLossy, RelayDup, NetLossy, Teardown, KeepaliveOK,
     HijackPlant, NamedFacilitatorPlant,
+    MacFrames,           \* EXPLORATION, not the code: frame-auth-note.md's MAC'd
+                         \* punch frames, sent to knocked and sprayed ports
+                         \* too; a stranger that gets one cannot forge a reply
     SprayHits,           \* "any" | "hit" | "miss": oracle on the spray
     SprayBudget,         \* the process budget allows the spray (review 2)
     NP, W, EscAt, BdayAt, K, S, Q, MaxSkew, Latency
@@ -58,6 +68,10 @@ PubIP(s) == s
 PeerIP(s) == IF Pooling = "arbitrary" /\ Map(s) /= "EIM" THEN s \o "2" ELSE s
 Lan(s) == <<"lan", s>>
 Socks == 0..K
+\* Birthday sockets a side may hold: K (MAX_BIRTHDAY_SOCKETS, 128) on
+\* two-observer evidence, KF (FALLBACK_BIRTHDAY_SOCKETS, 32) on own
+\* evidence alone (std start_punch, third review N1c).
+BdayK == IF Observers >= 2 THEN K ELSE KF
 \* Ports a side's NAT may allocate: never the stranger's.
 Alloc(s) == IF Stranger THEN Ports \ {StrangerPort} ELSE Ports
 
@@ -115,14 +129,20 @@ NewPorts(s, k, d) ==
     ELSE Alloc(s) \ Used(s)
 WithMapping(s, k, d, port) ==
     IF d[1] = "lan" \/ MapOf(s, k, d) /= {} THEN nat[s] ELSE nat[s] \cup {<<k, d, port>>}
+\* RFC 4787 section 5: filtering is a property of the MAPPING the datagram
+\* arrives at (its external address), judged against the destinations that
+\* mapping was made toward. (An earlier draft judged it against every
+\* mapping of the same internal socket, which on an EDM NAT let a port made
+\* toward the facilitator admit the peer: the SamePath counterexamples of
+\* the d4ff59e run were that, not the code.)
 Admit(s, src, dstAddr) ==
     LET ms == {m \in nat[s] : <<SrcIP(s, m[2]), m[3]>> = dstAddr}
         socks == {m[1] : m \in ms}
     IN IF socks = {} THEN -1
        ELSE LET k == CHOOSE x \in socks : TRUE
                 ok == CASE Filt(s) = "EIF"  -> TRUE
-                        [] Filt(s) = "ADF"  -> \E m \in nat[s] : m[1] = k /\ m[2][1] = src[1]
-                        [] Filt(s) = "APDF" -> \E m \in nat[s] : m[1] = k /\ m[2] = src
+                        [] Filt(s) = "ADF"  -> \E m \in ms : m[2][1] = src[1]
+                        [] Filt(s) = "APDF" -> \E m \in ms : m[2] = src
             IN IF ok /\ k \in open[s] THEN k ELSE -1
 
 -----------------------------------------------------------------------------
@@ -206,10 +226,12 @@ ProbeAnswer(s, p) ==
     /\ p \in NewPorts(s, 0, FacAddr(ProbeTarget(s)))
     /\ LET f == ProbeTarget(s)
            seen == IF ForgedProbe /\ s = "A" THEN (IF p = NP THEN 1 ELSE p + 1) ELSE p
+           \* Two-observer evidence (std classify_nat), or, with one observer,
+           \* the own-evidence fallback (std decide): random steps alone.
            edm == Map(s) /= "EIM" /\ Observers >= 2
            c2 == IF Map(s) = "EDMseq" THEN p + 2 ELSE ctr[s]
            q  == IF edm /\ Map(s) = "EDMseq" THEN {c2 + i : i \in 1..Q} \cap Ports ELSE {}
-           b  == edm /\ Map(s) = "EDMrand"
+           b  == Map(s) = "EDMrand"
            me == <<PubIP(s), seen>>
        IN
        /\ nat' = [nat EXCEPT ![s] = @ \cup {<<0, FacAddr(f), p>>}]
@@ -268,8 +290,9 @@ RecvRequest(s) ==
             /\ failure' = [failure EXCEPT ![s] = "-"]
             /\ peerAdv' = [peerAdv EXCEPT ![s] = m.adv]
             /\ peerPred' = [peerPred EXCEPT ![s] = m.q]
-            \* Only a node answering identified peers sprays (node, review 2).
-            /\ peerB' = [peerB EXCEPT ![s] = m.b /\ policy /= "accept_all"]
+            \* The peer's "b" is kept as sent (core Session::set_peer_birthday);
+            \* whether this side may act on it is the trust gate, Escalates.
+            /\ peerB' = [peerB EXCEPT ![s] = m.b]
             /\ UNCHANGED punchVars
     /\ UNCHANGED <<adv, pred, bday, nat, ctr, peerDone, fellBack, net, linkUp,
                    facSaw, facSessions, strangerSaw, persisted, duped>>
@@ -293,7 +316,6 @@ RecvOther(s) ==
             /\ phase' = [phase EXCEPT ![s] = "Punching"]
             /\ peerAdv' = [peerAdv EXCEPT ![s] = m.adv]
             /\ peerPred' = [peerPred EXCEPT ![s] = m.q]
-            \* A is the proposer; its policy for the model is ask_host.
             /\ peerB' = [peerB EXCEPT ![s] = m.b]
             /\ StartPunch(s, m.adv, m.q)
             /\ UNCHANGED <<failure, peerDone>>
@@ -333,6 +355,22 @@ Aged(s) == {[d EXCEPT !.w = @ + 1] : d \in net}
 SkewOK(s) == phase[Other(s)] \in {"Punching", "AwaitingReady", "Discovering", "Proposing"}
              => tick[s] < tick[Other(s)] + MaxSkew + 1
 SilentPrimary(s) == heard[s] = {} /\ acked[s] = {}
+\* The trust gate (core direct_link_escalation_allowed, third review): may
+\* this side's punch escalate at all (knocks, spray, birthday sockets)? The
+\* host's decision for the link when it gave one; else never under
+\* accept_all; yes on a link this side initiated; under identified_only, yes
+\* for an identified peer; under ask_host, yes as the responder (the session
+\* exists only once the host accepted); never under reject.
+Policy(s) == IF s = "B" THEN PolicyB ELSE "ask_host"
+HostTrust(s) == IF s = "A" THEN HostTrustA ELSE HostTrustB
+LinkInitiator(s) == IF s = "B" THEN BInitiatedLink ELSE ~BInitiatedLink
+Escalates(s) ==
+    IF HostTrust(s) /= "unset" THEN HostTrust(s) = "allow"
+    ELSE CASE Policy(s) = "accept_all"      -> FALSE
+           [] LinkInitiator(s)              -> TRUE
+           [] Policy(s) = "identified_only" -> PeerIdentified
+           [] Policy(s) = "ask_host"        -> role[s] = "R"
+           [] OTHER                         -> FALSE
 
 \* The peer's birthday mappings toward this side, for the spray oracle.
 PeerBdayPorts(s) == {m[3] : m \in {x \in nat[Other(s)] : x[1] # 0}}
@@ -342,7 +380,8 @@ SprayDraws(s) ==
         pick == CASE SprayHits = "hit"  -> IF hits /= {} THEN hits ELSE cand
                   [] SprayHits = "miss" -> cand \ hits
                   [] OTHER -> cand
-    IN IF peerB[s] /\ escalated[s] /\ SprayBudget /\ heard[s] = {} /\ Cardinality(sprayed[s]) < S
+    IN IF peerB[s] /\ escalated[s] /\ SprayBudget /\ Escalates(s) /\ heard[s] = {}
+          /\ Cardinality(sprayed[s]) < S
        THEN {{a} : a \in pick} \cup (IF pick = {} THEN {{}} ELSE {})
        ELSE {{}}
 
@@ -365,39 +404,54 @@ Tick(s) ==
     /\ linkUp /\ Punching(s) /\ tick[s] < W /\ ~DueTo(s) /\ SkewOK(s)
     /\ LET esc  == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] = {}
            drop == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] /= {}
-           kn   == IF esc THEN held[s] ELSE IF heard[s] /= {} THEN {} ELSE knocking[s]
-           openB == bday[s] /\ active[s] = 0 /\ tick[s] + 1 >= BdayAt
+           kn   == IF ~Escalates(s) THEN {}
+                   ELSE IF esc THEN held[s] ELSE IF heard[s] /= {} THEN {} ELSE knocking[s]
+           \* BIRTHDAY_AFTER on two-observer evidence; the full silence gate
+           \* (ESCALATE_AFTER) on own evidence alone (Eric's fallback).
+           gate == IF Observers >= 2 THEN BdayAt ELSE EscAt
+           openB == bday[s] /\ Escalates(s) /\ SprayBudget /\ active[s] = 0 /\ tick[s] + 1 >= gate
                     /\ SilentPrimary(s) /\ open[s] = {0}
            k == active[s]
        IN
        \E spray \in SprayDraws(s) :
        LET knockTo == kn \cup spray
-           tokTo == targets[s] \cup (IF HijackPlant THEN knockTo ELSE {})
+           tokTo == targets[s] \cup (IF HijackPlant \/ MacFrames THEN knockTo ELSE {})
            dests == targets[s] \cup knockTo
            newD == {x \in dests : x[1] /= "lan" /\ MapOf(s, k, x) = {}}
        IN
-       \E f \in Allocations(s, k, newD) :
-       LET nat1 == nat[s] \cup {<<k, x, f[x]>> : x \in newD}
-           freeB == Alloc(s) \ {m[3] : m \in nat1}
+       \* Model choice M7 (the scale's port pool): a NAT with no port left for
+       \* a new destination maps none and the datagram is dropped; likewise
+       \* the birthday phase opens nothing if the pool cannot map BdayK more.
+       \* (At NP=4 a random NAT runs out; the code's 64k pool does not.)
+       LET allocs == Allocations(s, k, newD)
+           exhausted == allocs = {}
        IN
-       \E g \in (IF openB THEN {h \in [1..K -> freeB] : \A i, j \in 1..K : i /= j => h[i] /= h[j]}
-                 ELSE {[x \in {} |-> 0]}) :
-       LET nat2 == IF openB THEN nat1 \cup {<<j, PeerPub(s), g[j]>> : j \in 1..K} ELSE nat1
-           opened == IF openB THEN 0..K ELSE open[s]
+       \E f \in (IF exhausted THEN {[x \in {} |-> 0]} ELSE allocs) :
+       LET mapped == IF exhausted THEN {} ELSE newD
+           nat1 == IF exhausted THEN nat[s] ELSE nat[s] \cup {<<k, x, f[x]>> : x \in newD}
+           freeB == Alloc(s) \ {m[3] : m \in nat1}
+           gs == IF openB THEN {h \in [1..BdayK -> freeB] : \A i, j \in 1..BdayK : i /= j => h[i] /= h[j]}
+                 ELSE {}
+           openB2 == openB /\ gs /= {}
+       IN
+       \E g \in (IF openB2 THEN gs ELSE {[x \in {} |-> 0]}) :
+       LET nat2 == IF openB2 THEN nat1 \cup {<<j, PeerPub(s), g[j]>> : j \in 1..BdayK} ELSE nat1
+           opened == IF openB2 THEN 0..BdayK ELSE open[s]
+           sendable(x) == x[1] = "lan" \/ x \notin newD \/ x \in mapped
            srcOf(x) == IF x[1] = "lan" THEN Lan(s)
                        ELSE <<SrcIP(s, x), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = k /\ y[2] = x}} : TRUE>>
-           pk == {[src |-> srcOf(x), dst |-> x, k |-> "P", w |-> 0] : x \in tokTo}
-           kk == {[src |-> srcOf(x), dst |-> x, k |-> "K", w |-> 0] : x \in knockTo \ tokTo}
+           pk == {[src |-> srcOf(x), dst |-> x, k |-> "P", w |-> 0] : x \in {y \in tokTo : sendable(y)}}
+           kk == {[src |-> srcOf(x), dst |-> x, k |-> "K", w |-> 0] : x \in {y \in knockTo \ tokTo : sendable(y)}}
            bsrc(j) == <<PeerIP(s), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = j /\ y[2] = PeerPub(s)}} : TRUE>>
            bk == {[src |-> bsrc(j), dst |-> PeerPub(s), k |-> "P", w |-> 0] : j \in (opened \ {0}) \ {k}}
        IN
        /\ nat' = [nat EXCEPT ![s] = nat2]
-       /\ ctr' = [ctr EXCEPT ![s] = IF Map(s) = "EDMseq" THEN @ + Cardinality(newD) ELSE @]
+       /\ ctr' = [ctr EXCEPT ![s] = IF Map(s) = "EDMseq" THEN @ + Cardinality(mapped) ELSE @]
        /\ held' = [held EXCEPT ![s] = IF esc \/ drop THEN {} ELSE @]
        /\ knocking' = [knocking EXCEPT ![s] = kn]
        /\ escalated' = [escalated EXCEPT ![s] = @ \/ esc \/ drop]
        /\ sprayed' = [sprayed EXCEPT ![s] = @ \cup spray]
-       /\ punched' = [punched EXCEPT ![s] = @ \cup tokTo]
+       /\ punched' = [punched EXCEPT ![s] = @ \cup {y \in tokTo : sendable(y)}]
        /\ open' = [open EXCEPT ![s] = opened]
        /\ tick' = [tick EXCEPT ![s] = @ + 1]
        /\ net' = Aged(s) \cup pk \cup kk \cup bk
@@ -417,11 +471,11 @@ Ack(d) == [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]
 StrangerGets(d) ==
     /\ d \in net /\ StrangerAddr(d)
     /\ net' = (net \ {d}) \cup
-              (IF Tokened(d.k) \/ "tokened" \in strangerSaw
+              (IF (Tokened(d.k) /\ ~MacFrames) \/ "tokened" \in strangerSaw
                THEN {[src |-> d.dst, dst |-> d.src, k |-> "P", w |-> 0],
                      [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]}
                ELSE {})
-    /\ strangerSaw' = strangerSaw \cup {IF Tokened(d.k) THEN "tokened" ELSE "K"}
+    /\ strangerSaw' = strangerSaw \cup {IF ~Tokened(d.k) THEN "K" ELSE IF MacFrames THEN "mac" ELSE "tokened"}
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
                    peerPred, peerB, nat, ctr, punchVars, peerDone, fellBack,
                    linkUp, facSaw, facSessions, relaySaw, persisted, duped>>
@@ -595,13 +649,19 @@ TypeOK == phase \in [Sides -> Phases]
 
 CapsHeld ==
     /\ \A s \in Sides : Cardinality(sprayed[s]) <= S
-    /\ \A s \in Sides : Cardinality(open[s] \ {0}) <= K
+    /\ \A s \in Sides : Cardinality(open[s] \ {0}) <= BdayK
     /\ \A s \in Sides : Cardinality(pred[s]) <= Q
 
 \* Where socket k of s, sending to x, appears to the peer.
 Shows(s, k, x) ==
     IF x[1] = "lan" THEN {Lan(s)}
     ELSE {<<SrcIP(s, m[2]), m[3]>> : m \in {y \in nat[s] : y[1] = k /\ y[2] = x}}
+
+\* The trust gate holds: no knock, spray or birthday socket from a side the
+\* gate does not let escalate (core direct_link_escalation_allowed, std
+\* punch_with: predicted, spray and extras all need plan.escalate).
+EscalationNeedsTrust ==
+    \A s \in Sides : (knocking[s] /= {} \/ sprayed[s] /= {} \/ open[s] /= {0}) => Escalates(s)
 
 \* A side goes direct only on an address both heard and acked.
 PathHeardAndAcked ==
@@ -649,7 +709,9 @@ FacilitatorKnowledge ==
     /\ facSessions = {}
 
 \* A stranger on a sprayed IP learns only that a knock arrived.
-StrangerKnowledge == strangerSaw \subseteq {"K"}
+\* (With MacFrames a stranger may also see a MAC'd frame: the session id
+\* travels in clear, the key never; "mac" records that exposure.)
+StrangerKnowledge == strangerSaw \subseteq {"K", "mac"}
 NoTokenToStranger == "tokened" \notin strangerSaw
 
 \* CC 2.6.8: no observed mapping is ever written into a nodecode, a signed

@@ -1,8 +1,8 @@
 # DirectLinkPunch: a TLA+ model of the direct-link punch
 
 `DirectLinkPunch.tla` models the leviculum (+ciris) direct-link upgrade as
-the code does it at `d4ff59e` (diag/punch-telemetry, after the review of
-72be0f9): sides A (initiator) and B (responder), each side's own
+the code does it at `2cf992a` (diag/punch-telemetry, after the third review
+of 4ab3b14: the trust gate, fair shares, the own-evidence fallback): sides A (initiator) and B (responder), each side's own
 facilitator, the relay carrying the signalling, each NAT as a parameter, and
 a stranger on the hard side's public IP. It was built from the code, not
 from intent. Where the code leaves a behaviour undefined, the model's choice
@@ -76,6 +76,27 @@ through `TearDown`.
 - **M6, the relay:** one FIFO per direction, reliable, because the RNS
   Channel is reliable and ordered and the core relies on it. `RelayLossy`
   and `RelayDup` break that on purpose.
+- **M7, the port pool:** at `NP=4` a random NAT can run out of ports. A
+  datagram toward a new destination that no free port can map is dropped
+  (no mapping, nothing sent), and the birthday phase opens nothing if the
+  pool cannot map its sockets. The code's 64k pool never runs out; without
+  this the model deadlocked (the `NotStuck` counterexample of the d4ff59e
+  run on EDMrand↔EDMrand was this, not the code).
+- **M8, filtering per mapping:** RFC 4787 section 5 filters at the mapping
+  (external address) a datagram arrives at, against the destinations that
+  mapping was made toward. The d4ff59e model judged it against every
+  mapping of the same internal socket, which on an EDM NAT let a port made
+  toward the facilitator admit the peer. Every `SamePath` counterexample on
+  an EDM–ADF pair in that run was this artifact; with the fix those pairs
+  reach only `RelayedOnly` (see the results).
+- **M9, the trust gate and the socket counts:** `Escalates(s)` is core
+  `direct_link_escalation_allowed`: the host's decision (`HostTrustA/B`)
+  when given; otherwise never under `accept_all`; yes on a link the side
+  initiated (`BInitiatedLink`); `identified_only`: yes for an identified
+  peer (`PeerIdentified`); `ask_host`: yes as the responder; `reject`: no.
+  A runs `ask_host`. The birthday count is `K` (MAX_BIRTHDAY_SOCKETS, 128)
+  on two-observer evidence and `KF` (FALLBACK_BIRTHDAY_SOCKETS, 32) on own
+  evidence; the matrix runs `K=KF=1`, the `sockets-*` rows `K=2, KF=1|2`.
 
 ## Actions and the code they follow
 
@@ -85,7 +106,7 @@ through `TearDown`.
 | `ProbeAnswer`, `ProbeFail` | std `direct_link.rs` `start_probe` (`probe`, `classify_nat`, `allocation_steps`, `advertise`), core `Session::probed_with_candidates` / `probe_failed` |
 | `RecvRequest` | core `direct_link_signal`: policy, crossing (glare: `keep_ours` / `give_way`), busy, `accept_direct_request` (own facilitator, CC 5.4.6) |
 | `RecvOther` | core `Session::signal` (ACCEPT, READY, COMPLETE, REJECT per phase) |
-| `Tick` | std `punch_inner` tick arm (tokened punches, knocks, spray, escalation) and `punch_birthday` (gate, birthday sockets, refresh) |
+| `Tick` | std `punch_inner` tick arm (tokened punches, knocks, spray, escalation) and `punch_birthday` (gate: BIRTHDAY_AFTER on two-observer evidence, ESCALATE_AFTER on own; `birthday_max` 128 / 32; the pair's allowance asked before anything binds), all behind core `direct_link_escalation_allowed` (`Escalates`) |
 | `Deliver` | std `punch_inner` recv arm (ack, heard, peer-reflexive, acked only if punched), `birthday_task` and the switch (only while the session socket is silent) |
 | `StrangerGets` | another host's socket on the hard side's IP |
 | `PunchOK`, `PunchFail` | std `punch_inner` result → core `Session::punched` (COMPLETE, or REJECT PUNCH_FAILED) |
@@ -108,7 +129,8 @@ through `TearDown`.
 | `StrangerKnowledge` | a stranger on a sprayed IP learns only that a knock arrived |
 | `NoTokenToStranger` | no tokened frame reaches a stranger |
 | `NoLearnedAddressPersisted` | CC 2.6.8: no observed mapping is written into a nodecode, a signed dial hint or any record. **By construction:** the code has no such write, and the model has no action that writes `persisted` |
-| `CapsHeld` | spray ≤ S, birthday sockets ≤ K, predicted ≤ Q |
+| `EscalationNeedsTrust` | no knock, spray or birthday socket from a side the trust gate does not let escalate |
+| `CapsHeld` | spray ≤ S, birthday sockets ≤ K (two-observer) or KF (own evidence), predicted ≤ Q |
 | `NotStuck` | until the attempt is over, some action is enabled |
 | `EventuallyOver` (liveness, weak fairness) | every attempt ends |
 | `LinkPathTransitions` (action) | linkPath moves only along the six transitions |
@@ -156,4 +178,85 @@ through `TearDown`.
   per attempt. The code's per-IP cooldown spans attempts, which the live
   re-proof showed refusing the 2nd and 3rd attempts.
 
-RESULTS (filled from `matrix.md` and `classes-*.md` when the runs end).
+- **G8, path choice is per side (found by this run, `samenat-hairpin`):**
+  each side settles on the FIRST address both heard and acked (std
+  `direct_link.rs:1313`), independently. With two live candidates (same NAT
+  with hairpin: LAN and hairpinned public; on EDM pairs, two mappings) A can
+  settle on one pair and B on another. The direct interface accepts only its
+  own path peer (`interfaces/direct_udp.rs:220`), so each side drops the
+  other's frames and both fall back after the liveness timeout: a wasted
+  upgrade, not a wrong one. Fix candidates: the initiator nominates (COMPLETE
+  carries its chosen pair, the responder adopts it, as ICE does), or the
+  direct interface accepts any source that proved the session token.
+- **G9, EDM on both sides with non-EIF filtering is structurally relayed
+  only.** A tokened punch goes only to an advertised address or a source
+  that already sent one (review item 1); knocks are token-free and earn no
+  reply. When both NATs are endpoint-dependent and filter, no tokened frame
+  ever reaches the address the peer's NAT allocated toward us, so no pair is
+  ever heard and acked. Exhaustive at this scale, not a probability. The
+  exploration constant `MacFrames` (frame-auth-note.md's MAC'd frames sent to
+  predicted and sprayed ports too, no forgeable reply) opens five of the
+  eight such pairs; see the `mac-*` rows.
+- **G10, an EIM NAT that allocates new sockets at random** would show random
+  own steps and, with one observer, take the fallback ("b") though its
+  mapping is endpoint-independent. The model's EIM allocates in order. The
+  live arms saw no such NAT (every EIM runner: evidence none).
+
+## Results (2cf992a, `matrix.md`)
+
+TLC 1.7.4, 103 scenarios, `-continue`; two runs reached the 420 s cap
+(`pair-EDMrand-APDF--EDMrand-EIF`, `hard-latency`) and are PARTIAL: what they
+reached is real, "no violation" covers the states explored. The outcome class
+is over every reachable terminal state (the draws are nondeterministic, so
+"direct or relayed" means some draws close and some do not).
+
+| A \ B | EIM-EIF | EIM-ADF | EIM-APDF | EDMseq-EIF | EDMseq-ADF | EDMseq-APDF | EDMrand-EIF | EDMrand-ADF | EDMrand-APDF |
+|---|---|---|---|---|---|---|---|---|---|
+| EIM-EIF | direct | direct | direct | direct | direct | direct | direct | direct | direct |
+| EIM-ADF | direct | direct | direct | direct | direct | direct | direct | direct | direct |
+| EIM-APDF | direct | direct | direct | direct | direct | direct | direct or relayed | direct or relayed | direct or relayed |
+| EDMseq-APDF | direct | direct | direct | direct | relayed only | relayed only | direct | relayed only | relayed only |
+| EDMrand-APDF | direct | direct | direct or relayed | direct | relayed only | relayed only | direct [capped] | relayed only | relayed only |
+
+**Invariant violations and what they are in the code:**
+
+| scenario | property | cause | code |
+|---|---|---|---|
+| `samenat-hairpin` | `SamePath` | G8: A settles on B's LAN candidate, B on A's hairpinned public mapping; each drops the other's frames | std `direct_link.rs:1313` (first heard∧acked, per side), `interfaces/direct_udp.rs:220` (only the path peer is accepted) |
+| `mac-EDMseq-APDF--EDMrand-ADF` (exploration) | `SamePath` | G8 again, on two EDM mappings both heard and acked | same lines |
+| `easy-relay-lossy` | `NoLoneMove` | G2: a lost COMPLETE; the side that got the peer's COMPLETE moves, the other times out of Committing | core `direct_link/session.rs:571-578` (Connected on the peer's COMPLETE), `:599-601` (Committing → Timeout); recovery `interfaces/direct_udp.rs:283` (silence → path down) |
+| `plant-hijack` | `StrangerKnowledge` (and liveness) | the plant: tokened spray and acks from sprayed ports | fixed by std `direct_link.rs:1207,1240` (token-free `knock_frame`) and `:1290` (an ack counts only from a punched address) |
+| `plant-named-facilitator` | `FacilitatorKnowledge` | the plant: the responder probes the REQUEST's facilitator | fixed by core `node/direct_link.rs:1115-1143` (`accept_direct_request` probes its own) |
+
+None of `NoLearnedAddressPersisted` (by construction), `FacilitatorCarriesNothing`,
+`NoTokenToStranger`, `NoPathToStranger`, `ForgedReflexiveNeverWrongDirect`,
+`AbortLeavesLinkUnchanged`, `EscalationNeedsTrust`, `CapsHeld` or `NotStuck`
+is violated anywhere outside the plants; `EventuallyOver` holds outside
+`plant-hijack`.
+
+The d4ff59e run's other counterexamples were the model's: the `SamePath`
+rows on EDM–ADF pairs (M8) and `NotStuck` on EDMrand↔EDMrand (M7).
+
+**The trust gate (no violation; liveness consequences):**
+
+- `gate-b-initiated-link` reaches **no** `DirectPathUp`: on a link B (the
+  random side) opened, A proposes under ask_host as the session initiator,
+  so the default rule says no (core `node/direct_link.rs:480-482`: link
+  initiator yes, else ask_host only as responder). A cannot spray, B's
+  birthday sockets never get in. `gate-b-initiated-link-a-allowed` (the host
+  says yes) restores the hard pair's outcomes. A node that proposes chose
+  its peer as much as one that opened the link: candidate change, `Role::
+  Initiator` counts as trusted under ask_host.
+- `gate-host-deny-a` and `gate-host-deny-both`: relayed only (by design).
+  `gate-host-deny-b`, `hard-accept-all`, `gate-identified-only-anonymous`:
+  fewer closing draws (B's birthday sockets off). `gate-identified-only` and
+  `gate-accept-all-host-allow`: the same as ask_host.
+
+**Fallback sockets:** `sockets-two-observer-K2` and `sockets-fallback-KF2`
+close in every draw; `sockets-fallback-KF1` (fewer sockets on own evidence)
+is the only one of the three with relayed outcomes. The live arms say the
+same at full scale: fallback at 32 sockets closed 3/12, two-observer at 128
+closed 9/12 (the odds 1 − exp(−K·S/R), S = 960, R ≈ 64.5k: 38% and 85%).
+
+`classes-*.md` are from the d4ff59e model and were not regenerated.
+
