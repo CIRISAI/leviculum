@@ -565,6 +565,8 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PKT_DROP_SUMMARY",
         required_keys: &[
+            // A datagram the interface's credit shed (#102).
+            "datagram_shed",
             "overheard_transport_id",
             "invalid_announce",
             "plain_group_multihop",

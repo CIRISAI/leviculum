@@ -870,7 +870,7 @@ why the exit code is what the tests assert. The ID does not become
 unobtainable, because `loquax status <id>` needs it: `LNMSG_ENQUEUED … id=…`
 carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
 turns on and which is written by an unfiltered layer, so the line arrives even
-at the `warn` default (`leviculum-std/src/event_log.rs:834-841`). No
+at the `warn` default (`leviculum-std/src/event_log.rs:836-843`). No
 `--print-id` flag was added: nothing consumes the ID today, and an option
 added against a hypothetical user is an option nobody tests.
 
