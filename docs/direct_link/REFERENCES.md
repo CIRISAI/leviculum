@@ -133,6 +133,7 @@ and titles, not full text.
 | HyperDHT `lib/holepuncher.js` at `ce23dfd62d` | birthday: 256 sockets / 1,750 probes, TTL 5 priming, per-socket refresh, random×random → no punch, global random-punch limit | [code] |
 | Tailscale `87b3a5ff26`, iroh `40833b58fb`, go-libp2p `8582b880e8`, Nebula `7876efaaf4`, Syncthing `0f77b91539`, ZeroTier `899352e384` (and 1.2.12) | local-port guess; lifetime probing; DCUtR retries; punch_back; adaptive keepalive; historical prediction | [code] |
 | leviculum `DirectLinkPunch.tla` at `acb936328` (`matrix.md`) | the mechanism; `MacFrames` exploration | this repository |
+| The CIRIS Constitution (CC): 5.4.6 (who may hold a link; no third party learns a node reaches another), 1.13.3.1 (the relay concedes that a link exists and that ciphertext flows on it at certain times and sizes), 2.6.8 (no learned address persisted) | R0, D7's conditions, PLAN/OBS properties | internal; the D7 answer relayed by the team lead on 2026-11-22 |
 
 ## 2. Traceability
 
@@ -151,6 +152,7 @@ so.
 
 | row | class | source |
 |---|---|---|
+| R0 Anonymous Tier: never upgrades, by rule | implements | CC 5.4.6, CC 1.13.3.1 (D7, the Constitution's answer) |
 | R1 same network: host candidates | formalizes | RFC 8445 §5.1.1.1 (host candidates), §5.1.2 (host preferred by type preference); RFC 5128 §3.3.2 (peers behind a common NAT); HyperDHT LAN prefix match |
 | R1 carrier-side candidates (same CGN) | **ours** | RFC 6598 §4 defines the range; RFC 6887 §8 (ANNOUNCE/MAP) reveals an external address. No surveyed system offers the CGN-side address as a candidate. |
 | R1 "never the hairpin when host candidates exist" | formalizes | RFC 8445 §5.1.2 (host type preference above server-reflexive); RFC 5128 §3.3.2 |
@@ -169,6 +171,7 @@ so.
 | R7 per-socket refresh, low-TTL priming | formalizes | HyperDHT (refresh about every 5.1 s; TTL 5); Guha 2005 §2.2; RFC 4787 §4.3 (binding refresh) |
 | R7 port-block targeting | formalizes (described, shipped by nobody) | RFC 7422; RFC 7768 §2; RFC 6888 REQ-4; Richter 2016; Keller 2022 (+1/+2 clustering); SURVEY.md §3b.2 |
 | R7 tranches 64 → 128 → 256, within 3 per pair; caps 256 / 1,750 | **ours** for the ramp | Caps: HyperDHT's numbers (Eric's decision). Retry count: DCUtR's 3 attempts. The sizing by CGN per-subscriber quota (RFC 6888 REQ-4; Richter: ≥ 512 ports/subscriber) is ours. |
+| R7b ambiguous own evidence, trusted peer: one symmetric birthday (D4) | **ours** | today's code sprays both ways when both sides advertise "b"; the trust gating, the single attempt and the cost marking are ours (team lead's D4) |
 | R8 both random, or nothing above the floor: no direct path | formalizes | HyperDHT `_punch` (no branch for random×random); Tailscale docs (hard+hard → relayed); NATCracker §5.8.3 (birthday ignored); Trautwein §7.1 (0.01%) |
 | Hand-off to multi-reflector relaying (#1024) | formalizes | RFC 5128 §3.1 relaying; RFC 8656; circuit relay v2 |
 
@@ -203,7 +206,11 @@ so.
 | NoReplay | implements | rns-rs RNSK keepalives (counter + HMAC); RFC 7675 §5 (consent only from an authenticated response) |
 | NoRawToCapablePeer | implements | rns-rs HELLO capability check (`6d21c606`) |
 | NoTokenToStranger, StrangerKnowledge, NoPathToStranger | formalizes | RFC 8445 §19 (attacks on connectivity checks); rns-rs nonces checked against the source (`01f7be6c`); the tokenless knock is ours |
-| FacilitatorKnowledge, FacilitatorCarriesNothing | **ours** | CC 5.4.6 (CIRIS); RFC 8489 §16 is the nearest |
+| FacilitatorKnowledge, FacilitatorCarriesNothing (now covering PLAN and OBS) | implements | CC 5.4.6; RFC 8489 §16 is the nearest IETF text |
+| NoLearnedAddressPersisted (facts carry no address, in Strategy.tla itself) | implements | CC 2.6.8 |
+| PlanObsToPeerOnly | implements | CC 5.4.6 (D7 condition: OBS to the peer only, inside the link's encryption) |
+| ShapedHidesSignals | implements | CC 1.13.3.1 and D7's shaping condition (signals ride inside the constant-size shaped frames) |
+| AnonymousNeverUpgrades | implements | CC 5.4.6, CC 1.13.3.1 (R0) |
 | EscalationNeedsTrust | **ours** | the leviculum review's trust gate |
 | AbortLeavesLinkUnchanged, NoLoneMove | formalizes | leviculum two-sided commit (#89); make-before-break as in RFC 9000 §9 (migration keeps the old path until the new one is validated) |
 

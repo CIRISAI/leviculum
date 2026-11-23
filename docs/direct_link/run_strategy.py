@@ -55,7 +55,7 @@ BASE = dict(
     BUDGET="3", STRANGER="FALSE", HIJACK="FALSE", NAMED="FALSE", RLOSS="FALSE",
     NLOSS="FALSE", PATHLOSS="FALSE", PLANNER="strategy", UNTAGGED="FALSE",
     MAXATT="2", INVS=INVS, PROPS=PROPS, ACTC=ACTC,
-    HIST="1", HELLOA="FALSE", HELLOB="FALSE", DOWNGRADE="FALSE", ONPATH="FALSE",
+    HIST="3", ANONA="FALSE", ANONB="FALSE", SHAPED="FALSE", HELLOA="FALSE", HELLOB="FALSE", DOWNGRADE="FALSE", ONPATH="FALSE",
     LANSTRANGER="FALSE", PORTBLOCK="FALSE", TRANCHES="1",
 )
 MAPS = ["EIM", "EDMseq", "EDMrand"]
@@ -121,8 +121,15 @@ def environments():
     yield "replay-onpath-raw", dict(ONPATH="TRUE", PATHLOSS="TRUE", MAXATT="1")
     yield "replay-onpath-mac", dict(mac, ONPATH="TRUE", PATHLOSS="TRUE", MAXATT="1")
     # Birthday tranches across attempts (64 -> 128 -> 256 sockets x 1,750).
-    yield "tranches-hard", dict(hard, TRANCHES="3", MAXATT="3", HIST="2", BUDGET="3")
-    yield "tranches-hard-budget2", dict(hard, TRANCHES="3", MAXATT="3", HIST="2", BUDGET="2")
+    yield "tranches-hard", dict(hard, TRANCHES="3", MAXATT="3", BUDGET="3")
+    yield "tranches-hard-budget2", dict(hard, TRANCHES="3", MAXATT="3", BUDGET="2")
+    # D4: ambiguous own evidence, trusted (both gates) and untrusted.
+    yield "ambiguous-trusted", dict(hard, CLASSIFY="FALSE", EIMSTEPS="rand")
+    yield "ambiguous-untrusted", dict(hard, CLASSIFY="FALSE", EIMSTEPS="rand", ESCA="FALSE")
+    # R0 and D7 (CC 5.4.6, CC 1.13.3.1).
+    yield "anon-initiator", dict(hard, ANONA="TRUE")
+    yield "anon-responder", dict(ANONB="TRUE", V6A="TRUE", V6B="TRUE")
+    yield "shaped-hard", dict(hard, SHAPED="TRUE")
     yield "portblock-hard", dict(hard, PORTBLOCK="TRUE")
 
 

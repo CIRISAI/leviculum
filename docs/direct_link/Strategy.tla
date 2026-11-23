@@ -80,7 +80,12 @@ CONSTANTS
     \* ---- evidence about the hard side's allocator, and the ramp ----
     PortBlock,           \* its ports cluster in a known block (RFC 7422, RFC 7768;
                          \* Richter 2016; Keller 2022)
-    Tranches             \* birthday tranches (64, 128, 256 sockets x 1,750 knocks)
+    Tranches,            \* birthday tranches (64, 128, 256 sockets x 1,750 knocks)
+    \* ---- the Constitution (CC 5.4.6, CC 1.13.3.1; D7, 2026-11-22) ----
+    AnonA, AnonB,        \* the side is an Anonymous-Tier identity: only layer and
+                         \* rendezvous links, all shaped; it NEVER upgrades
+    Shaped               \* the link is shaped: signals ride inside its constant-
+                         \* size frames at the shaped rate, never as an extra emission
 
 Sides == {"A", "B"}
 Other(s) == IF s = "A" THEN "B" ELSE "A"
@@ -102,25 +107,27 @@ Steps(s) == CASE Map(s) = "EDMrand" -> "rand"
 (* that maps (map), whose ports are predicted (pred), that is random and  *)
 (* holds the birthday sockets (bday).                                      *)
 Techs == {"lan", "v6", "hair", "rev", "plain", "mapA", "mapB",
-          "predA", "predB", "predAB", "bdayA", "bdayB"}
+          "predA", "predB", "predAB", "bdayA", "bdayB", "bdaySym"}
 BdayTechs == {"bdayA", "bdayB"}
 Paths == Techs \cup {"stray"}        \* "stray": an answer from the stranger
 Rank(t) == CASE t = "lan" -> 1 [] t = "v6" -> 2 [] t = "hair" -> 3 [] t = "rev" -> 4
              [] t = "plain" -> 5 [] t = "mapA" -> 6 [] t = "mapB" -> 7
              [] t = "predA" -> 8 [] t = "predB" -> 9 [] t = "predAB" -> 10
-             [] t = "bdayA" -> 11 [] t = "bdayB" -> 12
+             [] t = "bdayA" -> 11 [] t = "bdayB" -> 12 [] t = "bdaySym" -> 13
 \* Cost: datagrams and held state per attempt, in units (STRATEGY.md).
 Cost(t) == CASE t \in {"lan", "v6", "rev"} -> 1 [] t \in {"hair", "plain"} -> 2
              [] t \in {"mapA", "mapB"} -> 3 [] t \in {"predA", "predB", "predAB"} -> 5
+             [] t = "bdaySym" -> 24        \* D4: the costliest row (both sides' sockets and sprays)
              [] OTHER -> 12
 Side(t) == IF t \in {"mapA", "predA", "bdayA"} THEN "A" ELSE "B"
-Escalated == {"predA", "predB", "predAB", "bdayA", "bdayB"}
-HoldsRes == {"mapA", "mapB", "bdayA", "bdayB"}  \* a router lease; sockets+permits
+Escalated == {"predA", "predB", "predAB", "bdayA", "bdayB", "bdaySym"}
+HoldsRes == {"mapA", "mapB", "bdayA", "bdayB", "bdaySym"}  \* a router lease; sockets+permits
 \* The resources side s holds while technique t runs.
 Acquire(s, t) == IF t \in {"mapA", "mapB"} THEN (IF s = Side(t) THEN {t} ELSE {})
-                 ELSE IF t \in {"bdayA", "bdayB"} THEN {t} ELSE {}
+                 ELSE IF t \in {"bdayA", "bdayB", "bdaySym"} THEN {t} ELSE {}
 \* Which side sends knocks (to ports that may be anyone's) for t.
-Knocks(s, t) == t \in Escalated /\ (t = "predAB" \/ s /= Side(t))
+Knocks(s, t) == t \in Escalated /\ (t \in {"predAB", "bdaySym"} \/ s /= Side(t))
+Anon(s) == IF s = "A" THEN AnonA ELSE AnonB
 
 RECURSIVE SumCost(_)
 SumCost(S) == IF S = {} THEN 0
@@ -227,6 +234,11 @@ WorksAt(t, n) ==
                \* both random: reachable at the mechanism model's NP=4 with
                \* MAC'd frames (matrix.md mac-EDMrand-*), negligible in 16 bits
                \/ Map(Other(Side(t))) = "EDMrand" /\ Wire = "mac" /\ luck["hh"]
+      \* D4: both sides hold a first tranche and both spray: covers whichever
+      \* side is the random one when the evidence cannot tell
+      [] t = "bdaySym" ->
+            ~SamePub /\ FacBoth /\ luck["bday"] <= 1
+            /\ \E e \in Sides : Map(e) = "EDMrand" /\ EIM(Other(e))
       [] OTHER -> FALSE
 Works(t) == WorksAt(t, att)
 Hears(s, t) == IF t = "plain" THEN ~SamePub /\ FacBoth /\ HPub(s) ELSE Works(t)
@@ -276,6 +288,8 @@ FiltV(kn, F, x) ==
     ELSE IF HasF(F, "heardOnly", Other(x), "plain") THEN "APDF"
     ELSE "unk"
 Gate(kn, x) == Kn(kn, x) /\ Esc(x)
+\* R0 (CC 5.4.6, CC 1.13.3.1): an Anonymous-Tier identity on either end.
+AnonV(kn) == \E x \in kn : Anon(x)
 \* The frame wire both ends have shown they speak (rns-rs >= 0.14 HELLO and
 \* HMAC frames; survey section 8). Learned with the profile: AuthV.
 AuthV(kn) == KAB(kn) /\ HelloA /\ HelloB
@@ -291,6 +305,11 @@ Failed(F, n) ==
                       /\ (f.n = n \/ t \notin BdayTechs \/ Tranche(t, F, n) > Tranches)}
 \* Own-evidence fallback for "random": exactly one side shows random
 \* allocation steps, its class is unknown, and the plain punch has failed.
+\* Own evidence that cannot name the random side: random allocation steps
+\* on both sides, neither classified, and plain has failed.
+Ambiguous(kn, F, n) ==
+    /\ KAB(kn) /\ "plain" \in Failed(F, n)
+    /\ \A x \in Sides : MapV(kn, F, x) = "unk" /\ Steps(x) = "rand"
 RandSide(kn, F, n, e) ==
     \/ MapV(kn, F, e) = "EDMrand"
     \/ /\ MapV(kn, F, e) = "unk" /\ Kn(kn, e) /\ Steps(e) = "rand"
@@ -337,6 +356,12 @@ Pre(kn, F, tr, n, t) ==
                \* authenticated wire) random too: the squared model
                /\ (m(Other(e)) \in {"EIM", "unk"} \/ (AuthV(kn) /\ m(Other(e)) = "EDMrand"))
                /\ Gate(kn, e) /\ Gate(kn, Other(e)) /\ bud
+         \* D4 (2026-11-22, team lead): ambiguous own evidence (random steps on
+         \* BOTH sides, no class, plain failed), toward a TRUSTED peer only (both
+         \* gates): one symmetric birthday, then Learning decides
+         [] t = "bdaySym" ->
+               K /\ ~SamePub /\ facb /\ Ambiguous(kn, F, n)
+               /\ Gate(kn, "A") /\ Gate(kn, "B") /\ bud
          [] OTHER -> FALSE
 
 (***************************************************************************)
@@ -356,6 +381,7 @@ Likely(kn, F, n, t) ==
       [] t \in {"mapA", "mapB"} -> "high"   \* RFC 6886/6887; unmeasured here
       [] t \in {"predA", "predB"} -> "high" \* Keller 2022 DEVM/DPSM 76-78%
       [] t = "predAB" -> "low"         \* NATCracker 5.9.3: PRC-PRC "drops significantly"
+      [] t = "bdaySym" -> "high"       \* tranche 1 from both sides: 82% for the true hard side
       [] t \in {"bdayA", "bdayB"} ->
             IF m(Other(Side(t))) \in EDMs THEN "negligible"
                 \* both hard: 1-exp(-N*M/65536^2) = 0.003% at 256 x 1,750 (survey 4)
@@ -365,7 +391,7 @@ Likely(kn, F, n, t) ==
             ELSE "certain"                     \* 128 x 1,750: 97%; 256 x 1,750: 99.9%
       [] OTHER -> "negligible"
 AboveFloor(kn, F, n, t) == Likely(kn, F, n, t) /= "negligible"
-Avail(kn, F, tr, n, t) == Pre(kn, F, tr, n, t) /\ t \notin Failed(F, n) /\ AboveFloor(kn, F, n, t)
+Avail(kn, F, tr, n, t) == ~AnonV(kn) /\ Pre(kn, F, tr, n, t) /\ t \notin Failed(F, n) /\ AboveFloor(kn, F, n, t)
 \* The physics' answer: the cheapest technique that may still work and is
 \* above the floor.
 Cheapest(kn, F, tr, n) ==
@@ -408,9 +434,13 @@ Row(kn, F, tr, n) ==
                                     /\ Gate(kn, e) /\ Gate(kn, Other(e))
                                     /\ untried("bday" \o e) /\ budget("bday" \o e)}
         pick(S)   == IF "A" \in S THEN "A" ELSE "B"
+        ambiguous == Ambiguous(kn, F, n) /\ Gate(kn, "A") /\ Gate(kn, "B")
+                     /\ untried("bdaySym") /\ budget("bdaySym")
     IN
+    \* R0 by rule (CC 5.4.6, 1.13.3.1): an Anonymous-Tier end never upgrades
+    IF AnonV(kn) THEN "none"
     \* R1 same network: host or carrier candidates only, never the hairpin
-    IF sameNet /\ haveCands /\ untried("lan") THEN "lan"
+    ELSE IF sameNet /\ haveCands /\ untried("lan") THEN "lan"
     \* R2 both global v6: a stateful-firewall punch on v6 only
     ELSE IF bothV6 /\ untried("v6") THEN "v6"
     \* R3 one public IP, no candidates (or they failed): the hairpin
@@ -428,6 +458,8 @@ Row(kn, F, tr, n) ==
     ELSE IF ~sameNet /\ reflexive /\ bothSeq THEN "predAB"
     \* R7 one side random EDM: birthday (sockets there, spray here), by tranche
     ELSE IF ~sameNet /\ reflexive /\ randSide /= {} THEN "bday" \o pick(randSide)
+    \* R7b ambiguous own evidence, trusted peer: one symmetric birthday (D4)
+    ELSE IF ~sameNet /\ reflexive /\ ambiguous THEN "bdaySym"
     \* R8 nothing can work above the floor: no direct path, at once (#1024)
     ELSE "none"
 
@@ -459,6 +491,10 @@ CommitTech(s) == commit[s]
 -----------------------------------------------------------------------------
 Msg(ty, fr, e, t, f) == [ty |-> ty, fr |-> fr, n |-> att, e |-> e, t |-> t, f |-> f]
 Tag(m) == UntaggedPlant \/ m.n = att
+\* What the relay can tell of a signal: on a shaped link nothing (it rides
+\* inside the constant-size shaped frames at the shaped rate); otherwise
+\* its type and timing (CC 1.13.3.1 concedes that ciphertext flows on a link).
+Observe(ty) == IF Shaped THEN {} ELSE {ty}
 ProbeTarget(s) == IF s /= ini /\ NamedFacilitatorPlant THEN OwnFac(ini) ELSE OwnFac(s)
 \* luck.bday is the tranche at which the birthday hits (Tranches + 1: never).
 LuckSet ==
@@ -515,7 +551,7 @@ Decide(c, F2, base) ==
         /\ ts' = [ts EXCEPT ![c] = {}]
         /\ res' = [res EXCEPT ![c] = {}]
         /\ msgs' = base \cup {Msg("ABORT", c, ep[c], "NODIRECT", Carry(F2))}
-        /\ relaySaw' = relaySaw \cup {"ABORT"}
+        /\ relaySaw' = relaySaw \cup Observe("ABORT")
         /\ UNCHANGED <<ep, el, tried, first, escUsed, fooled>>
     ELSE
         /\ ep' = [ep EXCEPT ![c] = @ + 1]
@@ -526,7 +562,7 @@ Decide(c, F2, base) ==
         /\ escUsed' = escUsed + (IF p \in Escalated THEN 1 ELSE 0)
         /\ msgs' = base \cup {Msg("PLAN", c, ep[c] + 1, p,
                                   {f \in F2 : f.n = att /\ f.k \in HistKinds})}
-        /\ relaySaw' = relaySaw \cup {"PLAN"}
+        /\ relaySaw' = relaySaw \cup Observe("PLAN")
         /\ UNCHANGED <<ph, first, fooled>>
 
 \* The probe: own facilitator only (CC 5.4.6), which teaches the side its
@@ -534,6 +570,7 @@ Decide(c, F2, base) ==
 \* the responder, holding both, plans epoch 1 and sends it in READY.
 Probe(s) ==
     /\ ph[s] = "gather"
+    /\ ~(Planner = "strategy" /\ Anon(s))
     /\ LET fz == ProbeTarget(s)
            kn == knows[s] \cup {s}
        IN
@@ -547,14 +584,14 @@ Probe(s) ==
                      /\ UNCHANGED <<msgs, relaySaw, fooled>>
                 ELSE /\ ph' = [ph EXCEPT ![s] = "wait"]
                      /\ msgs' = msgs \cup {Msg("REQ", s, 0, "-", Carry(ev[s]))}
-                     /\ relaySaw' = relaySaw \cup {"REQ"}
+                     /\ relaySaw' = relaySaw \cup Observe("REQ")
                      /\ UNCHANGED ifail
              /\ UNCHANGED <<ep, ts, el, res, tried, first, escUsed, fooled>>
           ELSE IF Planner = "today" THEN
              IF ~Fac(s) THEN \* REJECT UNSUPPORTED
                 /\ ph' = [ph EXCEPT ![s] = "relayed"]
                 /\ msgs' = msgs \cup {Msg("ABORT", s, 0, "UNSUP", Carry(ev[s]))}
-                /\ relaySaw' = relaySaw \cup {"ABORT"}
+                /\ relaySaw' = relaySaw \cup Observe("ABORT")
                 /\ UNCHANGED <<ep, ts, el, res, tried, first, escUsed, ifail, fooled>>
              ELSE
                 /\ ph' = [ph EXCEPT ![s] = "run"]
@@ -562,14 +599,14 @@ Probe(s) ==
                 /\ el' = [el EXCEPT ![s] = 0]
                 /\ tried' = tried \cup TodayBase(s)
                 /\ msgs' = msgs \cup {Msg("READY", s, 0, "-", Carry(ev[s]))}
-                /\ relaySaw' = relaySaw \cup {"READY"}
+                /\ relaySaw' = relaySaw \cup Observe("READY")
                 /\ UNCHANGED <<ep, res, escUsed, ifail, first, fooled>>
           ELSE
              LET p == Row(kn, Now(s), {}, att) IN
              IF p = "none" THEN \* "no direct path", at once
                 /\ ph' = [ph EXCEPT ![s] = "relayed"]
                 /\ msgs' = msgs \cup {Msg("ABORT", s, 0, "NODIRECT", Carry(ev[s]))}
-                /\ relaySaw' = relaySaw \cup {"ABORT"}
+                /\ relaySaw' = relaySaw \cup Observe("ABORT")
                 /\ UNCHANGED <<ep, ts, el, res, tried, first, escUsed, ifail, fooled>>
              ELSE
                 \* the follower starts the plan it computed; the controller,
@@ -580,9 +617,25 @@ Probe(s) ==
                 /\ el' = [el EXCEPT ![s] = 0]
                 /\ res' = [res EXCEPT ![s] = Acquire(s, p)]
                 /\ msgs' = msgs \cup {Msg("READY", s, 1, p, Carry(ev[s]))}
-                /\ relaySaw' = relaySaw \cup {"READY"}
+                /\ relaySaw' = relaySaw \cup Observe("READY")
                 /\ UNCHANGED <<ifail, tried, first, escUsed>>
     /\ UNCHANGED <<att, ini, ev, commit, retry, luck, race, strangerSaw, fooled>>
+
+\* R0 (CC 5.4.6, CC 1.13.3.1): an Anonymous-Tier end never upgrades: it
+\* probes no facilitator, sends no REQUEST, READY, PLAN or OBS; as the
+\* responder it refuses on the link (REJECT POLICY), and the link stays
+\* relayed. (Strategy only: today's code has no such rule; the host must
+\* set the policy to reject.)
+AnonRefuse(s) ==
+    /\ Planner = "strategy" /\ Anon(s) /\ ph[s] = "gather"
+    /\ ph' = [ph EXCEPT ![s] = "relayed"]
+    /\ IF s /= ini
+       THEN /\ msgs' = msgs \cup {Msg("ABORT", s, 0, "POLICY", {})}
+            /\ relaySaw' = relaySaw \cup Observe("ABORT")
+       ELSE UNCHANGED <<msgs, relaySaw>>
+    /\ ifail' = IF s = ini THEN "anon" ELSE ifail
+    /\ UNCHANGED <<att, ini, knows, ev, ep, ts, el, res, commit, escUsed, tried, first,
+                   retry, luck, race, facSaw, strangerSaw, fooled>>
 
 RecvReqOK(s, m) == s /= ini /\ ph[s] = "idle" /\ m.ty = "REQ" /\ m.fr = ini /\ Tag(m)
 RecvReq(s, m) ==
@@ -613,7 +666,7 @@ RecvReady(s, m) ==
        ELSE IF p = "none"
        THEN /\ ph' = [ph EXCEPT ![s] = "relayed"]
             /\ msgs' = (msgs \ {m}) \cup {Msg("ABORT", s, 0, "NODIRECT", Carry(ev[s] \cup m.f))}
-            /\ relaySaw' = relaySaw \cup {"ABORT"}
+            /\ relaySaw' = relaySaw \cup Observe("ABORT")
             /\ UNCHANGED <<ep, ts, res, tried>>
        ELSE /\ ph' = [ph EXCEPT ![s] = "run"]
             /\ ep' = [ep EXCEPT ![s] = 1]
@@ -692,7 +745,7 @@ Hear(s, t) ==
           THEN Decide(s, F2, msgs)
           ELSE IF Planner = "strategy" /\ news /= {}
           THEN /\ msgs' = msgs \cup {Msg("OBS", s, ep[s], "-", news)}
-               /\ relaySaw' = relaySaw \cup {"OBS"}
+               /\ relaySaw' = relaySaw \cup Observe("OBS")
                /\ UNCHANGED <<ph, ep, ts, el, res, tried, first, escUsed, fooled>>
           ELSE UNCHANGED <<ph, ep, ts, el, res, tried, first, escUsed, msgs, relaySaw, fooled>>
     /\ UNCHANGED <<att, ini, knows, commit, ifail, retry, luck, race, facSaw, strangerSaw, fooled>>
@@ -800,7 +853,7 @@ Tick(s) ==
                      /\ UNCHANGED <<ph, ep, ts, res, tried, first, escUsed, msgs, relaySaw, fooled>>
                 ELSE /\ el' = [el EXCEPT ![s] = @ + 1]
                      /\ msgs' = msgs \cup {Msg("OBS", s, ep[s], "-", news)}
-                     /\ relaySaw' = relaySaw \cup {"OBS"}
+                     /\ relaySaw' = relaySaw \cup Observe("OBS")
                      /\ UNCHANGED <<ph, ep, ts, res, tried, first, escUsed, fooled>>
           /\ UNCHANGED <<att, ini, knows, commit, ifail, retry, luck, race, facSaw, strangerSaw, fooled>>
        \/ \* strategy: the peer's verdict never came (a lost signal): the
@@ -859,7 +912,7 @@ RecvNom(s) ==
     /\ res' = [res EXCEPT ![s] = @ \cap {commit[Ctl]}]
     /\ el' = [el EXCEPT ![s] = 0]
     /\ msgs' = msgs \cup {Msg("COMPLETE", s, ep[s], commit[Ctl], {})}
-    /\ relaySaw' = relaySaw \cup {"COMPLETE"}
+    /\ relaySaw' = relaySaw \cup Observe("COMPLETE")
     /\ UNCHANGED <<att, ini, knows, ev, ep, ts, escUsed, tried, first, ifail, retry,
                    luck, race, facSaw, strangerSaw, fooled>>
 
@@ -876,7 +929,7 @@ PunchOK(s) ==
           /\ ev' = [ev EXCEPT ![s] = @ \cup (IF done THEN {Fact("ok", s, t, att)} ELSE {})]
     /\ el' = [el EXCEPT ![s] = 0]
     /\ msgs' = msgs \cup {Msg("COMPLETE", s, 0, "-", {})}
-    /\ relaySaw' = relaySaw \cup {"COMPLETE"}
+    /\ relaySaw' = relaySaw \cup Observe("COMPLETE")
     /\ UNCHANGED <<att, ini, knows, ep, ts, escUsed, tried, first, ifail, retry, luck, race,
                    facSaw, strangerSaw, fooled>>
 
@@ -897,7 +950,7 @@ RecvComplete(s, m) ==
             /\ res' = [res EXCEPT ![s] = @ \cap {commit[s]}]
             /\ IF Planner = "strategy" /\ s = Ctl
                THEN /\ msgs' = (msgs \ {m}) \cup {Msg("COMPLETE", s, ep[s], commit[s], {})}
-                    /\ relaySaw' = relaySaw \cup {"COMPLETE"}
+                    /\ relaySaw' = relaySaw \cup Observe("COMPLETE")
                ELSE /\ msgs' = msgs \ {m}
                     /\ UNCHANGED relaySaw
     /\ UNCHANGED <<att, ini, knows, ep, ts, el, commit, escUsed, tried, first, ifail,
@@ -923,7 +976,7 @@ PunchFail(s) ==
           /\ msgs' = msgs \cup {Msg("ABORT", s, 0, "PF", Carry(ev[s] \cup nf))}
     /\ ph' = [ph EXCEPT ![s] = "relayed"]
     /\ Release(s)
-    /\ relaySaw' = relaySaw \cup {"ABORT"}
+    /\ relaySaw' = relaySaw \cup Observe("ABORT")
     /\ ifail' = IF s = ini /\ ifail = "-" THEN "own" ELSE ifail
     /\ UNCHANGED <<att, ini, knows, ep, el, escUsed, tried, first, retry, luck, race, facSaw,
                    strangerSaw, fooled>>
@@ -942,7 +995,7 @@ Deadline(s) ==
     /\ ph' = [ph EXCEPT ![s] = "relayed"]
     /\ Release(s)
     /\ msgs' = msgs \cup {Msg("ABORT", s, ep[s], "TIMEOUT", Carry(ev[s]))}
-    /\ relaySaw' = relaySaw \cup {"ABORT"}
+    /\ relaySaw' = relaySaw \cup Observe("ABORT")
     /\ ifail' = IF s = ini /\ ifail = "-" THEN "timeout" ELSE ifail
     /\ UNCHANGED <<att, ini, knows, ev, ep, el, escUsed, tried, first, retry, luck, race,
                    facSaw, strangerSaw, fooled>>
@@ -1052,7 +1105,7 @@ Next ==
     \/ \E s \in Sides :
         \/ Probe(s) \/ Tick(s) \/ Nominate(s) \/ RecvNom(s) \/ PunchOK(s)
         \/ PunchFail(s) \/ Deadline(s) \/ FallBack(s) \/ StrangerGets(s)
-        \/ StrangerOnLan(s) \/ Replay(s) \/ LoneLoss(s)
+        \/ StrangerOnLan(s) \/ Replay(s) \/ LoneLoss(s) \/ AnonRefuse(s)
         \/ \E t \in Paths : Hear(s, t) \/ Ack(s, t)
         \/ \E m \in msgs : RecvReq(s, m) \/ RecvReady(s, m) \/ RecvPlan(s, m)
                            \/ RecvObs(s, m) \/ RecvComplete(s, m) \/ RecvAbort(s, m)
@@ -1065,6 +1118,7 @@ Fair(s) ==
     /\ WF_vars(Probe(s)) /\ WF_vars(Tick(s)) /\ WF_vars(Nominate(s))
     /\ WF_vars(PunchOK(s)) /\ WF_vars(PunchFail(s)) /\ WF_vars(Deadline(s))
     /\ WF_vars(FallBack(s))
+    /\ WF_vars(AnonRefuse(s))
     /\ WF_vars(\E m \in msgs : RecvReq(s, m) \/ RecvReady(s, m) \/ RecvPlan(s, m)
                                \/ RecvObs(s, m) \/ RecvComplete(s, m) \/ RecvAbort(s, m))
     /\ (~NetLossy => /\ WF_vars(RecvNom(s))
@@ -1139,13 +1193,15 @@ EnvAllows(t) ==
       [] t = "predAB" -> EscA /\ EscB /\ (escUsed < PairBudget \/ t \in tried)
       [] t \in {"bdayA", "bdayB"} -> EscA /\ EscB /\ (escUsed < PairBudget \/ t \in tried)
                                     /\ EIM(Other(Side(t)))
+      [] t = "bdaySym" -> EscA /\ EscB /\ (escUsed < PairBudget \/ t \in tried)
       [] OTHER -> TRUE
 DirectWhenPossible ==
-    (SettledRelayed /\ ~Faults /\ retry = "no" /\ ifail /= "lost")
+    (SettledRelayed /\ ~Faults /\ retry = "no" /\ ifail /= "lost"
+     /\ ~(Planner = "strategy" /\ (AnonA \/ AnonB)))
         => \A t \in Techs : Works(t) => ~EnvAllows(t)
 GateAllows(t) ==
     CASE t \in {"predA", "predB"} -> Esc(Other(Side(t)))
-      [] t \in {"bdayA", "bdayB", "predAB"} -> EscA /\ EscB
+      [] t \in {"bdayA", "bdayB", "predAB", "bdaySym"} -> EscA /\ EscB
       [] OTHER -> TRUE
 \* A technique is recorded failed only if it cannot work (no faults).
 NoFalseAbort ==
@@ -1213,7 +1269,31 @@ AbortLeavesLinkUnchanged ==
     (Over /\ ~RelayLossy /\ Quiet /\ ifail /= "lost" /\ \E s \in Sides : ph[s] /= "direct") => SettledRelayed
 NoLoneMove == (~RelayLossy /\ ifail /= "lost") => ~\E s \in Sides : ph[s] = "direct" /\ ph[Other(s)] = "relayed"
 FacilitatorKnowledge == \A f \in Facs : \A x \in facSaw[f] : OwnFac(x) = f
-FacilitatorCarriesNothing == relaySaw \subseteq {"REQ", "READY", "PLAN", "OBS", "COMPLETE", "ABORT"}
+\* Extended to PLAN and OBS (D7): every signal goes between A and B over the
+\* relayed link, never to a facilitator, and the relay learns types only.
+FacilitatorCarriesNothing ==
+    /\ relaySaw \subseteq {"REQ", "READY", "PLAN", "OBS", "COMPLETE", "ABORT"}
+    /\ \A m \in msgs : m.fr \in Sides
+    /\ \A f \in Facs : facSaw[f] \subseteq Sides
+\* CC 2.6.8, extended to PLAN and OBS: a fact carries a kind, a side, a
+\* technique and an attempt, never an address; PLAN and OBS carry facts
+\* only, to the peer only. Held in memory (no state here persists).
+FactShape(f) == DOMAIN f = {"k", "x", "t", "n"}
+NoLearnedAddressPersisted ==
+    /\ \A s \in Sides : \A f \in ev[s] : FactShape(f)
+    /\ \A m \in msgs : \A f \in m.f : FactShape(f)
+PlanObsToPeerOnly ==
+    \A m \in msgs : m.ty \in {"PLAN", "OBS"} =>
+        /\ m.fr \in Sides
+        /\ \A f \in m.f : f.k \in HistKinds \cup Decisive
+\* D7: on a shaped link the relay observes no signal count or timing.
+ShapedHidesSignals == Shaped => relaySaw = {}
+\* R0: an Anonymous-Tier identity never upgrades and never sends PLAN or OBS.
+AnonymousNeverUpgrades ==
+    \A s \in Sides : (Planner = "strategy" /\ Anon(s)) =>
+        /\ ph[s] \notin {"run", "nom", "cwait", "direct"}
+        /\ \A f \in Facs : s \notin facSaw[f]
+        /\ ~\E m \in msgs : m.fr = s /\ m.ty \in {"REQ", "READY", "PLAN", "OBS", "COMPLETE"}
 NoTokenToStranger == "tokened" \notin strangerSaw
 \* A stranger learns only that a knock (or an authenticated frame it cannot
 \* verify, forge or replay) arrived.

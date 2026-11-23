@@ -1,5 +1,9 @@
 | scenario | outcomes (final states) | properties violated | states |
 |---|---|---|---|
+| strategy--ambiguous-trusted | direct:bdaySym x16, relayed x32 | none | 864 |
+| strategy--ambiguous-untrusted | relayed x64 | none | 576 |
+| strategy--anon-initiator | relayed x32 | none | 144 |
+| strategy--anon-responder | relayed x32 | none | 144 |
 | strategy--bothrandom-mac-reachable | relayed x64 | none | 576 |
 | strategy--bothrandom-nothing | relayed x64 | none | 576 |
 | strategy--budget-one-hard | direct:bdayB x16, relayed x32 | none | 864 |
@@ -15,20 +19,20 @@
 | strategy--gate-deny-b-hard | relayed x64 | none | 576 |
 | strategy--hard-filtknown | direct:bdayB x16, relayed x32 | none | 576 |
 | strategy--hard-unclassified-eif | direct:bdayB x16, direct:plain x32, relayed x32 | none | 1472 |
-| strategy--hard-unclassified-eimrandalloc | relayed x64 | DirectWhenPossible | 576 |
+| strategy--hard-unclassified-eimrandalloc | direct:bdaySym x16, relayed x32 | none | 864 |
 | strategy--hello-one-side | direct:bdayB x16, relayed x32 | none | 864 |
 | strategy--lan-leak-cgn-mac | direct:hair x32 | none | 576 |
 | strategy--lan-leak-cgn-raw | direct:hair x32 | none | 576 |
 | strategy--learn-pathloss | direct:plain x64, relayed x32 | none | 1408 |
 | strategy--learn-pathloss-hard | direct:bdayB x48, relayed x64 | none | 1632 |
 | strategy--learn-three-attempts-hard | direct:bdayB x16, relayed x32 | none | 864 |
-| strategy--pair-EDMrand-ADF--EDMrand-APDF-clsF | relayed x64 | none | 576 |
+| strategy--pair-EDMrand-ADF--EDMrand-APDF-clsF | relayed x64 | none | 864 |
 | strategy--pair-EDMrand-ADF--EDMrand-APDF-clsT | relayed x64 | none | 576 |
 | strategy--pair-EDMrand-ADF--EDMseq-APDF-clsF | relayed x64 | none | 864 |
 | strategy--pair-EDMrand-ADF--EDMseq-APDF-clsT | relayed x64 | none | 576 |
 | strategy--pair-EDMrand-ADF--EIM-APDF-clsF | direct:bdayA x16, relayed x32 | none | 864 |
 | strategy--pair-EDMrand-ADF--EIM-APDF-clsT | direct:bdayA x16, relayed x32 | none | 864 |
-| strategy--pair-EDMrand-APDF--EDMrand-APDF-clsF | relayed x64 | none | 576 |
+| strategy--pair-EDMrand-APDF--EDMrand-APDF-clsF | relayed x64 | none | 864 |
 | strategy--pair-EDMrand-APDF--EDMrand-APDF-clsT | relayed x64 | none | 576 |
 | strategy--pair-EDMrand-APDF--EDMrand-EIF-clsF | direct:plain x32 | none | 752 |
 | strategy--pair-EDMrand-APDF--EDMrand-EIF-clsT | direct:plain x32 | none | 752 |
@@ -94,6 +98,7 @@
 | strategy--seqseq-mac | direct:predAB x16, relayed x32 | none | 864 |
 | strategy--seqseq-mac-bothstrict | relayed x64 | none | 864 |
 | strategy--seqseq-raw | relayed x64 | none | 576 |
+| strategy--shaped-hard | direct:bdayB x16, relayed x32 | none | 864 |
 | strategy--stranger-hard | direct:bdayB x32, relayed x64 | none | 1328 |
 | strategy--tranches-hard | direct:bdayB x112, relayed x128 | none | 5760 |
 | strategy--tranches-hard-budget2 | direct:bdayB x48, relayed x128 | none | 3456 |
@@ -105,8 +110,12 @@
 | strategy--v6-both-closed-hard | direct:bdayB x16, relayed x32 | none | 1152 |
 | strategy--v6-both-hard | direct:v6 x32 | none | 576 |
 | strategy--v6-one-side | direct:plain x32 | none | 576 |
-| today--bothrandom-mac-reachable | direct:bdayA x624, direct:bdayB x624, relayed x288 | Agreement, AttemptCost, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 8896 |
-| today--bothrandom-nothing | relayed x576 | AttemptCost, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--ambiguous-trusted | direct:bdayB x48, relayed x288 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
+| today--ambiguous-untrusted | relayed x320 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2496 |
+| today--anon-initiator | direct:bdayB x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction | 2368 |
+| today--anon-responder | direct:plain x1248, direct:v6 x1248 | Agreement, OneTechnique | 13984 |
+| today--bothrandom-mac-reachable | direct:bdayA x624, direct:bdayB x624, relayed x288 | Agreement, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 8896 |
+| today--bothrandom-nothing | relayed x576 | EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--budget-one-hard | relayed x640 | DirectWhenPossible, NoFalseAbort, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 4768 |
 | today--budget-zero-hard | relayed x320 | NoSpam, NotRetriedSameWay, RetryIsEvidenceFunction | 2496 |
 | today--fac-silent-a-upnp | relayed x48 | DirectWhenPossible | 288 |
@@ -120,21 +129,21 @@
 | today--gate-deny-b-hard | relayed x320 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2496 |
 | today--hard-filtknown | direct:bdayB x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction | 2368 |
 | today--hard-unclassified-eif | direct:plain x96, relayed x320 | DirectWhenPossible, NoFalseAbort, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3520 |
-| today--hard-unclassified-eimrandalloc | direct:bdayB x48, relayed x288 | AttemptCost, EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
+| today--hard-unclassified-eimrandalloc | direct:bdayB x48, relayed x288 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--hello-one-side | direct:bdayB x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--lan-leak-cgn-mac | direct:hair x192 | NoSpam, OneTechnique | 1760 |
 | today--lan-leak-cgn-raw | direct:hair x192 | NoSpam, NoTokenToStranger, OneTechnique, StrangerKnowledge | 1760 |
 | today--learn-pathloss | direct:plain x384, relayed x288 | none | 5248 |
 | today--learn-pathloss-hard | direct:bdayB x48, relayed x672 | DirectWhenPossible, NoFalseAbort, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 4720 |
 | today--learn-three-attempts-hard | direct:bdayB x48, relayed x672 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 5696 |
-| today--pair-EDMrand-ADF--EDMrand-APDF-clsF | relayed x576 | AttemptCost, EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
-| today--pair-EDMrand-ADF--EDMrand-APDF-clsT | relayed x576 | AttemptCost, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--pair-EDMrand-ADF--EDMrand-APDF-clsF | relayed x576 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--pair-EDMrand-ADF--EDMrand-APDF-clsT | relayed x576 | EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--pair-EDMrand-ADF--EDMseq-APDF-clsF | relayed x576 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--pair-EDMrand-ADF--EDMseq-APDF-clsT | relayed x576 | EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--pair-EDMrand-ADF--EIM-APDF-clsF | direct:bdayA x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--pair-EDMrand-ADF--EIM-APDF-clsT | direct:bdayA x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
-| today--pair-EDMrand-APDF--EDMrand-APDF-clsF | relayed x576 | AttemptCost, EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
-| today--pair-EDMrand-APDF--EDMrand-APDF-clsT | relayed x576 | AttemptCost, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--pair-EDMrand-APDF--EDMrand-APDF-clsF | relayed x576 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--pair-EDMrand-APDF--EDMrand-APDF-clsT | relayed x576 | EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--pair-EDMrand-APDF--EDMrand-EIF-clsF | direct:plain x96 | none | 928 |
 | today--pair-EDMrand-APDF--EDMrand-EIF-clsT | direct:plain x96 | none | 928 |
 | today--pair-EDMrand-APDF--EDMseq-APDF-clsF | relayed x576 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
@@ -197,10 +206,11 @@
 | today--seqseq-mac | relayed x576 | DirectWhenPossible, EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--seqseq-mac-bothstrict | relayed x576 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--seqseq-raw | relayed x576 | EscPerAttempt, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--shaped-hard | direct:bdayB x48, relayed x288 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--stranger-hard | direct:bdayB x96, relayed x576 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 4544 |
 | today--tranches-hard | direct:bdayB x48, relayed x2016 | DirectWhenPossible, NoFalseAbort, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 16064 |
 | today--tranches-hard-budget2 | direct:bdayB x48, relayed x1056 | NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 9248 |
-| today--upnp-bothrandom | relayed x576 | AttemptCost, DirectWhenPossible, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
+| today--upnp-bothrandom | relayed x576 | DirectWhenPossible, EscPerAttempt, NoNegligibleRow, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 3712 |
 | today--upnp-easy-side | direct:bdayB x48, relayed x288 | DirectWhenPossible, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--upnp-hard-side | direct:bdayB x48, relayed x288 | DirectWhenPossible, NoSpam, NotRetriedSameWay, OneTechnique, RetryIsEvidenceFunction, UsesEvidence | 2368 |
 | today--v6-both | direct:plain x1248, direct:v6 x1248 | Agreement, OneTechnique, UsesEvidence | 13984 |

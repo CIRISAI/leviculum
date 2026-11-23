@@ -58,6 +58,25 @@ After epoch 1, only the controller re-plans, in the step a fact arrives. It
 sends `PLAN(epoch, technique, why)`. The follower reports its own partials
 and its verdict in `OBS`.
 
+**What one controller costs (D1).** Sending epoch 1's plan from the
+initiator would cost one relay round trip before the responder could start:
+READY one way, then PLAN back. That is the link's RTT, which today's code
+already measures for `RESPONDER_START_DELAY` (`node` :1303-1307; RTT/2
+capped at 1.5 s, so up to 3 s on a slow relay). Typical relayed RTTs are
+tens to a few hundred milliseconds, but we have no field distribution.
+
+Computing epoch 1 on both ends removes that round trip:
+
+- the responder starts at READY plus RTT/2, exactly as today;
+- the initiator starts on READY;
+- `SamePlan` checks that both computed the same plan.
+
+So there is one controller for the plan and for the pair at no added
+latency. Each mid-attempt re-plan costs one relay one-way delay: the
+follower switches when the PLAN lands. If `SamePlan` ever failed in the
+field, the fallback is the one-round-trip version: the initiator sends
+epoch 1, the responder waits for it.
+
 Why not have both ends re-plan from shared evidence? The decisive
 secondary evidence is asymmetric. Only the side that heard without being
 acked knows it, and only the side that saw the peer's port move knows that.
@@ -135,6 +154,7 @@ column refers to REFERENCES.md §2.
 
 | row | situation (evidence, EVIDENCE.md) | technique | expected (class: source and assumptions) | class | stop condition | moves mid-attempt |
 |---|---|---|---|---|---|---|
+| **R0** anonymous, by rule | either end is an Anonymous-Tier identity: only layer and rendezvous links, all shaped | **none**, stays relayed; no probe, no REQUEST/READY/PLAN/OBS; the responder refuses on the link (REJECT POLICY) | — (a rule, not a failure: a punch hands the peer this end's address) | implements CC 5.4.6 and CC 1.13.3.1 | at once | — |
 | **R1** same network | the same public IP (P8), with LAN or carrier-side candidates (P8) | `lan` only, **never the hairpin** | certain on one LAN (a host path, RFC 8445 §5.1.2 host first); carrier side: high, assumed (unmeasured) | formalizes; carrier candidates are **ours** | silent past `Stop` | silent: R2, else R3 |
 | **R2** both global v6 | both have a global v6 address (P6) | `v6` only | high, assumed: a stateful v6 firewall passes a simultaneous punch (RFC 6092 REC-11/14); unmeasured | formalizes (RFC 8305 preference); exclusivity is **ours** | silent past `Stop`, or ICMP no-route at once (S8) | to R3/R3b/R4 |
 | **R3** one public IP, no usable candidates | the same public IP, no candidates (or R1 failed), both reflexive | `hair` | low: hairpin UDP on 24% of NATs (Ford 2005); a CGN MUST hairpin (RFC 6888 REQ-9): high there | formalizes | silent past `Stop` | to R5 |
@@ -144,6 +164,7 @@ column refers to REFERENCES.md §2.
 | **R6** one sequential EDM | X EDM-sequential (P1 + P1b), the other EIM or unknown, the knocker's gate (P11), budget left | `predX` | high: 76–78% for progressing allocators (Keller 2022, mobile); assumes the step holds between measurement and punch | formalizes | silent past `Stop` after the knocks begin | to R6b/R7/R8 |
 | **R6b** both sequential | both EDM-sequential, **Auth**, not both filtering strictly (P3), both gates, budget | `predAB` | low: NATCracker §5.9.3 (PRC-PRC success "drops significantly"); DirectLinkPunch reaches it only with MAC'd frames and not both-APDF | formalizes NATCracker §5.8; the Auth precondition is from DLP | silent past `Stop` | to R8 |
 | **R7** one random EDM | X EDM-random (P1); or, on own evidence, random steps on exactly ONE side, class unknown, and plain failed; the other EIM or unknown; both gates; budget | `bdayX` at tranche k | tranche 1 (64 sockets x 1,750): 82%; 2 (128): 97%; 3 (256): 99.9% (over 64,512 ports, uniform). Inside a known port block (S9, S10, P12): ~100% (SURVEY.md §4). Assumes the mappings live through the window (refresh; S17 lifetime) | formalizes; the tranches are **ours** | the knocks spent and one refresh later, or a hit | heard on the session socket: stay. A miss: the next attempt runs tranche k+1 |
+| **R7b** ambiguous own evidence, trusted peer (D4) | random allocation steps on BOTH sides, no class, plain failed; both gates allow (a trusted peer: the host's decision under ask_host); budget left | `bdaySym`: one symmetric birthday, both sides holding a first tranche (64) and both spraying, ONCE; then Learning decides | high for whichever side is truly random: 82% at tranche 1. **The costliest row** (cost 24: twice a birthday) | ours (D4); the symmetric case is today's behaviour, now gated | the knocks spent and one refresh later | never toward an untrusted peer (R8). The first row to replace once a distinct-IP observer (P1) exists |
 | **R8** nothing above the floor | otherwise: e.g. both random (negligible: 0.003%); both EDM with filtering known closed; no v6, mapping or candidates; or every row failed or gated | **none**: "no direct path" at once, the link unchanged, handed to #1024 (multi-reflector relaying; RFC 5128 §3.1) | — | formalizes (HyperDHT; Tailscale; NATCracker §5.8.3) | at once | — |
 
 Notes:
@@ -153,11 +174,14 @@ Notes:
   DirectLinkPunch cross-check found that an EDM NAT with endpoint-independent filtering
   punches plain against ANY EDM peer (section 7). Eric's "both random,
   report at once" holds as stated once filtering is known closed (P3). With
-  filtering unknown, R4 spends one plain stop first, with no knocks and no
-  sockets; the partials usually end it early (open decision D3).
-- **R7's own-evidence fallback** needs random steps on exactly one side. An
-  EIM NAT that allocates SOCKETS at random reads like a random EDM (P1b).
-  With both sides random and no class, R8 (D4).
+  filtering unknown, R4 spends one plain round first, bounded by `Stop`,
+  with no knocks and no sockets, then R8. The partials usually end it
+  early (D3, decided).
+- **R7 on own evidence** needs random steps on exactly ONE side. An EIM NAT
+  that allocates SOCKETS at random reads like a random EDM (P1b). With
+  random steps on both sides and no class, R7b toward a trusted peer, and
+  R8 otherwise (D4). Both kinds of evidence use the same caps and tranches:
+  there is no separate fallback socket count (D8).
 - Today a facilitator's silence ends the session at once. Here it removes
   only the rows that need a reflexive address (R3, R3b, R4, R6, R6b, R7);
   R1, R2 and R5 stand.
@@ -281,6 +305,25 @@ signals:
 - the attempt tag on every signal. `UntaggedPlant` shows what goes wrong
   without it.
 
+**PLAN and OBS under the Constitution (D7, answered by the Constitution):**
+
+- They are within CC 5.4.6, with no padding required: the relay already
+  concedes "that a link exists … and that ciphertext flows on it at certain
+  times and sizes" (CC 1.13.3.1).
+- **On a shaped link they ride as bodies of the link's constant-size shaped
+  frames, at the shaped rate, never as an extra emission outside the
+  shape.** In the model (`Shaped`), the relay then observes no signal type,
+  count or timing (`ShapedHidesSignals`).
+- OBS reports what one end observed of the other's reflexive address
+  behaviour, as classes. It goes to the peer, inside the link's encryption
+  only, and never to a facilitator. It names no room, no derived address
+  and no third party. Nothing is retained beyond the in-memory history.
+  `PlanObsToPeerOnly`, `FacilitatorCarriesNothing` and
+  `NoLearnedAddressPersisted` (a fact has a kind, a side, a technique and an
+  attempt, never an address) cover PLAN and OBS in Strategy.tla itself.
+- Padding unshaped links to a fixed number of signals is optional defence
+  in depth for later, not a requirement.
+
 **Frame authentication is a precondition, not only a security property.**
 We adopt rns-rs's wire (rns-net ≥ 0.14), negotiated per link by HELLO. It
 **implements** the rns-rs DirectLink protocol document and commits:
@@ -318,14 +361,16 @@ Toward a peer that does not answer HELLO, the legacy raw-token wire stays
 
 ### The run
 
-`run_strategy.py` ran 208 scenarios, generated into `strategy-matrix.md`:
+`run_strategy.py` ran 218 scenarios (v3), generated into
+`strategy-matrix.md`:
 
-- 94 environments, each under both planners;
-- fault, learning, stranger, wire and plant scenarios.
+- 98 environments, each under both planners;
+- fault, learning, stranger, wire, anonymous-tier, shaped-link and plant
+  scenarios.
 
-All 208 runs completed with no TLC error and none was capped. In all, TLC
-explored 1,041,809 distinct states under the strategy planner (the largest
-run, `plant-untagged`, 847,232) and 344,480 under today's. The tool was
+All 218 runs completed with no TLC error and none was capped. In all, TLC
+explored 1,045,265 distinct states under the strategy planner (the largest
+run, `plant-untagged`, 847,232) and 368,064 under today's. The tool was
 TLC 2.19, with `-workers 2`, under `nice -n 19 ionice -c3`.
 
 Every run checks every property:
@@ -339,7 +384,7 @@ Every run checks every property:
 
 The bounds are:
 
-- 1 to 3 attempts, `Hist` 1 (2 for the tranche runs), up to 3 tranches;
+- 1 to 3 attempts, `Hist` = 3 (D5), up to 3 tranches;
 - stop and deadline timers of 2 and 3 ticks; today's window 3, its
   escalation at 1;
 - one oracle draw per run: the tranche at which a birthday hits, and hit
@@ -354,7 +399,7 @@ v6, map, rev and the lan/hair split rest on the cited RFC reasoning. Only
 the plain punch's oracle is cross-checked mechanically: 81/81 against
 DirectLinkPunch `acb936328`.
 
-### Results per property, strategy planner (105 runs)
+### Results per property, strategy planner (110 runs)
 
 | property | result |
 |---|---|
@@ -362,7 +407,7 @@ DirectLinkPunch `acb936328`.
 | **NoSpam** (`NoSpamStep`, `EscPerAttempt`, `AttemptCost`, `CapsHeld`) | holds |
 | **UsesEvidence** (`UsesEvidenceStep`, `PlanFollowsEvidence`) | holds |
 | **NoNegligibleRow** (the floor) | holds, including `bothrandom-mac-reachable`. There the authenticated wire makes the both-random birthday REACHABLE; the strategy never plans it, and today's code does. |
-| **DirectWhenPossible** | holds except in **4 evidence gaps**: the unclassified sequential EDM against a strict-filtering EIM (3 runs), and `hard-unclassified-eimrandalloc`. No secondary evidence separates them without the distinct-IP classifier (P1). |
+| **DirectWhenPossible** | holds except in **3 evidence-gap runs**: an unclassified sequential EDM against a strict-filtering EIM, in 3 filtering variants. No secondary evidence separates them without the distinct-IP classifier (P1). The former fourth gap (`hard-unclassified-eimrandalloc`) is closed toward a trusted peer by R7b (D4). Toward an untrusted one, R8 by rule (`ambiguous-untrusted`). |
 | **NoFalseAbort** | holds, per tranche: a birthday failed at tranche k is not a false abort if only tranche k+1 would hit |
 | **Agreement**, **SamePlan** | hold. Both ends compute the same epoch 1 in every run, and samenat-hairpin, the carrier NAT and dual-stack all agree, where today fails. |
 | **NoHalt** (`Variant`, `NotStuck`, `Termination`) | holds in every run, including relay loss, datagram loss and three attempts |
@@ -372,8 +417,10 @@ DirectLinkPunch `acb936328`.
 | **NoReplay** | holds under the HMAC wire. **FAILS under the raw wire** (`replay-onpath-raw`), for either planner: the property needs the rns-rs wire, not a better planner. |
 | **NoRawToCapablePeer** | holds. **`DowngradePlant`** violates it, and NoReplay with it. |
 | **FacilitatorKnowledge** and the rest kept from DirectLinkPunch | hold. **`NamedFacilitatorPlant`** violates FacilitatorKnowledge. |
+| **AnonymousNeverUpgrades** (R0) | holds (`anon-initiator`, `anon-responder`): an Anonymous-Tier end never probes, never runs a technique, and sends no REQUEST, READY, PLAN, OBS or COMPLETE |
+| **ShapedHidesSignals**, **PlanObsToPeerOnly**, **NoLearnedAddressPersisted**, **FacilitatorCarriesNothing** (now covering PLAN and OBS, D7) | hold in every run; `shaped-hard` direct with nothing observable to the relay |
 
-### Today's behaviour (103 runs): the counterexamples
+### Today's behaviour (108 runs): the counterexamples
 
 "Real" means confirmed against the code by reading it.
 
@@ -382,14 +429,14 @@ DirectLinkPunch `acb936328`.
      DirectLinkPunch's samenat-hairpin; real (`std` :1313, `udp` :220).
    - `samecgn-cand`: the same split on a carrier NAT.
    - `v6-both`: v4 on one side, v6 on the other.
-2. **Techniques racing (OneTechnique, 62 runs)** and **escalation without
-   evidence (NoSpam, 63 runs)**. For example: both random, so both sides
+2. **Techniques racing (OneTechnique, 67 runs)** and **escalation without
+   evidence (NoSpam, 67 runs)**. For example: both random, so both sides
    open sockets and spray (AttemptCost, EscPerAttempt).
 3. **Below the floor (NoNegligibleRow, 10 runs)**: today runs the birthday
    against a random or sequential EDM peer, the squared model. With MAC'd
    frames it is even reachable (`bothrandom-mac-reachable` reaches direct),
    but at about 0.003%.
-4. **The cheaper technique ignored (UsesEvidence, 57 runs)**:
+4. **The cheaper technique ignored (UsesEvidence, 60 runs)**:
    - a facilitator's silence ends the session although v6 or a router
      mapping would work; real (`core probe_failed` :461-474);
    - router mapping is never used;
@@ -398,8 +445,8 @@ DirectLinkPunch `acb936328`.
    and DirectWhenPossible)**. A random side that hears without being acked
    never opens its birthday sockets, while the peer sprays into nothing.
    Real (`std` :964, :1170).
-6. **Retried the same way (59 runs)**, and **the retry depends on arrival
-   order (59 runs)**: the peer's REJECT PUNCH_FAILED, arriving first,
+6. **Retried the same way (63 runs)**, and **the retry depends on arrival
+   order (63 runs)**: the peer's REJECT PUNCH_FAILED, arriving first,
    clears the retry. Real (`node` :1417-1421).
 7. **The raw wire.** Two failures:
    - `lan-leak-cgn-raw`: the LAN host-candidate punch sends the token to a
@@ -411,11 +458,14 @@ DirectLinkPunch `acb936328`.
    **Both disappear under the HMAC wire** (`lan-leak-cgn-mac`,
    `replay-onpath-mac`: no violation).
 
-Where today does better:
-- `hard-unclassified-eimrandalloc`: its symmetric birthday sometimes
-  connects, at twice the cost (D4).
-- `bothrandom-mac-reachable`: it reaches direct only by drawing a
-  negligible outcome.
+8. **No Anonymous-Tier rule.** Today's code upgrades an anonymous end
+   (`anon-initiator`, `anon-responder` reach direct). The host would have
+   to set the policy to reject; leviculum itself has no such rule.
+
+Where today does better: `bothrandom-mac-reachable`, where it reaches
+direct only by drawing a negligible outcome. The other former case,
+`hard-unclassified-eimrandalloc`, is now matched by R7b toward a trusted
+peer: one symmetric birthday, as D4 decided.
 
 ### What the design fixed on the way (the model's own findings)
 
@@ -442,40 +492,72 @@ Where today does better:
   (HELLO timeout, a stripped HELLO) are not modelled. Signals ride the
   encrypted link, so a third party cannot strip them.
 
-## 11. Open decisions for Eric
+## 11. Decisions
 
-Already decided, and in the model: initiator nomination; caps of 256 / 1,750
-in tranches; retries within 3 per pair; the HMAC wire later via HELLO; the
-host decides escalation under ask_host. The trust gate is a parameter here
-(`EscA`, `EscB`); proposing is not trust.
+The decisions below were recorded on 2026-11-22. "Team lead" means the
+team lead, acting for Eric, unless marked otherwise.
 
-- **D2. The hairpin.** R3 punches through the shared NAT only when there
-  are no LAN or carrier candidates, or after R1 failed (RFC 6888 REQ-9
-  makes a CGN hairpin). Allow it there, or never?
-- **D3. Both EDM, filtering unknown.** One plain round first (catches the
-  open-EDM pairs, which DirectLinkPunch shows do punch), or "no direct path
-  at once" until the filtering test (P3) exists?
-- **D4. Ambiguous own evidence** (random allocation on both sides, no
-  classifier). R8 (this design), today's symmetric birthday (twice the
-  cost), or require the distinct-IP observer first?
-- **D5. History.** H, how many attempts a failure is remembered (1 here,
-  2 for the ramp), and what counts as a network change. It lives in memory
-  only (CC 2.6.8).
-- **D6. Old peers.** Toward a raw-wire peer, keep today's pair split, or
-  refuse to commit without a nomination?
-- **D7. The relay** sees PLAN and OBS timing: it learns that a re-plan
-  happened, never why. Acceptable?
-- **D8. Thresholds.**
-  - The `Stop` floor (600 ms) and its RTT multiple (2x).
-  - The likelihood classes' bounds (certain ≥ 95%, high ≥ 50%, low ≥ 1%).
-  - Whether the floor should be "low" rather than "negligible": that would
-    drop R3 hairpin on home NATs (Ford: 24%) and R6b.
-- **D9. R5b PCP PEER** (RFC 6887 §12): shipped by nobody, but it makes an
-  EDM side exactly predictable. Build it?
-- **D10. Where the sources disagree** (`natcracker.md`):
-  - Sequential against random with non-strict filtering: NATCracker
-    Thm 5.7.1 says feasible, and Keller measured 14–17.5%. Our table says
-    R8. Add R6c?
-  - Sequential against sequential, both strict: NATCracker Thm 5.8.1 says
-    feasible; DirectLinkPunch says relayed even with MAC. Which model of
-    prediction is right needs a live witness.
+| # | decision | by | in the model |
+|---|---|---|---|
+| D1 | **The controller is the INITIATOR**: one controller for the plan and the pair (RFC 8445 controlling agent; the LTS nomination fix being built in `punch3`). Epoch 1 is computed by both ends, so the round trip is not paid (section 1). | team lead | `Ctl == ini`; `SamePlan` |
+| D2 | **The hairpin is allowed in R3**, only with no LAN or carrier candidates, or after R1 failed | team lead | R3 |
+| D3 | **Both EDM, filtering unknown: one plain round, bounded by `Stop`, then R8** | team lead | R4 / R8 |
+| D4 | **Ambiguous own evidence: toward a TRUSTED peer only, one symmetric birthday within the budget, then Learning; never untrusted.** It is the costliest row, and the first to replace once a distinct-IP observer exists | team lead | R7b `bdaySym`; `ambiguous-trusted` / `ambiguous-untrusted` |
+| D5 | **H = 3 attempts, per (peer, network epoch), in memory only** | team lead | `Hist = 3` |
+| D6 | **An old (raw-wire, no-strategy) peer keeps today's flow, pair split included; the strategy node cannot refuse, but logs the class** | team lead | the `today` planner is that flow |
+| D7 | **PLAN and OBS are within CC 5.4.6, with no padding required**. Conditions: shaped links carry them inside the shape; the address and facilitator properties cover them; OBS goes to the peer only. Plus **R0**: the Anonymous Tier never upgrades | **the Constitution** (CC 5.4.6, CC 1.13.3.1), via the team lead | `Shaped`, `ShapedHidesSignals`, `PlanObsToPeerOnly`, `NoLearnedAddressPersisted`, `AnonymousNeverUpgrades` |
+| D8 | **Caps of 256 sockets / 1,750 knocks for both evidence kinds, ramped in tranches of 64 → 128 → 256; no 32-socket fallback; `Stop` floor 600 ms and 2x RTT; the likelihood floor at "negligible"** | Eric (caps); team lead | `Tranches`, `Likely`, `NoNegligibleRow` |
+| D9 | **PCP PEER stays a candidate row**, to build with session-socket port mapping on leviculum's 0.35 line; not in the first conformance pass | team lead | not in `Row` |
+| D10 | **Both NATCracker disagreements stay candidate rows**, not built until a live witness exists; the planner must not select them | team lead | not in `Row` (R6b excludes both-APDF; R6c is absent) |
+
+### D10: what a live witness needs
+
+**seq-APDF × seq-APDF.** NATCracker Thm 5.8.1 calls it traversable by
+interleaved prediction (PRC-PRC). DirectLinkPunch says relayed, even with
+MAC'd frames. A witness needs:
+
+1. **Two NATs, both endpoint-dependent with SEQUENTIAL port assignment**
+   (RFC 4787 §4.2.1; a measured steady step, P1b) and
+   address-and-port-dependent filtering (RFC 4787 §5).
+   - Each must be verified by RFC 5780 §4.3 (mapping) and §4.4 (filtering)
+     tests from two observers at distinct IPs.
+   - Linux netfilter's default MASQUERADE PRESERVES ports. That is not this
+     class, so the NAT must be found in the field (Keller 2022's
+     "progressing" mobile carriers are candidates) or emulated. The natlab
+     namespaces on main (`natlab-nat-type.yml`) are the place to emulate one.
+2. **Little other traffic through either NAT during the attempt**, so the
+   step holds between the measurement and the punch (NATCracker §5.7.1
+   "port scanning" caveat). Then a run with background traffic, to measure
+   the loss.
+3. **The authenticated wire on both ends**: MAC'd frames to predicted
+   ports.
+4. **What to record**:
+   - per attempt, success, and the time from READY to the first heard;
+   - which predicted offset (1..16) hit on each side;
+   - the steps measured before and after.
+
+   At least 30 attempts, to tell "never" (DirectLinkPunch) from "sometimes"
+   (NATCracker reports PRC-PRC success "drops significantly", no number).
+5. **The verdict decides**:
+   - Works: R6b drops its "not both strict" condition, with the measured
+     rate as its likelihood.
+   - Never works: the both-APDF exclusion stands, citing the run.
+
+**seq-ADF × rand-ADF (R6c).** NATCracker Thm 5.7.1 calls it traversable by
+single-side prediction. Keller 2022 measured 14–17.5% for random ×
+progressing. A witness needs:
+
+- a sequential-EDM NAT with address-dependent filtering, against a
+  random-EDM NAT with address-dependent filtering;
+- the same recording as above.
+
+### What the planner must not select
+
+No plan can select R5b (PCP PEER) or R6c: neither is a technique in the
+model (`Techs`). R6b with both sides filtering strictly is excluded by
+R6b's own precondition, and that exclusion IS checked: `PlanIsCheapest` and
+NoSpam hold on every view in every run.
+
+An explicit "unproven" class can replace their absence once they are
+added: a fifth likelihood class below the floor, so `NoNegligibleRow` keeps
+them out until a witness moves them.

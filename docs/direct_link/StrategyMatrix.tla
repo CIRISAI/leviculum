@@ -20,7 +20,8 @@ InvNames == <<"TypeOK", "OneTechnique", "PlanIsCheapest", "EscPerAttempt", "Atte
               "RetryIsEvidenceFunction", "StartsWhereItWorked", "EscalationNeedsTrust",
               "AbortLeavesLinkUnchanged", "NoLoneMove", "FacilitatorKnowledge",
               "FacilitatorCarriesNothing", "NoTokenToStranger", "StrangerKnowledge",
-              "NoPathToStranger", "NoReplay", "NoRawToCapablePeer">>
+              "NoPathToStranger", "NoReplay", "NoRawToCapablePeer", "NoLearnedAddressPersisted",
+              "PlanObsToPeerOnly", "ShapedHidesSignals", "AnonymousNeverUpgrades">>
 Inv(n) ==
     CASE n = "TypeOK" -> TypeOK [] n = "OneTechnique" -> OneTechnique
       [] n = "PlanIsCheapest" -> PlanIsCheapest [] n = "EscPerAttempt" -> EscPerAttempt
@@ -39,6 +40,10 @@ Inv(n) ==
       [] n = "NoTokenToStranger" -> NoTokenToStranger
       [] n = "StrangerKnowledge" -> StrangerKnowledge [] n = "NoPathToStranger" -> NoPathToStranger
       [] n = "NoReplay" -> NoReplay [] n = "NoRawToCapablePeer" -> NoRawToCapablePeer
+      [] n = "NoLearnedAddressPersisted" -> NoLearnedAddressPersisted
+      [] n = "PlanObsToPeerOnly" -> PlanObsToPeerOnly
+      [] n = "ShapedHidesSignals" -> ShapedHidesSignals
+      [] n = "AnonymousNeverUpgrades" -> AnonymousNeverUpgrades
 InvProbe == \A i \in 1..Len(InvNames) : ~Inv(InvNames[i]) => PrintT(<<"VIOLATED", InvNames[i]>>)
 \* Evidence and knowledge only grow (MonotoneEvidence).
 LinkStep == \A s \in Sides : ev[s] \subseteq ev'[s] /\ knows[s] \subseteq knows'[s]
