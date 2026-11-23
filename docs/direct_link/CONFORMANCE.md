@@ -1,5 +1,9 @@
 # Conformance: how the code refines Strategy.tla
 
+The code is to refine a model that formalizes established practice (RFC
+4787, RFC 5128, RFC 8445 roles and nomination, the rns-rs wire). The
+conformance tests trace back to those sources through REFERENCES.md §2.
+
 ## The rule
 
 **Any change to the punch's behaviour changes `Strategy.tla` first.** That
@@ -22,7 +26,8 @@ reruns, because the strategy's oracle rests on that mechanism.
 
 ```rust
 // leviculum-core/src/direct_link/strategy.rs: no_std, no I/O, no clock, no RNG
-pub fn plan(view: &View) -> Plan;
+pub fn plan(view: &View, attempt: u32) -> Plan;   // Row(kn, F, tried, n)
+pub fn likelihood(view: &View, attempt: u32, t: Tech) -> Likely; // Likely: the floor
 
 pub struct View<'a> {
     pub own: Profile,             // EVIDENCE P1..P11 for this side
@@ -30,14 +35,20 @@ pub struct View<'a> {
     pub facts: &'a [Fact],        // valid facts only (the caller applies validity)
     pub tried: TechSet,           // started this attempt
     pub budget_left: u8,          // escalations left for the pair
+    pub auth_wire: bool,          // both answered HELLO (EVIDENCE P14)
+    pub port_block: bool,         // the hard side's allocator block is known (P12)
 }
 pub struct Profile { mapping: Mapping, filtering: Filtering, steps: Steps,
                      global_v6: bool, router_maps: bool, reflexive: bool,
                      same_public_ip: bool, candidates: bool, may_escalate: bool }
 pub enum Fact { Silent(Side, Tech), HeardOnly(Side, Tech), OtherPort(Side),
                 Failed(Tech), Ok(Tech) /* .. each with its attempt */ }
-pub enum Plan { Lan, V6, Hairpin, Plain, Map(Side), Predict(Side), Birthday(Side), NoDirect }
+pub enum Plan { Lan, V6, Hairpin, Reversal, Plain, Map(Side), Predict(Side), PredictBoth,
+                Birthday(Side /* tranche from the facts */), NoDirect }
 ```
+
+The controller is the INITIATOR (RFC 8445 §6.1.1), and both ends call
+`plan` for epoch 1 on the same inputs.
 
 `plan` is `Row` in `Strategy.tla`, with `MapV` and `FiltV` as its private
 helpers. It must not read anything `Row` does not read. Validity
@@ -105,8 +116,13 @@ Sizes are S, M or L.
 | 11 | **Filtering test** (P3): the facilitator (or a #100 peer) answers from another port and IP on request; RNSP grows a flag | M | 3 | P3 |
 | 12 | **ICMP** (S8): `IP_RECVERR` on Linux (and the platform equivalents) on the session socket | S | 1 | S8 |
 | 13 | **Network-epoch detection**: route and interface changes expire the profile | S | 7 | - |
+| 14 | **The authenticated wire** (rns-rs ≥ 0.14): HELLO in link DATA context 0x80, then 52-byte HMAC-tagged punch and ack frames with random nonces, RNSK keepalives with counters; the legacy wire toward peers that never answer HELLO (leviculum#112). It removes the LAN token leak and keepalive replay, and is the precondition of R6b. | L | 3 | P14 |
+| 15 | **Birthday per tranche**: 64, then 128, then 256 sockets (caps 256 / 1,750 knocks), each socket refreshed within the measured binding lifetime, first sends at low TTL, the spray aimed at a known port block, the tranche at most half a known CGN quota | M | 5 | S9, S10, S17, S18, P12, P13 |
+| 16 | **Connection reversal** (R3b) and the **static local-port guess** (one extra candidate) | S | 5, 11 | P15, P16 |
+| 17 | **Adaptive keepalive** from the measured binding lifetime, replacing the fixed 5 s / 15 s and 30 s / 120 s | S | 14 | S17 |
 
-Steps 1 and 2 can go in parallel, as can 8 to 12 once 5 lands. The punch
+Steps 1 and 2 can go in parallel, as can 8 to 12 and 15 to 17 once 5 lands.
+Step 14 can start at any time; R6b waits for it. The punch
 branch must reach main first (lit-review gap 1): steps 8 and 9 need main's
 #100 and #101.
 

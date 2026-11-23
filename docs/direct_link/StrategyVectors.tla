@@ -13,9 +13,10 @@ VectorOf(c) ==
      stepsA |-> Steps("A"), stepsB |-> Steps("B"),
      v6A |-> V6A, v6B |-> V6B, upnpA |-> UpnpA, upnpB |-> UpnpB,
      facA |-> FacA, facB |-> FacB, samePub |-> SamePub, cands |-> LanWorks,
-     gateA |-> EscA, gateB |-> EscB,
-     failed |-> Failed(F), tried |-> tried, budgetLeft |-> PairBudget - escUsed,
-     plan |-> Row(kn, F, tried)]
+     gateA |-> EscA, gateB |-> EscB, authWire |-> AuthV(kn), portBlock |-> PortBlock,
+     trancheA |-> Tranche("bdayA", F, att), trancheB |-> Tranche("bdayB", F, att),
+     failed |-> Failed(F, att), tried |-> tried, budgetLeft |-> PairBudget - escUsed,
+     plan |-> Row(kn, F, tried, att), likelihood |-> Likely(kn, F, att, Row(kn, F, tried, att))]
 RecordVector ==
     (KAB(knows[Ctl]) /\ ph[Ctl] \in {"gather", "run"}) => PrintT(<<"VECTOR", VectorOf(Ctl)>>)
 =============================================================================

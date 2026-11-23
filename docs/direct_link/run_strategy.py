@@ -55,6 +55,8 @@ BASE = dict(
     BUDGET="3", STRANGER="FALSE", HIJACK="FALSE", NAMED="FALSE", RLOSS="FALSE",
     NLOSS="FALSE", PATHLOSS="FALSE", PLANNER="strategy", UNTAGGED="FALSE",
     MAXATT="2", INVS=INVS, PROPS=PROPS, ACTC=ACTC,
+    HIST="1", HELLOA="FALSE", HELLOB="FALSE", DOWNGRADE="FALSE", ONPATH="FALSE",
+    LANSTRANGER="FALSE", PORTBLOCK="FALSE", TRANCHES="1",
 )
 MAPS = ["EIM", "EDMseq", "EDMrand"]
 FILTS = ["EIF", "ADF", "APDF"]
@@ -105,6 +107,23 @@ def environments():
     yield "gate-deny-a-seq", dict(seq, ESCA="FALSE")
     yield "budget-one-hard", dict(hard, BUDGET="1", MAXATT="2")
     yield "budget-zero-hard", dict(hard, BUDGET="0")
+    # Connection reversal (RFC 5128 3.2): one side reachable by anyone.
+    yield "reversal-eim-eif-known", dict(MAPA="EIM", FILTA="EIF", MAPB="EDMrand", FILTKNOWN="TRUE")
+    # Frame authentication (rns-rs >= 0.14 wire, negotiated by HELLO).
+    mac = dict(HELLOA="TRUE", HELLOB="TRUE")
+    yield "seqseq-raw", dict(MAPA="EDMseq", MAPB="EDMseq", FILTA="APDF", FILTB="ADF")
+    yield "seqseq-mac", dict(mac, MAPA="EDMseq", MAPB="EDMseq", FILTA="APDF", FILTB="ADF")
+    yield "seqseq-mac-bothstrict", dict(mac, MAPA="EDMseq", MAPB="EDMseq")
+    yield "bothrandom-mac-reachable", dict(mac, MAPA="EDMrand", MAPB="EDMrand")
+    yield "hello-one-side", dict(HELLOA="TRUE", MAPB="EDMrand")
+    yield "lan-leak-cgn-raw", dict(TOPO="sameCGN", HAIRPIN="TRUE", LANSTRANGER="TRUE")
+    yield "lan-leak-cgn-mac", dict(mac, TOPO="sameCGN", HAIRPIN="TRUE", LANSTRANGER="TRUE")
+    yield "replay-onpath-raw", dict(ONPATH="TRUE", PATHLOSS="TRUE", MAXATT="1")
+    yield "replay-onpath-mac", dict(mac, ONPATH="TRUE", PATHLOSS="TRUE", MAXATT="1")
+    # Birthday tranches across attempts (64 -> 128 -> 256 sockets x 1,750).
+    yield "tranches-hard", dict(hard, TRANCHES="3", MAXATT="3", HIST="2", BUDGET="3")
+    yield "tranches-hard-budget2", dict(hard, TRANCHES="3", MAXATT="3", HIST="2", BUDGET="2")
+    yield "portblock-hard", dict(hard, PORTBLOCK="TRUE")
 
 
 def scenarios():
@@ -126,6 +145,7 @@ def scenarios():
         yield f"{planner}--plant-hijack", dict(hard, PLANNER=planner, STRANGER="TRUE", HIJACK="TRUE", LUCK="miss")
         yield f"{planner}--plant-named-facilitator", dict(PLANNER=planner, NAMED="TRUE")
     yield "strategy--plant-untagged", dict(hard, UNTAGGED="TRUE", MAXATT="2", RLOSS="TRUE")
+    yield "strategy--plant-downgrade", dict(HELLOA="TRUE", HELLOB="TRUE", DOWNGRADE="TRUE", ONPATH="TRUE", PATHLOSS="TRUE", MAXATT="1")
 
 
 def cfg_text(params):
@@ -285,120 +305,7 @@ def run_oracle(out, dlp):
               POOL="paired", STRANGER="FALSE", POLICY="ask_host", HOSTA="deny", HOSTB="deny",
               IDENT="TRUE", GLARE="FALSE", BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE",
               NLOSS="FALSE", TEAR="FALSE", KEEP="TRUE", HIJACK="FALSE", NAMED="FALSE",
-              HITS="any", BUDGET="TRUE", NP="4", W="6", K="1", KF="1", SKEW="0", LAT="0",
-              INVS="ProbeOracle", PROPS="")
-    rows, bad = [], 0
-    for ma, fa, mb, fb in itertools.product(MAPS, FILTS, MAPS, FILTS):
-        p = dict(p0, MAPA=ma, FILTA=fa, MAPB=mb, FILTB=fb)
-        text = base
-        for k, v in p.items():
-            text = text.replace(f"@{k}@", v)
-        name = f"oracle-{ma}-{fa}--{mb}-{fb}"
-        rc, log = tlc(out, name, text, "OracleProbe.tla")
-        seen = set()
-        for m in re.finditer(r'<<\s*"ORACLE",\s*"(\w+)",\s*<<(.*?)>>,\s*<<(.*?)>>\s*>>', log, re.S):
-            a = tuple(x.strip() == "TRUE" for x in m.group(2).split(","))
-            b = tuple(x.strip() == "TRUE" for x in m.group(3).split(","))
-            seen.add((m.group(1), a, b))
-        M, F = (ma, mb), (fa, fb)
-        pred = oracle_states(M, F)
-        ok = seen == pred
-        norm = {dlp_ack_artifact(x) for x in seen} == pred
-        bad += not norm
-        rows.append((name, sorted(seen), sorted(pred), "yes" if ok else ("yes, after the ack artifact" if norm else "NO")))
-        print(f"{name}: {states} states, {'complete' if complete else 'PARTIAL'}, "
-              f"violated={viol or '-'} outcomes={outcome_summary(outs)} {errors[:1]}", flush=True)
-        json.dump(results, open(path, "w"), indent=1, sort_keys=True)
-    write_md(out, results)
-
-
-def write_md(out, results):
-    lines = ["| scenario | outcomes (final states) | properties violated | states |",
-             "|---|---|---|---|"]
-    for name in sorted(results):
-        r = results[name]
-        oc = ", ".join(f"{k} x{v}" for k, v in sorted(r["outcomes"].items())) or "-"
-        lines.append(f"| {name} | {oc} | {', '.join(r['violated']) or 'none'} | "
-                     f"{r['states']}{'' if r['complete'] else ' PARTIAL'} |")
-    open(os.path.join(out, "strategy-matrix.md"), "w").write("\n".join(lines) + "\n")
-
-
-# ---- the oracle cross-check ----
-
-def eim(m):
-    return m == "EIM"
-
-
-def loose(f):
-    return f in ("EIF", "ADF")
-
-
-def open_edm(s, M, F):
-    return not eim(M[s]) and F[s] == "EIF"
-
-
-def eff_eim(s, M, F, race):
-    # Strategy.tla EffEIM: an EDM side with endpoint-independent filtering
-    # answers from the port a peer's packet arrived at (always toward an EDM
-    # peer; toward an EIM peer only if that packet won the race).
-    o = 1 - s
-    return eim(M[s]) or (open_edm(s, M, F) and (not eim(M[o]) or race == "reuse"))
-
-
-def hpub(s, M, F, race):
-    o = 1 - s
-    es, eo = eff_eim(s, M, F, race), eff_eim(o, M, F, race)
-    if es and eo:
-        return True
-    if es:
-        return loose(F[s])
-    if eo:
-        return loose(F[o]) or F[s] == "EIF"
-    return False
-
-
-def apub(s, M, F, race):
-    o = 1 - s
-    if eff_eim(o, M, F, race):
-        return hpub(o, M, F, race)
-    if eff_eim(s, M, F, race):
-        return hpub(o, M, F, race) and hpub(s, M, F, race)
-    return False
-
-
-def oracle_states(M, F):
-    races = ["reuse", "new"] if any(open_edm(s, M, F) and eim(M[1 - s]) for s in (0, 1)) else ["new"]
-    out = set()
-    for r in races:
-        works = all(hpub(s, M, F, r) and apub(s, M, F, r) for s in (0, 1))
-        side = lambda s: (hpub(s, M, F, r), hpub(s, M, F, r) and apub(s, M, F, r), apub(s, M, F, r),
-                          hpub(s, M, F, r) and not eff_eim(1 - s, M, F, r))
-        out.add(("direct" if works else "relayed", side(0), side(1)))
-    return out
-
-
-def dlp_ack_artifact(state):
-    """DirectLinkPunch sends an ack from the address the punch ARRIVED at
-    (Deliver: Ack(d) has src = d.dst) even when the socket already holds a
-    mapping toward that peer; a NAT sends one socket's datagrams to one
-    destination through one mapping. Where that differs, a side is 'acked
-    but never heard' in the model only. Normalise it away for comparison."""
-    o, a, b = state
-    fix = lambda x: (x[0], x[1], x[2] and x[0], x[3]) if o == "relayed" else x
-    return (o, fix(a), fix(b))
-
-
-def run_oracle(out, dlp):
-    shutil.copy(dlp, os.path.join(out, "DirectLinkPunch.tla"))
-    shutil.copy(os.path.join(HERE, "OracleProbe.tla"), out)
-    tmpl = os.path.join(os.path.dirname(os.path.abspath(dlp)), "base.cfg.tmpl")
-    base = open(tmpl).read()
-    p0 = dict(MAPA="EIM", MAPB="EIM", FILTA="APDF", FILTB="APDF", SAMENAT="FALSE",
-              HAIRPIN="FALSE", FACA="F1", FACB="F1", FAC="TRUE", FORGED="FALSE", OBS="2",
-              POOL="paired", STRANGER="FALSE", POLICY="ask_host", HOSTA="deny", HOSTB="deny",
-              IDENT="TRUE", GLARE="FALSE", BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE",
-              NLOSS="FALSE", TEAR="FALSE", KEEP="TRUE", HIJACK="FALSE", NAMED="FALSE",
-              HITS="any", BUDGET="TRUE", NP="4", W="6", K="1", KF="1", SKEW="0", LAT="0",
+              HITS="any", BUDGET="TRUE", NP="4", W="6", K="1", KF="1", SKEW="0", LAT="0", MAC="FALSE",
               INVS="ProbeOracle", PROPS="")
     rows, bad = [], 0
     for ma, fa, mb, fb in itertools.product(MAPS, FILTS, MAPS, FILTS):

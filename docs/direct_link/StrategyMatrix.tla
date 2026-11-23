@@ -20,7 +20,7 @@ InvNames == <<"TypeOK", "OneTechnique", "PlanIsCheapest", "EscPerAttempt", "Atte
               "RetryIsEvidenceFunction", "StartsWhereItWorked", "EscalationNeedsTrust",
               "AbortLeavesLinkUnchanged", "NoLoneMove", "FacilitatorKnowledge",
               "FacilitatorCarriesNothing", "NoTokenToStranger", "StrangerKnowledge",
-              "NoPathToStranger">>
+              "NoPathToStranger", "NoReplay", "NoRawToCapablePeer">>
 Inv(n) ==
     CASE n = "TypeOK" -> TypeOK [] n = "OneTechnique" -> OneTechnique
       [] n = "PlanIsCheapest" -> PlanIsCheapest [] n = "EscPerAttempt" -> EscPerAttempt
@@ -38,6 +38,7 @@ Inv(n) ==
       [] n = "FacilitatorCarriesNothing" -> FacilitatorCarriesNothing
       [] n = "NoTokenToStranger" -> NoTokenToStranger
       [] n = "StrangerKnowledge" -> StrangerKnowledge [] n = "NoPathToStranger" -> NoPathToStranger
+      [] n = "NoReplay" -> NoReplay [] n = "NoRawToCapablePeer" -> NoRawToCapablePeer
 InvProbe == \A i \in 1..Len(InvNames) : ~Inv(InvNames[i]) => PrintT(<<"VIOLATED", InvNames[i]>>)
 \* Evidence and knowledge only grow (MonotoneEvidence).
 LinkStep == \A s \in Sides : ev[s] \subseteq ev'[s] /\ knows[s] \subseteq knows'[s]
@@ -46,5 +47,6 @@ ActProbe ==
     /\ (~NoSpamStep => PrintT(<<"VIOLATED", "NoSpam">>))
     /\ (~UsesEvidenceStep => PrintT(<<"VIOLATED", "UsesEvidence">>))
     /\ (~VariantStep => PrintT(<<"VIOLATED", "Variant">>))
+    /\ (~NoNegligibleStep => PrintT(<<"VIOLATED", "NoNegligibleRow">>))
     /\ (~LinkStep => PrintT(<<"VIOLATED", "MonotoneEvidence">>))
 =============================================================================

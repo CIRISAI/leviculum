@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Row-by-row comparison of our decision table with NATCracker's.
+
+    python3 docs/direct_link/natcracker_compare.py > docs/direct_link/natcracker.md
+
+NATCracker (Roverso, El-Ansary, Haridi, ICCCN 2009; read in R. Roverso's KTH
+doctoral thesis, Dec 2013, chapter 5) classifies a NAT by mapping m, allocation
+a and filtering f, with m, f in {EI, HD, PD} and a in {PP, PC, RD}. It decides,
+for each pair, the first feasible technique by three theorems:
+
+  Thm 5.6.1  SHP feasible  iff  exists x: f(x)=EI and (m(x)=EI or f(x')<PD)
+  Thm 5.7.1  prediction on x  iff  a(x)<RD and f(x)<PD and (m(x)<PD or f(x')<PD)
+  Thm 5.8.1  interleaved prediction  iff  a(A)<RD and a(B)<RD
+  otherwise  X (no relay-free technique; the birthday paradox is "ignored due
+             to low success probability, high traffic and long time", 5.8.3)
+
+Ours: Strategy.tla's physics (plain = HPub/APub with peer-reflexive learning
+and the open-EDM reuse race; pred, predAB, bday, rev as in Works), and Row's
+choice with full knowledge (classified, filtering known), the authenticated
+wire, no v6 / LAN / router mapping. Our classes: EIM = m EI; EDMseq = m PD,
+a PC; EDMrand = m PD, a RD; filtering EIF/ADF/APDF = f EI/HD/PD. An EIM
+side's allocation is taken as PC (it matters to NATCracker's prediction only).
+"""
+import itertools
+
+MAPS = ["EIM", "EDMseq", "EDMrand"]
+FILTS = ["EIF", "ADF", "APDF"]
+NC_F = {"EIF": 0, "ADF": 1, "APDF": 2}          # EI < HD < PD
+NC_M = {"EIM": 0, "EDMseq": 2, "EDMrand": 2}     # EI, (HD), PD
+NC_A = {"EIM": 1, "EDMseq": 1, "EDMrand": 2}     # PP 0 < PC 1 < RD 2
+
+
+def natcracker(A, B):
+    sides = [A, B]
+    for i in (0, 1):
+        x, o = sides[i], sides[1 - i]
+        if NC_F[x[1]] == 0 and (NC_M[x[0]] == 0 or NC_F[o[1]] < 2):
+            return "SHP"
+    for i in (0, 1):
+        x, o = sides[i], sides[1 - i]
+        if NC_A[x[0]] < 2 and NC_F[x[1]] < 2 and (NC_M[x[0]] < 2 or NC_F[o[1]] < 2):
+            return "PRC (one side)"
+    if NC_A[A[0]] < 2 and NC_A[B[0]] < 2:
+        return "PRC-PRC (interleaved)"
+    return "X"
+
+
+def eim(m):
+    return m == "EIM"
+
+
+def loose(f):
+    return f in ("EIF", "ADF")
+
+
+def plain_works(A, B):
+    """Strategy.tla HPub/APub; True if it works in some race (open EDM)."""
+    M, F = (A[0], B[0]), (A[1], B[1])
+    res = []
+    races = ["reuse", "new"]
+    for r in races:
+        def eff(s):
+            o = 1 - s
+            return eim(M[s]) or (not eim(M[s]) and F[s] == "EIF" and (not eim(M[o]) or r == "reuse"))
+
+        def hp(s):
+            o = 1 - s
+            if eff(s) and eff(o):
+                return True
+            if eff(s):
+                return loose(F[s])
+            if eff(o):
+                return loose(F[o]) or F[s] == "EIF"
+            return False
+
+        def ap(s):
+            o = 1 - s
+            if eff(o):
+                return hp(o)
+            if eff(s):
+                return hp(o) and hp(s)
+            return False
+        res.append(all(hp(s) and ap(s) for s in (0, 1)))
+    return "yes" if all(res) else ("race" if any(res) else "no")
+
+
+def ours(A, B):
+    """Row with full knowledge: the first technique that may work, and
+    whether it does (plain may be a race)."""
+    (ma, fa), (mb, fb) = A, B
+    if eim(ma) and fa == "EIF" or eim(mb) and fb == "EIF":
+        return "rev (R3b)", "certain"
+    pw = plain_works(A, B)
+    closed = lambda m, f: not eim(m) and f != "EIF"
+    plain_can = not (closed(ma, fa) and closed(mb, fb)) and \
+        not (closed(ma, fa) and fb == "APDF") and not (closed(mb, fb) and fa == "APDF")
+    if plain_can and pw != "no":
+        return "plain (R4)", "high" if pw == "yes" else "race (open EDM)"
+    for x, o in ((A, B), (B, A)):
+        if x[0] == "EDMseq" and eim(o[0]):
+            return "pred (R6)", "high (Keller 76-78%)"
+    if ma == mb == "EDMseq" and not (fa == fb == "APDF"):
+        return "predAB (R6b, authenticated wire)", "low"
+    for x, o in ((A, B), (B, A)):
+        if x[0] == "EDMrand" and eim(o[0]):
+            return "bday (R7)", "high: 82% (64 sockets) to 99.9% (256)"
+    if ma == mb == "EDMrand":
+        return "none (R8): both random", "negligible, 0.003%"
+    return "none (R8)", "-"
+
+
+def main():
+    pairs = list(itertools.combinations_with_replacement(
+        list(itertools.product(MAPS, FILTS)), 2))
+    rows = []
+    for A, B in pairs:
+        nc = natcracker(A, B)
+        o, lk = ours(A, B)
+        nc_ok = nc != "X"
+        o_ok = not o.startswith("none")
+        if nc_ok and o_ok:
+            agree = "both traverse"
+        elif not nc_ok and not o_ok:
+            agree = "both: no direct path"
+        elif o_ok:
+            agree = "ours only"
+        else:
+            agree = "NATCracker only"
+        rows.append((f"{A[0]}-{A[1]}", f"{B[0]}-{B[1]}", nc, o, lk, agree))
+    print("# Our decision table against NATCracker's, pair by pair\n")
+    print("Generated by `natcracker_compare.py`; see its docstring for the encoding of")
+    print("NATCracker's Theorems 5.6.1, 5.7.1 and 5.8.1 (Roverso, El-Ansary, Haridi,")
+    print("ICCCN 2009; KTH thesis 2013 ch. 5) and of ours (Strategy.tla). Unordered")
+    print("pairs of our 9 classes: 45 rows.\n")
+    print("| A | B | NATCracker | ours (row) | ours: expected | verdict |")
+    print("|---|---|---|---|---|---|")
+    for r in rows:
+        print("| " + " | ".join(r) + " |")
+    from collections import Counter
+    c = Counter(r[5] for r in rows)
+    print("\n" + ", ".join(f"{k}: {v}" for k, v in sorted(c.items())))
+
+
+if __name__ == "__main__":
+    main()
