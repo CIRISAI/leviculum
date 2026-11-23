@@ -2006,7 +2006,7 @@ pub(crate) fn predict_ports(steps: AllocationSteps) -> Vec<u16> {
 
 /// The tracing target of the one-line punch and probe summaries, so a tool
 /// can collect them without the address-bearing lines beside them.
-pub const DIAG_TARGET: &str = "direct_link_diag";
+pub const DIAG_TARGET: &str = leviculum_core::node::DIRECT_LINK_DIAG_TARGET;
 
 /// +ciris — where a punch was heard from, relative to what the peer
 /// advertised. Addresses never leave this function: only the class does,
@@ -2366,7 +2366,7 @@ impl PunchDiag {
             birthday_tranches = self.birthday_tranches.load(std::sync::atomic::Ordering::Relaxed),
             birthday_quota = self.birthday_quota.load(std::sync::atomic::Ordering::Relaxed),
             spray_pps = SPRAY_PPS,
-            "direct link diag: punch summary"
+            // The punch summary: no free-text message (the event catalog).
         );
     }
 }
@@ -2444,7 +2444,7 @@ fn log_probe_diag(
         probe_attempts = stats.map_or(0, |s| s.attempts),
         probe_rtt_ms = stats.map_or(-1, |s| s.rtt_ms as i64),
         extras_skipped,
-        "direct link diag: probe summary"
+        // The probe summary: no free-text message (the event catalog).
     );
 }
 

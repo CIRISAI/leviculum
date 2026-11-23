@@ -190,6 +190,36 @@ pub struct EventSchema {
 /// per-reason shapes (Codeberg #320); a record passes if any one shape
 /// is fully present.
 pub const EVENT_CATALOG: &[EventSchema] = &[
+    // +ciris: the direct-link diagnostics on target `direct_link_diag`
+    // (counts, classes and milliseconds only, never an address).
+    EventSchema {
+        name: "punch",
+        required_keys: &[
+            "session",
+            "outcome",
+            "elapsed_ms",
+            "window_ms",
+            "nomination",
+        ],
+    },
+    EventSchema {
+        name: "probe",
+        required_keys: &[
+            "session",
+            "answered",
+            "elapsed_ms",
+            "mapping",
+            "edm_evidence",
+        ],
+    },
+    EventSchema {
+        name: "reject",
+        required_keys: &["session", "reason", "role", "phase", "since_start_ms"],
+    },
+    EventSchema {
+        name: "escalation_capped",
+        required_keys: &["session", "running"],
+    },
     // Per-packet journey contract (Periculum phase 6): PKT_RX / PKT_TX /
     // PKT_FORWARD / PKT_DROP / DEDUP_DROP live on the dedicated
     // `leviculum_core::pkt` tracing target and carry `ph`, the first

@@ -55,6 +55,10 @@ pub const RETRY_BACKOFF_MS: [u64; 6] = [60_000, 120_000, 300_000, 600_000, 900_0
 /// that refused UNSUPPORTED (no facilitator of its own): it may gain one.
 pub const UNSUPPORTED_RETRY_MS: u64 = 600_000;
 
+/// +ciris: the tracing target of the direct-link diagnostic lines, in
+/// counts, classes and milliseconds only (leviculum-std's `DIAG_TARGET`).
+pub const DIRECT_LINK_DIAG_TARGET: &str = "direct_link_diag";
+
 /// +ciris (fourth review): punches escalating at once on the DEFAULT rule
 /// alone (a link this node initiated, an ask_host request the host
 /// accepted), without a host decision for the link. Two, to match the
@@ -1119,14 +1123,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             {
                 if signal.session() == s.id() {
                     crate::tracing::info!(
-                        target: "direct_link_diag",
+                        target: DIRECT_LINK_DIAG_TARGET,
                         event = "reject",
                         session = %HexShort(&s.id()[..4]),
                         reason = *reason,
                         role = ?s.role(),
                         phase = ?s.phase(),
                         since_start_ms = now_ms.saturating_sub(s.started_ms()),
-                        "direct link diag: reject received"
+                        // A REJECT received; no free-text message.
                     );
                 }
             }
@@ -1471,11 +1475,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             true
                         } else {
                             crate::tracing::info!(
-                                target: "direct_link_diag",
+                                target: DIRECT_LINK_DIAG_TARGET,
                                 event = "escalation_capped",
                                 session = %HexShort(&session_id[..4]),
                                 running = d.len(),
-                                "direct link diag: escalation capped, punching plain"
+                                // The punch runs plain; no free-text message.
                             );
                             false
                         }
