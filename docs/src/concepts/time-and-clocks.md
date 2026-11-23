@@ -270,12 +270,12 @@ rule; skipping it re-introduces two regressions by accident.
 
 **Implementation status.** The lower bound is the build timestamp
 (Codeberg #247): `leviculum-core/build.rs` embeds it, `BUILD_UNIX_SECS`
-(`constants.rs:649`) carries it, and `EMISSION_SANITY_FLOOR_SECS`
-(`constants.rs:682`) is the bound the filter applies — the build stamp,
+(`constants.rs:660`) carries it, and `EMISSION_SANITY_FLOOR_SECS`
+(`constants.rs:693`) is the bound the filter applies — the build stamp,
 floored by the old fixed date `EMISSION_PLAUSIBLE_MIN_SECS`
-(`constants.rs:656`, 2020) so a bogus `SOURCE_DATE_EPOCH` cannot lower
+(`constants.rs:667`, 2020) so a bogus `SOURCE_DATE_EPOCH` cannot lower
 it. The upper bound is still the fixed date
-`EMISSION_LEARN_CEILING_SECS` (`constants.rs:639`, 2200-01-01). One
+`EMISSION_LEARN_CEILING_SECS` (`constants.rs:650`, 2200-01-01). One
 filter enforces both on learning, on host injection and on GNSS. The
 stamp is precise enough by construction: real time is always after the
 moment the binary was built, and a stale stamp only widens the window.
@@ -488,7 +488,7 @@ never caps adoption
   can trust.
 - **Status:** implemented in the core (#247). An instance with no
   source anchors at `BUILD_UNIX_SECS`
-  (`leviculum-core/src/constants.rs:649`) advanced by uptime, which
+  (`leviculum-core/src/constants.rs:660`) advanced by uptime, which
   retires the raw-uptime state every cross-restart comparison lost
   (#155). A port inherits it with the core and adds nothing; what a
   port still owes is the arms above it.
@@ -653,7 +653,7 @@ The announce timestamp field holds
 silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
-(`leviculum-core/src/constants.rs:630`) caps it, enforced at the
+(`leviculum-core/src/constants.rs:641`) caps it, enforced at the
 point of resolution (`transport.rs:5153`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
@@ -665,10 +665,10 @@ regardless of which source produced the value. Incident: Codeberg
 Within arm 4, an older emission never regresses the anchor
 (`emitted_secs <= current`, `leviculum-core/src/transport.rs:5946`),
 and adoption is bounded by the sanity window: values above
-`EMISSION_LEARN_CEILING_SECS` (`constants.rs:639`, 2200-01-01) cannot
+`EMISSION_LEARN_CEILING_SECS` (`constants.rs:650`, 2200-01-01) cannot
 come from a real clock and are refused outright
 (`leviculum-core/src/transport.rs:5931`); the lower bound is the build floor
-`EMISSION_SANITY_FLOOR_SECS` (`leviculum-core/src/constants.rs:682`),
+`EMISSION_SANITY_FLOOR_SECS` (`leviculum-core/src/constants.rs:693`),
 which real time is always after, so a peer's uptime seconds and a
 dead RTC's 1999 are refused as anchors by the same filter (#247).
 Incidents: #160, #161. Pinned at
@@ -714,7 +714,7 @@ abused downwards. Pinned at
 
 Once the calendar is no longer birth-anchored, one announce may
 advance it by at
-most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:721`, one
+most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:732`, one
 day), so a peer whose clock is decades wrong cannot capture the
 calendar in one announce. State the protection level honestly:
 learning runs before the per-destination announce rate limit and the
@@ -918,13 +918,13 @@ reasoned commit, never load-bearing for the model itself.
 
 - **The upper sanity margin** above the best known anchor — order of
   decades; today the fixed date in `EMISSION_LEARN_CEILING_SECS`
-  (`constants.rs:639`).
+  (`constants.rs:650`).
 - **The lower bound** is the build timestamp and not a practice
   parameter at all; `EMISSION_PLAUSIBLE_MIN_SECS`
-  (`constants.rs:656`) survives only as the guard under it, for a
+  (`constants.rs:667`) survives only as the guard under it, for a
   build stamp no firmware was ever built at.
 - **The per-announce advance cap**
-  `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:721`).
+  `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:732`).
 - **The healing cohort**: how many distinct senders form a median,
   and how large a deviation counts as gross.
 - **The local plausible-now tolerance**: the bounded forward skew
@@ -1160,7 +1160,7 @@ issues cannot land without their cells.
 3. **Inherit the build floor; do not reinvent it.** The build
    timestamp is the sanity floor and the birth anchor, and the core
    carries both (`BUILD_UNIX_SECS`,
-   `leviculum-core/src/constants.rs:649`, from
+   `leviculum-core/src/constants.rs:660`, from
    `leviculum-core/build.rs`), together with the rank-keyed adoption
    and ticket predicates that must move with it
    ([provenance rank](#anchor-provenance-is-first-class-state)). A
