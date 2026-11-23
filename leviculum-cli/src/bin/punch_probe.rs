@@ -42,9 +42,18 @@ use tracing_subscriber::Layer;
     about = "Measure a direct-link punch over a relay"
 )]
 struct Cli {
-    /// The relay's TCP dial, which is also its UDP facilitator.
+    /// The relay's TCP dial, which is also its UDP facilitator unless
+    /// `--facilitator` names another.
     #[arg(long)]
     relay: String,
+    /// The facilitator this node probes (`host:port`), when it is not the
+    /// relay: a public STUN server with `--protocol stun`, so a run over a
+    /// third-party relay needs no facilitator of anyone's.
+    #[arg(long)]
+    facilitator: Option<String>,
+    /// How to probe the facilitator: rnsp or stun.
+    #[arg(long, default_value = "rnsp")]
+    protocol: String,
     /// A public STUN server (`host:port`) for the mapping-behaviour check.
     #[arg(long)]
     stun: Option<String>,
@@ -258,7 +267,7 @@ async fn resolve_v4(addr: &str) -> Option<SocketAddr> {
 /// This host's NAT, in classes: one socket probes the facilitator twice
 /// (is the mapping stable?) and, with `--stun`, a second server (does the
 /// mapping depend on the destination? that is a symmetric NAT on THIS side).
-async fn nat_check(role: &str, relay: SocketAddr, stun: Option<&str>) {
+async fn nat_check(role: &str, relay: SocketAddr, protocol: ProbeProtocol, stun: Option<&str>) {
     let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
         out(json!({"role": role, "kind": "nat_check", "error": "bind"}));
         return;
@@ -268,8 +277,8 @@ async fn nat_check(role: &str, relay: SocketAddr, stun: Option<&str>) {
         .and_then(|s| s.connect(relay).and_then(|_| s.local_addr()))
         .map(|a| a.ip())
         .ok();
-    let first = probe_once(&socket, relay, ProbeProtocol::Rnsp).await;
-    let second = probe_once(&socket, relay, ProbeProtocol::Rnsp).await;
+    let first = probe_once(&socket, relay, protocol).await;
+    let second = probe_once(&socket, relay, protocol).await;
     let stun_addr = match stun {
         Some(s) => resolve_v4(s).await,
         None => None,
@@ -287,7 +296,7 @@ async fn nat_check(role: &str, relay: SocketAddr, stun: Option<&str>) {
     // (port-preserving) or allocate sequentially / randomly?
     let other = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok();
     let other_mapped = match &other {
-        Some(o) => probe_once(o, relay, ProbeProtocol::Rnsp).await,
+        Some(o) => probe_once(o, relay, protocol).await,
         None => None,
     };
     let other_preserved = match (&other, other_mapped) {
@@ -396,7 +405,17 @@ async fn main() {
         out(json!({"role": role, "kind": "error", "error": "relay does not resolve"}));
         std::process::exit(2);
     };
-    nat_check(role, relay, cli.stun.as_deref()).await;
+    let protocol = if cli.protocol == "stun" {
+        ProbeProtocol::Stun
+    } else {
+        ProbeProtocol::Rnsp
+    };
+    let facilitator_name = cli.facilitator.clone().unwrap_or_else(|| cli.relay.clone());
+    let Some(facilitator) = resolve_v4(&facilitator_name).await else {
+        out(json!({"role": role, "kind": "error", "error": "facilitator does not resolve"}));
+        std::process::exit(2);
+    };
+    nat_check(role, facilitator, protocol, cli.stun.as_deref()).await;
 
     let storage = tempfile::tempdir().expect("tempdir");
     let mut node = ReticulumNodeBuilder::new()
@@ -407,8 +426,8 @@ async fn main() {
             // only a node answering identified peers may spray.
             let mut settings = DirectLinkSettings::default();
             settings.policy = DirectLinkPolicy::AskHost;
-            settings.facilitator = Some(cli.relay.clone());
-            settings.protocol = ProbeProtocol::Rnsp;
+            settings.facilitator = Some(facilitator_name.clone());
+            settings.protocol = protocol;
             settings.facilitator2 = cli.facilitator2.clone();
             settings.protocol2 = if cli.protocol2 == "rnsp" {
                 ProbeProtocol::Rnsp

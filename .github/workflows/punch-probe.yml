@@ -34,8 +34,16 @@ on:
         required: false
         default: "900"
       relay:
-        description: "relay TCP dial = UDP facilitator (host:port)"
+        description: "relay TCP dial (host:port); also the UDP facilitator unless `facilitator` is set"
         required: true
+      facilitator:
+        description: "the facilitator to probe instead of the relay (host:port; empty: the relay)"
+        required: false
+        default: ""
+      protocol:
+        description: "how to probe the facilitator: rnsp or stun"
+        required: false
+        default: "rnsp"
       attempts:
         description: "proposals per runner"
         required: false
@@ -110,6 +118,8 @@ jobs:
           IN_LISTEN_SECS: ${{ inputs.listen_secs }}
           IN_STUN: ${{ inputs.stun }}
           IN_FAC2: ${{ inputs.facilitator2 }}
+          IN_FAC: ${{ inputs.facilitator }}
+          IN_PROTO: ${{ inputs.protocol }}
           JOB: ${{ matrix.job }}
           TARGET: ${{ matrix.target }}
           ATTEMPTS_OVERRIDE: ${{ matrix.attempts }}
@@ -121,6 +131,8 @@ jobs:
           extra=()
           if [ -n "$STUN" ]; then extra+=(--stun "$STUN"); fi
           if [ -n "$FAC2" ]; then extra+=(--facilitator2 "$FAC2" --protocol2 stun); fi
+          if [ -n "$IN_FAC" ]; then extra+=(--facilitator "$IN_FAC"); fi
+          if [ "$IN_PROTO" = "stun" ]; then extra+=(--protocol stun); fi
           bin="target/$TARGET/release/punch-probe"
           out="punch-probe-$JOB.jsonl"
           if [ "$ROLE" = "listen" ]; then
