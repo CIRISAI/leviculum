@@ -377,6 +377,12 @@ pub(crate) struct DirectLinks {
     /// spray, birthday sockets). Absent: the default rule
     /// ([`NodeCore::direct_link_escalation_allowed`]).
     pub(super) escalation_trust: BTreeMap<LinkId, bool>,
+    /// +ciris (review pass 5, item 1): the session whose commit wait ran out
+    /// on this link after this side sent its COMPLETE. The peer may have
+    /// moved on that COMPLETE (and lowered its MTU); its own COMPLETE, if it
+    /// comes, says so, and then this side lowers too. A side lowers exactly
+    /// when it holds both COMPLETEs.
+    pub(super) committing_aborted: BTreeMap<LinkId, SessionId>,
     /// +ciris (fourth review): links whose running punch escalates on the
     /// DEFAULT rule (no host decision), at most [`MAX_DEFAULT_ESCALATIONS`].
     default_escalating: BTreeSet<LinkId>,
@@ -547,6 +553,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// identified is not trust; the host decides.
     pub fn direct_link_escalation_allowed(&self, link_id: &LinkId, role: Role) -> bool {
         self.direct_link_escalation(link_id, role).0
+    }
+
+    /// +ciris: take (or keep) one of the MAX_DEFAULT_ESCALATIONS places for
+    /// `link_id`; false when they are all taken by other links.
+    fn reserve_default_escalation(&mut self, link_id: LinkId) -> bool {
+        let d = &mut self.direct_links.default_escalating;
+        if d.contains(&link_id) || d.len() < MAX_DEFAULT_ESCALATIONS {
+            d.insert(link_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// The gate's answer, and whether the host gave it (true) or the
@@ -777,11 +795,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // +ciris (fourth review item 6): "b" asks the PEER to spray
             // toward us, which helps only if this end may hold its birthday
             // sockets open: our own gate decides whether we say it.
-            let own_gate = self
-                .direct_links
-                .sessions
-                .get(&link_id)
-                .is_some_and(|s| self.direct_link_escalation_allowed(&link_id, s.role()));
+            // +ciris (review pass 5, item 5): and the cap on concurrent
+            // default-rule escalations: a slot is reserved here, the moment
+            // "b" is promised, and released with the session.
+            let role = self.direct_links.sessions.get(&link_id).map(|s| s.role());
+            let own_gate = match role {
+                Some(role) if birthday => {
+                    let (allowed, by_host) = self.direct_link_escalation(&link_id, role);
+                    allowed && (by_host || self.reserve_default_escalation(link_id))
+                }
+                _ => false,
+            };
             let birthday = birthday && own_gate;
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => match public {
@@ -1086,6 +1110,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
+                self.direct_link_late_complete(link_id, session);
                 self.direct_link_nudged(&link_id, session);
             }
             if matches!(
@@ -1469,11 +1494,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     // alone are capped at once; a host's yes is not. A
                     // capped punch runs plain.
                     let escalate = if allowed && !by_host {
-                        let d = &mut self.direct_links.default_escalating;
-                        if d.contains(&link_id) || d.len() < MAX_DEFAULT_ESCALATIONS {
-                            d.insert(link_id);
+                        if self.reserve_default_escalation(link_id) {
                             true
                         } else {
+                            let d = &self.direct_links.default_escalating;
                             crate::tracing::info!(
                                 target: DIRECT_LINK_DIAG_TARGET,
                                 event = "escalation_capped",
@@ -1567,6 +1591,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
         self.direct_links.default_escalating.remove(&link_id);
+        // +ciris (review pass 5, item 1): a commit wait that ran out after
+        // this side's COMPLETE: the peer's may still come (see
+        // direct_link_late_complete).
+        if failure == Some(Failure::Timeout) && session.phase() == Phase::Committing {
+            self.direct_links
+                .committing_aborted
+                .insert(link_id, *session.id());
+        } else {
+            self.direct_links.committing_aborted.remove(&link_id);
+        }
         // Its signals still waiting on the channel would outlive it: a
         // REQUEST sent after the initiator gave up starts the peer on a
         // session nobody holds (Codex review on #74).
@@ -1890,6 +1924,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.pending)
             + hc::btree_map_bytes(&d.escalation_trust)
             + hc::btree_set_bytes(&d.default_escalating)
+            + hc::btree_map_bytes(&d.committing_aborted)
             + hc::btree_map_bytes(&d.outbox)
             + outbox
             + hc::vec_deque_bytes(&d.jobs)
@@ -1914,6 +1949,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.last_proposal_ms.remove(link_id);
         self.direct_links.escalation_trust.remove(link_id);
         self.direct_links.default_escalating.remove(link_id);
+        self.direct_links.committing_aborted.remove(link_id);
         self.direct_links.peer_holding.remove(link_id);
         self.direct_links.mtu_before_move.remove(link_id);
         self.direct_links.retries.remove(link_id);
@@ -2201,6 +2237,29 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.direct_links.attached.remove(&index);
         self.release_direct_attachment(index, attachment, "peer nudged over the relay", true);
+    }
+
+    /// +ciris (review pass 5, item 1): the peer's COMPLETE for a session whose
+    /// commit wait already ran out here. This side sent its own COMPLETE
+    /// before giving up, so now both are held: the peer moved (or holds its
+    /// move) and lowered its MTU, and this side lowers to match, keeping what
+    /// it had for resources the peer cut before (`mtu_before_move`). The
+    /// signals ride the link's ordered, reliable channel, so the COMPLETE
+    /// arrives while the link lives; if the link dies first there is nothing
+    /// to reconcile.
+    fn direct_link_late_complete(&mut self, link_id: LinkId, session: &SessionId) {
+        if self.direct_links.committing_aborted.get(&link_id) != Some(session) {
+            return;
+        }
+        self.direct_links.committing_aborted.remove(&link_id);
+        if let Some(link) = self.links.get_mut(&link_id) {
+            self.direct_links.lower_for_move(link_id, link);
+            crate::tracing::info!(
+                link = %HexShort(link_id.as_bytes()),
+                session = %HexShort(session),
+                "direct link: the peer's late COMPLETE; lowering the MTU to match its move"
+            );
+        }
     }
 
     /// +ciris (strategy review): the peer's REJECT for `session`, which this

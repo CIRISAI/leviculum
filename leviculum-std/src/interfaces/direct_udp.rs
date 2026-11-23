@@ -45,9 +45,11 @@ use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, O
 /// NATs sit at the bottom of that range, so a 30 s refresh can arrive just
 /// after the mapping went.
 pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
-/// Silence after which the direct path is declared dead (four missed
-/// keepalives of ours; two of an rns-rs peer's 30 s ones).
-pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Silence after which the direct path is declared dead, with a peer whose
+/// keepalives are unsequenced (rns-rs): four of ITS 30 s keepalives, so one
+/// lost does not drop the path (review pass 5, item 4: 60 s took one). Fast
+/// liveness (FAST_*) is for a peer that acks sequenced probes.
+pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 /// +ciris: the acked probe interval, and the silence after which the path
 /// is dead (three missed probes, each answered by an ack and matched by the
 /// peer's own), with a peer that acks them.

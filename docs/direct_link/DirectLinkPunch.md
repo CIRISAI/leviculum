@@ -126,6 +126,16 @@ through `TearDown`.
   session (core `direct_link_peer_aborted`): `NoLoneMove` can break while the
   abort crosses the relay, `NoLoneMoveSettled` says it never outlasts it.
 
+- **M14, review pass 5:** the link MTU (`Lowered`: a side holds both
+  COMPLETEs) with `MtuAgree` once the relay has delivered everything, the
+  peer's late COMPLETE lowering a side whose commit wait ran out; the
+  core's Punching wait (`DriverSlow`, `PunchTimeout`: REJECT, then fail);
+  the fallback's nudge in `RecvAbortDirect` (the retry it schedules is a new
+  attempt, outside this one); the responder's grace fixed at one tick,
+  whatever the initiator does, as the code's 2 s is. Held (deferred) moves
+  are not modelled: a held move exists only after both COMPLETEs, so for
+  the MTU it is the moved case.
+
 ## Timeline of an escalated attempt (the code's numbers)
 
 | when (from the responder's READY; the initiator starts on its arrival) | what happens |

@@ -984,7 +984,7 @@ pub(crate) async fn punch_with_ports(
     } else {
         Duration::ZERO
     };
-    let deadline = now + shape.window + grace;
+    let deadline = now + punch_span(shape.window) + grace;
     let escalate_at = now + ESCALATE_AFTER;
     let result = match extras {
         None => punch_inner(
@@ -1035,6 +1035,18 @@ pub(crate) async fn punch_with_ports(
 /// [`ESCALATED_PUNCH_WINDOW`] with room for a start skew of up to
 /// RESPONDER_START_DELAY_MAX and the birthday side's next refresh.
 pub(crate) const SPRAY_PER_TICK: usize = 32;
+
+/// +ciris (review pass 5, item 2): sources one socket remembers having
+/// acked, for nominations; a punch has at most PUNCH_TARGETS_MAX targets.
+const ACKED_SOURCES_MAX: usize = wire::PUNCH_TARGETS_MAX;
+
+/// +ciris (review pass 5, item 3): how long the punch itself may run in a
+/// `window`: the path-MTU probe that follows a success runs inside the same
+/// window, so the verdict is in by its end and no wait an older peer shares
+/// grows.
+pub(crate) fn punch_span(window: Duration) -> Duration {
+    window.saturating_sub(MTU_PROBE_WINDOW)
+}
 
 /// +ciris (pair agreement): how long past its window a responder waits for a
 /// nomination, and an initiator that settled keeps nominating. Inside both
@@ -1285,7 +1297,12 @@ async fn punch_birthday(
                             // - the responder: only a nomination, which its
                             //   birthday tasks alone report (they ack every
                             //   other punch and keep listening).
-                            Some(_) if !may_switch(nomination, acked(&primary_heard), acked(&primary_acked)) => {
+                            Some((_, _, seq)) if !may_switch(
+                                nomination,
+                                acked(&primary_heard),
+                                acked(&primary_acked),
+                                seq.is_some(),
+                            ) => {
                                 ignored += 1;
                             }
                             Some((index, src, seq)) => break BirthdayEnd::Hit { index, src, seq },
@@ -1348,10 +1365,20 @@ async fn punch_birthday(
 /// punch off the session socket? Without nomination only while that socket
 /// has heard nothing; the initiator while nothing it sent from it is acked;
 /// the responder on a nomination only (its tasks report nothing else).
-pub(crate) fn may_switch(nomination: Option<Role>, heard: bool, acked: bool) -> bool {
+pub(crate) fn may_switch(
+    nomination: Option<Role>,
+    heard: bool,
+    acked: bool,
+    hit_is_punch: bool,
+) -> bool {
     match nomination {
         None => !heard,
-        Some(Role::Initiator) => !acked,
+        // Review pass 5, item 6: an ACK-only hit says the peer heard this
+        // birthday socket, not that it punches it (it punches its first
+        // advertised and four reflexive sources at most). Leaving a session
+        // socket that has heard the peer for it could strand the path; a
+        // PUNCH hit means the peer does punch this socket.
+        Some(Role::Initiator) => !acked && (hit_is_punch || !heard),
         Some(Role::Responder) => true,
     }
 }
@@ -1386,6 +1413,7 @@ fn birthday_task(
             );
             let mut refresh = tokio::time::interval(BIRTHDAY_REFRESH);
             let mut buf = [0u8; 512];
+            let mut acked_here: Vec<SocketAddr> = Vec::new();
             loop {
                 tokio::select! {
                     _ = refresh.tick() => {
@@ -1406,9 +1434,17 @@ fn birthday_task(
                         };
                         if ack_all {
                             let Some(seq) = seq else { continue };
+                            let src = canonical(src);
                             let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
                             let _ = extra.send_to(&ack, on_socket(&extra, src)).await;
-                            if !wire::punch_seq_nominates(seq) {
+                            // A nomination counts only from a source this
+                            // socket had already acked (review pass 5,
+                            // item 2).
+                            let known = acked_here.contains(&src);
+                            if !known && acked_here.len() < ACKED_SOURCES_MAX {
+                                acked_here.push(src);
+                            }
+                            if !(wire::punch_seq_nominates(seq) && known) {
                                 continue;
                             }
                         }
@@ -1474,6 +1510,9 @@ async fn punch_inner(
     // +ciris (pair agreement): the initiator's settled pair, being
     // nominated until the responder acks a nomination on it.
     let mut nominating: Option<SocketAddr> = None;
+    // +ciris (review pass 5, item 2): sources whose punch this socket has
+    // acked, the only ones a nomination is taken from.
+    let mut acked_sources: Vec<SocketAddr> = Vec::new();
     // The initiator nominates up to NOMINATION_GRACE past its window: the
     // responder waits as long.
     let mut deadline = deadline;
@@ -1641,12 +1680,19 @@ async fn punch_inner(
                         // +ciris (pair agreement): the initiator named this
                         // pair; it proved it both ways from its side, so the
                         // responder takes it as it arrived.
+                        // Only from a source this socket had already heard
+                        // and acked (review pass 5, item 2): one forged
+                        // datagram from a new address must not pin the path.
                         if nomination == Some(Role::Responder)
                             && wire::punch_seq_nominates(their_seq)
+                            && acked_sources.contains(&src)
                         {
                             diag.nominated_ms = Some(diag.elapsed_ms());
                             diag.path = Some(src);
                             return Some(Punched { peer: src, early });
+                        }
+                        if !acked_sources.contains(&src) && acked_sources.len() < ACKED_SOURCES_MAX {
+                            acked_sources.push(src);
                         }
                         // A source that sent a valid punch proved the token:
                         // it is punched (tokened) from now on.
@@ -2453,7 +2499,8 @@ fn log_probe_diag(
 /// punch interval or two of this end (both finish punching on each other's
 /// acks), so a window this much longer than the sending phase covers it.
 const MTU_PROBE_SEND: Duration = Duration::from_millis(400);
-const MTU_PROBE_WINDOW: Duration = Duration::from_millis(600);
+const MTU_PROBE_WINDOW: Duration =
+    Duration::from_millis(leviculum_core::direct_link::session::MTU_PROBE_WINDOW_MS);
 const MTU_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// +ciris (leviculum#104): find the largest of [`wire::MTU_PROBE_STEPS`] the
@@ -4185,13 +4232,16 @@ mod tests {
     #[test]
     fn the_birthday_switch_follows_the_nomination_rule() {
         // Without nomination: only while the session socket heard nothing.
-        assert!(may_switch(None, false, false));
-        assert!(!may_switch(None, true, false));
-        // The initiator: while nothing it sent is acked, heard or not.
-        assert!(may_switch(Some(Role::Initiator), true, false));
-        assert!(!may_switch(Some(Role::Initiator), true, true));
+        assert!(may_switch(None, false, false, true));
+        assert!(!may_switch(None, true, false, true));
+        // The initiator: while nothing it sent is acked; an ack-only hit
+        // only while the session socket has heard nothing either (pass 5).
+        assert!(may_switch(Some(Role::Initiator), true, false, true));
+        assert!(!may_switch(Some(Role::Initiator), true, false, false));
+        assert!(may_switch(Some(Role::Initiator), false, false, false));
+        assert!(!may_switch(Some(Role::Initiator), true, true, true));
         // The responder: on a nomination, whatever its session socket saw.
-        assert!(may_switch(Some(Role::Responder), true, true));
+        assert!(may_switch(Some(Role::Responder), true, true, true));
     }
 
     /// +ciris (review item 6): only the SAME socket toward two observers
@@ -4921,6 +4971,79 @@ mod tests {
             pa.peer,
             winner.local_addr().unwrap(),
             "A nominated B's winner"
+        );
+    }
+
+    /// +ciris (review pass 5, item 2): a nomination is taken only from a
+    /// source the responder had already heard and acked. One forged
+    /// nominate-flagged punch from a new address (the token travels in clear,
+    /// so an on-path observer has it) does not pin the path there.
+    #[tokio::test]
+    async fn one_forged_nomination_from_a_new_address_pins_nothing() {
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        let nobody = loopback().await.local_addr().unwrap();
+        let forger = loopback().await;
+        let (session, token) = ([47u8; 16], [48u8; 32]);
+        let forged = wire::punch_frame(
+            PunchKind::Punch,
+            &session,
+            &token,
+            wire::punch_seq(1, 0, true),
+        );
+        let send = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = forger.send_to(&forged, b_addr).await;
+        };
+        let shape = PunchShape {
+            window: Duration::from_millis(1_500),
+            nomination: Some(Role::Responder),
+        };
+        let (r, _) = tokio::join!(
+            punch_with_ports(
+                &b,
+                None,
+                std::slice::from_ref(&nobody),
+                &[],
+                &session,
+                &token,
+                None,
+                test_budget(),
+                shape
+            ),
+            send
+        );
+        assert!(
+            r.is_none(),
+            "settled on a forged nomination: {:?}",
+            r.map(|(p, _)| p.peer)
+        );
+    }
+
+    /// +ciris (review pass 5, item 3): the punch ends a probe's length before
+    /// its window, so the verdict, the path-MTU probe included, is in by the
+    /// window's end.
+    #[test]
+    fn the_verdict_with_its_mtu_probe_fits_the_window() {
+        for window in [PUNCH_WINDOW, ESCALATED_PUNCH_WINDOW] {
+            assert!(
+                punch_span(window) + MTU_PROBE_WINDOW <= window,
+                "{window:?}"
+            );
+        }
+    }
+
+    /// +ciris (review pass 5, item 4): with an unsequenced peer (rns-rs, a
+    /// keepalive every 30 s) the path survives one lost keepalive: four of
+    /// its intervals before it is called dead.
+    #[test]
+    fn an_unsequenced_peer_survives_a_lost_keepalive() {
+        let plain = DirectUdpTiming::default();
+        assert!(!plain.sequenced);
+        assert!(
+            plain.inactivity >= 4 * Duration::from_secs(30),
+            "{:?}",
+            plain.inactivity
         );
     }
 

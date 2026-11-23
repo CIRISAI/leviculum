@@ -47,6 +47,8 @@ CONSTANTS
                          \* FALSE: the code before it (each side its own).
     Glare, BInitiatedLink,
     RelayLossy, RelayDup, NetLossy, Teardown, KeepaliveOK,
+    DriverSlow,          \* the driver's punch verdict may come after the
+                         \* core's Punching wait (pass 5 (3))
     RelaySlow,           \* timers run while relay signals are in flight (a
                          \* bounded but long delay): a Committing wait may run
                          \* out with the peer's COMPLETE still on its way
@@ -337,6 +339,12 @@ RecvOther(s) ==
       [] m.t = "COMPLETE" /\ phase[s] = "Committing" ->
             /\ phase' = [phase EXCEPT ![s] = "Connected"]
             /\ UNCHANGED <<failure, peerAdv, peerPred, peerB, peerDone, punchVars>>
+      \* Pass 5 (1): the peer's COMPLETE arriving after this side's commit
+      \* wait ran out: both COMPLETEs are now held, so this side lowers its
+      \* MTU (core direct_link_late_complete), as the peer did when it moved.
+      [] m.t = "COMPLETE" /\ phase[s] = "Failed" /\ punch[s] = "ok" ->
+            /\ peerDone' = [peerDone EXCEPT ![s] = TRUE]
+            /\ UNCHANGED <<phase, failure, peerAdv, peerPred, peerB, punchVars>>
       [] m.t = "REJECT" /\ phase[s] \in {"Punching", "Committing"} ->
             /\ phase' = [phase EXCEPT ![s] = "Failed"]
             /\ failure' = [failure EXCEPT ![s] = "Rejected(" \o m.r \o ")"]
@@ -421,8 +429,11 @@ Tokened(kind) == kind \in {"P", "A", "N", "AN"}
 \* punch_inner returns, or starts nominating, the moment it sees it).
 CanSettle(s) == ~(Nominate /\ role[s] = "R")
                 /\ \E h \in heard[s] : h \in acked[s] /\ h[1] = active[s]
+\* The responder under nomination waits NOMINATION_GRACE past its window
+\* (one tick here), unconditionally, as the code's fixed 2 s does.
+Grace(s) == IF Nominate /\ role[s] = "R" THEN 1 ELSE 0
 Tick(s) ==
-    /\ linkUp /\ Punching(s) /\ ~Nominating(s) /\ tick[s] < W /\ ~DueTo(s) /\ SkewOK(s)
+    /\ linkUp /\ Punching(s) /\ ~Nominating(s) /\ tick[s] < W + Grace(s) /\ ~DueTo(s) /\ SkewOK(s)
     /\ ~CanSettle(s)
     /\ LET esc  == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] = {}
            drop == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] /= {}
@@ -491,7 +502,8 @@ NomSrc(s) == IF path[s][2][1] = "lan" THEN Lan(s)
              ELSE <<SrcIP(s, path[s][2]),
                     CHOOSE p \in {m[3] : m \in {y \in nat[s] : y[1] = active[s] /\ y[2] = path[s][2]}} : TRUE>>
 \* NOMINATION_GRACE (std): a settled initiator nominates one tick past its
-\* window; the responder waits for it as long (PunchFail).
+\* window; the responder waits as long, whatever the initiator does (Tick,
+\* PunchFail).
 NomTick(s) ==
     /\ linkUp /\ Nominating(s) /\ tick[s] < W + 1 /\ ~DueTo(s)
     /\ tick' = [tick EXCEPT ![s] = @ + 1]
@@ -635,11 +647,7 @@ PunchOK(s) ==
                    linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
 
 PunchFail(s) ==
-    /\ linkUp /\ Punching(s) /\ tick[s] = (IF Nominating(s) THEN W + 1 ELSE W)
-    \* The responder's grace: it waits while the initiator can still settle
-    \* or is nominating (the code: NOMINATION_GRACE past its window).
-    /\ ~(Nominate /\ role[s] = "R" /\ Punching(Other(s))
-          /\ (CanSettle(Other(s)) \/ Nominating(Other(s))))
+    /\ linkUp /\ Punching(s) /\ tick[s] = (IF Nominating(s) THEN W + 1 ELSE W + Grace(s))
     /\ ~(\E d \in net : ToSide(d, s) /\ ~StrangerAddr(d))
     \* A nominating initiator whose nomination was never acked, and a
     \* responder never nominated, fail at the window as any punch does.
@@ -656,6 +664,19 @@ PunchFail(s) ==
                    linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
 
 -----------------------------------------------------------------------------
+\* Pass 5 (3): the core's Punching wait runs out before the driver's verdict
+\* (DriverSlow): it fails and says so (REJECT), as a failed punch does.
+PunchTimeout(s) ==
+    /\ DriverSlow /\ linkUp /\ Punching(s)
+    /\ phase' = [phase EXCEPT ![s] = "Failed"]
+    /\ failure' = [failure EXCEPT ![s] = "PunchFailed"]
+    /\ punch' = [punch EXCEPT ![s] = "aborted"]
+    /\ Send(s, [t |-> "REJECT", sess |-> sid[s], r |-> "PUNCH_FAILED"])
+    /\ UNCHANGED <<role, sid, adv, pred, bday, peerAdv, peerPred, peerB, nat, ctr,
+                   open, active, targets, held, knocking, sprayed, punched,
+                   heard, acked, tick, escalated, path, peerDone, fellBack, net,
+                   linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
+
 Waiting(s) == phase[s] \in {"Proposing", "AwaitingReady", "Committing"}
 \* The peer will send this side nothing more: it ended, or sits Idle with
 \* nothing on its way to it, or both wait in Committing (each lost the
@@ -684,10 +705,15 @@ Timeout(s) ==
 RecvAbortDirect(s) ==
     /\ linkUp /\ chan[s] /= <<>> /\ Front(s).t = "REJECT" /\ Front(s).sess = sid[s]
     /\ phase[s] = "Connected"
-    /\ chan' = [chan EXCEPT ![s] = Tail(@)]
+    \* Back to the relay, and the fallback's nudge (a COMPLETE for the
+    \* session, which the peer ignores as a protocol message). The retry the
+    \* code schedules is a new attempt, outside this model's one.
+    /\ chan' = [chan EXCEPT ![s] = Tail(@), ![Other(s)] = Append(@, [t |-> "COMPLETE", sess |-> sid[s]])]
+    /\ relaySaw' = relaySaw \cup {"COMPLETE"}
     /\ fellBack' = [fellBack EXCEPT ![s] = TRUE]
     /\ UNCHANGED <<phase, role, sid, failure, adv, pred, bday, peerAdv, peerPred,
-                   peerB, nat, ctr, punchVars, peerDone, net, linkUp, knowVars>>
+                   peerB, nat, ctr, punchVars, peerDone, net, linkUp,
+                   facSaw, facSessions, strangerSaw, persisted, duped>>
 
 LoseSignal(s) ==
     /\ RelayLossy /\ chan[s] /= <<>>
@@ -742,7 +768,7 @@ Next ==
         \/ \E p \in Ports : ProbeAnswer(s, p)
         \/ ProbeFail(s)
         \/ RecvRequest(s) \/ RecvOther(s) \/ RecvAbortDirect(s)
-        \/ Tick(s) \/ NomTick(s) \/ PunchOK(s) \/ PunchFail(s)
+        \/ Tick(s) \/ NomTick(s) \/ PunchOK(s) \/ PunchFail(s) \/ PunchTimeout(s)
         \/ Timeout(s) \/ LoseSignal(s) \/ DupSignal(s) \/ FallBack(s)
     \/ DeliverAny \/ LoseAny \/ StrangerGetsAny
     \/ TearDown
@@ -809,6 +835,18 @@ ForgedReflexiveNeverWrongDirect ==
 NoPathToStranger ==
     \A s \in Sides : path[s] = None \/ ~Stranger \/ path[s][2][2] /= StrangerPort
                                   \/ path[s][2][1] \notin {Other(s), Other(s) \o "2"}
+
+\* Pass 5 (1): a side's link MTU is lowered exactly when it holds BOTH
+\* COMPLETEs: it sent its own (its punch succeeded under the commit) and got
+\* the peer's (it moved, or the peer's COMPLETE came after its own wait ran
+\* out). The signals ride the ordered, reliable channel, so once the relay
+\* has delivered what it carries the two ends agree; if the link dies first
+\* there is nothing to reconcile (linkUp). A lossy relay (G2) is the
+\* exception the model shows elsewhere.
+Lowered(s) == punch[s] = "ok" /\ (phase[s] = "Connected" \/ peerDone[s])
+MtuAgree ==
+    (linkUp /\ ~RelayLossy /\ Over /\ \A s \in Sides : chan[s] = <<>>)
+        => Lowered("A") = Lowered("B")
 
 \* No side direct while the other has failed.
 NoLoneMove == ~(\E s \in Sides : phase[s] = "Connected" /\ phase[Other(s)] = "Failed")

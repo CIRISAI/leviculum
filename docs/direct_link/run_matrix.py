@@ -28,11 +28,11 @@ BASE = dict(
     HAIRPIN="FALSE", FACA="F1", FACB="F1", FAC="TRUE", FORGED="FALSE", OBS="2",
     POOL="paired", STRANGER="FALSE", POLICY="ask_host", HOSTA="unset", HOSTB="unset",
     IDENT="TRUE", GLARE="FALSE",
-    BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE", RSLOW="FALSE", NLOSS="FALSE", TEAR="FALSE",
+    BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE", RSLOW="FALSE", DSLOW="FALSE", NLOSS="FALSE", TEAR="FALSE",
     KEEP="TRUE", HIJACK="FALSE", NAMED="FALSE", MAC="FALSE", HITS="any", BUDGET="TRUE",
     NP="4", W="6", K="1", NOM="TRUE", SKEW="0", LAT="0",
     INVS="TypeOK CapsHeld PathHeardAndAcked SamePath ForgedReflexiveNeverWrongDirect "
-         "NoLoneMove NoLoneMoveSettled EscalationNeedsTrust AbortLeavesLinkUnchanged FacilitatorCarriesNothing FacilitatorKnowledge "
+         "MtuAgree NoLoneMove NoLoneMoveSettled EscalationNeedsTrust AbortLeavesLinkUnchanged FacilitatorCarriesNothing FacilitatorKnowledge "
          "StrangerKnowledge NoTokenToStranger NoPathToStranger NoLearnedAddressPersisted "
          "NotStuck RecordOutcome",
     PROPS="EventuallyOver LinkPathTransitions",
@@ -98,6 +98,9 @@ def scenarios():
     # NoLoneMoveSettled says it never outlasts the relay's delivery.
     yield "easy-relay-slow", dict(easy, RSLOW="TRUE")
     yield "samenat-hairpin-relay-slow", dict(easy, SAMENAT="TRUE", HAIRPIN="TRUE", RSLOW="TRUE")
+    # Pass 5: the driver's verdict after the core's Punching wait.
+    yield "easy-driver-slow", dict(easy, DSLOW="TRUE")
+    yield "hard-relay-slow", dict(hard, RSLOW="TRUE")
     yield "easy-net-lossy", dict(easy, NLOSS="TRUE")
     yield "easy-teardown", dict(easy, TEAR="TRUE")
     yield "easy-keepalive-lost", dict(easy, KEEP="FALSE")

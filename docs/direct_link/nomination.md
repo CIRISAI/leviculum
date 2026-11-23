@@ -26,7 +26,13 @@ settles on its own, as rns-rs does.
    Then its punch succeeds on that address.
 4. The responder (controlled) never settles on its own. It settles on the
    source address a nominate-flagged punch arrived from, on the socket it
-   arrived on, and acks it. Both direct interfaces then start on one 5-tuple;
+   arrived on, and acks it, but only from a source it had already heard and
+   acked on that socket (review pass 5): one forged nominate-flagged
+   datagram from a new address pins nothing. The token travels in clear in
+   every punch frame, so an observer ON the path can still send a punch and
+   then a nomination from its own address, exactly as it could already
+   become a heard-and-acked pair without nomination; MAC'd frames
+   (frame-auth-note.md, rns-rs v0.14's framing below) are what closes that. Both direct interfaces then start on one 5-tuple;
    nothing is re-pointed after the move.
 
 ## A lost nomination

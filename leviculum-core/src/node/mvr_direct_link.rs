@@ -676,6 +676,54 @@ fn a_direct_side_honours_the_peers_abort_for_its_own_session() {
     )));
 }
 
+/// +ciris (review pass 5, item 1): the commit race again, for the link MTU.
+/// B moves on A's COMPLETE (and lowers); A's commit wait runs out with B's
+/// COMPLETE still on the relay (A sends REJECT, B comes back); B's COMPLETE
+/// then reaches A. A side lowers exactly when it holds both COMPLETEs, so A
+/// lowers then and the two ends agree on the link MDU.
+#[test]
+fn after_the_commit_race_both_ends_agree_on_the_mtu() {
+    let mut pair = Pair::new();
+    // A link over TCP-sized MTU, which a move lowers.
+    large_mtu(&mut pair, 16_384);
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    // A's punch succeeds: COMPLETE to B, which is still punching.
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    let (_, ev) = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    pair.b_events.extend(ev);
+    // B's succeeds: it holds A's COMPLETE, so it moves at once. Its own
+    // COMPLETE is held back from A.
+    let out = pair.b.direct_link_punched(&session, Some(b_direct));
+    let mut held_complete = packets(&out);
+    // The COMPLETE may wait out the channel's pacing: B's next tick sends it.
+    pair.b.transport.clock().advance(1_000);
+    held_complete.extend(packets(&pair.b.handle_timeout()));
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    let b_mtu = pair.b.links.get(&pair.link).unwrap().negotiated_mtu();
+    // A's commit wait runs out: REJECT to B, which comes back.
+    let wait = crate::direct_link::session::COMMIT_TIMEOUT_MS
+        + crate::direct_link::session::NOMINATION_GRACE_MS;
+    pair.a.transport.clock().advance(wait + 1_000);
+    let out = pair.a.handle_timeout();
+    pair.a_events.extend(out.events.clone());
+    assert!(a_failed(&pair).contains(&Failure::Timeout));
+    let (_, ev) = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    pair.b_events.extend(ev);
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        None,
+        "B came back"
+    );
+    // B's COMPLETE arrives late: A lowers to match.
+    let a_before = pair.a.links.get(&pair.link).unwrap().negotiated_mtu();
+    assert_ne!(a_before, b_mtu, "the disagreement the fix removes");
+    let _ = deliver(&mut pair.a, pair.a_mesh, held_complete);
+    let a_after = pair.a.links.get(&pair.link).unwrap().negotiated_mtu();
+    assert_eq!(a_after, b_mtu, "both ends at one MTU");
+}
+
 /// +ciris (strategy model): a miss is retried whichever verdict lands
 /// first: the peer's REJECT PUNCH_FAILED arriving before this side's own
 /// punch ends schedules the retry exactly as this side's own PunchFailed does.
@@ -729,7 +777,12 @@ fn a_third_default_rule_escalation_runs_plain() {
         links.push(link);
     }
     pair.b.set_direct_link_escalation(&links[3], Some(true));
+    // A may escalate on every link, so its spray follows B's "b" alone.
+    for link in &links {
+        pair.a.set_direct_link_escalation(link, Some(true));
+    }
     let mut escalates = Vec::new();
+    let mut sprays = Vec::new();
     for link in &links {
         let out = pair.a.propose_direct_link(link).expect("propose");
         pair.pump_from_a(packets(&out));
@@ -739,13 +792,30 @@ fn a_third_default_rule_escalation_runs_plain() {
         let out = pair.b.accept_direct_link(link).expect("accept");
         pair.pump_from_b(packets(&out));
         let _ = only_probe(&pair.b.take_direct_link_jobs());
-        let _ = pair.b.direct_link_probed(&session, Some(b_public()));
+        // B's NAT is random: it would say "b" (review pass 5, item 5).
+        let out = pair.b.direct_link_probed_with_candidates(
+            &session,
+            Some(b_public()),
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
         match pair.b.take_direct_link_jobs().as_slice() {
             [DirectLinkJob::Punch { escalate, .. }] => escalates.push(*escalate),
             other => panic!("expected one punch, got {other:?}"),
         }
         let _ = pair.a.take_direct_link_jobs();
+        pair.pump_from_b(packets(&out));
+        match pair.a.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { spray, .. }] => sprays.push(*spray),
+            other => panic!("expected A's punch, got {other:?}"),
+        }
     }
+    assert_eq!(
+        sprays,
+        [true, true, false, true],
+        "B promises \"b\" only with a place under the cap (pass 5, item 5)"
+    );
     assert_eq!(
         escalates,
         [true, true, false, true],

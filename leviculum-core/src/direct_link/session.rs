@@ -46,6 +46,12 @@ pub const COMMIT_TIMEOUT_MS: u64 = 12_000;
 /// nomination, and a settled initiator keeps nominating.
 pub const NOMINATION_GRACE_MS: u64 = 2_000;
 
+/// +ciris (review pass 5, item 3): how long the driver's path-MTU probe runs
+/// after a punch succeeds. The driver ends its punch this much before its
+/// window, so the verdict (probe included) is in by the window's end and
+/// every wait an older peer shares keeps its length.
+pub const MTU_PROBE_WINDOW_MS: u64 = 600;
+
 /// +ciris: the punch and commit waits of an ESCALATED punch: its window
 /// (13 s), the responder's start delay (up to 1.5 s), the nomination grace
 /// (2 s) and slack. A plain punch keeps [`PUNCH_TIMEOUT_MS`] (plus the
@@ -697,6 +703,17 @@ impl Session {
             Some(deadline) if now_ms >= deadline => {
                 let failure = if self.phase == Phase::Discovering {
                     Failure::ProbeFailed
+                } else if self.phase == Phase::Punching && self.commit {
+                    // +ciris (review pass 5, item 3): the driver's verdict
+                    // never came; say so, as a failed punch does, so the
+                    // peer does not sit out its whole commit wait.
+                    return alloc::vec![
+                        Step::Send(Signal::Reject {
+                            session: self.id,
+                            reason: REJECT_PUNCH_FAILED,
+                        }),
+                        Step::Failed(Failure::PunchFailed),
+                    ];
                 } else if self.phase == Phase::Punching {
                     Failure::PunchFailed
                 } else if self.phase == Phase::Committing {
@@ -1107,6 +1124,68 @@ mod tests {
         );
         let ((_, a_nom), (_, b_nom)) = shapes(false, false, false, false, false);
         assert_eq!((a_nom, b_nom), (None, None));
+    }
+
+    /// +ciris (review pass 5, item 3): every wait covers the slowest verdict:
+    /// the responder's start delay, its punch window (the path-MTU probe now
+    /// runs inside it) and, with nomination, the grace. A Punching timeout
+    /// says so.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn every_wait_covers_the_slowest_verdict_and_a_punch_timeout_says_so() {
+        let start = 1_500; // RESPONDER_START_DELAY_MAX_MS
+        for (escalated, nominate, wait) in [
+            (false, false, PUNCH_TIMEOUT_MS),
+            (false, true, PUNCH_TIMEOUT_MS + NOMINATION_GRACE_MS),
+            (true, true, ESCALATED_PUNCH_TIMEOUT_MS),
+        ] {
+            let window = if escalated {
+                ESCALATED_PUNCH_WINDOW_MS
+            } else {
+                PUNCH_WINDOW_MS
+            };
+            let grace = if nominate { NOMINATION_GRACE_MS } else { 0 };
+            assert!(
+                start + window + grace <= wait,
+                "escalated={escalated} nominate={nominate}: {} > {wait}",
+                start + window + grace
+            );
+        }
+        assert!(MTU_PROBE_WINDOW_MS < PUNCH_WINDOW_MS);
+        // The timeout itself: under the commit, REJECT, then fail.
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        let steps = a.probed(a_pub(), 1);
+        let Signal::Request {
+            initiator_public, ..
+        } = request_from(&steps).clone()
+        else {
+            unreachable!()
+        };
+        let (mut b, b_steps) = Session::respond(
+            ID,
+            TOKEN,
+            t(),
+            initiator_public,
+            Vec::new(),
+            ProbeProtocol::Rnsp,
+            2,
+        );
+        b.set_commit(true);
+        deliver(&b_steps, &mut a, 3);
+        let b_steps = b.probed(b_pub(), 4);
+        assert_eq!(b.phase(), Phase::Punching);
+        let deadline = b.deadline_ms().unwrap();
+        assert_eq!(
+            b.poll(deadline),
+            [
+                Step::Send(Signal::Reject {
+                    session: ID,
+                    reason: REJECT_PUNCH_FAILED
+                }),
+                Step::Failed(Failure::PunchFailed)
+            ]
+        );
+        let _ = b_steps;
     }
 
     /// +ciris (strategy review): a side whose commit wait runs out tells the
