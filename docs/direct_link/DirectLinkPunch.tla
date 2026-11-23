@@ -1,7 +1,8 @@
 --------------------------- MODULE DirectLinkPunch ---------------------------
 (***************************************************************************)
 (* The direct-link punch of leviculum (+ciris), as the code does it at the *)
-(* head of diag/punch-telemetry after the third review (2cf992a): two     *)
+(* head of diag/punch-telemetry after the fourth review (nomination, the  *)
+(* socket ramp, symmetric acks; earlier runs: the third review, 2cf992a): two *)
 (* nodes A and B share a relayed RNS link; A proposes; each probes ITS OWN *)
 (* facilitator; both punch; the link moves only when both punches         *)
 (* succeeded (the two-sided commit, #89).                                 *)
@@ -40,10 +41,15 @@ CONSTANTS
                          \* (core set_direct_link_escalation): "unset" |
                          \* "allow" | "deny"
     PeerIdentified,      \* the link's remote identity is known (LINKIDENTIFY)
-    KF,                  \* birthday sockets on own evidence alone (the
-                         \* fallback; 32 in the code against K's 128)
+    Nominate,            \* pair agreement (fourth review H): the initiator
+                         \* nominates the pair it settled on, the responder
+                         \* takes it; acks must echo the punch's own target.
+                         \* FALSE: the code before it (each side its own).
     Glare, BInitiatedLink,
     RelayLossy, RelayDup, NetLossy, Teardown, KeepaliveOK,
+    RelaySlow,           \* timers run while relay signals are in flight (a
+                         \* bounded but long delay): a Committing wait may run
+                         \* out with the peer's COMPLETE still on its way
     HijackPlant, NamedFacilitatorPlant,
     MacFrames,           \* EXPLORATION, not the code: frame-auth-note.md's MAC'd
                          \* punch frames, sent to knocked and sprayed ports
@@ -68,10 +74,15 @@ PubIP(s) == s
 PeerIP(s) == IF Pooling = "arbitrary" /\ Map(s) /= "EIM" THEN s \o "2" ELSE s
 Lan(s) == <<"lan", s>>
 Socks == 0..K
-\* Birthday sockets a side may hold: K (MAX_BIRTHDAY_SOCKETS, 128) on
-\* two-observer evidence, KF (FALLBACK_BIRTHDAY_SOCKETS, 32) on own
-\* evidence alone (std start_punch, third review N1c).
-BdayK == IF Observers >= 2 THEN K ELSE KF
+\* Birthday sockets a side may hold: K (MAX_BIRTHDAY_SOCKETS, 256), on
+\* either evidence kind (the fallback split is gone, fourth review G),
+\* opened one tranche per tick while silent (the ramp: 64 every 500 ms in
+\* the code, one socket per tick here).
+BdayK == K
+\* A datagram the model sends: `to` is, for an ack, the address the punch it
+\* answers was sent to (what the punch's target index names in the code);
+\* None for anything else.
+Dg(src, dst, k) == [src |-> src, dst |-> dst, k |-> k, w |-> 0, to |-> None]
 \* Ports a side's NAT may allocate: never the stranger's.
 Alloc(s) == IF Stranger THEN Ports \ {StrangerPort} ELSE Ports
 
@@ -299,6 +310,7 @@ RecvRequest(s) ==
 
 RecvOther(s) ==
     /\ linkUp /\ chan[s] /= <<>> /\ Front(s).t /= "REQUEST"
+    /\ ~(Front(s).t = "REJECT" /\ Front(s).sess = sid[s] /\ phase[s] = "Connected")
     /\ chan' = [chan EXCEPT ![s] = Tail(@)]
     /\ LET m == Front(s) IN
        IF m.sess /= sid[s] THEN
@@ -328,7 +340,7 @@ RecvOther(s) ==
       [] m.t = "REJECT" /\ phase[s] \in {"Punching", "Committing"} ->
             /\ phase' = [phase EXCEPT ![s] = "Failed"]
             /\ failure' = [failure EXCEPT ![s] = "Rejected(" \o m.r \o ")"]
-            /\ punch' = [punch EXCEPT ![s] = IF @ = "running" THEN "aborted" ELSE @]
+            /\ punch' = [punch EXCEPT ![s] = IF @ \in {"running", "nominating"} THEN "aborted" ELSE @]
             /\ UNCHANGED <<peerAdv, peerPred, peerB, peerDone, open, active, targets,
                            held, knocking, sprayed, punched, heard, acked, tick,
                            escalated, path>>
@@ -338,7 +350,10 @@ RecvOther(s) ==
 
 -----------------------------------------------------------------------------
 (* The punch (std punch_inner / punch_birthday).                            *)
-Punching(s) == phase[s] = "Punching" /\ punch[s] = "running"
+Punching(s) == phase[s] = "Punching" /\ punch[s] \in {"running", "nominating"}
+\* The initiator has settled and nominates its pair until the nomination is
+\* acked (std punch_inner, `nominating`).
+Nominating(s) == phase[s] = "Punching" /\ punch[s] = "nominating"
 Listening(s) == Punching(s) \/ phase[s] \in {"Committing", "Connected"}
 PeerPub(s) == peerAdv[s]
 ToSide(d, s) == d.dst[1] \in {PubIP(s), PeerIP(s)} \/ d.dst = Lan(s)
@@ -358,9 +373,9 @@ SilentPrimary(s) == heard[s] = {} /\ acked[s] = {}
 \* The trust gate (core direct_link_escalation_allowed, third review): may
 \* this side's punch escalate at all (knocks, spray, birthday sockets)? The
 \* host's decision for the link when it gave one; else never under
-\* accept_all; yes on a link this side initiated; under identified_only, yes
-\* for an identified peer; under ask_host, yes as the responder (the session
-\* exists only once the host accepted); never under reject.
+\* accept_all; yes on a link this side initiated; never under
+\* identified_only (fourth review B); under ask_host, yes as the responder
+\* (the session exists only once the host accepted); never under reject.
 Policy(s) == IF s = "B" THEN PolicyB ELSE "ask_host"
 HostTrust(s) == IF s = "A" THEN HostTrustA ELSE HostTrustB
 LinkInitiator(s) == IF s = "B" THEN BInitiatedLink ELSE ~BInitiatedLink
@@ -368,7 +383,9 @@ Escalates(s) ==
     IF HostTrust(s) /= "unset" THEN HostTrust(s) = "allow"
     ELSE CASE Policy(s) = "accept_all"      -> FALSE
            [] LinkInitiator(s)              -> TRUE
-           [] Policy(s) = "identified_only" -> PeerIdentified
+           \* fourth review B: an identity costs nothing to make; no by
+           \* default, the host decides (PeerIdentified no longer matters).
+           [] Policy(s) = "identified_only" -> FALSE
            [] Policy(s) = "ask_host"        -> role[s] = "R"
            [] OTHER                         -> FALSE
 
@@ -398,10 +415,15 @@ Allocations(s, k, D) ==
 \* Whether a datagram toward address x carries the token: a punch to a
 \* target does; a knock to a predicted or sprayed port does not, unless the
 \* HijackPlant puts 72be0f9's tokened spray back.
-Tokened(kind) == kind \in {"P", "A"}
+Tokened(kind) == kind \in {"P", "A", "N", "AN"}
 
+\* A side that has proved a pair settles before it punches again (std
+\* punch_inner returns, or starts nominating, the moment it sees it).
+CanSettle(s) == ~(Nominate /\ role[s] = "R")
+                /\ \E h \in heard[s] : h \in acked[s] /\ h[1] = active[s]
 Tick(s) ==
-    /\ linkUp /\ Punching(s) /\ tick[s] < W /\ ~DueTo(s) /\ SkewOK(s)
+    /\ linkUp /\ Punching(s) /\ ~Nominating(s) /\ tick[s] < W /\ ~DueTo(s) /\ SkewOK(s)
+    /\ ~CanSettle(s)
     /\ LET esc  == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] = {}
            drop == ~escalated[s] /\ tick[s] + 1 >= EscAt /\ heard[s] /= {}
            kn   == IF ~Escalates(s) THEN {}
@@ -409,8 +431,13 @@ Tick(s) ==
            \* BIRTHDAY_AFTER on two-observer evidence; the full silence gate
            \* (ESCALATE_AFTER) on own evidence alone (Eric's fallback).
            gate == IF Observers >= 2 THEN BdayAt ELSE EscAt
+           \* The ramp (fourth review G): one more socket a tick while
+           \* silent, up to BdayK.
+           \* Gated on ACKS, not on hearing (strategy model): a side heard but
+           \* never acked is exactly one whose own mapping is in the way.
            openB == bday[s] /\ Escalates(s) /\ SprayBudget /\ active[s] = 0 /\ tick[s] + 1 >= gate
-                    /\ SilentPrimary(s) /\ open[s] = {0}
+                    /\ acked[s] = {} /\ Cardinality(open[s] \ {0}) < BdayK
+           nextJ == Cardinality(open[s])
            k == active[s]
        IN
        \E spray \in SprayDraws(s) :
@@ -430,20 +457,19 @@ Tick(s) ==
        LET mapped == IF exhausted THEN {} ELSE newD
            nat1 == IF exhausted THEN nat[s] ELSE nat[s] \cup {<<k, x, f[x]>> : x \in newD}
            freeB == Alloc(s) \ {m[3] : m \in nat1}
-           gs == IF openB THEN {h \in [1..BdayK -> freeB] : \A i, j \in 1..BdayK : i /= j => h[i] /= h[j]}
-                 ELSE {}
+           gs == IF openB THEN freeB ELSE {}
            openB2 == openB /\ gs /= {}
        IN
-       \E g \in (IF openB2 THEN gs ELSE {[x \in {} |-> 0]}) :
-       LET nat2 == IF openB2 THEN nat1 \cup {<<j, PeerPub(s), g[j]>> : j \in 1..BdayK} ELSE nat1
-           opened == IF openB2 THEN 0..BdayK ELSE open[s]
+       \E g \in (IF openB2 THEN gs ELSE {0}) :
+       LET nat2 == IF openB2 THEN nat1 \cup {<<nextJ, PeerPub(s), g>>} ELSE nat1
+           opened == IF openB2 THEN open[s] \cup {nextJ} ELSE open[s]
            sendable(x) == x[1] = "lan" \/ x \notin newD \/ x \in mapped
            srcOf(x) == IF x[1] = "lan" THEN Lan(s)
                        ELSE <<SrcIP(s, x), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = k /\ y[2] = x}} : TRUE>>
-           pk == {[src |-> srcOf(x), dst |-> x, k |-> "P", w |-> 0] : x \in {y \in tokTo : sendable(y)}}
-           kk == {[src |-> srcOf(x), dst |-> x, k |-> "K", w |-> 0] : x \in {y \in knockTo \ tokTo : sendable(y)}}
+           pk == {Dg(srcOf(x), x, "P") : x \in {y \in tokTo : sendable(y)}}
+           kk == {Dg(srcOf(x), x, "K") : x \in {y \in knockTo \ tokTo : sendable(y)}}
            bsrc(j) == <<PeerIP(s), CHOOSE p \in {m[3] : m \in {y \in nat2 : y[1] = j /\ y[2] = PeerPub(s)}} : TRUE>>
-           bk == {[src |-> bsrc(j), dst |-> PeerPub(s), k |-> "P", w |-> 0] : j \in (opened \ {0}) \ {k}}
+           bk == {Dg(bsrc(j), PeerPub(s), "P") : j \in (opened \ {0}) \ {k}}
        IN
        /\ nat' = [nat EXCEPT ![s] = nat2]
        /\ ctr' = [ctr EXCEPT ![s] = IF Map(s) = "EDMseq" THEN @ + Cardinality(mapped) ELSE @]
@@ -459,11 +485,36 @@ Tick(s) ==
                    peerPred, peerB, active, targets, heard, acked, punch, path,
                    peerDone, fellBack, linkUp, knowVars>>
 
+\* The initiator, settled, sends only a nomination on its pair each tick,
+\* until one is acked (std punch_inner, `nominating`).
+NomSrc(s) == IF path[s][2][1] = "lan" THEN Lan(s)
+             ELSE <<SrcIP(s, path[s][2]),
+                    CHOOSE p \in {m[3] : m \in {y \in nat[s] : y[1] = active[s] /\ y[2] = path[s][2]}} : TRUE>>
+\* NOMINATION_GRACE (std): a settled initiator nominates one tick past its
+\* window; the responder waits for it as long (PunchFail).
+NomTick(s) ==
+    /\ linkUp /\ Nominating(s) /\ tick[s] < W + 1 /\ ~DueTo(s)
+    /\ tick' = [tick EXCEPT ![s] = @ + 1]
+    /\ net' = Aged(s) \cup {Dg(NomSrc(s), path[s][2], "N")}
+    /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
+                   peerPred, peerB, nat, ctr, open, active, targets, held, knocking,
+                   sprayed, punched, heard, acked, escalated, punch, path,
+                   peerDone, fellBack, linkUp, knowVars>>
+
 DstSide(d) == IF d.dst = Lan("A") \/ d.dst[1] \in {"A", "A2"} THEN "A" ELSE "B"
 HairOK(d) == ~SameNAT \/ d.dst[1] = "lan" \/ Hairpin
 Reaches(d) == LET s == DstSide(d) IN
               IF d.dst[1] = "lan" THEN active[s] ELSE Admit(s, d.src, d.dst)
-Ack(d) == [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]
+\* The reply leaves through the replying socket's own mapping toward the
+\* punch's source (made here if none: WithMapping, at the port the punch
+\* arrived at), not from wherever the punch arrived: on an endpoint-dependent
+\* NAT the two can differ. `to` records where the punch was sent. (Earlier
+\* runs shortcut the reply to come from `d.dst`, which no NAT does.)
+AckOf(s, k, d, natS) ==
+    [src |-> IF d.src[1] = "lan" THEN Lan(s)
+             ELSE <<SrcIP(s, d.src),
+                    CHOOSE p \in {m[3] : m \in {x \in natS : x[1] = k /\ x[2] = d.src}} : TRUE>>,
+     dst |-> d.src, k |-> IF d.k = "N" THEN "AN" ELSE "A", w |-> 0, to |-> d.dst]
 
 \* The stranger: a host on the hard side's IP holding StrangerPort. It sees
 \* what lands there; it can answer with a valid tokened frame only if a
@@ -472,8 +523,8 @@ StrangerGets(d) ==
     /\ d \in net /\ StrangerAddr(d)
     /\ net' = (net \ {d}) \cup
               (IF (Tokened(d.k) /\ ~MacFrames) \/ "tokened" \in strangerSaw
-               THEN {[src |-> d.dst, dst |-> d.src, k |-> "P", w |-> 0],
-                     [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0]}
+               THEN {Dg(d.dst, d.src, "P"),
+                     [src |-> d.dst, dst |-> d.src, k |-> "A", w |-> 0, to |-> d.dst]}
                ELSE {})
     /\ strangerSaw' = strangerSaw \cup {IF ~Tokened(d.k) THEN "K" ELSE IF MacFrames THEN "mac" ELSE "tokened"}
     /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
@@ -486,39 +537,70 @@ Deliver(d) ==
            k == Reaches(d)
            taken == linkUp /\ Listening(s) /\ HairOK(d) /\ k /= -1
            onActive == taken /\ k = active[s]
-           \* std punch_birthday: switch to birthday socket k only while the
-           \* session socket has heard and been acked by nothing (review 5).
+           \* std punch_birthday / may_switch (docs/direct_link/nomination.md):
+           \* without Nominate, switch to birthday socket k only while the
+           \* session socket has heard and been acked by nothing (review 5);
+           \* the initiator while nothing is acked; the responder only on a
+           \* nomination.
+           mayLeave == IF ~Nominate THEN SilentPrimary(s)
+                       ELSE IF role[s] = "I" THEN acked[s] = {}
+                       ELSE d.k = "N"
            switch == taken /\ k /= active[s] /\ k /= 0 /\ active[s] = 0 /\ Punching(s)
-                     /\ Tokened(d.k) /\ SilentPrimary(s)
-           reply == (onActive \/ switch) /\ d.k = "P"
+                     /\ Tokened(d.k) /\ mayLeave
+           isPunch == d.k \in {"P", "N"}
+           isAck == d.k \in {"A", "AN"}
+           \* Under Nominate the responder's birthday sockets ack every punch
+           \* and keep listening (std birthday_task, ack_all).
+           bdayAcks == Nominate /\ role[s] = "R" /\ Punching(s) /\ taken /\ k /= 0
+           reply == (onActive \/ switch \/ bdayAcks) /\ isPunch
+           natS == IF reply /\ d.dst[1] /= "lan"
+                   THEN WithMapping(s, k, d.src,
+                          CHOOSE p \in {m[3] : m \in {x \in nat[s] : <<SrcIP(s, x[2]), x[3]>> = d.dst}} : TRUE)
+                   ELSE nat[s]
+           \* The responder takes the nominated pair as it arrived (fourth
+           \* review H): Nominate is the code; ~Nominate the code before it.
+           settles == Nominate /\ role[s] = "R" /\ Punching(s) /\ d.k = "N" /\ (onActive \/ switch)
+           \* The initiator's nomination was acked on its pair: it is done.
+           nomDone == Nominating(s) /\ onActive /\ d.k = "AN" /\ d.src = path[s][2]
+           \* An ack counts only from an address this side punched; under
+           \* Nominate only for a punch sent to that very address (the code's
+           \* target index in the sequence number); with the plant, a sprayed
+           \* port counts too (72be0f9).
+           ackOurs == (d.src \in punched[s] /\ (~Nominate \/ d.to = d.src))
+                      \/ (HijackPlant /\ d.src \in sprayed[s])
        IN
-       /\ net' = (net \ {d}) \cup (IF reply THEN {Ack(d)} ELSE {})
-       /\ nat' = IF reply /\ d.dst[1] /= "lan"
-                 THEN [nat EXCEPT ![s] = WithMapping(s, k, d.src,
-                          CHOOSE p \in {m[3] : m \in {x \in nat[s] : <<SrcIP(s, x[2]), x[3]>> = d.dst}} : TRUE)]
-                 ELSE nat
-       /\ IF onActive /\ Punching(s) /\ d.k = "P"
-          THEN /\ heard' = [heard EXCEPT ![s] = @ \cup {<<k, d.src>>}]
-               \* A source that sent a valid punch proved the token.
-               /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
-               /\ UNCHANGED <<acked, open, active>>
-          ELSE IF onActive /\ Punching(s) /\ d.k = "A"
-          THEN \* Ours only if this side sent a tokened punch there (review
-               \* 1); with the plant, a sprayed port counts too (72be0f9).
-               /\ acked' = [acked EXCEPT ![s] =
-                     IF d.src \in punched[s] \/ (HijackPlant /\ d.src \in sprayed[s])
-                     THEN @ \cup {<<k, d.src>>} ELSE @]
-               /\ UNCHANGED <<heard, targets, open, active>>
-          ELSE IF switch
-          THEN /\ active' = [active EXCEPT ![s] = k]
-               /\ open' = [open EXCEPT ![s] = {k}]
-               /\ heard' = [heard EXCEPT ![s] = IF d.k = "P" THEN {<<k, d.src>>} ELSE {}]
-               /\ acked' = [acked EXCEPT ![s] = {}]
-               /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
-          ELSE UNCHANGED <<heard, acked, targets, open, active>>
-    /\ UNCHANGED <<phase, role, sid, failure, chan, adv, pred, bday, peerAdv,
+       /\ net' = (net \ {d}) \cup (IF reply THEN {AckOf(s, k, d, natS)} ELSE {})
+       /\ nat' = [nat EXCEPT ![s] = natS]
+       /\ IF settles \/ nomDone
+          THEN /\ path' = [path EXCEPT ![s] = IF settles THEN <<k, d.src>> ELSE @]
+               /\ punch' = [punch EXCEPT ![s] = "ok"]
+               /\ phase' = [phase EXCEPT ![s] = IF peerDone[s] THEN "Connected" ELSE "Committing"]
+               /\ chan' = [chan EXCEPT ![Other(s)] = Append(@, [t |-> "COMPLETE", sess |-> sid[s]])]
+               /\ relaySaw' = relaySaw \cup {"COMPLETE"}
+               /\ heard' = [heard EXCEPT ![s] = IF settles THEN @ \cup {<<k, d.src>>} ELSE @]
+               /\ active' = [active EXCEPT ![s] = k]
+               /\ open' = [open EXCEPT ![s] = IF k = 0 THEN @ ELSE {k}]
+               /\ UNCHANGED <<acked, targets>>
+          ELSE /\ UNCHANGED <<path, punch, phase, chan, relaySaw>>
+               /\ IF onActive /\ Punching(s) /\ isPunch
+                  THEN /\ heard' = [heard EXCEPT ![s] = @ \cup {<<k, d.src>>}]
+                       \* A source that sent a valid punch proved the token.
+                       /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
+                       /\ UNCHANGED <<acked, open, active>>
+                  ELSE IF onActive /\ Punching(s) /\ isAck
+                  THEN /\ acked' = [acked EXCEPT ![s] = IF ackOurs THEN @ \cup {<<k, d.src>>} ELSE @]
+                       /\ UNCHANGED <<heard, targets, open, active>>
+                  ELSE IF switch
+                  THEN /\ active' = [active EXCEPT ![s] = k]
+                       /\ open' = [open EXCEPT ![s] = {k}]
+                       /\ heard' = [heard EXCEPT ![s] = IF isPunch THEN {<<k, d.src>>} ELSE {}]
+                       /\ acked' = [acked EXCEPT ![s] = {}]
+                       /\ targets' = [targets EXCEPT ![s] = @ \cup {d.src}]
+                  ELSE UNCHANGED <<heard, acked, targets, open, active>>
+    /\ UNCHANGED <<role, sid, failure, adv, pred, bday, peerAdv,
                    peerPred, peerB, ctr, held, knocking, sprayed, punched, tick,
-                   escalated, punch, path, peerDone, fellBack, linkUp, knowVars>>
+                   escalated, peerDone, fellBack, linkUp, facSaw, facSessions,
+                   strangerSaw, persisted, duped>>
 
 Lose(d) ==
     /\ NetLossy /\ d \in net
@@ -528,22 +610,42 @@ Lose(d) ==
                    linkUp, knowVars>>
 
 PunchOK(s) ==
-    /\ linkUp /\ Punching(s)
+    /\ linkUp /\ Punching(s) /\ ~Nominating(s)
+    \* Under Nominate the responder settles only on a nomination (Deliver).
+    /\ ~(Nominate /\ role[s] = "R")
     /\ \E h \in heard[s] : h \in acked[s] /\ h[1] = active[s]
     /\ LET h == CHOOSE x \in heard[s] : x \in acked[s] /\ x[1] = active[s] IN
        /\ path' = [path EXCEPT ![s] = h]
-       /\ punch' = [punch EXCEPT ![s] = "ok"]
-       /\ phase' = [phase EXCEPT ![s] = IF peerDone[s] THEN "Connected" ELSE "Committing"]
-       /\ Send(s, [t |-> "COMPLETE", sess |-> sid[s]])
+       /\ IF Nominate
+          THEN \* The initiator nominates its pair at once, and every tick
+               \* until it is acked (NomTick); COMPLETE waits for that.
+               /\ punch' = [punch EXCEPT ![s] = "nominating"]
+               /\ net' = net \cup {Dg(IF h[2][1] = "lan" THEN Lan(s)
+                                     ELSE <<SrcIP(s, h[2]),
+                                            CHOOSE p \in {m[3] : m \in {y \in nat[s] : y[1] = active[s] /\ y[2] = h[2]}} : TRUE>>,
+                                     h[2], "N")}
+               /\ UNCHANGED <<phase, chan, relaySaw>>
+          ELSE /\ punch' = [punch EXCEPT ![s] = "ok"]
+               /\ phase' = [phase EXCEPT ![s] = IF peerDone[s] THEN "Connected" ELSE "Committing"]
+               /\ Send(s, [t |-> "COMPLETE", sess |-> sid[s]])
+               /\ UNCHANGED net
     /\ UNCHANGED <<role, sid, failure, adv, pred, bday, peerAdv, peerPred, peerB,
                    nat, ctr, open, active, targets, held, knocking, sprayed,
                    punched, heard, acked, tick, escalated, peerDone, fellBack,
-                   net, linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
+                   linkUp, facSaw, facSessions, strangerSaw, persisted, duped>>
 
 PunchFail(s) ==
-    /\ linkUp /\ Punching(s) /\ tick[s] = W
+    /\ linkUp /\ Punching(s) /\ tick[s] = (IF Nominating(s) THEN W + 1 ELSE W)
+    \* The responder's grace: it waits while the initiator can still settle
+    \* or is nominating (the code: NOMINATION_GRACE past its window).
+    /\ ~(Nominate /\ role[s] = "R" /\ Punching(Other(s))
+          /\ (CanSettle(Other(s)) \/ Nominating(Other(s))))
     /\ ~(\E d \in net : ToSide(d, s) /\ ~StrangerAddr(d))
-    /\ ~(\E h \in heard[s] : h \in acked[s] /\ h[1] = active[s])
+    \* A nominating initiator whose nomination was never acked, and a
+    \* responder never nominated, fail at the window as any punch does.
+    /\ \/ Nominating(s)
+       \/ Nominate /\ role[s] = "R"
+       \/ ~(\E h \in heard[s] : h \in acked[s] /\ h[1] = active[s])
     /\ punch' = [punch EXCEPT ![s] = "fail"]
     /\ phase' = [phase EXCEPT ![s] = "Failed"]
     /\ failure' = [failure EXCEPT ![s] = "PunchFailed"]
@@ -563,11 +665,29 @@ PeerEnded(s) == \/ phase[Other(s)] \in {"Failed", "Gone", "Connected"}
                 \/ (phase[Other(s)] = "Idle" /\ chan[Other(s)] = <<>>)
                 \/ (phase[Other(s)] = "Committing" /\ phase[s] = "Committing")
 Timeout(s) ==
-    /\ linkUp /\ Waiting(s) /\ chan[s] = <<>> /\ (PeerEnded(s) \/ RelayLossy)
+    /\ linkUp /\ Waiting(s)
+    /\ \/ chan[s] = <<>> /\ (PeerEnded(s) \/ RelayLossy)
+       \/ RelaySlow /\ phase[s] = "Committing"
     /\ phase' = [phase EXCEPT ![s] = "Failed"]
     /\ failure' = [failure EXCEPT ![s] = "Timeout"]
-    /\ UNCHANGED <<role, sid, chan, adv, pred, bday, peerAdv, peerPred, peerB, nat,
-                   ctr, punchVars, peerDone, fellBack, net, linkUp, knowVars>>
+    \* The code (strategy review): a commit wait that runs out says so, so
+    \* a peer that moves on this side's late COMPLETE comes back.
+    /\ IF phase[s] = "Committing"
+       THEN Send(s, [t |-> "REJECT", sess |-> sid[s], r |-> "PUNCH_FAILED"])
+       ELSE UNCHANGED <<chan, relaySaw>>
+    /\ UNCHANGED <<role, sid, adv, pred, bday, peerAdv, peerPred, peerB, nat,
+                   ctr, punchVars, peerDone, fellBack, net, linkUp,
+                   facSaw, facSessions, strangerSaw, persisted, duped>>
+
+\* A direct side honours an abort for its own session (core
+\* direct_link_peer_aborted): back to the relay.
+RecvAbortDirect(s) ==
+    /\ linkUp /\ chan[s] /= <<>> /\ Front(s).t = "REJECT" /\ Front(s).sess = sid[s]
+    /\ phase[s] = "Connected"
+    /\ chan' = [chan EXCEPT ![s] = Tail(@)]
+    /\ fellBack' = [fellBack EXCEPT ![s] = TRUE]
+    /\ UNCHANGED <<phase, role, sid, failure, adv, pred, bday, peerAdv, peerPred,
+                   peerB, nat, ctr, punchVars, peerDone, net, linkUp, knowVars>>
 
 LoseSignal(s) ==
     /\ RelayLossy /\ chan[s] /= <<>>
@@ -591,7 +711,7 @@ TearDown ==
     /\ linkUp' = FALSE
     /\ phase' = [s \in Sides |-> IF phase[s] = "Idle" THEN "Idle" ELSE "Gone"]
     /\ chan' = [s \in Sides |-> <<>>]
-    /\ punch' = [s \in Sides |-> IF punch[s] = "running" THEN "aborted" ELSE punch[s]]
+    /\ punch' = [s \in Sides |-> IF punch[s] \in {"running", "nominating"} THEN "aborted" ELSE punch[s]]
     /\ UNCHANGED <<role, sid, failure, adv, pred, bday, peerAdv, peerPred, peerB,
                    nat, ctr, open, active, targets, held, knocking, sprayed,
                    punched, heard, acked, tick, escalated, path, peerDone,
@@ -621,8 +741,8 @@ Next ==
         \/ Propose(s)
         \/ \E p \in Ports : ProbeAnswer(s, p)
         \/ ProbeFail(s)
-        \/ RecvRequest(s) \/ RecvOther(s)
-        \/ Tick(s) \/ PunchOK(s) \/ PunchFail(s)
+        \/ RecvRequest(s) \/ RecvOther(s) \/ RecvAbortDirect(s)
+        \/ Tick(s) \/ NomTick(s) \/ PunchOK(s) \/ PunchFail(s)
         \/ Timeout(s) \/ LoseSignal(s) \/ DupSignal(s) \/ FallBack(s)
     \/ DeliverAny \/ LoseAny \/ StrangerGetsAny
     \/ TearDown
@@ -632,8 +752,8 @@ Fairness ==
         /\ WF_vars(Propose(s))
         /\ WF_vars(\E p \in Ports : ProbeAnswer(s, p))
         /\ WF_vars(ProbeFail(s))
-        /\ WF_vars(RecvRequest(s)) /\ WF_vars(RecvOther(s))
-        /\ WF_vars(Tick(s)) /\ WF_vars(PunchOK(s)) /\ WF_vars(PunchFail(s))
+        /\ WF_vars(RecvRequest(s)) /\ WF_vars(RecvOther(s)) /\ WF_vars(RecvAbortDirect(s))
+        /\ WF_vars(Tick(s)) /\ WF_vars(NomTick(s)) /\ WF_vars(PunchOK(s)) /\ WF_vars(PunchFail(s))
         /\ WF_vars(Timeout(s))
         /\ WF_vars(FallBack(s))
     /\ WF_vars(DeliverAny \/ StrangerGetsAny)
@@ -663,9 +783,13 @@ Shows(s, k, x) ==
 EscalationNeedsTrust ==
     \A s \in Sides : (knocking[s] /= {} \/ sprayed[s] /= {} \/ open[s] /= {0}) => Escalates(s)
 
-\* A side goes direct only on an address both heard and acked.
+\* A side goes direct only on an address both heard and acked; under
+\* Nominate the responder on the address the nomination came from (heard),
+\* which the initiator proved both ways.
 PathHeardAndAcked ==
-    \A s \in Sides : path[s] /= None => (path[s] \in heard[s] /\ path[s] \in acked[s])
+    \A s \in Sides : path[s] /= None =>
+        /\ path[s] \in heard[s]
+        /\ (path[s] \in acked[s] \/ (Nominate /\ role[s] = "R"))
 
 \* Both direct, on one pair: each side's path address is where the other's
 \* chosen socket, toward its chosen address, appears. This is also
@@ -688,10 +812,18 @@ NoPathToStranger ==
 
 \* No side direct while the other has failed.
 NoLoneMove == ~(\E s \in Sides : phase[s] = "Connected" /\ phase[Other(s)] = "Failed")
+\* The same, once the relay has delivered everything: under RelaySlow a side
+\* may be direct alone while the peer's abort crosses the relay, never after.
+NoLoneMoveSettled ==
+    (\A s \in Sides : chan[s] = <<>>) =>
+        ~(\E s \in Sides : linkPath(s) = "direct" /\ phase[Other(s)] = "Failed")
 
 \* A clean abort leaves the link as it was: relayed, on both sides.
+\* (Once the relay has delivered what it carries: under RelaySlow the peer's
+\* abort may still be in flight.)
 AbortLeavesLinkUnchanged ==
-    (Over /\ \E s \in Sides : phase[s] = "Failed") => \A s \in Sides : linkPath(s) = "relayed"
+    (Over /\ (\A s \in Sides : chan[s] = <<>>) /\ \E s \in Sides : phase[s] = "Failed")
+        => \A s \in Sides : linkPath(s) = "relayed"
 
 \* Nothing but probes goes to or comes from a facilitator; the relay carries
 \* signals only (it never sees a punch, knock or payload).

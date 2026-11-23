@@ -28,11 +28,11 @@ BASE = dict(
     HAIRPIN="FALSE", FACA="F1", FACB="F1", FAC="TRUE", FORGED="FALSE", OBS="2",
     POOL="paired", STRANGER="FALSE", POLICY="ask_host", HOSTA="unset", HOSTB="unset",
     IDENT="TRUE", GLARE="FALSE",
-    BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE", NLOSS="FALSE", TEAR="FALSE",
+    BINIT="FALSE", RLOSS="FALSE", RDUP="FALSE", RSLOW="FALSE", NLOSS="FALSE", TEAR="FALSE",
     KEEP="TRUE", HIJACK="FALSE", NAMED="FALSE", MAC="FALSE", HITS="any", BUDGET="TRUE",
-    NP="4", W="6", K="1", KF="1", SKEW="0", LAT="0",
+    NP="4", W="6", K="1", NOM="TRUE", SKEW="0", LAT="0",
     INVS="TypeOK CapsHeld PathHeardAndAcked SamePath ForgedReflexiveNeverWrongDirect "
-         "NoLoneMove EscalationNeedsTrust AbortLeavesLinkUnchanged FacilitatorCarriesNothing FacilitatorKnowledge "
+         "NoLoneMove NoLoneMoveSettled EscalationNeedsTrust AbortLeavesLinkUnchanged FacilitatorCarriesNothing FacilitatorKnowledge "
          "StrangerKnowledge NoTokenToStranger NoPathToStranger NoLearnedAddressPersisted "
          "NotStuck RecordOutcome",
     PROPS="EventuallyOver LinkPathTransitions",
@@ -81,11 +81,10 @@ def scenarios():
     yield "gate-b-initiated-link-a-allowed", dict(hard, BINIT="TRUE", HOSTA="allow")
     yield "gate-random-proposer-b-initiated", dict(MAPA="EDMrand", FILTA="APDF", MAPB="EIM",
                                                    FILTB="APDF", BINIT="TRUE")
-    # Fallback sockets: K stands for 128 (two-observer), KF for 32 (own
-    # evidence); at the model's scale 2 and 1.
-    yield "sockets-two-observer-K2", dict(hard, K="2", KF="1", OBS="2")
-    yield "sockets-fallback-KF1", dict(hard, K="2", KF="1", OBS="1")
-    yield "sockets-fallback-KF2", dict(hard, K="2", KF="2", OBS="1")
+    # The socket ramp (fourth review G): K stands for 256 on either evidence
+    # kind, opened one socket a tick while silent; at the model's scale 2.
+    yield "sockets-ramp-two-observer-K2", dict(hard, K="2", OBS="2")
+    yield "sockets-ramp-fallback-K2", dict(hard, K="2", OBS="1")
     yield "forged-probe", dict(easy, FORGED="TRUE")
     yield "forged-probe-hard", dict(hard, FORGED="TRUE")
     yield "easy-glare-a-wins", dict(easy, GLARE="TRUE", BINIT="FALSE")
@@ -94,11 +93,22 @@ def scenarios():
     yield "easy-no-facilitator-answer", dict(easy, FAC="FALSE")
     yield "easy-relay-lossy", dict(easy, RLOSS="TRUE")
     yield "easy-relay-dup", dict(easy, RDUP="TRUE")
+    # The commit race (strategy review): timers run while signals cross the
+    # relay. NoLoneMove may be broken while an abort is in flight;
+    # NoLoneMoveSettled says it never outlasts the relay's delivery.
+    yield "easy-relay-slow", dict(easy, RSLOW="TRUE")
+    yield "samenat-hairpin-relay-slow", dict(easy, SAMENAT="TRUE", HAIRPIN="TRUE", RSLOW="TRUE")
     yield "easy-net-lossy", dict(easy, NLOSS="TRUE")
     yield "easy-teardown", dict(easy, TEAR="TRUE")
     yield "easy-keepalive-lost", dict(easy, KEEP="FALSE")
     yield "easy-own-facilitators-differ", dict(easy, FACB="F2")
     yield "samenat-hairpin", dict(easy, SAMENAT="TRUE", HAIRPIN="TRUE")
+    # The code before nomination (fourth review H), kept to show the bug.
+    yield "samenat-hairpin-before-nomination", dict(easy, SAMENAT="TRUE", HAIRPIN="TRUE", NOM="FALSE")
+    # A lost nomination (fourth review H, note 2): bounded by the window, and
+    # the link stays relayed, unchanged, on both sides.
+    yield "samenat-hairpin-net-lossy", dict(easy, SAMENAT="TRUE", HAIRPIN="TRUE", NLOSS="TRUE")
+    yield "hard-net-lossy", dict(hard, NLOSS="TRUE")
     yield "samenat-no-hairpin", dict(easy, SAMENAT="TRUE", HAIRPIN="FALSE")
     yield "samenat-hard-no-hairpin", dict(hard, SAMENAT="TRUE", HAIRPIN="FALSE")
     yield "skew-1", dict(hard, SKEW="1")
@@ -269,7 +279,16 @@ def pair_grid(results):
 
 def table(results):
     """matrix.md: the pair grid, then one row per scenario."""
-    out = ["## NAT pairs (outcome class over every reachable terminal state)", "",
+    out = ["## How to read this", "",
+           "TLC explores every behaviour the model allows, so each row says which outcomes "
+           "are REACHABLE for that pair and scenario, never how likely they are. \"direct or "
+           "relayed\" means both can happen, not that they are equally common: the live runs "
+           "measure likelihood. In particular a pair where BOTH sides map at random "
+           "(EDMrand x EDMrand) needs the spray to hit a birthday socket on each side at once; "
+           "the odds of that are the single-side odds squared over a far larger space, and in "
+           "practice such pairs are negligible (two random carrier NATs facing each other), "
+           "so a direct outcome there is reachable but not to be expected.", "",
+           "## NAT pairs (outcome class over every reachable terminal state)", "",
            pair_grid(results), "## Every scenario", "",
            "| scenario | outcomes reached (terminal states) | invariants violated | liveness | run |",
            "|---|---|---|---|---|"]

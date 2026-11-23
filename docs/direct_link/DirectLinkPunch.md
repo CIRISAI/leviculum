@@ -92,11 +92,54 @@ through `TearDown`.
 - **M9, the trust gate and the socket counts:** `Escalates(s)` is core
   `direct_link_escalation_allowed`: the host's decision (`HostTrustA/B`)
   when given; otherwise never under `accept_all`; yes on a link the side
-  initiated (`BInitiatedLink`); `identified_only`: yes for an identified
-  peer (`PeerIdentified`); `ask_host`: yes as the responder; `reject`: no.
-  A runs `ask_host`. The birthday count is `K` (MAX_BIRTHDAY_SOCKETS, 128)
-  on two-observer evidence and `KF` (FALLBACK_BIRTHDAY_SOCKETS, 32) on own
-  evidence; the matrix runs `K=KF=1`, the `sockets-*` rows `K=2, KF=1|2`.
+  initiated (`BInitiatedLink`); `identified_only`: no (fourth review B: an
+  identity costs nothing; `PeerIdentified` no longer matters); `ask_host`:
+  yes as the responder; `reject`: no. A runs `ask_host`. The birthday count
+  is `K` (MAX_BIRTHDAY_SOCKETS, 256) on either evidence kind (fourth review
+  G removed the 32-socket fallback split), opened one socket a tick while
+  the side hears nothing (the code's ramp: 64 every 500 ms); the matrix runs
+  `K=1`, the `sockets-ramp-*` rows `K=2`.
+- **M10, the reply leaves through the replier's own mapping (fourth
+  review):** an ack goes out through the replying socket's mapping toward
+  the punch's source (made at the arrival port if there is none), and
+  carries `to`, the address the punch was sent to (the code's target index
+  in the sequence number). Earlier runs shortcut the ack to come from the
+  address the punch arrived at, which no NAT does, and which produced acks
+  on EDM pairs that the code never sees.
+- **M11, settling is immediate:** a side that has proved a pair does not
+  tick again before settling (`CanSettle`), as std `punch_inner` returns
+  the moment it sees it. With nomination a responder waits on the
+  initiator, so letting the initiator idle past its proof put the
+  responder's window out first: a model artifact, not the code.
+- **M12, nomination (`Nominate`, fourth review H):** the initiator, once it
+  has a pair heard and acked (an ack counts only if `to` is the address it
+  came from), sends a nomination (`N`) on it every tick until one is acked
+  (`AN`); COMPLETE waits for that. The responder never settles on its own:
+  it settles on the address an `N` arrived from, on the socket it arrived
+  on. `Nominate=FALSE` is the code before it (each side its own first
+  pair), kept for the `-before-nomination` rows.
+
+- **M13, timers during relay delay (`RelaySlow`, strategy review):** a
+  Committing wait may run out while the peer's COMPLETE is still on the
+  relay. The side that times out sends REJECT (core `Session::poll`), and a
+  side that already moved on the late COMPLETE honours an abort for its own
+  session (core `direct_link_peer_aborted`): `NoLoneMove` can break while the
+  abort crosses the relay, `NoLoneMoveSettled` says it never outlasts it.
+
+## Timeline of an escalated attempt (the code's numbers)
+
+| when (from the responder's READY; the initiator starts on its arrival) | what happens |
+|---|---|
+| before: the proposal | each side probes ITS OWN facilitator: one round trip when it answers, at most 6 s (3 attempts of 2 s); the second observer and the allocation probes add at most 1.5 s and are skipped once the main probe took over 3 s |
+| 0 to 1.5 s | the responder starts punching RTT/2 after its READY (at most 1.5 s), so both ends start together |
+| +1.0 s (two-observer evidence) or +1.5 s (own evidence) | the random side, if none of its punches is acked yet: the first 64 birthday sockets |
+| +1.5 s | if nothing is heard: knocks to predicted ports, and the spray (320 knocks a second); the random side's second tranche (128 sockets) |
+| +2.0 s, +2.5 s | third and fourth tranches (192, then all 256), while nothing is acked |
+| about +7.0 s | the spray's 1,750 knocks are spent |
+| +13 s | the escalated window ends (a plain punch: +10 s, as rns-rs) |
+| +15 s | the nomination grace ends: the responder stops waiting for a nomination, the settled initiator stops nominating (plain with nomination: +12 s) |
+| +18 s after the session began punching | the core's punch and commit waits: no verdict means `DirectLinkFailed` (plain: 12 s, 14 s with nomination; an older peer without `"n"` sees exactly the 10 s window and 12 s waits it always did) |
+| after both COMPLETEs | the link moves, one relay trip later |
 
 ## Actions and the code they follow
 
@@ -106,10 +149,11 @@ through `TearDown`.
 | `ProbeAnswer`, `ProbeFail` | std `direct_link.rs` `start_probe` (`probe`, `classify_nat`, `allocation_steps`, `advertise`), core `Session::probed_with_candidates` / `probe_failed` |
 | `RecvRequest` | core `direct_link_signal`: policy, crossing (glare: `keep_ours` / `give_way`), busy, `accept_direct_request` (own facilitator, CC 5.4.6) |
 | `RecvOther` | core `Session::signal` (ACCEPT, READY, COMPLETE, REJECT per phase) |
-| `Tick` | std `punch_inner` tick arm (tokened punches, knocks, spray, escalation) and `punch_birthday` (gate: BIRTHDAY_AFTER on two-observer evidence, ESCALATE_AFTER on own; `birthday_max` 128 / 32; the pair's allowance asked before anything binds), all behind core `direct_link_escalation_allowed` (`Escalates`) |
-| `Deliver` | std `punch_inner` recv arm (ack, heard, peer-reflexive, acked only if punched), `birthday_task` and the switch (only while the session socket is silent) |
+| `Tick` | std `punch_inner` tick arm (tokened punches, each naming its target, knocks, spray, escalation) and `punch_birthday` (gate: BIRTHDAY_AFTER on two-observer evidence, ESCALATE_AFTER on own; the ramp, tranche by tranche while silent, up to 256; the pair's allowance asked before anything binds), all behind core `direct_link_escalation_allowed` (`Escalates`) |
+| `NomTick` | std `punch_inner`, `nominating`: the settled initiator's nomination every tick until acked |
+| `Deliver` | std `punch_inner` recv arm (ack, heard, peer-reflexive, acked only if punched and, under nomination, only for a punch to that address; a responder settles on a nomination, an initiator on its ack), `birthday_task` and the switch (only while the session socket is silent) |
 | `StrangerGets` | another host's socket on the hard side's IP |
-| `PunchOK`, `PunchFail` | std `punch_inner` result → core `Session::punched` (COMPLETE, or REJECT PUNCH_FAILED) |
+| `PunchOK`, `PunchFail` | std `punch_inner` result → core `Session::punched` (COMPLETE, or REJECT PUNCH_FAILED); under nomination `PunchOK` starts the initiator nominating, and the responder never takes it |
 | `Timeout` | core `Session::poll` |
 | `TearDown` | core `direct_link_link_removed` |
 | `FallBack` | core `direct_link_link_stale` / `release_direct_attachment` |
@@ -118,7 +162,7 @@ through `TearDown`.
 
 | property | what it says |
 |---|---|
-| `PathHeardAndAcked` | a side settles on an address only if it both heard and was acked there, on its punching socket |
+| `PathHeardAndAcked` | a side settles on an address only if it both heard and was acked there, on its punching socket (under nomination, the responder: heard there, the nomination's source, which the initiator proved both ways) |
 | `SamePath` | both direct, on ONE socket pair |
 | `ForgedReflexiveNeverWrongDirect` | a direct path always joins A and B; a forged probe answer leads to `relayed`, never a wrong `direct` |
 | `NoPathToStranger` | no side settles, even only into the commit, on a stranger's address (the review's hijack) |
@@ -130,7 +174,7 @@ through `TearDown`.
 | `NoTokenToStranger` | no tokened frame reaches a stranger |
 | `NoLearnedAddressPersisted` | CC 2.6.8: no observed mapping is written into a nodecode, a signed dial hint or any record. **By construction:** the code has no such write, and the model has no action that writes `persisted` |
 | `EscalationNeedsTrust` | no knock, spray or birthday socket from a side the trust gate does not let escalate |
-| `CapsHeld` | spray ≤ S, birthday sockets ≤ K (two-observer) or KF (own evidence), predicted ≤ Q |
+| `CapsHeld` | spray ≤ S, birthday sockets ≤ K, predicted ≤ Q |
 | `NotStuck` | until the attempt is over, some action is enabled |
 | `EventuallyOver` (liveness, weak fairness) | every attempt ends |
 | `LinkPathTransitions` (action) | linkPath moves only along the six transitions |
@@ -178,7 +222,8 @@ through `TearDown`.
   per attempt. The code's per-IP cooldown spans attempts, which the live
   re-proof showed refusing the 2nd and 3rd attempts.
 
-- **G8, path choice is per side (found by this run, `samenat-hairpin`):**
+- **G8, path choice is per side (found by the 2cf992a run, `samenat-hairpin`;
+  FIXED by nomination in the fourth review, see the results):**
   each side settles on the FIRST address both heard and acked (std
   `direct_link.rs:1313`), independently. With two live candidates (same NAT
   with hairpin: LAN and hairpinned public; on EDM pairs, two mappings) A can
