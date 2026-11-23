@@ -18,7 +18,7 @@
 //! 4. `Release`: drop whatever the driver holds for the session.
 //!    `CloseInterface`: tear the direct interface down (its link is gone).
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
@@ -50,6 +50,20 @@ pub const PROPOSAL_COOLDOWN_MS: u64 = 60_000;
 /// up to a quarter of it is added at random ([`jittered`]), so two nodes that
 /// failed together do not try again together (leviculum#96).
 pub const RETRY_BACKOFF_MS: [u64; 6] = [60_000, 120_000, 300_000, 600_000, 900_000, 900_000];
+
+/// +ciris (fourth review item 1): how long before proposing again to a peer
+/// that refused UNSUPPORTED (no facilitator of its own): it may gain one.
+pub const UNSUPPORTED_RETRY_MS: u64 = 600_000;
+
+/// +ciris (fourth review): punches escalating at once on the DEFAULT rule
+/// alone (a link this node initiated, an ask_host request the host
+/// accepted), without a host decision for the link. Two, to match the
+/// driver's process-wide birthday sockets (two sessions' full sets of 256,
+/// leviculum-std `PROCESS_BIRTHDAY_SOCKETS`). A third such punch runs
+/// plain (no knocks, spray or birthday sockets), logged on
+/// `direct_link_diag` as `event=escalation_capped`; a host's yes is not
+/// counted against it.
+pub const MAX_DEFAULT_ESCALATIONS: usize = 2;
 
 /// +ciris: the responder starts punching this long after it sends READY, at
 /// most: half the link's round trip, so both ends start together instead of
@@ -103,15 +117,48 @@ pub enum DirectLinkPolicy {
 }
 
 /// Direct-link settings. The default refuses requests and cannot propose.
+///
+/// `#[non_exhaustive]` (fourth review item 9): build it with
+/// [`DirectLinkConfig::new`] and the `with_*` setters, so a later field is
+/// not a break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct DirectLinkConfig {
     /// How to answer a peer's REQUEST.
     pub policy: DirectLinkPolicy,
-    /// Where this node probes when it proposes. `None` means this node cannot
-    /// propose; it can still accept, probing the facilitator the peer names.
+    /// This node's own facilitator, once resolved. `None` means it cannot
+    /// propose, and (CC 5.4.6) refuses to answer: it probes only its own.
     pub facilitator: Option<SocketAddr>,
     /// How to probe `facilitator`.
     pub protocol: ProbeProtocol,
+    /// +ciris (fourth review item 1): a facilitator is CONFIGURED, whether
+    /// or not it has resolved yet. Configured but unresolved (startup, a DNS
+    /// outage), a peer's proposal is refused BUSY, which the peer retries;
+    /// only a node with none configured refuses UNSUPPORTED.
+    pub facilitator_configured: bool,
+}
+
+impl DirectLinkConfig {
+    /// Settings with `policy`, `facilitator` and `protocol`; the facilitator
+    /// counts as configured when one is given.
+    pub fn new(
+        policy: DirectLinkPolicy,
+        facilitator: Option<SocketAddr>,
+        protocol: ProbeProtocol,
+    ) -> Self {
+        DirectLinkConfig {
+            policy,
+            facilitator,
+            protocol,
+            facilitator_configured: facilitator.is_some(),
+        }
+    }
+
+    /// Whether a facilitator is configured (it may resolve later).
+    pub fn with_facilitator_configured(mut self, configured: bool) -> Self {
+        self.facilitator_configured = configured;
+        self
+    }
 }
 
 /// Why [`NodeCore::propose_direct_link`] did not start an upgrade.
@@ -171,6 +218,10 @@ pub enum DirectLinkJob {
     /// commit, so the peer is a CIRIS node that acks the interface's
     /// sequenced keepalives: the interface may then probe often and give the
     /// path up within seconds instead of minutes.
+    ///
+    /// `#[non_exhaustive]` (+ciris): the fork keeps adding fields; match it
+    /// with `..`.
+    #[non_exhaustive]
     Punch {
         session: SessionId,
         peer: SocketAddr,
@@ -186,12 +237,25 @@ pub enum DirectLinkJob {
         /// +ciris (review item 2): the link, as the escalation budget's pair
         /// key (one peer per link).
         link: [u8; 16],
+        /// +ciris (fourth review B): the peer's identity, when it identified
+        /// itself: the budget's pair allowance is kept per identity as well
+        /// as per link, so one identity cannot buy fresh allowances by
+        /// opening fresh links.
+        peer_identity: Option<[u8; crate::constants::IDENTITY_HASHBYTES]>,
         token: [u8; 32],
         start_delay_ms: u64,
         fast_liveness: bool,
         /// +ciris: spray the peer's public IP (its NAT is random); see
         /// [`crate::direct_link::Step::Punch`].
         spray: bool,
+        /// +ciris: punch for [`crate::direct_link::session::ESCALATED_PUNCH_WINDOW_MS`]
+        /// rather than the plain window: both ends derived it from what they
+        /// advertised.
+        escalated_window: bool,
+        /// +ciris (pair agreement): nomination is in force; `Initiator`
+        /// nominates the pair it settles on, `Responder` settles only on the
+        /// pair nominated to it. `None`: each end settles on its own.
+        nomination: Option<Role>,
     },
     /// The session is over: drop its socket and any task still running.
     Release { session: SessionId },
@@ -231,13 +295,15 @@ struct PendingRequest {
     predicted: Vec<u16>,
     /// +ciris: the initiator asked to be sprayed.
     birthday: bool,
+    /// +ciris (pair agreement): the REQUEST offered nomination.
+    nominate: bool,
 }
 
 /// +ciris: a link this node proposed on, for proposing again.
 #[derive(Debug, Clone)]
 pub(super) struct Retry {
     /// Attempts scheduled so far, an index into [`RETRY_BACKOFF_MS`].
-    attempt: usize,
+    pub(super) attempt: usize,
     /// When to propose again; `None` while nothing is due.
     pub(super) due_ms: Option<u64>,
     /// The host payload of the proposal, sent again with each retry.
@@ -306,7 +372,10 @@ pub(crate) struct DirectLinks {
     /// whether this node may escalate a punch toward that peer (knocks,
     /// spray, birthday sockets). Absent: the default rule
     /// ([`NodeCore::direct_link_escalation_allowed`]).
-    escalation_trust: BTreeMap<LinkId, bool>,
+    pub(super) escalation_trust: BTreeMap<LinkId, bool>,
+    /// +ciris (fourth review): links whose running punch escalates on the
+    /// DEFAULT rule (no host decision), at most [`MAX_DEFAULT_ESCALATIONS`].
+    default_escalating: BTreeSet<LinkId>,
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
     pub(super) jobs: VecDeque<DirectLinkJob>,
@@ -441,19 +510,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         crate::resource::ResourceError::TransferInProgress
     }
 
-    /// +ciris: stop or resume retrying failed proposals (on by default).
-    /// Off, a failed upgrade stays failed until the host proposes again.
     /// +ciris (third review, the gate): the host's trust decision for one
     /// link: may a punch on it escalate (knock the peer's predicted ports,
     /// spray its IP, hold birthday sockets open toward it)? `None` returns
     /// the link to the default rule. CIRIS answers it from consent (own
     /// nodes, mutual contacts, serve seats: the only peers that may hold a
     /// link at all, CC 5.4.6).
+    ///
+    /// Only for a link this node holds (fourth review item 5): a decision
+    /// for an unknown or closed link is dropped, not kept.
     pub fn set_direct_link_escalation(&mut self, link_id: &LinkId, allowed: Option<bool>) {
         let link_id = self.resolve_link_id(link_id);
         match allowed {
             Some(a) => {
-                self.direct_links.escalation_trust.insert(link_id, a);
+                if self.links.contains_key(&link_id) {
+                    self.direct_links.escalation_trust.insert(link_id, a);
+                }
             }
             None => {
                 self.direct_links.escalation_trust.remove(&link_id);
@@ -465,25 +537,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `role`, may escalate. Decided by trust in the PEER, not by the answer
     /// policy: the host's decision when it gave one; otherwise never under
     /// accept_all; yes when this node initiated the link to a peer it chose;
-    /// under identified_only, yes for an identified peer; under ask_host, yes
-    /// for a request the host accepted (the session exists only then).
+    /// under ask_host, yes for a request the host accepted (the session
+    /// exists only then). Under identified_only, NO by default (fourth
+    /// review item 2): an identity costs nothing to make, so being
+    /// identified is not trust; the host decides.
     pub fn direct_link_escalation_allowed(&self, link_id: &LinkId, role: Role) -> bool {
+        self.direct_link_escalation(link_id, role).0
+    }
+
+    /// The gate's answer, and whether the host gave it (true) or the
+    /// default rule did (false).
+    fn direct_link_escalation(&self, link_id: &LinkId, role: Role) -> (bool, bool) {
         let link_id = self.resolve_link_id(link_id);
         if let Some(a) = self.direct_links.escalation_trust.get(&link_id) {
-            return *a;
+            return (*a, true);
         }
         let Some(link) = self.links.get(&link_id) else {
-            return false;
+            return (false, false);
         };
-        match self.direct_links.config.policy {
+        let allowed = match self.direct_links.config.policy {
             DirectLinkPolicy::AcceptAll => false,
             _ if link.is_initiator() => true,
-            DirectLinkPolicy::IdentifiedOnly => link.remote_identity().is_some(),
+            DirectLinkPolicy::IdentifiedOnly => false,
             DirectLinkPolicy::AskHost => role == Role::Responder,
             DirectLinkPolicy::Reject => false,
+        };
+        (allowed, false)
+    }
+
+    /// +ciris (fourth review item 4): the link's establishment retried
+    /// under a fresh id (#66): the host's decision moves with it.
+    pub(super) fn direct_link_rekeyed(&mut self, old: &LinkId, new: &LinkId) {
+        if let Some(a) = self.direct_links.escalation_trust.remove(old) {
+            self.direct_links.escalation_trust.insert(*new, a);
         }
     }
 
+    /// +ciris: stop or resume retrying failed proposals (on by default).
+    /// Off, a failed upgrade stays failed until the host proposes again.
     pub fn set_direct_link_retry(&mut self, enabled: bool) {
         self.direct_links.retry_off = !enabled;
         if !enabled {
@@ -580,6 +671,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
     }
 
+    /// +ciris (fourth review item 1): propose again after `wait_ms`
+    /// (jittered), without spending a step of [`RETRY_BACKOFF_MS`]: a peer
+    /// that refused UNSUPPORTED is asked this rarely for as long as the
+    /// link lives.
+    fn schedule_direct_link_retry_after(&mut self, link_id: LinkId, now_ms: u64, wait_ms: u64) {
+        if self.direct_links.retry_off {
+            return;
+        }
+        let random = self.rng.next_u32();
+        let Some(retry) = self.direct_links.retries.get_mut(&link_id) else {
+            return;
+        };
+        let wait = jittered(wait_ms, random);
+        retry.due_ms = Some(now_ms.saturating_add(wait));
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            wait_ms = wait,
+            "direct link: the peer has no facilitator; proposing again much later"
+        );
+    }
+
     /// +ciris: propose again where a retry is due.
     fn run_due_direct_link_retries(&mut self, now_ms: u64) {
         let due: Vec<(LinkId, Option<Vec<u8>>)> = self
@@ -658,6 +770,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
         if let Some(link_id) = self.direct_links.link_of_session(session) {
+            // +ciris (fourth review item 6): "b" asks the PEER to spray
+            // toward us, which helps only if this end may hold its birthday
+            // sockets open: our own gate decides whether we say it.
+            let own_gate = self
+                .direct_links
+                .sessions
+                .get(&link_id)
+                .is_some_and(|s| self.direct_link_escalation_allowed(&link_id, s.role()));
+            let birthday = birthday && own_gate;
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => match public {
                     Some(addr) => {
@@ -957,6 +1078,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             host_payload,
             initiator_predicted,
             initiator_birthday,
+            initiator_nominates,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -974,6 +1096,39 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     .saturating_add(FALLBACK_GRACE_MS);
                 self.direct_links.peer_holding.insert(link_id, until);
                 return;
+            }
+            // +ciris (strategy review, the commit race): a REJECT for the
+            // session that already put this link on a direct interface (or
+            // holds its move) means the peer gave the upgrade up after our
+            // COMPLETE reached it, its own wait having run out first. A
+            // direct side honours it: back to the relay, as on a fallback.
+            if let Signal::Reject { session, .. } = &signal {
+                let running = self
+                    .direct_links
+                    .sessions
+                    .get(&link_id)
+                    .is_some_and(|s| s.id() == session);
+                if !running && self.direct_link_peer_aborted(link_id, session, now_ms) {
+                    return;
+                }
+            }
+            // +ciris (diagnostics for the planner): a REJECT's reason and when
+            // it arrived, in ms since the session began; no address.
+            if let (Signal::Reject { reason, .. }, Some(s)) =
+                (&signal, self.direct_links.sessions.get(&link_id))
+            {
+                if signal.session() == s.id() {
+                    crate::tracing::info!(
+                        target: "direct_link_diag",
+                        event = "reject",
+                        session = %HexShort(&s.id()[..4]),
+                        reason = *reason,
+                        role = ?s.role(),
+                        phase = ?s.phase(),
+                        since_start_ms = now_ms.saturating_sub(s.started_ms()),
+                        "direct link diag: reject received"
+                    );
+                }
             }
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => s.signal(&signal, now_ms),
@@ -1078,6 +1233,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             commit,
             predicted: initiator_predicted,
             birthday: initiator_birthday,
+            nominate: initiator_nominates,
         };
         if ask_host {
             // Held: nothing probed, nothing sent, until the host answers.
@@ -1113,17 +1269,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_ms: u64,
     ) {
         let Some(own) = self.direct_links.config.facilitator else {
+            // +ciris (fourth review item 1): configured but not resolved yet
+            // (startup, a DNS outage) is "not now", which the peer retries;
+            // only none configured is "never".
+            let configured = self.direct_links.config.facilitator_configured;
             crate::tracing::info!(
                 link = %HexShort(link_id.as_bytes()),
                 session = %HexShort(&request.session),
-                facilitator = "none",
+                facilitator = if configured { "unresolved" } else { "none" },
                 "direct link: refusing a peer's proposal: no facilitator of our own"
             );
             self.send_direct_link_signal(
                 &link_id,
                 &Signal::Reject {
                     session: request.session,
-                    reason: wire::REJECT_UNSUPPORTED,
+                    reason: if configured {
+                        REJECT_BUSY
+                    } else {
+                        wire::REJECT_UNSUPPORTED
+                    },
                 },
                 now_ms,
             );
@@ -1147,6 +1311,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             now_ms,
         );
         session.set_commit(request.commit);
+        session.set_nominate(request.nominate);
         session.set_peer_predicted(request.predicted);
         session.set_peer_birthday(request.birthday);
         self.direct_links.sessions.insert(link_id, session);
@@ -1288,16 +1453,47 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     alternates,
                     predicted,
                     spray,
+                    escalated_window,
+                    nomination,
                 } => {
                     // +ciris (third review, the gate): every escalated send
                     // (knocks to predicted ports, the spray, birthday sockets)
                     // goes to an IP the peer reported, so it is decided by
                     // trust in the peer, not by how this node answers.
-                    let escalate = self.direct_link_escalation_allowed(&link_id, session.role());
+                    let (allowed, by_host) = self.direct_link_escalation(&link_id, session.role());
+                    // +ciris (fourth review): escalations on the default rule
+                    // alone are capped at once; a host's yes is not. A
+                    // capped punch runs plain.
+                    let escalate = if allowed && !by_host {
+                        let d = &mut self.direct_links.default_escalating;
+                        if d.contains(&link_id) || d.len() < MAX_DEFAULT_ESCALATIONS {
+                            d.insert(link_id);
+                            true
+                        } else {
+                            crate::tracing::info!(
+                                target: "direct_link_diag",
+                                event = "escalation_capped",
+                                session = %HexShort(&session_id[..4]),
+                                running = d.len(),
+                                "direct link diag: escalation capped, punching plain"
+                            );
+                            false
+                        }
+                    } else {
+                        allowed
+                    };
+                    let Some(session) = self.direct_links.sessions.get(&link_id) else {
+                        return;
+                    };
                     let spray = spray && escalate;
                     let predicted = if escalate { predicted } else { Vec::new() };
                     let token = *session.token();
                     let fast_liveness = session.commit();
+                    let peer_identity = self
+                        .links
+                        .get(&link_id)
+                        .and_then(|l| l.remote_identity())
+                        .map(|id| *id.hash());
                     // READY reaches the initiator one relay trip after the
                     // responder sent it; the responder waits that long.
                     let start_delay_ms = if session.role() == Role::Responder {
@@ -1315,10 +1511,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         predicted,
                         escalate,
                         link: *link_id.as_bytes(),
+                        peer_identity,
                         token,
                         start_delay_ms,
                         fast_liveness,
                         spray,
+                        escalated_window,
+                        nomination,
                     });
                 }
                 // The attach already happened in `direct_link_punched`,
@@ -1363,6 +1562,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(session) = self.direct_links.sessions.remove(&link_id) else {
             return;
         };
+        self.direct_links.default_escalating.remove(&link_id);
         // Its signals still waiting on the channel would outlive it: a
         // REQUEST sent after the initiator gave up starts the peer on a
         // session nobody holds (Codex review on #74).
@@ -1414,9 +1614,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.direct_links.last_proposal_ms.remove(&link_id);
             }
             if session.role() == Role::Initiator {
-                if matches!(failure, Failure::Rejected(r) if r != REJECT_BUSY) {
+                if failure == Failure::Rejected(wire::REJECT_UNSUPPORTED) {
+                    // +ciris (fourth review item 1): the peer has no
+                    // facilitator today; it may gain one, so ask again
+                    // rarely rather than never.
+                    let now_ms = self.transport.clock().now_ms();
+                    self.schedule_direct_link_retry_after(link_id, now_ms, UNSUPPORTED_RETRY_MS);
+                } else if matches!(
+                    failure,
+                    Failure::Rejected(r) if r != REJECT_BUSY && r != wire::REJECT_PUNCH_FAILED
+                ) {
                     // The peer said no; asking again changes nothing. BUSY
-                    // is not a no: it says "not now".
+                    // is not a no: it says "not now". +ciris (strategy model):
+                    // nor is PUNCH_FAILED, the peer's verdict on a miss: it
+                    // and this side's own PunchFailed are one miss, whichever
+                    // lands first, and a miss is retried.
                     self.direct_links.retries.remove(&link_id);
                 } else {
                     let now_ms = self.transport.clock().now_ms();
@@ -1672,6 +1884,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .map(alloc::vec::Vec::capacity)
                 .sum::<usize>()
             + hc::btree_map_bytes(&d.pending)
+            + hc::btree_map_bytes(&d.escalation_trust)
+            + hc::btree_set_bytes(&d.default_escalating)
             + hc::btree_map_bytes(&d.outbox)
             + outbox
             + hc::vec_deque_bytes(&d.jobs)
@@ -1695,6 +1909,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.direct_links.last_proposal_ms.remove(link_id);
         self.direct_links.escalation_trust.remove(link_id);
+        self.direct_links.default_escalating.remove(link_id);
         self.direct_links.peer_holding.remove(link_id);
         self.direct_links.mtu_before_move.remove(link_id);
         self.direct_links.retries.remove(link_id);
@@ -1982,6 +2197,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.direct_links.attached.remove(&index);
         self.release_direct_attachment(index, attachment, "peer nudged over the relay", true);
+    }
+
+    /// +ciris (strategy review): the peer's REJECT for `session`, which this
+    /// side already completed: leave its direct interface, or give its held
+    /// move up. Whether anything was left.
+    fn direct_link_peer_aborted(
+        &mut self,
+        link_id: LinkId,
+        session: &SessionId,
+        now_ms: u64,
+    ) -> bool {
+        if let Some(held) = self.direct_links.deferred.get(&link_id).copied() {
+            if &held.session == session {
+                self.direct_links.deferred.remove(&link_id);
+                self.give_up_held_move(link_id, held, Failure::PeerFellBack, true, now_ms);
+                return true;
+            }
+        }
+        let Some(index) = self.direct_links.interface_of_link(&link_id) else {
+            return false;
+        };
+        match self.direct_links.attached.get(&index) {
+            Some(a) if &a.session == session => {}
+            _ => return false,
+        }
+        let Some(attachment) = self.direct_links.attached.remove(&index) else {
+            return false;
+        };
+        self.release_direct_attachment(index, attachment, "the peer gave the upgrade up", true);
+        true
     }
 
     /// The link went stale while on a direct interface: the direct path has

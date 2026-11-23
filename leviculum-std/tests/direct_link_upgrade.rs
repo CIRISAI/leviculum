@@ -75,9 +75,10 @@ async fn transport_node(tcp_port: u16, facilitator_port: u16) -> TestNode {
         ReticulumNodeBuilder::new()
             .enable_transport(true)
             .add_interface_config(cfg)
-            .direct_link(DirectLinkSettings {
-                facilitator_port: Some(facilitator_port),
-                ..Default::default()
+            .direct_link({
+                let mut s = DirectLinkSettings::default();
+                s.facilitator_port = Some(facilitator_port);
+                s
             }),
     )
     .await
@@ -111,18 +112,16 @@ async fn leaf_with(tcp_port: u16, settings: DirectLinkSettings, udp: bool) -> Te
 }
 
 fn proposer(facilitator_port: u16) -> DirectLinkSettings {
-    DirectLinkSettings {
-        facilitator: Some(format!("127.0.0.1:{facilitator_port}")),
-        protocol: ProbeProtocol::Rnsp,
-        ..Default::default()
-    }
+    let mut s = DirectLinkSettings::default();
+    s.facilitator = Some(format!("127.0.0.1:{facilitator_port}"));
+    s.protocol = ProbeProtocol::Rnsp;
+    s
 }
 
 fn accepter() -> DirectLinkSettings {
-    DirectLinkSettings {
-        policy: DirectLinkPolicy::AcceptAll,
-        ..Default::default()
-    }
+    let mut s = DirectLinkSettings::default();
+    s.policy = DirectLinkPolicy::AcceptAll;
+    s
 }
 
 async fn next_event(
@@ -502,10 +501,9 @@ async fn upgrade_and_drop_relay(
 }
 
 fn asker() -> DirectLinkSettings {
-    DirectLinkSettings {
-        policy: DirectLinkPolicy::AskHost,
-        ..Default::default()
-    }
+    let mut s = DirectLinkSettings::default();
+    s.policy = DirectLinkPolicy::AskHost;
+    s
 }
 
 async fn outcome(rx: &mut EventReceiver) -> Option<NodeEvent> {

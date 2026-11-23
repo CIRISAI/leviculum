@@ -4375,6 +4375,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             }
                         }
                         self.link_id_aliases.insert(link_id, new_link_id);
+                        // +ciris (fourth review item 4): the host's
+                        // escalation decision moves with the link, so a
+                        // "no" given before establishment stays a "no".
+                        self.direct_link_rekeyed(&link_id, &new_link_id);
                         // Event boundary: outbound events for this link
                         // report the ORIGINAL caller-visible id.
                         let origin = self.link_origin_ids.remove(&link_id).unwrap_or(link_id);

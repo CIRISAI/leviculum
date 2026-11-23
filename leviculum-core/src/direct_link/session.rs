@@ -30,16 +30,38 @@ use super::wire::{
 
 /// How long each waiting phase may last before the session gives up.
 ///
-/// Punching gets the driver's own punch window (10 s) plus slack, so the
-/// driver's verdict normally arrives before this timer fires.
+/// Punching gets the driver's own punch window plus slack, so the driver's
+/// verdict normally arrives before this timer fires: 10 s for a plain punch,
+/// +ciris [`ESCALATED_PUNCH_WINDOW_MS`] for an escalated one.
 pub const DISCOVER_TIMEOUT_MS: u64 = 10_000;
 pub const PROPOSE_TIMEOUT_MS: u64 = 10_000;
 pub const READY_TIMEOUT_MS: u64 = 10_000;
 pub const PUNCH_TIMEOUT_MS: u64 = 12_000;
 /// +ciris (leviculum#89): how long a side whose punch succeeded waits for the
-/// peer's verdict. The peer's punch window ends within this, and its COMPLETE
-/// or REJECT travels the relay.
+/// peer's verdict. The peer's punch window (an escalated one too) ends
+/// within this, and its COMPLETE or REJECT travels the relay.
 pub const COMMIT_TIMEOUT_MS: u64 = 12_000;
+
+/// +ciris (pair agreement): how long past its window a responder waits for a
+/// nomination, and a settled initiator keeps nominating.
+pub const NOMINATION_GRACE_MS: u64 = 2_000;
+
+/// +ciris: the punch and commit waits of an ESCALATED punch: its window
+/// (13 s), the responder's start delay (up to 1.5 s), the nomination grace
+/// (2 s) and slack. A plain punch keeps [`PUNCH_TIMEOUT_MS`] (plus the
+/// grace when nomination is in force), so a peer without `"n"` sees exactly
+/// the timing it always did.
+pub const ESCALATED_PUNCH_TIMEOUT_MS: u64 = 18_000;
+
+/// +ciris: the driver's punch window for a plain punch, as rns-rs's.
+pub const PUNCH_WINDOW_MS: u64 = 10_000;
+/// +ciris: the driver's punch window when the punch is ESCALATED: either
+/// side advertised "b" or "q" and both run the two-sided commit. The spray
+/// (1,750 knocks at 320 a second from 1.5 s) ends by about 7 s; the window
+/// covers it, the birthday side's next refresh, a start skew of up to
+/// 1.5 s and two round trips. Both ends derive it from the same exchanged
+/// keys, so neither gives up while the other still sprays.
+pub const ESCALATED_PUNCH_WINDOW_MS: u64 = 13_000;
 
 /// Which end of the upgrade this node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +183,9 @@ pub enum Step {
     /// `alternates` at once: the peer's host candidates, when both ends sit
     /// behind the same NAT (+ciris). The first that proves both directions
     /// is the path.
+    ///
+    /// `#[non_exhaustive]` (+ciris): the fork keeps adding fields.
+    #[non_exhaustive]
     Punch {
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
@@ -171,6 +196,14 @@ pub enum Step {
         /// punch up to [`super::wire::MAX_SPRAY_PORTS`] random ports on its
         /// public IP, until anything is heard from it.
         spray: bool,
+        /// +ciris: the punch is escalated (see [`ESCALATED_PUNCH_WINDOW_MS`]),
+        /// decided from what both sides advertised, so both ends agree.
+        escalated_window: bool,
+        /// +ciris (pair agreement): nomination is in force, and this side
+        /// is the one that nominates (the initiator) or the one that settles
+        /// on the nomination (the responder). `None`: each side settles on
+        /// its own first proven pair, as rns-rs does.
+        nomination: Option<Role>,
     },
     /// The direct path is up.
     Established,
@@ -185,6 +218,8 @@ pub struct Session {
     role: Role,
     phase: Phase,
     phase_since_ms: u64,
+    /// +ciris (diagnostics): when the session began.
+    started_ms: u64,
     /// The punch token, bound to the link key and `id`.
     token: [u8; 32],
     facilitator: SocketAddr,
@@ -213,6 +248,11 @@ pub struct Session {
     peer_birthday: bool,
     /// +ciris: this node's NAT is random; told to the peer.
     own_birthday: bool,
+    /// +ciris: this node advertised predicted ports ("q").
+    own_predicted: bool,
+    /// +ciris (pair agreement): nomination offered (initiator) or agreed
+    /// (responder, when the REQUEST offered it); in force once both did.
+    nominate: bool,
 }
 
 impl Session {
@@ -229,6 +269,7 @@ impl Session {
             role: Role::Initiator,
             phase: Phase::Discovering,
             phase_since_ms: now_ms,
+            started_ms: now_ms,
             token,
             facilitator,
             protocol,
@@ -241,6 +282,8 @@ impl Session {
             peer_predicted: Vec::new(),
             peer_birthday: false,
             own_birthday: false,
+            own_predicted: false,
+            nominate: true,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -268,6 +311,7 @@ impl Session {
             role: Role::Responder,
             phase: Phase::Discovering,
             phase_since_ms: now_ms,
+            started_ms: now_ms,
             token,
             facilitator,
             protocol,
@@ -281,6 +325,9 @@ impl Session {
             peer_predicted: Vec::new(),
             peer_birthday: false,
             own_birthday: false,
+            own_predicted: false,
+            // Agreed only if the REQUEST offered it: see `set_nominate`.
+            nominate: false,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -304,6 +351,11 @@ impl Session {
         self.phase
     }
 
+    /// +ciris (diagnostics): when the session began.
+    pub fn started_ms(&self) -> u64 {
+        self.started_ms
+    }
+
     pub fn token(&self) -> &[u8; 32] {
         &self.token
     }
@@ -319,6 +371,35 @@ impl Session {
     /// turns it off here only to talk to a peer as rns-rs does.
     pub fn set_commit(&mut self, commit: bool) {
         self.commit = commit;
+    }
+
+    /// +ciris (pair agreement): a responder agrees to nomination when the
+    /// REQUEST offered it; an initiator offers it by default.
+    pub fn set_nominate(&mut self, nominate: bool) {
+        self.nominate = nominate;
+    }
+
+    /// +ciris (pair agreement): nomination is in force (as far as this side
+    /// knows so far): both ends offered it, under the two-sided commit.
+    pub fn nominate(&self) -> bool {
+        self.nominate && self.commit
+    }
+
+    /// +ciris: the punch is escalated: either side advertised "b" or "q",
+    /// with nomination in force (so the peer is a CIRIS node of this
+    /// version, which derives the same answer from the same keys; an older
+    /// peer keeps today's window).
+    pub fn escalated_window(&self) -> bool {
+        self.nominate()
+            && (self.own_birthday
+                || self.peer_birthday
+                || self.own_predicted
+                || !self.peer_predicted.is_empty())
+    }
+
+    /// +ciris: the punch's role in nomination, when it is in force.
+    fn nomination(&self) -> Option<Role> {
+        self.nominate().then_some(self.role)
     }
 
     /// +ciris (leviculum#88): bytes the initiator's REQUEST carries for the
@@ -369,11 +450,24 @@ impl Session {
             Phase::Discovering => DISCOVER_TIMEOUT_MS,
             Phase::Proposing => PROPOSE_TIMEOUT_MS,
             Phase::AwaitingReady => READY_TIMEOUT_MS,
-            Phase::Punching => PUNCH_TIMEOUT_MS,
-            Phase::Committing => COMMIT_TIMEOUT_MS,
+            Phase::Punching => self.wait_ms(PUNCH_TIMEOUT_MS),
+            Phase::Committing => self.wait_ms(COMMIT_TIMEOUT_MS),
             Phase::Connected => return None,
         };
         Some(self.phase_since_ms.saturating_add(budget))
+    }
+
+    /// +ciris: a punch or commit wait for this session: the escalated one,
+    /// or the plain one plus the nomination grace where nomination is in
+    /// force; exactly `plain` otherwise.
+    fn wait_ms(&self, plain: u64) -> u64 {
+        if self.escalated_window() {
+            ESCALATED_PUNCH_TIMEOUT_MS
+        } else if self.nominate() {
+            plain + NOMINATION_GRACE_MS
+        } else {
+            plain
+        }
     }
 
     fn enter(&mut self, phase: Phase, now_ms: u64) {
@@ -411,6 +505,7 @@ impl Session {
         if self.phase != Phase::Discovering {
             return Vec::new();
         }
+        self.own_predicted = !predicted.is_empty();
         match self.role {
             Role::Initiator => {
                 self.enter(Phase::Proposing, now_ms);
@@ -425,6 +520,7 @@ impl Session {
                     host_payload: self.host_payload.take(),
                     initiator_predicted: predicted,
                     initiator_birthday: self.own_birthday,
+                    initiator_nominates: self.nominate && self.commit,
                 })]
             }
             Role::Responder => {
@@ -443,12 +539,15 @@ impl Session {
                         commit: self.commit,
                         responder_predicted: predicted,
                         responder_birthday: self.own_birthday,
+                        responder_nominated: self.nominate(),
                     }),
                     Step::Punch {
                         peer,
                         alternates,
                         predicted: knock,
                         spray: self.peer_birthday,
+                        escalated_window: self.escalated_window(),
+                        nomination: self.nomination(),
                     },
                 ]
             }
@@ -507,11 +606,13 @@ impl Session {
                     commit,
                     responder_predicted,
                     responder_birthday,
+                    responder_nominated,
                     ..
                 },
             ) => {
                 // In force only when the responder agreed too.
                 self.commit = self.commit && *commit;
+                self.nominate = self.nominate && *responder_nominated;
                 self.peer_public = Some(*responder_public);
                 self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
@@ -530,6 +631,8 @@ impl Session {
                     alternates,
                     predicted,
                     spray: self.peer_birthday,
+                    escalated_window: self.escalated_window(),
+                    nomination: self.nomination(),
                 }]
             }
             // +ciris (leviculum#89): the peer's half of the two-sided commit.
@@ -597,8 +700,18 @@ impl Session {
                 } else if self.phase == Phase::Punching {
                     Failure::PunchFailed
                 } else if self.phase == Phase::Committing {
-                    // The peer never said how its punch went.
-                    Failure::Timeout
+                    // The peer never said how its punch went. +ciris
+                    // (strategy review): its COMPLETE may only be late, and
+                    // ours may reach it after this; say we gave up, so a peer
+                    // that moved on our COMPLETE comes back (it honours an
+                    // abort for its own session even once direct).
+                    return alloc::vec![
+                        Step::Send(Signal::Reject {
+                            session: self.id,
+                            reason: REJECT_PUNCH_FAILED,
+                        }),
+                        Step::Failed(Failure::Timeout),
+                    ];
                 } else {
                     Failure::Timeout
                 };
@@ -672,6 +785,7 @@ mod tests {
             initiator_predicted: _,
             host_payload: None,
             initiator_birthday: _,
+            initiator_nominates: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -706,6 +820,8 @@ mod tests {
                 alternates: Vec::new(),
                 spray: false,
                 predicted: Vec::new(),
+                escalated_window: false,
+                nomination: None,
             }
         );
 
@@ -717,6 +833,8 @@ mod tests {
                 alternates: Vec::new(),
                 spray: false,
                 predicted: Vec::new(),
+                escalated_window: false,
+                nomination: None,
             }]
         );
         assert_eq!(a.peer_public(), Some(b_pub()));
@@ -822,6 +940,7 @@ mod tests {
             initiator_predicted: _,
             host_payload: None,
             initiator_birthday: _,
+            initiator_nominates: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -849,6 +968,8 @@ mod tests {
                 alternates: alloc::vec![a_lan],
                 spray: false,
                 predicted: Vec::new(),
+                escalated_window: false,
+                nomination: None,
             },
             "B punches A's public address and A's host candidate"
         );
@@ -860,6 +981,8 @@ mod tests {
                 alternates: alloc::vec![b_lan],
                 spray: false,
                 predicted: Vec::new(),
+                escalated_window: false,
+                nomination: None,
             }],
             "A punches B's public address and B's host candidate"
         );
@@ -882,6 +1005,147 @@ mod tests {
         assert_eq!(
             same_nat_alternates(a_pub, b_pub, &[lan, global, link_local, ula]),
             alloc::vec![global]
+        );
+    }
+
+    /// The punch step one side ends up with: (escalated window, nomination).
+    fn punch_shape(steps: &[Step]) -> (bool, Option<Role>) {
+        steps
+            .iter()
+            .find_map(|s| match s {
+                Step::Punch {
+                    escalated_window,
+                    nomination,
+                    ..
+                } => Some((*escalated_window, *nomination)),
+                _ => None,
+            })
+            .expect("a punch")
+    }
+
+    /// Run one upgrade to the punch with what each side advertises, and
+    /// whether the responder takes the commit and nomination it is offered.
+    fn shapes(
+        a_b: bool,
+        a_q: bool,
+        b_b: bool,
+        b_q: bool,
+        b_agrees: bool,
+    ) -> ((bool, Option<Role>), (bool, Option<Role>)) {
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        a.set_own_birthday(a_b);
+        let ports = |on: bool, p: u16| if on { alloc::vec![p] } else { Vec::new() };
+        let steps = a.probed_with_candidates(a_pub(), Vec::new(), ports(a_q, 5001), 1);
+        let Signal::Request {
+            initiator_public,
+            commit,
+            initiator_predicted,
+            initiator_birthday,
+            initiator_nominates,
+            ..
+        } = request_from(&steps).clone()
+        else {
+            unreachable!()
+        };
+        let (mut b, b_steps) = Session::respond(
+            ID,
+            TOKEN,
+            t(),
+            initiator_public,
+            Vec::new(),
+            ProbeProtocol::Rnsp,
+            2,
+        );
+        b.set_commit(commit && b_agrees);
+        b.set_nominate(initiator_nominates && b_agrees);
+        b.set_peer_predicted(initiator_predicted);
+        b.set_peer_birthday(initiator_birthday);
+        deliver(&b_steps, &mut a, 3);
+        b.set_own_birthday(b_b);
+        let b_steps = b.probed_with_candidates(b_pub(), Vec::new(), ports(b_q, 6001), 4);
+        let a_steps = deliver(&b_steps, &mut a, 5);
+        (punch_shape(&a_steps), punch_shape(&b_steps))
+    }
+
+    /// +ciris (fourth review G, Eric's condition 1): both ends agree whether
+    /// the punch is escalated, from the "b" and "q" they exchanged, whoever
+    /// advertised them: the side that only answers an escalation (the easy
+    /// side, which sprays) runs the long window too, so neither can give up
+    /// and abort the other mid-spray. Plain punches keep the plain window.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn both_ends_agree_on_the_escalated_window_from_what_they_exchanged() {
+        for bits in 0..16u8 {
+            let (a_b, a_q, b_b, b_q) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let ((a_win, _), (b_win, _)) = shapes(a_b, a_q, b_b, b_q, true);
+            let escalated = a_b || a_q || b_b || b_q;
+            assert_eq!((a_win, b_win), (escalated, escalated), "{bits:04b}");
+            // Without the commit (an rns-rs-like peer) nothing changes.
+            let ((a_win, _), (b_win, _)) = shapes(a_b, a_q, b_b, b_q, false);
+            assert_eq!((a_win, b_win), (false, false), "{bits:04b} plain");
+        }
+        assert!(ESCALATED_PUNCH_WINDOW_MS > PUNCH_WINDOW_MS);
+        // The window, the responder's start delay (1.5 s at most) and the
+        // nomination grace all fit; a plain punch keeps today's waits.
+        assert!(
+            ESCALATED_PUNCH_TIMEOUT_MS >= ESCALATED_PUNCH_WINDOW_MS + 1_500 + NOMINATION_GRACE_MS
+        );
+        assert_eq!((PUNCH_TIMEOUT_MS, COMMIT_TIMEOUT_MS), (12_000, 12_000));
+        assert!(
+            PUNCH_TIMEOUT_MS + NOMINATION_GRACE_MS >= PUNCH_WINDOW_MS + 1_500 + NOMINATION_GRACE_MS
+        );
+    }
+
+    /// +ciris (pair agreement): nomination is in force only when both ends
+    /// run the commit and the responder agreed; the initiator nominates.
+    #[test]
+    fn nomination_is_agreed_in_request_and_ready() {
+        let ((_, a_nom), (_, b_nom)) = shapes(false, false, false, false, true);
+        assert_eq!(
+            (a_nom, b_nom),
+            (Some(Role::Initiator), Some(Role::Responder))
+        );
+        let ((_, a_nom), (_, b_nom)) = shapes(false, false, false, false, false);
+        assert_eq!((a_nom, b_nom), (None, None));
+    }
+
+    /// +ciris (strategy review): a side whose commit wait runs out tells the
+    /// peer, which may yet move on this side's late COMPLETE and must come
+    /// back.
+    #[test]
+    fn a_commit_timeout_says_so() {
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        let steps = a.probed(a_pub(), 1);
+        let Signal::Request {
+            initiator_public, ..
+        } = request_from(&steps).clone()
+        else {
+            unreachable!()
+        };
+        let (mut b, b_steps) = Session::respond(
+            ID,
+            TOKEN,
+            t(),
+            initiator_public,
+            Vec::new(),
+            ProbeProtocol::Rnsp,
+            2,
+        );
+        b.set_commit(true);
+        deliver(&b_steps, &mut a, 3);
+        let b_steps = b.probed(b_pub(), 4);
+        deliver(&b_steps, &mut a, 5);
+        assert_eq!(a.punched(true, 6).len(), 1, "COMPLETE, then Committing");
+        let deadline = a.deadline_ms().expect("committing");
+        assert_eq!(
+            a.poll(deadline),
+            [
+                Step::Send(Signal::Reject {
+                    session: ID,
+                    reason: REJECT_PUNCH_FAILED
+                }),
+                Step::Failed(Failure::Timeout)
+            ]
         );
     }
 
@@ -941,6 +1205,7 @@ mod tests {
             commit: true,
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
+            responder_nominated: false,
         };
         a.signal(&ready, 3);
         assert_eq!(a.phase(), Phase::Punching);
@@ -980,6 +1245,7 @@ mod tests {
             commit: false,
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
+            responder_nominated: false,
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);

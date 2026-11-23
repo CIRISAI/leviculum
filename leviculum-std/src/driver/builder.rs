@@ -1256,11 +1256,16 @@ impl ReticulumNodeBuilder {
         // does not resolve, because a responder probes its OWN facilitator
         // and a node may answer before it ever proposes. Never here: a
         // blocking lookup inside an async build.
-        node_core.set_direct_link_config(leviculum_core::node::DirectLinkConfig {
-            policy: direct_link.policy,
-            facilitator: None,
-            protocol: direct_link.protocol,
-        });
+        // Configured but unresolved until then: a proposal meanwhile is
+        // refused BUSY, which the peer retries (fourth review item 1).
+        node_core.set_direct_link_config(
+            leviculum_core::node::DirectLinkConfig::new(
+                direct_link.policy,
+                None,
+                direct_link.protocol,
+            )
+            .with_facilitator_configured(direct_link.facilitator.is_some()),
+        );
         // +ciris (leviculum#91): the relay table is off in core (boards);
         // a std node keeps it.
         node_core.set_relay_route_bounds(

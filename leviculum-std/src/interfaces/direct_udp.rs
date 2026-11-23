@@ -39,12 +39,15 @@ use tokio::time::Instant;
 
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
 
-/// How often the pinhole is refreshed. Common NAT UDP mapping lifetimes run
-/// 30 to 120 s; matches rns-rs.
-pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the pinhole is refreshed, with a peer that does not run the
+/// two-sided commit (rns-rs). +ciris (fourth review J): 15 s, not rns-rs's
+/// 30: common NAT UDP mapping lifetimes run 30 to 120 s, and many carrier
+/// NATs sit at the bottom of that range, so a 30 s refresh can arrive just
+/// after the mapping went.
+pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Silence after which the direct path is declared dead (four missed
-/// keepalives).
-pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
+/// keepalives of ours; two of an rns-rs peer's 30 s ones).
+pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 /// +ciris: the acked probe interval, and the silence after which the path
 /// is dead (three missed probes, each answered by an ack and matched by the
 /// peer's own), with a peer that acks them.

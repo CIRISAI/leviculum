@@ -402,20 +402,20 @@ async fn main() {
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_client(relay)
-        .direct_link(DirectLinkSettings {
+        .direct_link({
             // ask_host: the listener admits only its allowlisted dialer, and
             // only a node answering identified peers may spray.
-            policy: DirectLinkPolicy::AskHost,
-            facilitator: Some(cli.relay.clone()),
-            protocol: ProbeProtocol::Rnsp,
-            facilitator_port: None,
-            facilitator2: cli.facilitator2.clone(),
-            facilitator_second_port: false,
-            protocol2: if cli.protocol2 == "rnsp" {
+            let mut settings = DirectLinkSettings::default();
+            settings.policy = DirectLinkPolicy::AskHost;
+            settings.facilitator = Some(cli.relay.clone());
+            settings.protocol = ProbeProtocol::Rnsp;
+            settings.facilitator2 = cli.facilitator2.clone();
+            settings.protocol2 = if cli.protocol2 == "rnsp" {
                 ProbeProtocol::Rnsp
             } else {
                 ProbeProtocol::Stun
-            },
+            };
+            settings
         })
         .storage_path(storage.path().to_path_buf())
         .build()

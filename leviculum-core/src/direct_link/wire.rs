@@ -2,7 +2,8 @@
 //!
 //! Three families, all fixed by the rns-rs DirectLink protocol so a
 //! leviculum node and an rns-rs node can upgrade a link between them and
-//! share a facilitator:
+//! share a facilitator. Wire-compatible with rns-rs through rns-net v0.13.0
+//! (rns-rs changed its wire in v0.14; that later wire is not implemented):
 //!
 //! - **Signals**: channel messages on the existing link, MSGTYPE
 //!   `0xFE00..=0xFE04`, each body a msgpack map keyed by one-letter strings.
@@ -60,14 +61,16 @@ pub const MAX_PREDICTED_PORTS: usize = 16;
 /// when the peer asked for it (`"b"`): its NAT allocates at random, and the
 /// peer holds [`MAX_BIRTHDAY_SOCKETS`] mappings open toward this node. Over
 /// a full 16-bit range a spray this wide hits one with probability
-/// 1 - exp(-128 * 960 / 64512), about 85% (more on a NAT with a narrower
-/// pool). A hard cap, as approved: no more than this, and only on the
-/// direct path.
-pub const MAX_SPRAY_PORTS: usize = 960;
+/// 1 - exp(-256 * 1750 / 64512), about 99.9% (more on a NAT with a narrower
+/// pool), once all [`MAX_BIRTHDAY_SOCKETS`] are open. A hard cap, as
+/// approved (Eric, matching HyperDHT's birthday caps): no more than this,
+/// and only on the direct path.
+pub const MAX_SPRAY_PORTS: usize = 1_750;
 
 /// +ciris: the most extra sockets a node behind a random NAT opens toward
-/// the peer for one punch, each one mapping. A hard cap.
-pub const MAX_BIRTHDAY_SOCKETS: usize = 128;
+/// the peer for one punch, each one mapping. A hard cap; the punch opens
+/// them in tranches while it hears nothing (see leviculum-std).
+pub const MAX_BIRTHDAY_SOCKETS: usize = 256;
 
 /// +ciris (leviculum#88): the largest host payload a REQUEST carries. Big
 /// enough for a hybrid-signed CIRIS contact grant (ML-DSA-65, about 6-8 KiB);
@@ -137,8 +140,13 @@ pub enum WireError {
 }
 
 /// One upgrade signal, as carried on the link's channel.
+///
+/// +ciris: REQUEST and READY are `#[non_exhaustive]`, since the fork keeps
+/// adding keys an rns-rs decoder skips: outside this crate build them with
+/// [`Signal::request`] and [`Signal::ready`], and match them with `..`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
+    #[non_exhaustive]
     Request {
         session: SessionId,
         facilitator: SocketAddr,
@@ -162,6 +170,10 @@ pub enum Signal {
         /// responder and asks the responder to spray its public IP
         /// ([`MAX_SPRAY_PORTS`] at most) to hit one of them.
         initiator_birthday: bool,
+        /// +ciris (pair agreement): the initiator offers nomination (`"n"`):
+        /// it names the pair both ends use by a flagged punch on it
+        /// ([`punch_seq`]), and a responder that agrees settles only on that.
+        initiator_nominates: bool,
     },
     Accept {
         session: SessionId,
@@ -170,6 +182,7 @@ pub enum Signal {
         session: SessionId,
         reason: u8,
     },
+    #[non_exhaustive]
     Ready {
         session: SessionId,
         responder_public: SocketAddr,
@@ -182,6 +195,9 @@ pub enum Signal {
         responder_predicted: Vec<u16>,
         /// +ciris: the responder's NAT is random, as in REQUEST.
         responder_birthday: bool,
+        /// +ciris (pair agreement): the responder agrees to nomination (only
+        /// when the REQUEST offered it).
+        responder_nominated: bool,
     },
     Complete {
         session: SessionId,
@@ -189,6 +205,40 @@ pub enum Signal {
 }
 
 impl Signal {
+    /// +ciris: a REQUEST as rns-rs sends it: none of the fork's keys.
+    pub fn request(
+        session: SessionId,
+        facilitator: SocketAddr,
+        initiator_public: SocketAddr,
+        protocol: ProbeProtocol,
+    ) -> Self {
+        Signal::Request {
+            session,
+            facilitator,
+            initiator_public,
+            protocol,
+            initiator_local: Vec::new(),
+            commit: false,
+            host_payload: None,
+            initiator_predicted: Vec::new(),
+            initiator_birthday: false,
+            initiator_nominates: false,
+        }
+    }
+
+    /// +ciris: a READY as rns-rs sends it: none of the fork's keys.
+    pub fn ready(session: SessionId, responder_public: SocketAddr) -> Self {
+        Signal::Ready {
+            session,
+            responder_public,
+            responder_local: Vec::new(),
+            commit: false,
+            responder_predicted: Vec::new(),
+            responder_birthday: false,
+            responder_nominated: false,
+        }
+    }
+
     /// The channel MSGTYPE this signal travels under.
     pub fn msgtype(&self) -> u16 {
         match self {
@@ -229,6 +279,7 @@ impl Signal {
                 host_payload,
                 initiator_predicted,
                 initiator_birthday,
+                initiator_nominates,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
                 let local = !initiator_local.is_empty();
@@ -239,7 +290,8 @@ impl Signal {
                         + u8::from(*commit)
                         + u8::from(host_payload.is_some())
                         + u8::from(!initiator_predicted.is_empty())
-                        + u8::from(*initiator_birthday),
+                        + u8::from(*initiator_birthday)
+                        + u8::from(*initiator_nominates),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
@@ -256,6 +308,7 @@ impl Signal {
                 write_extras(&mut buf, *commit, host_payload.as_deref());
                 write_predicted(&mut buf, initiator_predicted);
                 write_birthday(&mut buf, *initiator_birthday);
+                write_flag(&mut buf, "n", *initiator_nominates);
             }
             Signal::Accept { session } | Signal::Complete { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
@@ -274,6 +327,7 @@ impl Signal {
                 commit,
                 responder_predicted,
                 responder_birthday,
+                responder_nominated,
             } => {
                 let local = !responder_local.is_empty();
                 msgpack::write_fixmap_header(
@@ -281,7 +335,8 @@ impl Signal {
                     2 + u8::from(local)
                         + u8::from(*commit)
                         + u8::from(!responder_predicted.is_empty())
-                        + u8::from(*responder_birthday),
+                        + u8::from(*responder_birthday)
+                        + u8::from(*responder_nominated),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
@@ -292,6 +347,7 @@ impl Signal {
                 write_extras(&mut buf, *commit, None);
                 write_predicted(&mut buf, responder_predicted);
                 write_birthday(&mut buf, *responder_birthday);
+                write_flag(&mut buf, "n", *responder_nominated);
             }
         }
         buf
@@ -321,6 +377,7 @@ impl Signal {
                 host_payload: fields.host_payload,
                 initiator_predicted: fields.predicted,
                 initiator_birthday: fields.birthday,
+                initiator_nominates: fields.nominate,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -337,6 +394,7 @@ impl Signal {
                 commit: fields.commit,
                 responder_predicted: fields.predicted,
                 responder_birthday: fields.birthday,
+                responder_nominated: fields.nominate,
             },
             _ => Signal::Complete { session },
         };
@@ -357,6 +415,7 @@ struct Fields {
     host_payload: Option<Vec<u8>>,
     predicted: Vec<u16>,
     birthday: bool,
+    nominate: bool,
 }
 
 impl Fields {
@@ -379,6 +438,7 @@ impl Fields {
                 b"c" => fields.commit = read_bool(data, &mut pos)?,
                 b"q" => fields.predicted = read_predicted(data, &mut pos)?,
                 b"b" => fields.birthday = read_bool(data, &mut pos)?,
+                b"n" => fields.nominate = read_bool(data, &mut pos)?,
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -443,6 +503,14 @@ fn write_predicted(buf: &mut Vec<u8>, ports: &[u16]) {
 fn write_birthday(buf: &mut Vec<u8>, birthday: bool) {
     if birthday {
         msgpack::write_fixstr(buf, "b");
+        msgpack::write_bool(buf, true);
+    }
+}
+
+/// +ciris: a boolean key, written only when set; an older decoder skips it.
+fn write_flag(buf: &mut Vec<u8>, key: &str, value: bool) {
+    if value {
+        msgpack::write_fixstr(buf, key);
         msgpack::write_bool(buf, true);
     }
 }
@@ -746,6 +814,43 @@ pub const PUNCH_FRAME_LEN: usize = 4 + 16 + 32 + 4;
 /// The sequence number a keepalive carries; ordinary punches count up from 0.
 pub const KEEPALIVE_SEQ: u32 = u32::MAX;
 
+/// +ciris (pair agreement): how many low bits of a punch's sequence number
+/// name the target it was sent to (an index into the sender's own target
+/// list). The ack echoes the number, so the sender can tell an ack for a
+/// punch it sent to THAT address (a symmetric pair, RFC 8445 7.2.5.2.1) from
+/// one for a punch it sent elsewhere.
+pub const PUNCH_TARGET_BITS: u32 = 5;
+/// +ciris (pair agreement): the most targets a punch can name.
+pub const PUNCH_TARGETS_MAX: usize = 1 << PUNCH_TARGET_BITS;
+/// +ciris (pair agreement): the bit that makes a punch a NOMINATION: the
+/// initiator, once settled, sends it on the pair it chose, and a responder
+/// that agreed to nomination takes the address it arrived from. Bit 31 stays
+/// clear in every punch sequence number, so none is ever [`KEEPALIVE_SEQ`]
+/// or an MTU probe's.
+pub const NOMINATE_BIT: u32 = 1 << 30;
+const PUNCH_COUNTER_MAX: u32 = 1 << (30 - PUNCH_TARGET_BITS);
+
+/// +ciris (pair agreement): the sequence number of a punch: `counter` (taken
+/// modulo its width), the index of the target it goes to, and whether it
+/// nominates. A peer that predates this echoes it like any other number.
+pub const fn punch_seq(counter: u32, target: usize, nominate: bool) -> u32 {
+    let index = (target as u32) & (PUNCH_TARGETS_MAX as u32 - 1);
+    let flag = if nominate { NOMINATE_BIT } else { 0 };
+    flag | ((counter % PUNCH_COUNTER_MAX) << PUNCH_TARGET_BITS) | index
+}
+
+/// +ciris (pair agreement): the target index a punch's (or its ack's)
+/// sequence number names.
+pub const fn punch_seq_target(seq: u32) -> usize {
+    (seq & (PUNCH_TARGETS_MAX as u32 - 1)) as usize
+}
+
+/// +ciris (pair agreement): whether a punch's (or its ack's) sequence
+/// number nominates. Never true for a keepalive or an MTU probe.
+pub const fn punch_seq_nominates(seq: u32) -> bool {
+    seq & (1 << 31) == 0 && seq & NOMINATE_BIT != 0
+}
+
 /// Which of the two punch frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PunchKind {
@@ -931,6 +1036,7 @@ mod tests {
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
             initiator_birthday: false,
+            initiator_nominates: false,
         };
         let golden = hex(
             "83a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c404c6336417cd9c40",
@@ -951,6 +1057,7 @@ mod tests {
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
             initiator_birthday: false,
+            initiator_nominates: false,
         };
         let golden = hex(
             "84a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c41020010db800000000000000000000000105a17001",
@@ -981,6 +1088,7 @@ mod tests {
                     commit: false,
                     responder_predicted: alloc::vec::Vec::new(),
                     responder_birthday: false,
+                    responder_nominated: false,
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -1024,6 +1132,7 @@ mod tests {
                 commit: false,
                 responder_predicted: alloc::vec::Vec::new(),
                 responder_birthday: false,
+                responder_nominated: false,
             })
         );
     }
@@ -1043,6 +1152,7 @@ mod tests {
             host_payload: None,
             initiator_predicted: many.clone(),
             initiator_birthday: false,
+            initiator_nominates: false,
         };
         let Ok(Signal::Request {
             initiator_predicted,
@@ -1060,6 +1170,7 @@ mod tests {
             // Port 0, a well-known port and a repeat are all dropped.
             responder_predicted: alloc::vec![0, 80, 41_000, 41_000, 41_001],
             responder_birthday: false,
+            responder_nominated: false,
         };
         let Ok(Signal::Ready {
             responder_predicted,
@@ -1101,6 +1212,7 @@ mod tests {
             commit: false,
             responder_predicted: Vec::new(),
             responder_birthday: birthday,
+            responder_nominated: false,
         };
         for birthday in [false, true] {
             let bytes = ready(birthday).encode();
@@ -1124,6 +1236,7 @@ mod tests {
             host_payload: None,
             initiator_predicted: Vec::new(),
             initiator_birthday: true,
+            initiator_nominates: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -1143,6 +1256,7 @@ mod tests {
             commit: true,
             responder_predicted: Vec::new(),
             responder_birthday: false,
+            responder_nominated: false,
         };
         let mut old = Vec::new();
         msgpack::write_fixmap_header(&mut old, 3);
@@ -1158,6 +1272,7 @@ mod tests {
             commit: true,
             responder_predicted: alloc::vec![41_000],
             responder_birthday: false,
+            responder_nominated: false,
         };
         let bytes = with.encode();
         assert_eq!(bytes[0], 0x80 | 4, "one more map entry");
@@ -1179,6 +1294,7 @@ mod tests {
             initiator_predicted: alloc::vec::Vec::new(),
             host_payload: None,
             initiator_birthday: false,
+            initiator_nominates: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -1192,6 +1308,7 @@ mod tests {
             commit: false,
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
+            responder_nominated: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
@@ -1202,6 +1319,7 @@ mod tests {
                 commit: false,
                 responder_predicted: alloc::vec::Vec::new(),
                 responder_birthday: false,
+                responder_nominated: false,
             })
         );
     }
@@ -1333,5 +1451,64 @@ mod tests {
             None,
             "a keepalive ack is not a probe ack"
         );
+    }
+
+    /// +ciris (pair agreement): "n" travels in REQUEST and READY when set,
+    /// and a body without it (rns-rs, an older leviculum) reads as off.
+    #[test]
+    fn nomination_round_trips_and_defaults_off() {
+        let mut request = Signal::request(SESSION, facilitator(), public_v4(), ProbeProtocol::Rnsp);
+        let plain = request.encode();
+        if let Signal::Request {
+            initiator_nominates,
+            commit,
+            ..
+        } = &mut request
+        {
+            *initiator_nominates = true;
+            *commit = true;
+        }
+        let with = request.encode();
+        assert!(with.len() > plain.len());
+        assert_eq!(Signal::decode(MSG_UPGRADE_REQUEST, &with), Ok(request));
+        assert!(matches!(
+            Signal::decode(MSG_UPGRADE_REQUEST, &plain),
+            Ok(Signal::Request {
+                initiator_nominates: false,
+                ..
+            })
+        ));
+        let mut ready = Signal::ready(SESSION, public_v6());
+        if let Signal::Ready {
+            responder_nominated,
+            ..
+        } = &mut ready
+        {
+            *responder_nominated = true;
+        }
+        assert_eq!(
+            Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
+            Ok(ready)
+        );
+    }
+
+    /// +ciris (pair agreement): a punch's sequence number carries its
+    /// target's index and the nomination bit, and is never a keepalive's
+    /// or an MTU probe's.
+    #[test]
+    fn a_punch_sequence_names_its_target_and_its_nomination() {
+        for counter in [0u32, 1, 7, u32::MAX / 2, u32::MAX] {
+            for target in [0usize, 1, 5, PUNCH_TARGETS_MAX - 1] {
+                for nominate in [false, true] {
+                    let seq = punch_seq(counter, target, nominate);
+                    assert_eq!(punch_seq_target(seq), target);
+                    assert_eq!(punch_seq_nominates(seq), nominate);
+                    assert_ne!(seq, KEEPALIVE_SEQ);
+                    assert_eq!(mtu_probe_acked_size(seq), None);
+                }
+            }
+        }
+        assert!(!punch_seq_nominates(KEEPALIVE_SEQ));
+        assert!(!punch_seq_nominates(mtu_probe_seq(1280)));
     }
 }

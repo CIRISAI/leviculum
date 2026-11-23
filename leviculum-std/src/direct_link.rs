@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leviculum_core::direct_link::wire::{self, PunchKind, SessionId};
-use leviculum_core::direct_link::ProbeProtocol;
+use leviculum_core::direct_link::{ProbeProtocol, Role};
 use leviculum_core::node::{DirectLinkJob, DirectLinkPolicy};
 use leviculum_core::transport::InterfaceId;
 use rand_core::RngCore;
@@ -36,7 +36,11 @@ use crate::interfaces::direct_udp::{spawn_direct_udp_interface, DirectUdpTiming}
 use crate::interfaces::InterfaceHandle;
 
 /// Direct-link settings, from config or the builder.
+///
+/// `#[non_exhaustive]` (+ciris): the fork keeps adding settings. Outside
+/// this crate start from [`Default`] and set the fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct DirectLinkSettings {
     /// How this node answers a peer's upgrade request.
     pub policy: DirectLinkPolicy,
@@ -48,9 +52,11 @@ pub struct DirectLinkSettings {
     /// Run a facilitator on this UDP port (all IPv4 addresses).
     pub facilitator_port: Option<u16>,
     /// +ciris (review item 6): a second observer (`host:port`), probed from
-    /// the same session socket to classify this node's NAT. Unset: the node
-    /// advertises neither predicted ports nor "b". No default: the node never
-    /// asks a party it was not told to.
+    /// the same session socket to classify this node's NAT. Unset, no NAT is
+    /// classified: the node never advertises predicted ports ("q"), and
+    /// advertises "b" only on its own evidence (its allocation probes look
+    /// random, the fallback). No default: the node never asks a party it was
+    /// not told to.
     pub facilitator2: Option<String>,
     /// How to probe `facilitator2`.
     pub protocol2: ProbeProtocol,
@@ -246,6 +252,10 @@ pub(crate) const RESOLVE_RETRY: Duration = Duration::from_secs(30);
 /// Probe attempts and the wait for each answer.
 const PROBE_ATTEMPTS: u32 = 3;
 const PROBE_WAIT: Duration = Duration::from_secs(2);
+/// +ciris (fourth review F): past this into discovery the second observer
+/// and the allocation probes are skipped, so the whole discovery (at most
+/// about 3 s + 0.5 s + 1 s) stays well inside the peer's 10 s wait.
+pub(crate) const DISCOVERY_EXTRAS_UNTIL: Duration = Duration::from_secs(3);
 
 /// One probe request and what identifies its answer.
 enum ProbeAttempt {
@@ -285,6 +295,7 @@ impl ProbeAttempt {
 }
 
 /// Learn `socket`'s reflexive address from `server`.
+#[cfg(test)]
 pub(crate) async fn probe(
     socket: &UdpSocket,
     server: SocketAddr,
@@ -301,16 +312,38 @@ pub(crate) async fn probe_with(
     attempts: u32,
     wait: Duration,
 ) -> io::Result<SocketAddr> {
+    probe_with_stats(socket, server, protocol, attempts, wait)
+        .await
+        .map(|(public, _)| public)
+}
+
+/// +ciris (diagnostics): how a probe that got its answer went: the attempt
+/// that was answered (1-based) and the round trip of that attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProbeStats {
+    pub(crate) attempts: u32,
+    pub(crate) rtt_ms: u64,
+}
+
+/// [`probe_with`], with [`ProbeStats`].
+pub(crate) async fn probe_with_stats(
+    socket: &UdpSocket,
+    server: SocketAddr,
+    protocol: ProbeProtocol,
+    attempts: u32,
+    wait: Duration,
+) -> io::Result<(SocketAddr, ProbeStats)> {
     let mut rng = rand_core::OsRng;
     let mut buf = [0u8; 512];
-    for _ in 0..attempts {
+    for attempt_no in 1..=attempts {
         // A fresh nonce per attempt, so a late answer to an earlier attempt
         // is not mistaken for this one (either is equally true, but matching
         // exactly keeps the rule simple).
         let attempt = ProbeAttempt::new(protocol, &mut rng);
         let request = attempt.request();
         socket.send_to(&request, on_socket(socket, server)).await?;
-        let deadline = tokio::time::Instant::now() + wait;
+        let sent_at = tokio::time::Instant::now();
+        let deadline = sent_at + wait;
         loop {
             match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
                 Err(_) => break,
@@ -323,7 +356,11 @@ pub(crate) async fn probe_with(
                         continue;
                     }
                     if let Some(public) = attempt.answer(&buf[..len]) {
-                        return Ok(public);
+                        let stats = ProbeStats {
+                            attempts: attempt_no,
+                            rtt_ms: sent_at.elapsed().as_millis() as u64,
+                        };
+                        return Ok((public, stats));
                     }
                 }
             }
@@ -347,7 +384,14 @@ const REANNOUNCE_AFTER: [Duration; 2] = [Duration::from_secs(1), Duration::from_
 /// Interval between punch frames, and the whole window. Same as rns-rs, so
 /// the two ends of a mixed pair give up at about the same time.
 const PUNCH_INTERVAL: Duration = Duration::from_millis(100);
-const PUNCH_WINDOW: Duration = Duration::from_secs(10);
+const PUNCH_WINDOW: Duration =
+    Duration::from_millis(leviculum_core::direct_link::session::PUNCH_WINDOW_MS);
+/// +ciris: the window of an ESCALATED punch (either side advertised "b" or
+/// "q", under the two-sided commit): long enough for the whole spray. Both
+/// ends derive it from the same exchanged keys. Plain punches keep
+/// [`PUNCH_WINDOW`], so rns-rs timing is unchanged.
+pub(crate) const ESCALATED_PUNCH_WINDOW: Duration =
+    Duration::from_millis(leviculum_core::direct_link::session::ESCALATED_PUNCH_WINDOW_MS);
 
 /// What a successful punch hands on.
 #[derive(Debug, PartialEq, Eq)]
@@ -388,6 +432,14 @@ const PEER_REFLEXIVE_MAX: usize = 4;
 /// anywhere else proves nothing about the pair this end would send on, and
 /// accepting it let the two ends settle on different paths.
 ///
+/// +ciris (pair agreement): each punch's sequence number names the target
+/// it went to ([`wire::punch_seq`]). Under nomination the ack must echo the
+/// index of the address it came from, so the check is really symmetric; the
+/// initiator then nominates the pair it settled on, and the responder takes
+/// exactly that pair instead of its own first one (RFC 8445 8.1.1, the
+/// controlling agent's USE-CANDIDATE). Without nomination (rns-rs, an older
+/// peer) each end settles on its own first proven address, as before.
+///
 /// Every punch heard is acked to where it came from, and that address is
 /// punched too from then on (a peer-reflexive candidate): behind a NAT that
 /// did not keep the advertised port, it is the address the peer is really
@@ -413,14 +465,15 @@ pub(crate) async fn punch(
 /// after [`ESCALATE_AFTER`] (or [`BIRTHDAY_AFTER`]) with nothing heard, so a
 /// pair that reaches each other at once never sprays or opens a socket more:
 /// - `birthday` (this node's NAT is the random one): up to
-///   [`wire::MAX_BIRTHDAY_SOCKETS`] more sockets, each sending one punch a
-///   [`BIRTHDAY_REFRESH`] toward the peer's advertised address so its own
-///   mapping stays open. The first one the peer reaches becomes the punch
-///   socket for the rest of the window and is returned, so the interface
-///   runs on it; every other one is closed.
-/// - `spray` (the peer's NAT is the random one): also punch random ports on
-///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is heard
-///   from it or [`wire::MAX_SPRAY_PORTS`] are used.
+///   [`wire::MAX_BIRTHDAY_SOCKETS`] more sockets, opened in tranches of
+///   [`BIRTHDAY_TRANCHE`] every [`BIRTHDAY_TRANCHE_EVERY`] while nothing is
+///   heard, each sending one punch a [`BIRTHDAY_REFRESH`] toward the peer's
+///   advertised address so its own mapping stays open. The first one the
+///   peer reaches becomes the punch socket for the rest of the window and is
+///   returned, so the interface runs on it; every other one is closed.
+/// - `spray` (the peer's NAT is the random one): also knock random ports on
+///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is
+///   heard from it or [`wire::MAX_SPRAY_PORTS`] are used.
 pub(crate) async fn punch_with(
     socket: &UdpSocket,
     targets: &[SocketAddr],
@@ -429,13 +482,13 @@ pub(crate) async fn punch_with(
     token: &[u8; 32],
     plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
-    let mut esc = Escalation::new(
+    let esc = Escalation::new(
         knock_budget(),
         plan.pair,
+        plan.identity,
         plan.escalate,
         plan.birthday_after,
     );
-    esc.birthday_max = plan.birthday_max;
     let spray: Option<SprayPorts> = (plan.spray && plan.escalate).then(|| {
         let mut rng = rand_core::OsRng;
         Box::new(move || spray_port(&mut rng)) as SprayPorts
@@ -443,7 +496,18 @@ pub(crate) async fn punch_with(
     let predicted: &[SocketAddr] = if plan.escalate { predicted } else { &[] };
     let extras = (plan.birthday && plan.escalate).then_some(Extras::Open);
     punch_with_ports(
-        socket, extras, targets, predicted, session, token, spray, &esc,
+        socket,
+        extras,
+        targets,
+        predicted,
+        session,
+        token,
+        spray,
+        &esc,
+        PunchShape {
+            window: plan.window,
+            nomination: plan.nomination,
+        },
     )
     .await
 }
@@ -461,12 +525,18 @@ pub(crate) struct PunchPlan {
     pub(crate) escalate: bool,
     /// The budget's pair key (the link).
     pub(crate) pair: [u8; 16],
+    /// The peer's identity, when known: the pair allowance is kept for it
+    /// too (fourth review B).
+    pub(crate) identity: Option<[u8; 16]>,
     /// When the birthday phase may open: BIRTHDAY_AFTER on two-observer
     /// evidence, ESCALATE_AFTER on own evidence alone (Eric's fallback).
     pub(crate) birthday_after: Duration,
-    /// How many birthday sockets: MAX_BIRTHDAY_SOCKETS on two-observer
-    /// evidence, FALLBACK_BIRTHDAY_SOCKETS on own evidence (N1c).
-    pub(crate) birthday_max: usize,
+    /// [`PUNCH_WINDOW`], or [`ESCALATED_PUNCH_WINDOW`] when both ends
+    /// agreed the punch is escalated.
+    pub(crate) window: Duration,
+    /// Pair agreement (see [`punch`]): `Initiator` nominates, `Responder`
+    /// settles on the nomination, `None` settles on its own.
+    pub(crate) nomination: Option<Role>,
 }
 
 impl PunchPlan {
@@ -478,8 +548,28 @@ impl PunchPlan {
             spray: false,
             escalate: false,
             pair: [0u8; 16],
+            identity: None,
             birthday_after: BIRTHDAY_AFTER,
-            birthday_max: 0,
+            window: PUNCH_WINDOW,
+            nomination: None,
+        }
+    }
+}
+
+/// +ciris: how long a punch runs and how it settles.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PunchShape {
+    pub(crate) window: Duration,
+    pub(crate) nomination: Option<Role>,
+}
+
+impl PunchShape {
+    /// The plain window, each end settling on its own.
+    #[cfg(test)]
+    pub(crate) fn plain() -> Self {
+        PunchShape {
+            window: PUNCH_WINDOW,
+            nomination: None,
         }
     }
 }
@@ -492,37 +582,40 @@ impl PunchPlan {
 pub(crate) struct Escalation {
     budget: &'static KnockBudget,
     pair: [u8; 16],
+    identity: Option<[u8; 16]>,
     allowed: bool,
     pub(crate) birthday_after: Duration,
-    /// How many birthday sockets this punch may hold: 128 on two-observer
-    /// evidence, 32 on own evidence alone (third review N1c).
-    pub(crate) birthday_max: usize,
     /// `None` until the first escalated send; then whether the pair's
     /// allowance granted this punch.
     granted: Arc<std::sync::Mutex<Option<bool>>>,
+    /// Birthday sockets this punch holds open right now: its rate need is
+    /// budgeted by these, not by the cap (Eric's condition on the ramp).
+    pub(crate) open: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Escalation {
     pub(crate) fn new(
         budget: &'static KnockBudget,
         pair: [u8; 16],
+        identity: Option<[u8; 16]>,
         allowed: bool,
         birthday_after: Duration,
     ) -> Self {
         Escalation {
             budget,
             pair,
+            identity,
             allowed,
             birthday_after,
-            birthday_max: wire::MAX_BIRTHDAY_SOCKETS,
             granted: Arc::new(std::sync::Mutex::new(None)),
+            open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
-    /// Is this punch granted its pair's allowance toward `ip`? Decided once,
-    /// at the first ask (a send, or the birthday phase before it binds
-    /// anything: third review N1b).
-    pub(crate) fn grant(&self, ip: std::net::IpAddr) -> bool {
+    /// Is this punch granted its pair's allowance? Decided once, at the
+    /// first ask (a send, or the birthday phase before it binds anything:
+    /// third review N1b).
+    pub(crate) fn grant(&self) -> bool {
         if !self.allowed {
             return false;
         }
@@ -532,16 +625,26 @@ impl Escalation {
             None => {
                 let ok = self
                     .budget
-                    .escalate(self.pair, ip, std::time::Instant::now());
+                    .escalate(self.pair, self.identity, std::time::Instant::now());
                 *g = Some(ok);
                 ok
             }
         }
     }
 
+    /// The datagrams a second this punch needs now: a spray's rate, and
+    /// one refresh per open birthday socket per [`BIRTHDAY_REFRESH`].
+    fn need_pps(&self) -> u32 {
+        let open = self.open.load(std::sync::atomic::Ordering::Relaxed) as u32;
+        SPRAY_PPS + open * BIRTHDAY_REFRESHES_PER_SEC
+    }
+
     /// May one escalated datagram go to `ip` now?
     pub(crate) fn send(&self, ip: std::net::IpAddr) -> bool {
-        self.grant(ip) && self.budget.take(self.pair, ip, std::time::Instant::now())
+        self.grant()
+            && self
+                .budget
+                .take(self.pair, ip, std::time::Instant::now(), self.need_pps())
     }
 
     /// Whether the pair's allowance refused this punch.
@@ -555,17 +658,29 @@ impl Escalation {
     }
 }
 
-/// +ciris (review item 2): escalations one pair (link, target) may start per
-/// [`BUDGET_WINDOW`]: retries after a birthday miss can spray again.
+/// +ciris (review item 2): escalations one link, and one peer identity, may
+/// start per [`BUDGET_WINDOW`], whatever target they spray: a retry after a
+/// birthday miss escalates again within these.
 pub(crate) const PAIR_ESCALATIONS: usize = 3;
 /// +ciris (review item 2): the budget's window.
 pub(crate) const BUDGET_WINDOW: Duration = Duration::from_secs(300);
+/// Random ports knocked a second (the spray's pacing).
+pub(crate) const SPRAY_PPS: u32 = SPRAY_PER_TICK as u32 * 10;
+/// One birthday socket's punches a second.
+pub(crate) const BIRTHDAY_REFRESHES_PER_SEC: u32 = 2;
 /// Birthday punches one session sends at most: every socket, every
-/// BIRTHDAY_REFRESH, for the whole window.
-pub(crate) const BIRTHDAY_SENDS_MAX: u32 = wire::MAX_BIRTHDAY_SOCKETS as u32 * 20;
-/// Escalated datagrams one escalation sends at most: the spray and the
-/// birthday punches.
-pub(crate) const ESCALATION_SENDS: u32 = wire::MAX_SPRAY_PORTS as u32 + BIRTHDAY_SENDS_MAX;
+/// BIRTHDAY_REFRESH, for a whole escalated window.
+pub(crate) const BIRTHDAY_SENDS_MAX: u32 = wire::MAX_BIRTHDAY_SOCKETS as u32
+    * BIRTHDAY_REFRESHES_PER_SEC
+    * (leviculum_core::direct_link::session::ESCALATED_PUNCH_WINDOW_MS / 1_000) as u32;
+/// Knocks to predicted ports one session sends at most: each, every tick,
+/// for a whole escalated window.
+pub(crate) const PREDICTED_SENDS_MAX: u32 = wire::MAX_PREDICTED_PORTS as u32
+    * (leviculum_core::direct_link::session::ESCALATED_PUNCH_WINDOW_MS / 100) as u32;
+/// Escalated datagrams one escalation sends at most: the spray, the
+/// predicted knocks and the birthday punches.
+pub(crate) const ESCALATION_SENDS: u32 =
+    wire::MAX_SPRAY_PORTS as u32 + PREDICTED_SENDS_MAX + BIRTHDAY_SENDS_MAX;
 /// +ciris (third review, B): escalated datagrams one PAIR may send one target
 /// per window: its own three escalations.
 pub(crate) const PAIR_TARGET_VOLUME: u32 = PAIR_ESCALATIONS as u32 * ESCALATION_SENDS;
@@ -574,14 +689,13 @@ pub(crate) const PAIR_TARGET_VOLUME: u32 = PAIR_ESCALATIONS as u32 * ESCALATION_
 /// pairs together: a ceiling over the pairs' shares, so no one pair can
 /// exhaust a shared (CGNAT) address for the others.
 pub(crate) const TARGET_VOLUME: u32 = 2 * PAIR_TARGET_VOLUME;
+/// One escalation at its peak: the spray and every birthday socket open
+/// (both ends random), 320 + 512 a second.
+pub(crate) const PAIR_FULL_PPS: u32 =
+    SPRAY_PPS + wire::MAX_BIRTHDAY_SOCKETS as u32 * BIRTHDAY_REFRESHES_PER_SEC;
 /// +ciris (review item 2): escalated datagrams per second the whole process
-/// may send: room for three concurrent escalations (each about 220 knocks
-/// and 256 birthday punches a second).
-pub(crate) const ESCALATED_GLOBAL_PPS: u32 = 1_500;
-/// +ciris (third review, N3): one escalation's rate, the floor of a pair's
-/// fair share of the global ceiling.
-pub(crate) const PAIR_FLOOR_PPS: u32 =
-    SPRAY_PER_TICK as u32 * 10 + wire::MAX_BIRTHDAY_SOCKETS as u32 * 2;
+/// may send: two concurrent escalations at their peak (2 x 832).
+pub(crate) const ESCALATED_GLOBAL_PPS: u32 = 2 * PAIR_FULL_PPS;
 /// How recently a pair must have sent to count as active for the fair share.
 const ACTIVE_PAIR: Duration = Duration::from_secs(2);
 
@@ -606,6 +720,14 @@ impl Target {
             },
         }
     }
+}
+
+/// +ciris (fourth review B): whose allowance an escalation spends: the
+/// link's, and the peer identity's when it identified itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AllowanceKey {
+    Link([u8; 16]),
+    Identity([u8; 16]),
 }
 
 /// +ciris (third review, item 2): a count over a sliding [`BUDGET_WINDOW`],
@@ -678,8 +800,8 @@ pub(crate) struct KnockBudget {
 }
 
 struct KnockBudgetInner {
-    /// Escalations started per (pair, target), with when.
-    pairs: HashMap<([u8; 16], Target), Vec<std::time::Instant>>,
+    /// Escalations started per link and per peer identity, with when.
+    allowances: HashMap<AllowanceKey, Vec<std::time::Instant>>,
     /// Datagrams per target, all pairs (the ceiling).
     volume: HashMap<Target, Sliding>,
     /// Datagrams per (pair, target): each pair's share of a target.
@@ -693,7 +815,7 @@ impl KnockBudget {
     pub(crate) fn new() -> Self {
         KnockBudget {
             inner: std::sync::Mutex::new(KnockBudgetInner {
-                pairs: HashMap::new(),
+                allowances: HashMap::new(),
                 volume: HashMap::new(),
                 pair_volume: HashMap::new(),
                 pair_rate: HashMap::new(),
@@ -705,34 +827,47 @@ impl KnockBudget {
         }
     }
 
-    /// May the pair start an escalation toward `ip` now? Records it if so.
+    /// May the pair (the link `pair`, and the peer `identity` when known)
+    /// start an escalation now? Both allowances must have room; both are
+    /// spent if so.
     pub(crate) fn escalate(
         &self,
         pair: [u8; 16],
-        ip: std::net::IpAddr,
+        identity: Option<[u8; 16]>,
         now: std::time::Instant,
     ) -> bool {
         let mut b = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        b.pairs.retain(|_, starts| {
+        b.allowances.retain(|_, starts| {
             starts.retain(|at| now.saturating_duration_since(*at) < BUDGET_WINDOW);
             !starts.is_empty()
         });
-        let starts = b.pairs.entry((pair, Target::of(ip))).or_default();
-        if starts.len() >= PAIR_ESCALATIONS {
+        let keys: Vec<AllowanceKey> = core::iter::once(AllowanceKey::Link(pair))
+            .chain(identity.map(AllowanceKey::Identity))
+            .collect();
+        let full = keys.iter().any(|k| {
+            b.allowances
+                .get(k)
+                .is_some_and(|starts| starts.len() >= PAIR_ESCALATIONS)
+        });
+        if full {
             return false;
         }
-        starts.push(now);
+        for k in keys {
+            b.allowances.entry(k).or_default().push(now);
+        }
         true
     }
 
     /// One escalated datagram from `pair` toward `ip`: the pair's share of
     /// the target, the target's ceiling, the pair's fair share of the global
-    /// rate, then the global ceiling.
+    /// rate (never below `need_pps`, what the pair has open, up to the whole
+    /// ceiling), then the global ceiling.
     pub(crate) fn take(
         &self,
         pair: [u8; 16],
         ip: std::net::IpAddr,
         now: std::time::Instant,
+        need_pps: u32,
     ) -> bool {
         let mut b = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // Prune what nothing refers to any more (third review, item 2).
@@ -765,7 +900,7 @@ impl KnockBudget {
             .count()
             + 1;
         let share = (f64::from(ESCALATED_GLOBAL_PPS) / active as f64)
-            .max(f64::from(PAIR_FLOOR_PPS))
+            .max(f64::from(need_pps))
             .min(f64::from(ESCALATED_GLOBAL_PPS));
         // A new pair's bucket starts full at its share.
         let mine = b.pair_rate.entry(pair).or_insert(Bucket {
@@ -794,11 +929,15 @@ pub(crate) fn knock_budget() -> &'static KnockBudget {
     BUDGET.get_or_init(KnockBudget::new)
 }
 
-/// +ciris (review item 3): birthday sockets the whole process may hold at
-/// once, all sessions together: one session's full set.
+/// +ciris: birthday sockets the whole process may hold at once, all
+/// sessions together: two sessions' full sets. A third concurrent session
+/// gets what is left, and punches on its session socket whatever it gets.
+pub(crate) const PROCESS_BIRTHDAY_SOCKETS: usize = 2 * wire::MAX_BIRTHDAY_SOCKETS;
+
+/// +ciris (review item 3): the process-wide count of birthday sockets.
 pub(crate) fn birthday_permits() -> &'static Arc<tokio::sync::Semaphore> {
     static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(wire::MAX_BIRTHDAY_SOCKETS)))
+    PERMITS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(PROCESS_BIRTHDAY_SOCKETS)))
 }
 
 /// Where a spray draws its ports: random in production, fixed in tests.
@@ -806,9 +945,12 @@ pub(crate) type SprayPorts = Box<dyn FnMut() -> u16 + Send>;
 
 /// Where a punch from behind a random NAT gets its birthday sockets.
 pub(crate) enum Extras {
-    /// Bind [`wire::MAX_BIRTHDAY_SOCKETS`] when they are needed.
+    /// Bind them, tranche by tranche, when they are needed.
     Open,
-    /// These, already bound (tests).
+    /// The same, against a semaphore of the test's own.
+    #[cfg(test)]
+    OpenFrom(Arc<tokio::sync::Semaphore>),
+    /// These, already bound, all in the first tranche (tests).
     #[cfg(test)]
     Given(Vec<Arc<UdpSocket>>),
 }
@@ -825,12 +967,24 @@ pub(crate) async fn punch_with_ports(
     token: &[u8; 32],
     spray: Option<SprayPorts>,
     esc: &Escalation,
+    shape: PunchShape,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let mut diag = PunchDiag::new(targets, predicted, *session);
     diag.escalation = Some(Arc::clone(&esc.granted));
     diag.escalation_allowed = esc.allowed();
+    diag.window_ms = shape.window.as_millis() as u64;
+    diag.nomination = shape.nomination;
     let now = tokio::time::Instant::now();
-    let deadline = now + PUNCH_WINDOW;
+    // +ciris (pair agreement): a responder waiting on a nomination waits
+    // NOMINATION_GRACE past its window, so an initiator that proves a pair
+    // in its last moments still gets its nomination through (it nominates
+    // for as long, see punch_inner).
+    let grace = if shape.nomination == Some(Role::Responder) {
+        NOMINATION_GRACE
+    } else {
+        Duration::ZERO
+    };
+    let deadline = now + shape.window + grace;
     let escalate_at = now + ESCALATE_AFTER;
     let result = match extras {
         None => punch_inner(
@@ -845,6 +999,7 @@ pub(crate) async fn punch_with_ports(
             spray,
             None,
             esc,
+            shape.nomination,
         )
         .await
         .map(|p| (p, None)),
@@ -861,6 +1016,7 @@ pub(crate) async fn punch_with_ports(
                 escalate_at,
                 spray,
                 esc,
+                shape.nomination,
             )
             .await
         }
@@ -874,10 +1030,18 @@ pub(crate) async fn punch_with_ports(
 }
 
 /// Random ports knocked on the peer's IP per punch tick (see [`punch_with`]):
-/// [`wire::MAX_SPRAY_PORTS`] over about 4.4 s, so the knocks still meet the
-/// peer's birthday sockets when the two ends start up to RTT/2 (at most
-/// RESPONDER_START_DELAY_MAX) apart (review item 7).
-pub(crate) const SPRAY_PER_TICK: usize = 22;
+/// 320 a second, so [`wire::MAX_SPRAY_PORTS`] (1,750) take about 5.5 s and,
+/// started at [`ESCALATE_AFTER`], end by about 7 s, inside
+/// [`ESCALATED_PUNCH_WINDOW`] with room for a start skew of up to
+/// RESPONDER_START_DELAY_MAX and the birthday side's next refresh.
+pub(crate) const SPRAY_PER_TICK: usize = 32;
+
+/// +ciris (pair agreement): how long past its window a responder waits for a
+/// nomination, and an initiator that settled keeps nominating. Inside both
+/// sessions' punch waits (core `Session`), which add it where nomination is
+/// in force.
+pub(crate) const NOMINATION_GRACE: Duration =
+    Duration::from_millis(leviculum_core::direct_link::session::NOMINATION_GRACE_MS);
 
 /// How long a punch hears nothing before it punches the peer's predicted
 /// ports and sprays: a pair that reaches each other does so well inside it
@@ -889,9 +1053,12 @@ pub(crate) const ESCALATE_AFTER: Duration = Duration::from_millis(1_500);
 /// open when the spray arrives.
 pub(crate) const BIRTHDAY_AFTER: Duration = Duration::from_millis(1_000);
 
-/// +ciris (third review N1c): birthday sockets a punch holds on own evidence
-/// alone (no observer could classify the NAT).
-pub(crate) const FALLBACK_BIRTHDAY_SOCKETS: usize = 32;
+/// +ciris: birthday sockets opened at a time. The first tranche opens at
+/// the birthday gate, the next every [`BIRTHDAY_TRANCHE_EVERY`] while
+/// nothing is heard, up to [`wire::MAX_BIRTHDAY_SOCKETS`] (four tranches):
+/// a pair that meets early never holds the full set.
+pub(crate) const BIRTHDAY_TRANCHE: usize = 64;
+pub(crate) const BIRTHDAY_TRANCHE_EVERY: Duration = Duration::from_millis(500);
 
 /// How often each birthday socket repeats its punch toward the peer. With
 /// the knock fix the peer's knock only opens its filter, and the next of
@@ -908,8 +1075,76 @@ enum BirthdayEnd {
     },
 }
 
+/// +ciris: the birthday sockets of one punch, as they are opened.
+struct BirthdaySet {
+    opened: Vec<Arc<UdpSocket>>,
+    permits: Vec<Option<tokio::sync::OwnedSemaphorePermit>>,
+    tasks: Vec<AbortOnDrop>,
+    /// Tranches opened so far.
+    tranches: usize,
+    /// A bind or send failed: the host (or a carrier NAT's per-subscriber
+    /// port quota) has no more; nothing more is opened.
+    quota: Arc<std::sync::atomic::AtomicBool>,
+    /// The set is all there will be (tests hand one in whole).
+    #[cfg(test)]
+    closed: bool,
+}
+
+impl BirthdaySet {
+    fn new() -> Self {
+        BirthdaySet {
+            opened: Vec::new(),
+            permits: Vec::new(),
+            tasks: Vec::new(),
+            tranches: 0,
+            quota: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            closed: false,
+        }
+    }
+
+    fn full(&self) -> bool {
+        #[cfg(test)]
+        if self.closed {
+            return true;
+        }
+        self.opened.len() >= wire::MAX_BIRTHDAY_SOCKETS
+            || self.quota.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Start a task for each socket from `from` on.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_from(
+        &mut self,
+        from: usize,
+        peer: SocketAddr,
+        hit_tx: &mpsc::Sender<(usize, SocketAddr, Option<u32>)>,
+        session: &SessionId,
+        token: &[u8; 32],
+        esc: &Escalation,
+        ack_all: bool,
+    ) {
+        for index in from..self.opened.len() {
+            self.tasks.push(birthday_task(
+                index,
+                Arc::clone(&self.opened[index]),
+                peer,
+                hit_tx.clone(),
+                *session,
+                *token,
+                esc.clone(),
+                Arc::clone(&self.quota),
+                ack_all,
+            ));
+        }
+        esc.open
+            .store(self.opened.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Punch from `socket`; past [`BIRTHDAY_AFTER`] with nothing heard, hold
-/// birthday sockets open too and switch to the first one the peer reaches.
+/// birthday sockets open too, tranche by tranche, and switch to the first
+/// one the peer reaches.
 #[allow(clippy::too_many_arguments)]
 async fn punch_birthday(
     socket: &UdpSocket,
@@ -923,17 +1158,27 @@ async fn punch_birthday(
     escalate_at: tokio::time::Instant,
     spray: Option<SprayPorts>,
     esc: &Escalation,
+    nomination: Option<Role>,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
     let peer = canonical(*targets.first()?);
-    let mut opened: Vec<Arc<UdpSocket>> = Vec::new();
-    // One per opened socket (none for given ones): released as each closes.
-    let mut permits: Vec<Option<tokio::sync::OwnedSemaphorePermit>> = Vec::new();
-    // Written the moment the sockets are bound, while `diag` is lent to the
-    // primary punch, so a punch the peer's REJECT aborts still logs them.
+    let mut set = BirthdaySet::new();
+    // Written as the sockets are bound, while `diag` is lent to the primary
+    // punch, so a punch the peer's REJECT aborts still logs them.
     let open_count = Arc::clone(&diag.birthday_open);
+    let tranche_count = Arc::clone(&diag.birthday_tranches);
+    // The set's quota flag IS the diag's, so a punch the session aborts
+    // still logs that the ramp hit it.
+    set.quota = Arc::clone(&diag.birthday_quota);
     // Set by the session socket's punch the moment it hears the peer, before
     // its ack leaves; read here on every birthday hit.
     let primary_heard = Arc::clone(&diag.primary_heard);
+    // Set once one of the session socket's punches is acked: its packets
+    // reach the peer. Until then this NAT's mapping is what is in the way,
+    // heard or not, and the birthday sockets are what helps (strategy
+    // model: "heard, never acked" used to suppress them).
+    let primary_acked = Arc::clone(&diag.primary_acked);
+    let acked =
+        |a: &Arc<std::sync::atomic::AtomicBool>| a.load(std::sync::atomic::Ordering::SeqCst);
     let mut ignored = 0usize;
     let end = {
         let primary = punch_inner(
@@ -948,6 +1193,7 @@ async fn punch_birthday(
             spray,
             None,
             esc,
+            nomination,
         );
         tokio::pin!(primary);
         // BIRTHDAY_AFTER on two-observer evidence; ESCALATE_AFTER when the
@@ -958,76 +1204,117 @@ async fn punch_birthday(
         };
         match early {
             Some(r) => BirthdayEnd::Primary(r),
-            // Heard already at the gate (review item 6), not allowed to
-            // escalate (the trust gate), or the pair's allowance refused
-            // before anything is bound (third review N1b): nothing to open.
-            None if primary_heard.load(std::sync::atomic::Ordering::SeqCst)
-                || !esc.grant(peer.ip()) =>
-            {
+            // Acked already at the gate (the session socket's mapping
+            // works), not allowed to escalate (the trust gate), or the
+            // pair's allowance refused before anything is bound (third
+            // review N1b): nothing to open.
+            None if acked(&primary_acked) || !esc.grant() => {
                 BirthdayEnd::Primary((&mut primary).await)
             }
             None => {
-                (opened, permits) = match extras {
-                    Extras::Open => {
-                        birthday_sockets(peer, birthday_permits(), esc.birthday_max).await
-                    }
+                let permits = match &extras {
                     #[cfg(test)]
-                    Extras::Given(given) => {
-                        let n = given.len();
-                        (given, (0..n).map(|_| None).collect())
-                    }
+                    Extras::OpenFrom(sem) => Arc::clone(sem),
+                    _ => Arc::clone(birthday_permits()),
                 };
-                opened.truncate(wire::MAX_BIRTHDAY_SOCKETS);
-                open_count.store(opened.len(), std::sync::atomic::Ordering::Relaxed);
+                let mut given: Option<Vec<Arc<UdpSocket>>> = match extras {
+                    Extras::Open => None,
+                    #[cfg(test)]
+                    Extras::OpenFrom(_) => None,
+                    #[cfg(test)]
+                    Extras::Given(given) => Some(given),
+                };
                 let (hit_tx, mut hit_rx) = mpsc::channel::<(usize, SocketAddr, Option<u32>)>(1);
-                let mut tasks = Vec::with_capacity(opened.len());
-                for (index, extra) in opened.iter().enumerate() {
-                    tasks.push(birthday_task(
-                        index,
-                        Arc::clone(extra),
-                        peer,
-                        hit_tx.clone(),
-                        *session,
-                        *token,
-                        esc.clone(),
-                    ));
-                }
-                drop(hit_tx);
+                let mut next_tranche = tokio::time::interval(BIRTHDAY_TRANCHE_EVERY);
+                next_tranche.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let end = loop {
                     tokio::select! {
                         r = &mut primary => break BirthdayEnd::Primary(r),
+                        // The first tick fires at once: the first tranche.
+                        _ = next_tranche.tick(), if !set.full() && !acked(&primary_acked) =>
+                        {
+                            // The guard was read when this select began; a
+                            // send may have failed (or the peer been heard)
+                            // while it waited for the tick: read it again.
+                            if set.full() || acked(&primary_acked) {
+                                continue;
+                            }
+                            let from = set.opened.len();
+                            match given.take() {
+                                Some(g) => {
+                                    let n = g.len().min(wire::MAX_BIRTHDAY_SOCKETS);
+                                    set.opened.extend(g.into_iter().take(n));
+                                    set.permits.extend((0..n).map(|_| None));
+                                    // Given sockets are the whole set.
+                                    #[cfg(test)]
+                                    {
+                                        set.closed = true;
+                                    }
+                                }
+                                None => open_tranche(&mut set, peer, &permits).await,
+                            }
+                            if set.opened.len() > from {
+                                set.tranches += 1;
+                            }
+                            set.spawn_from(
+                                from,
+                                peer,
+                                &hit_tx,
+                                session,
+                                token,
+                                esc,
+                                nomination == Some(Role::Responder),
+                            );
+                            open_count.store(set.opened.len(), std::sync::atomic::Ordering::Relaxed);
+                            tranche_count.store(set.tranches, std::sync::atomic::Ordering::Relaxed);
+                            if set.opened.is_empty() {
+                                // Nothing could be opened: the session
+                                // socket punches on alone.
+                                break BirthdayEnd::Primary((&mut primary).await);
+                            }
+                        }
                         hit = hit_rx.recv() => match hit {
-                            // The session socket has heard the peer, so the
-                            // peer may settle on it: switching now would put
-                            // the two ends on different socket pairs (found
-                            // by the TLA+ model, docs/direct_link). Stay.
-                            Some(_) if primary_heard.load(std::sync::atomic::Ordering::SeqCst) => {
+                            // Whether this hit may take the punch off the
+                            // session socket (docs/direct_link/nomination.md):
+                            // - no nomination: only while the session socket
+                            //   has heard nothing, or the peer may settle on
+                            //   it and the ends split (the TLA+ model);
+                            // - the initiator: while nothing it sent from the
+                            //   session socket is acked; it nominates, so the
+                            //   peer follows wherever it goes;
+                            // - the responder: only a nomination, which its
+                            //   birthday tasks alone report (they ack every
+                            //   other punch and keep listening).
+                            Some(_) if !may_switch(nomination, acked(&primary_heard), acked(&primary_acked)) => {
                                 ignored += 1;
                             }
                             Some((index, src, seq)) => break BirthdayEnd::Hit { index, src, seq },
-                            // Every birthday task reported and was passed
-                            // over: the session socket finishes it.
+                            // Unreachable while `hit_tx` lives here.
                             None => break BirthdayEnd::Primary((&mut primary).await),
                         },
                     }
                 };
                 // Every birthday task stops here, whichever way it went.
-                drop(tasks);
+                set.tasks.clear();
+                drop(hit_tx);
                 end
             }
         }
     };
     diag.birthday_ignored = ignored;
     let (index, src, seq) = match end {
-        BirthdayEnd::Primary(r) => return r.map(|p| (p, None)),
+        BirthdayEnd::Primary(r) => {
+            esc.open.store(0, std::sync::atomic::Ordering::Relaxed);
+            return r.map(|p| (p, None));
+        }
         BirthdayEnd::Hit { index, src, seq } => (index, src, seq),
     };
     // The peer reached the mapping of birthday socket `index`: close every
-    // other one, ack the punch that got through, and punch on from there.
-    let winner = Arc::clone(&opened[index]);
-    drop(opened);
-    // The winner's permit goes too: from here it is the path's socket.
-    drop(permits);
+    // other one at once, ack the punch that got through, and punch on from
+    // there.
+    let winner = Arc::clone(&set.opened[index]);
+    drop(set);
+    esc.open.store(0, std::sync::atomic::Ordering::Relaxed);
     diag.birthday_switched = true;
     diag.birthday_winner = Some(index);
     if let Some(seq) = seq {
@@ -1037,7 +1324,7 @@ async fn punch_birthday(
     // A punch that got through is already heard: the peer may finish on our
     // ack and then only ack, never punch again, so it must not be needed
     // twice.
-    let seed = seq.is_some().then_some(src);
+    let seed = seq.map(|seq| (src, wire::punch_seq_nominates(seq)));
     let now = tokio::time::Instant::now();
     punch_inner(
         &winner,
@@ -1051,13 +1338,31 @@ async fn punch_birthday(
         None,
         seed,
         esc,
+        nomination,
     )
     .await
     .map(|p| (p, Some(winner)))
 }
 
+/// +ciris (docs/direct_link/nomination.md): may a birthday hit take the
+/// punch off the session socket? Without nomination only while that socket
+/// has heard nothing; the initiator while nothing it sent from it is acked;
+/// the responder on a nomination only (its tasks report nothing else).
+pub(crate) fn may_switch(nomination: Option<Role>, heard: bool, acked: bool) -> bool {
+    match nomination {
+        None => !heard,
+        Some(Role::Initiator) => !acked,
+        Some(Role::Responder) => true,
+    }
+}
+
 /// One birthday socket: a punch toward `peer` every [`BIRTHDAY_REFRESH`],
-/// and the first valid frame back reported on `hit`.
+/// and the first valid frame back reported on `hit`. A send that fails sets
+/// `quota`: no more sockets are opened. With `ack_all` (the responder under
+/// nomination) every valid punch is acked where it came from and only a
+/// nomination is reported: the initiator proves this socket's pair itself
+/// and names it, and the responder settles wherever the name arrives.
+#[allow(clippy::too_many_arguments)]
 fn birthday_task(
     index: usize,
     extra: Arc<UdpSocket>,
@@ -1066,10 +1371,19 @@ fn birthday_task(
     session: SessionId,
     token: [u8; 32],
     esc: Escalation,
+    quota: Arc<std::sync::atomic::AtomicBool>,
+    ack_all: bool,
 ) -> AbortOnDrop {
     AbortOnDrop(
         tokio::spawn(async move {
-            let frame = wire::punch_frame(PunchKind::Punch, &session, &token, 0);
+            // Target 0, the peer's advertised address, which is where it
+            // punches from too.
+            let frame = wire::punch_frame(
+                PunchKind::Punch,
+                &session,
+                &token,
+                wire::punch_seq(0, 0, false),
+            );
             let mut refresh = tokio::time::interval(BIRTHDAY_REFRESH);
             let mut buf = [0u8; 512];
             loop {
@@ -1077,17 +1391,27 @@ fn birthday_task(
                     _ = refresh.tick() => {
                         // Each birthday punch is an escalated send toward the
                         // peer's IP: spent from the same budget (re-review 2).
-                        if esc.send(peer.ip()) {
-                            let _ = extra.send_to(&frame, on_socket(&extra, peer)).await;
+                        if esc.send(peer.ip())
+                            && extra.send_to(&frame, on_socket(&extra, peer)).await.is_err()
+                        {
+                            quota.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     r = extra.recv_from(&mut buf) => {
                         let Ok((len, src)) = r else { continue };
                         let seq = match wire::parse_punch_frame(&buf[..len], &session, &token) {
                             Some((PunchKind::Punch, seq)) => Some(seq),
-                            Some((PunchKind::Ack, _)) => None,
-                            None => continue,
+                            Some((PunchKind::Ack, _)) if !ack_all => None,
+                            _ => continue,
                         };
+                        if ack_all {
+                            let Some(seq) = seq else { continue };
+                            let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                            let _ = extra.send_to(&ack, on_socket(&extra, src)).await;
+                            if !wire::punch_seq_nominates(seq) {
+                                continue;
+                            }
+                        }
                         let _ = hit.send((index, canonical(src), seq)).await;
                         return;
                     }
@@ -1109,8 +1433,9 @@ async fn punch_inner(
     deadline: tokio::time::Instant,
     escalate_at: tokio::time::Instant,
     spray: Option<SprayPorts>,
-    seed_heard: Option<SocketAddr>,
+    seed_heard: Option<(SocketAddr, bool)>,
     esc: &Escalation,
+    nomination: Option<Role>,
 ) -> Option<Punched> {
     let mut targets: Vec<SocketAddr> = alloc_targets(
         canonical(*targets.first()?),
@@ -1119,6 +1444,9 @@ async fn punch_inner(
             .map(|a| canonical(*a))
             .collect::<Vec<_>>(),
     );
+    // +ciris (pair agreement): every target's index travels in its punches'
+    // sequence numbers, so no more than the field can name.
+    targets.truncate(wire::PUNCH_TARGETS_MAX);
     // +ciris: the peer's predicted ports (on its public IP), held back until
     // nothing has been heard for ESCALATE_AFTER; then KNOCKED, with the
     // spray (review item 1): a knock opens this node's filter toward a port
@@ -1136,17 +1464,33 @@ async fn punch_inner(
     let mut knocking: Vec<SocketAddr> = Vec::new();
     let mut rng = rand_core::OsRng;
     let advertised = targets.len() + held.len();
+    let reflexive_max = (advertised + PEER_REFLEXIVE_MAX).min(wire::PUNCH_TARGETS_MAX);
     // Addresses a punch actually left for; only an ack from one counts.
     let mut punched: Vec<SocketAddr> = Vec::new();
     // Addresses a valid punch came from (each acked at once), and those an
     // ack came from; the path is the first address in both, and punched.
     let mut heard: Vec<SocketAddr> = Vec::new();
     let mut acked: Vec<SocketAddr> = Vec::new();
+    // +ciris (pair agreement): the initiator's settled pair, being
+    // nominated until the responder acks a nomination on it.
+    let mut nominating: Option<SocketAddr> = None;
+    // The initiator nominates up to NOMINATION_GRACE past its window: the
+    // responder waits as long.
+    let mut deadline = deadline;
     // +ciris: a punch heard (and acked) before this loop began, on this
     // socket: a birthday socket the peer reached. Punched too, as any
     // peer-reflexive source is.
-    if let Some(src) = seed_heard.map(canonical) {
-        if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
+    if let Some((src, nominated)) = seed_heard.map(|(a, n)| (canonical(a), n)) {
+        if nominated && nomination == Some(Role::Responder) {
+            diag.heard(src);
+            diag.nominated_ms = Some(diag.elapsed_ms());
+            diag.path = Some(src);
+            return Some(Punched {
+                peer: src,
+                early: Vec::new(),
+            });
+        }
+        if !targets.contains(&src) && targets.len() < reflexive_max {
             targets.push(src);
             diag.peer_reflexive += 1;
         }
@@ -1155,7 +1499,7 @@ async fn punch_inner(
     }
     let mut early: Vec<Vec<u8>> = Vec::new();
     let mut early_bytes = 0usize;
-    let mut seq: u32 = 0;
+    let mut counter: u32 = 0;
     let mut tick = tokio::time::interval(PUNCH_INTERVAL);
     let mut buf = vec![0u8; 65_535];
     // +ciris: ports knocked on the peer's IP (its NAT is random). Never
@@ -1180,9 +1524,30 @@ async fn punch_inner(
                         pending_spray = None;
                     }
                 }
-                let frame = wire::punch_frame(PunchKind::Punch, session, token, seq);
-                seq = seq.wrapping_add(1) % wire::KEEPALIVE_SEQ;
-                for target in &targets {
+                counter = counter.wrapping_add(1);
+                if let Some(path) = nominating {
+                    // +ciris (pair agreement): only the settled pair, each
+                    // punch on it a nomination, until one is acked.
+                    let index = targets.iter().position(|t| *t == path).unwrap_or(0);
+                    let frame = wire::punch_frame(
+                        PunchKind::Punch,
+                        session,
+                        token,
+                        wire::punch_seq(counter, index, true),
+                    );
+                    if socket.send_to(&frame, on_socket(socket, path)).await.is_err() {
+                        diag.send_errors += 1;
+                    }
+                    diag.nominations += 1;
+                    continue;
+                }
+                for (index, target) in targets.iter().enumerate() {
+                    let frame = wire::punch_frame(
+                        PunchKind::Punch,
+                        session,
+                        token,
+                        wire::punch_seq(counter, index, false),
+                    );
                     let sent = socket.send_to(&frame, on_socket(socket, *target)).await.is_ok();
                     if !sent {
                         diag.send_errors += 1;
@@ -1272,9 +1637,20 @@ async fn punch_inner(
                         diag.primary_heard.store(true, std::sync::atomic::Ordering::SeqCst);
                         let ack = wire::punch_frame(PunchKind::Ack, session, token, their_seq);
                         let _ = socket.send_to(&ack, on_socket(socket, src)).await;
+                        diag.heard(src);
+                        // +ciris (pair agreement): the initiator named this
+                        // pair; it proved it both ways from its side, so the
+                        // responder takes it as it arrived.
+                        if nomination == Some(Role::Responder)
+                            && wire::punch_seq_nominates(their_seq)
+                        {
+                            diag.nominated_ms = Some(diag.elapsed_ms());
+                            diag.path = Some(src);
+                            return Some(Punched { peer: src, early });
+                        }
                         // A source that sent a valid punch proved the token:
                         // it is punched (tokened) from now on.
-                        if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
+                        if !targets.contains(&src) && targets.len() < reflexive_max {
                             tracing::debug!("direct link: peer-reflexive candidate");
                             targets.push(src);
                             diag.peer_reflexive += 1;
@@ -1282,14 +1658,22 @@ async fn punch_inner(
                         if !heard.contains(&src) && heard.len() < targets.len() {
                             heard.push(src);
                         }
-                        diag.heard(src);
                     }
-                    Some((PunchKind::Ack, _)) => {
+                    Some((PunchKind::Ack, seq)) => {
                         // Only an address this end sent a TOKENED punch to:
-                        // a knocked or sprayed one proves nothing.
-                        let ours = punched.contains(&src);
+                        // a knocked or sprayed one proves nothing. Under
+                        // nomination, only an ack for a punch sent to that
+                        // very address (the symmetric check).
+                        let ours = punched.contains(&src)
+                            && (nomination.is_none()
+                                || targets.get(wire::punch_seq_target(seq)) == Some(&src));
                         if ours {
                             diag.primary_heard.store(true, std::sync::atomic::Ordering::SeqCst);
+                            diag.primary_acked.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        if nominating == Some(src) && wire::punch_seq_nominates(seq) {
+                            diag.nominated_ms = Some(diag.elapsed_ms());
+                            return Some(Punched { peer: src, early });
                         }
                         if ours && !acked.contains(&src) {
                             acked.push(src);
@@ -1310,46 +1694,64 @@ async fn punch_inner(
                         }
                     }
                 }
-                if let Some(path) = acked.iter().find(|a| heard.contains(a)) {
-                    return Some(Punched { peer: *path, early });
+                if nominating.is_some() || nomination == Some(Role::Responder) {
+                    continue;
+                }
+                if let Some(path) = acked.iter().find(|a| heard.contains(a)).copied() {
+                    diag.path = Some(path);
+                    if nomination == Some(Role::Initiator) {
+                        // Nominate at once, then every tick until acked.
+                        nominating = Some(path);
+                        deadline = deadline.max(tokio::time::Instant::now() + NOMINATION_GRACE);
+                        let index = targets.iter().position(|t| *t == path).unwrap_or(0);
+                        let frame = wire::punch_frame(
+                            PunchKind::Punch,
+                            session,
+                            token,
+                            wire::punch_seq(counter, index, true),
+                        );
+                        let _ = socket.send_to(&frame, on_socket(socket, path)).await;
+                        diag.nominations += 1;
+                        continue;
+                    }
+                    return Some(Punched { peer: path, early });
                 }
             }
         }
     }
 }
 
-/// +ciris: up to [`wire::MAX_BIRTHDAY_SOCKETS`] fresh sockets for a punch
-/// toward `peer` from behind a random NAT, each a mapping of its own, and
+/// +ciris: open the next tranche of birthday sockets toward `peer`: up to
+/// [`BIRTHDAY_TRANCHE`] more, never past [`wire::MAX_BIRTHDAY_SOCKETS`],
 /// each holding one of `permits` (review item 3: the process-wide count).
-/// Fewer when the permits or the host run out; none is no birthday phase.
-async fn birthday_sockets(
+/// Fewer when the permits run out; a bind that fails sets the set's quota
+/// flag (the host, or its carrier NAT's per-subscriber cap, has no more).
+async fn open_tranche(
+    set: &mut BirthdaySet,
     peer: SocketAddr,
     permits: &Arc<tokio::sync::Semaphore>,
-    max: usize,
-) -> (
-    Vec<Arc<UdpSocket>>,
-    Vec<Option<tokio::sync::OwnedSemaphorePermit>>,
 ) {
     let bind = if canonical(peer).is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
         SocketAddr::from(([0u16; 8], 0))
     };
-    let mut out = Vec::with_capacity(wire::MAX_BIRTHDAY_SOCKETS);
-    let mut held = Vec::with_capacity(wire::MAX_BIRTHDAY_SOCKETS);
-    for _ in 0..max.min(wire::MAX_BIRTHDAY_SOCKETS) {
+    let room = wire::MAX_BIRTHDAY_SOCKETS.saturating_sub(set.opened.len());
+    for _ in 0..BIRTHDAY_TRANCHE.min(room) {
         let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
             break;
         };
         match UdpSocket::bind(bind).await {
             Ok(s) => {
-                out.push(Arc::new(s));
-                held.push(Some(permit));
+                set.opened.push(Arc::new(s));
+                set.permits.push(Some(permit));
             }
-            Err(_) => break,
+            Err(_) => {
+                set.quota.store(true, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
         }
     }
-    (out, held)
 }
 
 /// A random port to spray, above the well-known range.
@@ -1373,6 +1775,11 @@ pub(crate) struct AllocationSteps {
     last: u16,
     pub(crate) step1: i32,
     pub(crate) step2: i32,
+    /// +ciris (strategy review): every mapping sat at its socket's own local
+    /// port plus one fixed offset (zero: port-preserving, or no NAT). Then
+    /// the "steps" are the OS's random ephemeral ports, not the NAT's, and
+    /// the NAT is never random.
+    pub(crate) tracks_local: bool,
 }
 
 /// Probe `server` from two fresh sockets after the session socket's probe
@@ -1382,6 +1789,7 @@ async fn allocation_steps(
     server: SocketAddr,
     protocol: ProbeProtocol,
     base_port: u16,
+    base_local: Option<u16>,
 ) -> Option<AllocationSteps> {
     let bind = if server.is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
@@ -1401,7 +1809,26 @@ async fn allocation_steps(
         )
     };
     let (a, b) = tokio::time::timeout(ALLOCATION_DEADLINE, both).await.ok()?;
-    Some(steps_from(base_port, a.ok()?.port(), b.ok()?.port()))
+    let (a, b) = (a.ok()?.port(), b.ok()?.port());
+    let mut steps = steps_from(base_port, a, b);
+    let locals = (
+        base_local,
+        s1.local_addr().ok().map(|l| l.port()),
+        s2.local_addr().ok().map(|l| l.port()),
+    );
+    if let (Some(l0), Some(l1), Some(l2)) = locals {
+        steps.tracks_local = tracks_local([(base_port, l0), (a, l1), (b, l2)]);
+    }
+    Some(steps)
+}
+
+/// +ciris (strategy review): whether each mapped port is its socket's local
+/// port plus one shared offset (a port-preserving NAT, a port-shifting one,
+/// or none): the NAT then allocates nothing of its own.
+pub(crate) fn tracks_local(pairs: [(u16, u16); 3]) -> bool {
+    let offset = |(mapped, local): (u16, u16)| i32::from(mapped) - i32::from(local);
+    let first = offset(pairs[0]);
+    pairs.iter().all(|p| offset(*p) == first)
 }
 
 /// The two probes run at once, so which mapping came first is not known:
@@ -1419,6 +1846,7 @@ pub(crate) fn steps_from(base: u16, a: u16, b: u16) -> AllocationSteps {
         last: far,
         step1: d(near),
         step2: i32::from(far) - i32::from(near),
+        tracks_local: false,
     }
 }
 
@@ -1513,7 +1941,12 @@ pub(crate) fn decide(
             (q, b, evidence)
         }
         NatClass::Unknown => match steps {
-            Some(s) if predict_ports(s).is_empty() && s.step1 != 0 && s.step2 != 0 => {
+            Some(s)
+                if predict_ports(s).is_empty()
+                    && s.step1 != 0
+                    && s.step2 != 0
+                    && !s.tracks_local =>
+            {
                 (Vec::new(), true, EdmEvidence::FallbackSilenceRandom)
             }
             _ => (Vec::new(), false, EdmEvidence::None),
@@ -1532,6 +1965,11 @@ pub(crate) fn advertise(class: NatClass, steps: Option<AllocationSteps>) -> (Vec
     match steps {
         None => (Vec::new(), false),
         Some(s) => {
+            // A NAT that keeps each socket's port (or shifts it by one
+            // offset) allocates nothing to predict and is never random.
+            if s.tracks_local {
+                return (Vec::new(), false);
+            }
             let predicted = predict_ports(s);
             let random = predicted.is_empty() && s.step1 != 0 && s.step2 != 0;
             (predicted, random)
@@ -1659,6 +2097,9 @@ pub(crate) struct PunchDiag {
     /// The punching socket has heard the peer; shared with the birthday
     /// block, which must not switch away from it after that.
     pub(crate) primary_heard: Arc<std::sync::atomic::AtomicBool>,
+    /// The punching socket's own punch was acked (strategy model): what
+    /// gates the birthday sockets.
+    pub(crate) primary_acked: Arc<std::sync::atomic::AtomicBool>,
     /// Birthday hits passed over because the session socket had heard.
     pub(crate) birthday_ignored: usize,
     /// Knocks sent (predicted ports and spray), knocks the budget refused,
@@ -1693,6 +2134,24 @@ pub(crate) struct PunchDiag {
     acked: Vec<(SocketAddr, HeardRelation)>,
     first_heard_ms: Option<u64>,
     first_acked_ms: Option<u64>,
+    /// +ciris: knocks sent when the peer was first heard or first acked:
+    /// what the spray cost before it answered.
+    knocks_at_first_answer: Option<u32>,
+    /// +ciris: the punch window, in ms (plain or escalated).
+    pub(crate) window_ms: u64,
+    /// +ciris (pair agreement): nomination in force, and this side's part.
+    pub(crate) nomination: Option<Role>,
+    /// +ciris (pair agreement): nominations sent (initiator).
+    pub(crate) nominations: u32,
+    /// +ciris (pair agreement): when the nomination was acked (initiator)
+    /// or arrived (responder).
+    pub(crate) nominated_ms: Option<u64>,
+    /// +ciris: the address settled on; only its class is logged.
+    pub(crate) path: Option<SocketAddr>,
+    /// +ciris: birthday tranches opened, shared with the birthday block.
+    pub(crate) birthday_tranches: Arc<std::sync::atomic::AtomicUsize>,
+    /// +ciris: a bind or send failed while opening birthday sockets.
+    pub(crate) birthday_quota: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PunchDiag {
@@ -1721,6 +2180,7 @@ impl PunchDiag {
             sprayed: 0,
             birthday_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             primary_heard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            primary_acked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             birthday_ignored: 0,
             knocks: 0,
             knocks_refused: 0,
@@ -1745,6 +2205,14 @@ impl PunchDiag {
             acked: Vec::new(),
             first_heard_ms: None,
             first_acked_ms: None,
+            knocks_at_first_answer: None,
+            window_ms: PUNCH_WINDOW.as_millis() as u64,
+            nomination: None,
+            nominations: 0,
+            nominated_ms: None,
+            path: None,
+            birthday_tranches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            birthday_quota: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1768,6 +2236,7 @@ impl PunchDiag {
         self.punches_heard += 1;
         self.first_heard_ms
             .get_or_insert_with(|| self.start.elapsed().as_millis() as u64);
+        self.knocks_at_first_answer.get_or_insert(self.knocks);
         if !self.heard.iter().any(|(a, _)| *a == src) && self.heard.len() < 16 {
             let r = self.relation(src);
             self.heard.push((src, r));
@@ -1782,6 +2251,7 @@ impl PunchDiag {
         }
         self.first_acked_ms
             .get_or_insert_with(|| self.start.elapsed().as_millis() as u64);
+        self.knocks_at_first_answer.get_or_insert(self.knocks);
         if !self.acked.iter().any(|(a, _)| *a == src) && self.acked.len() < 16 {
             let r = self.relation(src);
             self.acked.push((src, r));
@@ -1826,6 +2296,17 @@ impl PunchDiag {
             .heard
             .iter()
             .any(|(h, _)| self.acked.iter().any(|(a, _)| a == h));
+        let heard_not_acked = self
+            .heard
+            .iter()
+            .filter(|(h, _)| !self.acked.iter().any(|(a, _)| a == h))
+            .count();
+        let acked_not_heard = self
+            .acked
+            .iter()
+            .filter(|(a, _)| !self.heard.iter().any(|(h, _)| h == a))
+            .count();
+        let path_class = self.path.map_or("none", |p| self.relation(p).as_str());
         tracing::info!(
             target: DIAG_TARGET,
             event = "punch",
@@ -1870,6 +2351,21 @@ impl PunchDiag {
             recv_errors = self.recv_errors,
             first_heard_ms = self.first_heard_ms.map(|v| v as i64).unwrap_or(-1),
             first_acked_ms = self.first_acked_ms.map(|v| v as i64).unwrap_or(-1),
+            heard_not_acked,
+            acked_not_heard,
+            path_class,
+            knocks_at_first_answer = self.knocks_at_first_answer.map_or(-1, i64::from),
+            window_ms = self.window_ms,
+            nomination = match self.nomination {
+                Some(Role::Initiator) => "nominates",
+                Some(Role::Responder) => "nominated",
+                None => "off",
+            },
+            nominations = self.nominations,
+            nominated_ms = self.nominated_ms.map_or(-1, |v| v as i64),
+            birthday_tranches = self.birthday_tranches.load(std::sync::atomic::Ordering::Relaxed),
+            birthday_quota = self.birthday_quota.load(std::sync::atomic::Ordering::Relaxed),
+            spray_pps = SPRAY_PPS,
             "direct link diag: punch summary"
         );
     }
@@ -1903,6 +2399,8 @@ fn log_probe_diag(
     predicted: usize,
     birthday: bool,
     elapsed_ms: u64,
+    stats: Option<ProbeStats>,
+    extras_skipped: bool,
 ) {
     let local_port = socket.local_addr().map(|a| a.port()).ok();
     let (port_preserved, no_nat) = match public {
@@ -1943,6 +2441,9 @@ fn log_probe_diag(
         alloc_step2 = steps.map_or(0, |s| s.step2),
         predicted,
         birthday,
+        probe_attempts = stats.map_or(0, |s| s.attempts),
+        probe_rtt_ms = stats.map_or(-1, |s| s.rtt_ms as i64),
+        extras_skipped,
         "direct link diag: probe summary"
     );
 }
@@ -2173,7 +2674,7 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
             };
             // A stateless responder must not be a reflector (third review
             // N4): at most FACILITATOR_REPLIES_PER_SEC replies per source.
-            if !limit.allow(src.ip(), std::time::Instant::now()) {
+            if !limit.allow(src, std::time::Instant::now()) {
                 continue;
             }
             let request = &buf[..len];
@@ -2190,42 +2691,88 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     Ok(task.abort_handle())
 }
 
-/// +ciris (third review N4): replies a facilitator port sends one source
-/// address per second at most (an honest prober sends a handful per
-/// proposal), and how many sources it tracks before it forgets the idlest.
+/// +ciris (third review N4, fourth review C): what a facilitator port
+/// answers. One source (IP and port: one prober's socket) gets
+/// [`FACILITATOR_REPLIES_PER_SEC`] a second; one IP, all its ports together,
+/// [`FACILITATOR_IP_REPLIES_PER_SEC`], so a carrier-NAT address shared by
+/// many subscribers is not held to one prober's rate; the whole port
+/// [`FACILITATOR_GLOBAL_REPLIES_PER_SEC`]. A full table forgets its least
+/// recently used entries instead of refusing newcomers. Honest probers send
+/// a handful per proposal.
 pub(crate) const FACILITATOR_REPLIES_PER_SEC: f64 = 10.0;
-const FACILITATOR_SOURCES: usize = 4_096;
+pub(crate) const FACILITATOR_IP_REPLIES_PER_SEC: f64 = 200.0;
+pub(crate) const FACILITATOR_GLOBAL_REPLIES_PER_SEC: f64 = 5_000.0;
+pub(crate) const FACILITATOR_SOURCES: usize = 4_096;
 
-/// Per-source reply buckets for a facilitator port.
+/// Reply buckets for a facilitator port.
 pub(crate) struct ReplyLimit {
-    sources: HashMap<std::net::IpAddr, Bucket>,
+    sources: HashMap<SocketAddr, Bucket>,
+    ips: HashMap<std::net::IpAddr, Bucket>,
+    global: Bucket,
+}
+
+/// Insert-or-get a bucket in a table bounded at `max`: when full, the
+/// least recently used eighth goes (amortised, so a flood of new sources
+/// costs a sort per 512 of them, not a scan per datagram).
+fn lru_bucket<K: std::hash::Hash + Eq + Copy>(
+    table: &mut HashMap<K, Bucket>,
+    key: K,
+    max: usize,
+    rate: f64,
+    now: std::time::Instant,
+) -> &mut Bucket {
+    if table.len() >= max && !table.contains_key(&key) {
+        let mut by_age: Vec<(std::time::Instant, K)> =
+            table.iter().map(|(k, b)| (b.at, *k)).collect();
+        by_age.sort_by_key(|(at, _)| *at);
+        for (_, k) in by_age.into_iter().take((max / 8).max(1)) {
+            table.remove(&k);
+        }
+    }
+    table.entry(key).or_insert(Bucket {
+        tokens: rate,
+        at: now,
+    })
 }
 
 impl ReplyLimit {
     pub(crate) fn new() -> Self {
         ReplyLimit {
             sources: HashMap::new(),
+            ips: HashMap::new(),
+            global: Bucket {
+                tokens: FACILITATOR_GLOBAL_REPLIES_PER_SEC,
+                at: std::time::Instant::now(),
+            },
         }
     }
 
-    /// May this source get a reply now?
-    pub(crate) fn allow(&mut self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
-        if self.sources.len() >= FACILITATOR_SOURCES && !self.sources.contains_key(&ip) {
-            // Forget sources idle for a while; if none, refuse the newcomer
-            // rather than grow without bound.
-            self.sources
-                .retain(|_, b| now.saturating_duration_since(b.at) < Duration::from_secs(10));
-            if self.sources.len() >= FACILITATOR_SOURCES {
-                return false;
-            }
-        }
-        self.sources
-            .entry(ip)
-            .or_insert(Bucket {
-                tokens: FACILITATOR_REPLIES_PER_SEC,
-                at: now,
-            })
-            .take(FACILITATOR_REPLIES_PER_SEC, now)
+    /// May this source get a reply now? The source's bucket, its IP's,
+    /// then the port's; a refusal at one spends nothing further on.
+    pub(crate) fn allow(&mut self, src: SocketAddr, now: std::time::Instant) -> bool {
+        let src = canonical(src);
+        lru_bucket(
+            &mut self.sources,
+            src,
+            FACILITATOR_SOURCES,
+            FACILITATOR_REPLIES_PER_SEC,
+            now,
+        )
+        .take(FACILITATOR_REPLIES_PER_SEC, now)
+            && lru_bucket(
+                &mut self.ips,
+                src.ip(),
+                FACILITATOR_SOURCES,
+                FACILITATOR_IP_REPLIES_PER_SEC,
+                now,
+            )
+            .take(FACILITATOR_IP_REPLIES_PER_SEC, now)
+            && self.global.take(FACILITATOR_GLOBAL_REPLIES_PER_SEC, now)
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.sources.len()
     }
 }
 
@@ -2269,6 +2816,18 @@ pub(crate) enum Outcome {
         /// on it rather than on the session's probe socket.
         socket: Option<Arc<UdpSocket>>,
     },
+}
+
+/// +ciris: what a punch job says about escalation and settling, as the
+/// runtime passes it on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PunchJobPlan {
+    spray: bool,
+    escalate: bool,
+    link: [u8; 16],
+    identity: Option<[u8; 16]>,
+    escalated_window: bool,
+    nomination: Option<Role>,
 }
 
 /// The sockets and tasks behind the node's direct-link sessions. Owned by
@@ -2368,10 +2927,14 @@ impl DirectLinkRuntime {
                 predicted,
                 escalate,
                 link,
+                peer_identity,
                 token,
                 start_delay_ms,
                 fast_liveness,
                 spray,
+                escalated_window,
+                nomination,
+                ..
             } => {
                 self.fast_liveness.insert(session, fast_liveness);
                 self.start_punch(
@@ -2381,9 +2944,14 @@ impl DirectLinkRuntime {
                     predicted,
                     token,
                     Duration::from_millis(start_delay_ms),
-                    spray,
-                    escalate,
-                    link,
+                    PunchJobPlan {
+                        spray,
+                        escalate,
+                        link,
+                        identity: peer_identity,
+                        escalated_window,
+                        nomination,
+                    },
                 )
             }
             DirectLinkJob::Release { session } => self.release(&session),
@@ -2419,16 +2987,24 @@ impl DirectLinkRuntime {
         let observer2 = self.observer2_cached();
         let task = tokio::spawn(async move {
             let probe_start = tokio::time::Instant::now();
-            let public = match probe(&socket, server, protocol).await {
-                Ok(public) => {
-                    tracing::info!("direct link: the facilitator answered the probe");
-                    Some(public)
-                }
-                Err(e) => {
-                    tracing::info!("direct link: probe failed: {e}");
-                    None
-                }
-            };
+            let (public, stats) =
+                match probe_with_stats(&socket, server, protocol, PROBE_ATTEMPTS, PROBE_WAIT).await
+                {
+                    Ok((public, stats)) => {
+                        tracing::info!("direct link: the facilitator answered the probe");
+                        (Some(public), Some(stats))
+                    }
+                    Err(e) => {
+                        tracing::info!("direct link: probe failed: {e}");
+                        (None, None)
+                    }
+                };
+            // +ciris (fourth review F): a responder's READY must beat the
+            // initiator's READY_TIMEOUT (10 s). A main probe that already
+            // took past DISCOVERY_EXTRAS_UNTIL (a lost attempt or two) skips
+            // the second observer and the allocation probes: no class, so no
+            // "q" and no two-observer "b", but the READY is in time.
+            let late = probe_start.elapsed() > DISCOVERY_EXTRAS_UNTIL;
             let local = host_candidates(&socket, server);
             // +ciris (review item 6): the same session socket toward a second
             // observer (the facilitator's second probe port, or one the
@@ -2437,7 +3013,7 @@ impl DirectLinkRuntime {
             // endpoint (re-review 6): across families nothing is compared.
             let second = match (observer2, public) {
                 (Some((server2, protocol2)), Some(_))
-                    if second_observer_usable(server, server2) =>
+                    if !late && second_observer_usable(server, server2) =>
                 {
                     probe_with(&socket, server2, protocol2, 2, ALLOCATION_DEADLINE / 2)
                         .await
@@ -2455,8 +3031,8 @@ impl DirectLinkRuntime {
                 (NatClass::Unknown, Some(p)) => Some(p.port()) != local_port,
                 _ => false,
             };
-            let steps = match (measure, public) {
-                (true, Some(p)) => allocation_steps(server, protocol, p.port()).await,
+            let steps = match (measure && !late, public) {
+                (true, Some(p)) => allocation_steps(server, protocol, p.port(), local_port).await,
                 _ => None,
             };
             // The fallback ends once a usable second observer is resolved
@@ -2480,6 +3056,8 @@ impl DirectLinkRuntime {
                 predicted.len(),
                 birthday,
                 probe_start.elapsed().as_millis() as u64,
+                stats,
+                late,
             );
             let _ = outcomes
                 .send(Outcome::Probed {
@@ -2504,30 +3082,31 @@ impl DirectLinkRuntime {
         predicted: Vec<SocketAddr>,
         token: [u8; 32],
         start_delay: Duration,
-        spray: bool,
-        escalate: bool,
-        link: [u8; 16],
+        job: PunchJobPlan,
     ) {
         let outcomes = self.outcomes.clone();
         let evidence = self.birthday.remove(&session).unwrap_or(EdmEvidence::None);
         let birthday = evidence != EdmEvidence::None;
+        let spray = job.spray;
         let plan = PunchPlan {
             birthday,
             spray,
-            escalate,
-            pair: link,
-            // Own evidence alone waits out the full silence gate, and holds
-            // fewer sockets (third review N1c).
+            escalate: job.escalate,
+            pair: job.link,
+            identity: job.identity,
+            // Own evidence alone waits out the full silence gate (the same
+            // socket caps on both evidence kinds: Eric's caps).
             birthday_after: if evidence == EdmEvidence::TwoObserver {
                 BIRTHDAY_AFTER
             } else {
                 ESCALATE_AFTER
             },
-            birthday_max: if evidence == EdmEvidence::TwoObserver {
-                wire::MAX_BIRTHDAY_SOCKETS
+            window: if job.escalated_window {
+                ESCALATED_PUNCH_WINDOW
             } else {
-                FALLBACK_BIRTHDAY_SOCKETS
+                PUNCH_WINDOW
             },
+            nomination: job.nomination,
         };
         let Some(socket) = self.sockets.get(&session).cloned() else {
             // No probe socket (it failed to bind, or was released): there is
@@ -2792,6 +3371,7 @@ mod tests {
         Box::leak(Box::new(Escalation::new(
             budget,
             [9u8; 16],
+            None,
             true,
             BIRTHDAY_AFTER,
         )))
@@ -2877,6 +3457,7 @@ mod tests {
             last: p2,
             step1: i32::from(p1) - i32::from(base),
             step2: i32::from(p2) - i32::from(p1),
+            tracks_local: false,
         }
     }
 
@@ -2974,6 +3555,7 @@ mod tests {
             &token,
             None,
             test_budget(),
+            PunchShape::plain(),
         )
         .await
         .map(|(p, _)| p);
@@ -3033,6 +3615,7 @@ mod tests {
             &token,
             cycle(ports),
             test_budget(),
+            PunchShape::plain(),
         )
         .await;
         peer.abort();
@@ -3065,7 +3648,8 @@ mod tests {
                 &session,
                 &token,
                 cycle(vec![by.port()]),
-                test_budget()
+                test_budget(),
+                PunchShape::plain()
             ),
             punch(&b, std::slice::from_ref(&a_addr), &session, &token)
         );
@@ -3110,6 +3694,7 @@ mod tests {
             now + ESCALATE_AFTER,
             None,
             test_budget(),
+            None,
         );
         // Past BIRTHDAY_AFTER, then dropped as the session does on REJECT.
         let r = tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(500), punching).await;
@@ -3170,6 +3755,7 @@ mod tests {
             &token,
             None,
             test_budget(),
+            PunchShape::plain(),
         )
         .await;
         peer.abort();
@@ -3217,6 +3803,7 @@ mod tests {
             &token,
             cycle(vec![n_addr.port()]),
             test_budget(),
+            PunchShape::plain(),
         )
         .await;
         task.abort();
@@ -3229,11 +3816,10 @@ mod tests {
             .all(|f| !f.windows(4).any(|w| w == &token[..4] || w == &session[..4])));
     }
 
-    /// +ciris (review item 2): one spray per target IP per cooldown, and a
-    /// global ceiling on knocks a second.
-    /// +ciris (re-review 2, B): the escalation allowance is per pair (link,
-    /// target), 3 per window; the volume per target (v4 address, v6 /64) is
-    /// shared by every pair; the global ceiling covers every escalated send.
+    /// +ciris (re-review 2, B; fourth review B, G): the escalation
+    /// allowance is per link and per peer identity, 3 per window, whatever
+    /// target; the volume per target (v4 address, v6 /64) is shared by every
+    /// pair; the global ceiling covers every escalated send.
     #[test]
     fn the_budget_allows_three_escalations_per_pair_and_caps_each_target() {
         let budget = KnockBudget::new();
@@ -3241,18 +3827,18 @@ mod tests {
         let ip: std::net::IpAddr = "198.51.100.7".parse().unwrap();
         let (pair, other_pair) = ([1u8; 16], [2u8; 16]);
         for _ in 0..PAIR_ESCALATIONS {
-            assert!(budget.escalate(pair, ip, t0));
+            assert!(budget.escalate(pair, None, t0));
         }
         assert!(
-            !budget.escalate(pair, ip, t0 + Duration::from_secs(60)),
-            "3 per window"
+            !budget.escalate(pair, None, t0 + Duration::from_secs(60)),
+            "3 per window, whatever the target"
         );
         assert!(
-            budget.escalate(other_pair, ip, t0),
+            budget.escalate(other_pair, None, t0),
             "another pair keeps its own"
         );
         assert!(
-            budget.escalate(pair, ip, t0 + BUDGET_WINDOW),
+            budget.escalate(pair, None, t0 + BUDGET_WINDOW),
             "after the window"
         );
         // One pair gets its share of the target, never the whole of it; a
@@ -3260,7 +3846,14 @@ mod tests {
         // Spread over time so no rate binds.
         let send = |pair: [u8; 16], n: u32, from: u64| {
             (0..n)
-                .filter(|i| budget.take(pair, ip, t0 + Duration::from_millis(from + u64::from(*i))))
+                .filter(|i| {
+                    budget.take(
+                        pair,
+                        ip,
+                        t0 + Duration::from_millis(from + u64::from(*i)),
+                        0,
+                    )
+                })
                 .count() as u32
         };
         assert_eq!(
@@ -3289,6 +3882,33 @@ mod tests {
         assert_eq!(Target::of(mapped), Target::of(ip));
     }
 
+    /// +ciris (fourth review B): one identity cannot buy fresh allowances
+    /// by opening fresh links; a link keeps its own when the peer shows a
+    /// fresh identity each time.
+    #[test]
+    fn the_pair_allowance_is_kept_per_identity_as_well_as_per_link() {
+        let budget = KnockBudget::new();
+        let t0 = std::time::Instant::now();
+        let who = Some([0xAAu8; 16]);
+        for link in 0..PAIR_ESCALATIONS as u8 {
+            assert!(budget.escalate([link; 16], who, t0), "link {link}");
+        }
+        assert!(
+            !budget.escalate([0x77u8; 16], who, t0),
+            "a fresh link, the same identity: spent"
+        );
+        let link = [0x55u8; 16];
+        for i in 0..PAIR_ESCALATIONS as u8 {
+            assert!(budget.escalate(link, Some([i; 16]), t0));
+        }
+        assert!(
+            !budget.escalate(link, Some([0x99u8; 16]), t0),
+            "the same link, a fresh identity: spent"
+        );
+        // A refusal spends nothing: the identity behind it still has room.
+        assert!(budget.escalate([0x66u8; 16], Some([0x99u8; 16]), t0));
+    }
+
     /// +ciris (third review N3): concurrent pairs share the global ceiling
     /// fairly: one busy pair cannot take another's floor.
     #[test]
@@ -3298,16 +3918,16 @@ mod tests {
         let ip = |i: u8| std::net::IpAddr::from([198, 51, 100, i]);
         let (greedy, honest) = ([10u8; 16], [11u8; 16]);
         // Both active at t0; the greedy one tries to send a whole ceiling.
-        assert!(budget.take(honest, ip(2), t0));
+        assert!(budget.take(honest, ip(2), t0, 0));
         let greedy_got = (0..ESCALATED_GLOBAL_PPS)
-            .filter(|_| budget.take(greedy, ip(1), t0))
+            .filter(|_| budget.take(greedy, ip(1), t0, 0))
             .count() as u32;
         assert!(
             greedy_got < ESCALATED_GLOBAL_PPS,
             "the greedy pair is held to its share"
         );
-        let honest_got = (0..PAIR_FLOOR_PPS / 2)
-            .filter(|_| budget.take(honest, ip(2), t0 + Duration::from_millis(300)))
+        let honest_got = (0..PAIR_FULL_PPS / 2)
+            .filter(|_| budget.take(honest, ip(2), t0 + Duration::from_millis(300), 0))
             .count() as u32;
         assert!(honest_got > 0, "the honest pair still sends");
     }
@@ -3326,28 +3946,73 @@ mod tests {
         assert!(est < 10.0, "and fades as it slides out: {est}");
     }
 
-    /// The global ceiling: room for three concurrent escalations (each about
-    /// 220 knocks and 256 birthday punches a second), refilling with time.
+    /// +ciris (fourth review G): the caps as Eric chose them, and the
+    /// budget sized to fit them: three escalations per pair per window, and
+    /// two concurrent escalations at their peak (320 knocks and 256 sockets'
+    /// refreshes a second each), refilling with time.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
-    fn the_global_ceiling_fits_three_concurrent_escalations() {
-        let per_escalation = SPRAY_PER_TICK as u32 * 10 + (wire::MAX_BIRTHDAY_SOCKETS as u32 * 2);
-        assert!(ESCALATED_GLOBAL_PPS >= 3 * per_escalation);
+    fn the_budget_fits_three_escalations_and_two_concurrent_at_their_peak() {
+        assert_eq!(wire::MAX_BIRTHDAY_SOCKETS, 256);
+        assert_eq!(wire::MAX_SPRAY_PORTS, 1_750);
+        assert_eq!(SPRAY_PPS, 320);
+        assert_eq!(PAIR_FULL_PPS, 832);
+        assert_eq!(ESCALATED_GLOBAL_PPS, 1_664);
+        // The spray, started at ESCALATE_AFTER, ends inside the escalated
+        // window with room to spare.
+        let spray_ends = ESCALATE_AFTER
+            + Duration::from_millis(wire::MAX_SPRAY_PORTS as u64 * 1_000 / u64::from(SPRAY_PPS));
+        assert!(spray_ends <= Duration::from_millis(7_100), "{spray_ends:?}");
+        assert!(spray_ends + Duration::from_secs(5) <= ESCALATED_PUNCH_WINDOW);
+        assert!(PAIR_TARGET_VOLUME >= PAIR_ESCALATIONS as u32 * ESCALATION_SENDS);
+        assert!(TARGET_VOLUME >= 2 * PAIR_TARGET_VOLUME);
         let budget = KnockBudget::new();
         let t0 = std::time::Instant::now();
-        let ips: Vec<std::net::IpAddr> = (1..=200u8)
-            .map(|i| std::net::IpAddr::from([198, 51, 100, i]))
-            .collect();
+        let ip = |i: u8| std::net::IpAddr::from([198, 51, 100, i]);
+        // Two pairs, each at its peak need, over one second in 1 ms steps.
+        let (p1, p2) = ([12u8; 16], [13u8; 16]);
+        let mut got = (0u32, 0u32);
+        for ms in 0..1_000u64 {
+            let at = t0 + Duration::from_millis(ms);
+            for _ in 0..PAIR_FULL_PPS.div_ceil(1_000) {
+                got.0 += u32::from(budget.take(p1, ip(1), at, PAIR_FULL_PPS));
+                got.1 += u32::from(budget.take(p2, ip(2), at, PAIR_FULL_PPS));
+            }
+        }
+        assert!(
+            got.0 >= PAIR_FULL_PPS * 95 / 100 && got.1 >= PAIR_FULL_PPS * 95 / 100,
+            "both peaks fit: {got:?}"
+        );
+        // And the ceiling holds: one second's worth at once, then refills.
+        let budget = KnockBudget::new();
+        let ips: Vec<std::net::IpAddr> = (1..=200u8).map(ip).collect();
         let taken = (0..2 * ESCALATED_GLOBAL_PPS as usize)
-            .filter(|i| budget.take([8u8; 16], ips[i % ips.len()], t0))
+            .filter(|i| budget.take([8u8; 16], ips[i % ips.len()], t0, ESCALATED_GLOBAL_PPS))
             .count();
         assert_eq!(
             taken as u32, ESCALATED_GLOBAL_PPS,
             "one second's worth at once"
         );
         assert!(
-            budget.take([8u8; 16], ips[0], t0 + Duration::from_millis(10)),
+            budget.take([8u8; 16], ips[0], t0 + Duration::from_millis(10), 0),
             "refills"
         );
+    }
+
+    /// +ciris (Eric's condition 2): a pair's rate share is budgeted by the
+    /// sockets it actually holds open, not by the 256 cap.
+    #[test]
+    fn the_rate_need_follows_the_sockets_actually_open() {
+        let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
+        let esc = Escalation::new(budget, [14u8; 16], None, true, BIRTHDAY_AFTER);
+        assert_eq!(esc.need_pps(), SPRAY_PPS);
+        esc.open.store(64, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(esc.need_pps(), SPRAY_PPS + 128);
+        esc.open.store(
+            wire::MAX_BIRTHDAY_SOCKETS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(esc.need_pps(), PAIR_FULL_PPS);
     }
 
     /// +ciris (re-review 2): no escalated send at all under a policy that
@@ -3357,33 +4022,53 @@ mod tests {
     fn an_escalation_is_gated_by_policy_and_by_the_pair_allowance() {
         let ip: std::net::IpAddr = "198.51.100.9".parse().unwrap();
         let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
-        let gated = Escalation::new(budget, [3u8; 16], false, BIRTHDAY_AFTER);
+        let gated = Escalation::new(budget, [3u8; 16], None, false, BIRTHDAY_AFTER);
         assert!(!gated.send(ip), "accept_all never escalates");
         for _ in 0..PAIR_ESCALATIONS {
-            let esc = Escalation::new(budget, [4u8; 16], true, BIRTHDAY_AFTER);
+            let esc = Escalation::new(budget, [4u8; 16], None, true, BIRTHDAY_AFTER);
             assert!(
                 esc.send(ip) && esc.send(ip),
                 "a granted punch keeps sending"
             );
             assert!(!esc.refused());
         }
-        let spent = Escalation::new(budget, [4u8; 16], true, BIRTHDAY_AFTER);
+        let spent = Escalation::new(budget, [4u8; 16], None, true, BIRTHDAY_AFTER);
         assert!(!spent.send(ip));
         assert!(spent.refused());
     }
 
-    /// +ciris (review item 3): birthday sockets are counted process-wide; with
-    /// no permit left there is no birthday phase, not more sockets.
+    /// +ciris (review item 3, fourth review G): birthday sockets are
+    /// counted process-wide (two sessions' full sets); a session takes at
+    /// most a tranche at a time and the per-session cap in all; a third
+    /// session gets what is left, and with no permit left opens nothing.
+    #[allow(clippy::assertions_on_constants)]
     #[tokio::test]
-    async fn no_birthday_sockets_without_a_permit() {
-        let sem = Arc::new(tokio::sync::Semaphore::new(3));
+    async fn birthday_sockets_open_by_tranche_within_the_permits() {
+        assert_eq!(PROCESS_BIRTHDAY_SOCKETS, 512);
+        let sem = Arc::new(tokio::sync::Semaphore::new(PROCESS_BIRTHDAY_SOCKETS));
         let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        let (some, permits) = birthday_sockets(peer, &sem, wire::MAX_BIRTHDAY_SOCKETS).await;
-        assert_eq!((some.len(), permits.len()), (3, 3), "as many as permits");
-        let (none, _) = birthday_sockets(peer, &sem, wire::MAX_BIRTHDAY_SOCKETS).await;
-        assert!(none.is_empty(), "the permits are held");
-        drop((some, permits));
-        assert_eq!(sem.available_permits(), 3, "released with the sockets");
+        let mut one = BirthdaySet::new();
+        let mut two = BirthdaySet::new();
+        for (round, want) in [(1, 64), (2, 128), (3, 192), (4, 256), (5, 256)] {
+            open_tranche(&mut one, peer, &sem).await;
+            open_tranche(&mut two, peer, &sem).await;
+            assert_eq!(one.opened.len(), want, "tranche {round}");
+            assert_eq!(two.opened.len(), want, "tranche {round}");
+        }
+        assert!(one.full() && two.full(), "the per-session cap");
+        let mut third = BirthdaySet::new();
+        open_tranche(&mut third, peer, &sem).await;
+        assert!(third.opened.is_empty(), "nothing left for a third");
+        assert!(!third.quota.load(std::sync::atomic::Ordering::Relaxed));
+        drop(one);
+        open_tranche(&mut third, peer, &sem).await;
+        assert_eq!(third.opened.len(), BIRTHDAY_TRANCHE, "what was freed");
+        drop((two, third));
+        assert_eq!(
+            sem.available_permits(),
+            PROCESS_BIRTHDAY_SOCKETS,
+            "released with the sockets"
+        );
     }
 
     /// +ciris (review item 4): no birthday socket at all (none bound, no
@@ -3425,45 +4110,88 @@ mod tests {
             &token,
             None,
             test_budget(),
+            PunchShape::plain(),
         )
         .await;
         peer.abort();
         assert_eq!(r.map(|(p, w)| (p.peer, w.is_none())), Some((a_addr, true)));
     }
 
-    /// +ciris (review item 6): heard already at the birthday gate, the punch
-    /// opens no birthday socket.
+    /// +ciris (strategy model): the birthday sockets are gated on ACKS, not
+    /// on hearing. A random side that hears the peer but whose own punches
+    /// are never acked (its mapping toward the peer is not what the peer
+    /// punches) opens them; one whose punch is acked at the gate does not.
     #[tokio::test]
-    async fn no_birthday_sockets_once_the_session_socket_has_heard() {
-        let a = Arc::new(loopback().await);
-        let a_addr = a.local_addr().unwrap();
-        let b = loopback().await;
-        let b_addr = b.local_addr().unwrap();
-        let mut extras = Vec::new();
-        for _ in 0..3 {
-            extras.push(Arc::new(loopback().await));
+    async fn birthday_sockets_open_unless_the_session_socket_is_acked() {
+        for acks in [false, true] {
+            let a = Arc::new(loopback().await);
+            let a_addr = a.local_addr().unwrap();
+            let b = loopback().await;
+            let b_addr = b.local_addr().unwrap();
+            let mut extras = Vec::new();
+            for _ in 0..3 {
+                extras.push(Arc::new(loopback().await));
+            }
+            let (session, token) = ([27u8; 16], [28u8; 32]);
+            // The peer punches at once; it acks B's punches only when `acks`.
+            let peer = {
+                let a = Arc::clone(&a);
+                tokio::spawn(async move {
+                    let punch = wire::punch_frame(PunchKind::Punch, &session, &token, 1);
+                    let _ = a.send_to(&punch, b_addr).await;
+                    let mut buf = [0u8; 256];
+                    loop {
+                        let Ok((len, src)) = a.recv_from(&mut buf).await else {
+                            continue;
+                        };
+                        if let Some((PunchKind::Punch, seq)) =
+                            wire::parse_punch_frame(&buf[..len], &session, &token)
+                        {
+                            if acks && src == b_addr {
+                                let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                                let _ = a.send_to(&ack, src).await;
+                            }
+                        }
+                    }
+                })
+            };
+            let mut diag = PunchDiag::new(std::slice::from_ref(&a_addr), &[], session);
+            let open = Arc::clone(&diag.birthday_open);
+            let now = tokio::time::Instant::now();
+            let punching = punch_birthday(
+                &b,
+                Extras::Given(extras),
+                std::slice::from_ref(&a_addr),
+                &[],
+                &session,
+                &token,
+                &mut diag,
+                now + PUNCH_WINDOW,
+                now + ESCALATE_AFTER,
+                None,
+                test_budget(),
+                None,
+            );
+            let _ =
+                tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(400), punching).await;
+            peer.abort();
+            let opened = open.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(opened, if acks { 0 } else { 3 }, "acks={acks}");
         }
-        let (session, token) = ([27u8; 16], [28u8; 32]);
-        // The peer punches at once but never acks: heard, not done.
-        let punch = wire::punch_frame(PunchKind::Punch, &session, &token, 1);
-        let _ = a.send_to(&punch, b_addr).await;
-        let mut diag = PunchDiag::new(std::slice::from_ref(&a_addr), &[], session);
-        let now = tokio::time::Instant::now();
-        let punching = punch_birthday(
-            &b,
-            Extras::Given(extras),
-            std::slice::from_ref(&a_addr),
-            &[],
-            &session,
-            &token,
-            &mut diag,
-            now + PUNCH_WINDOW,
-            now + ESCALATE_AFTER,
-            None,
-            test_budget(),
-        );
-        let _ = tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(400), punching).await;
-        assert_eq!(diag.birthday_sockets(), 0);
+    }
+
+    /// +ciris (docs/direct_link/nomination.md): who may leave the session
+    /// socket for a birthday socket the peer reached.
+    #[test]
+    fn the_birthday_switch_follows_the_nomination_rule() {
+        // Without nomination: only while the session socket heard nothing.
+        assert!(may_switch(None, false, false));
+        assert!(!may_switch(None, true, false));
+        // The initiator: while nothing it sent is acked, heard or not.
+        assert!(may_switch(Some(Role::Initiator), true, false));
+        assert!(!may_switch(Some(Role::Initiator), true, true));
+        // The responder: on a nomination, whatever its session socket saw.
+        assert!(may_switch(Some(Role::Responder), true, true));
     }
 
     /// +ciris (review item 6): only the SAME socket toward two observers
@@ -3623,11 +4351,10 @@ mod tests {
         let advertised = loopback().await.local_addr().unwrap();
         let (session, token) = ([33u8; 16], [34u8; 32]);
         let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
-        let ip = advertised.ip();
         for _ in 0..PAIR_ESCALATIONS {
-            assert!(budget.escalate([5u8; 16], ip, std::time::Instant::now()));
+            assert!(budget.escalate([5u8; 16], None, std::time::Instant::now()));
         }
-        let esc = Escalation::new(budget, [5u8; 16], true, BIRTHDAY_AFTER);
+        let esc = Escalation::new(budget, [5u8; 16], None, true, BIRTHDAY_AFTER);
         let mut diag = PunchDiag::new(std::slice::from_ref(&advertised), &[], session);
         let now = tokio::time::Instant::now();
         let r = punch_inner(
@@ -3642,6 +4369,7 @@ mod tests {
             cycle(vec![50_001, 50_002, 50_003]),
             None,
             &esc,
+            None,
         )
         .await;
         assert!(r.is_none());
@@ -3657,12 +4385,122 @@ mod tests {
     fn a_facilitator_limits_replies_per_source() {
         let mut limit = ReplyLimit::new();
         let t0 = std::time::Instant::now();
-        let a: std::net::IpAddr = "198.51.100.1".parse().unwrap();
-        let b: std::net::IpAddr = "198.51.100.2".parse().unwrap();
+        let a: SocketAddr = "198.51.100.1:40000".parse().unwrap();
+        let b: SocketAddr = "198.51.100.2:40000".parse().unwrap();
         let got = (0..100).filter(|_| limit.allow(a, t0)).count();
         assert_eq!(got as f64, FACILITATOR_REPLIES_PER_SEC);
         assert!(limit.allow(b, t0), "another source is unaffected");
         assert!(limit.allow(a, t0 + Duration::from_secs(1)), "it refills");
+    }
+
+    /// +ciris (fourth review C): a carrier-NAT address is many subscribers:
+    /// each of its ports (one prober's socket) gets its own rate, under a
+    /// larger cap for the IP; a full table forgets its least recently used
+    /// sources instead of refusing a newcomer; a global cap bounds the port.
+    #[test]
+    fn a_facilitator_serves_a_shared_address_and_never_locks_out_a_newcomer() {
+        let mut limit = ReplyLimit::new();
+        let t0 = std::time::Instant::now();
+        let cgnat = |port: u16| SocketAddr::new("198.51.100.3".parse().unwrap(), port);
+        // Twenty subscribers behind one address, each probing a handful.
+        let served = (0..20u16)
+            .flat_map(|i| (0..5).map(move |_| cgnat(20_000 + i)))
+            .filter(|src| limit.allow(*src, t0))
+            .count();
+        assert_eq!(served, 100, "one address, many probers");
+        // But not without bound: the address's own cap.
+        let flood = (0..1_000u16)
+            .filter(|i| limit.allow(cgnat(30_000 + i), t0))
+            .count();
+        assert!(flood < 1_000 && flood as f64 <= FACILITATOR_IP_REPLIES_PER_SEC);
+        // A full table (sources spread so no rate binds) takes a newcomer.
+        let mut limit = ReplyLimit::new();
+        for i in 0..FACILITATOR_SOURCES as u32 {
+            let src = SocketAddr::new(std::net::IpAddr::from(i.to_be_bytes()), 1);
+            assert!(limit.allow(src, t0 + Duration::from_millis(u64::from(i))));
+        }
+        let late = t0 + Duration::from_secs(10);
+        assert!(
+            limit.allow("203.0.113.200:9".parse().unwrap(), late),
+            "a newcomer"
+        );
+        assert!(limit.tracked() <= FACILITATOR_SOURCES);
+        // The global cap.
+        let mut limit = ReplyLimit::new();
+        let total = (0..(2.0 * FACILITATOR_GLOBAL_REPLIES_PER_SEC) as u32)
+            .filter(|i| {
+                let src = SocketAddr::new(std::net::IpAddr::from(i.to_be_bytes()), 2);
+                limit.allow(src, t0)
+            })
+            .count();
+        assert_eq!(total as f64, FACILITATOR_GLOBAL_REPLIES_PER_SEC);
+    }
+
+    /// +ciris (strategy review): the measuring sockets get OS-random local
+    /// ports, so behind a port-preserving NAT (or none) their mappings look
+    /// like random allocation. Mappings that track the local ports are never
+    /// "random" and predict nothing, on either evidence kind.
+    #[test]
+    fn steps_that_track_the_local_ports_are_never_random() {
+        // Port-preserving, OS-random locals.
+        assert!(tracks_local([
+            (40_000, 40_000),
+            (51_234, 51_234),
+            (33_017, 33_017)
+        ]));
+        // A port-shifting NAT: one offset.
+        assert!(tracks_local([
+            (40_100, 40_000),
+            (51_334, 51_234),
+            (33_117, 33_017)
+        ]));
+        // A NAT of its own allocation.
+        assert!(!tracks_local([
+            (61_002, 40_000),
+            (17_455, 51_234),
+            (29_871, 33_017)
+        ]));
+        // A genuinely random NAT (mappings that do not track the locals)
+        // still reads random, on both evidence kinds.
+        let mut s = steps_from(40_000, 51_234, 33_017);
+        assert!(!s.tracks_local);
+        assert!(
+            decide(NatClass::Unknown, Some(s)).1,
+            "random-looking steps alone"
+        );
+        assert!(
+            advertise(NatClass::EndpointDependent, Some(s)).1,
+            "two-observer random"
+        );
+        s.tracks_local = true;
+        assert_eq!(
+            decide(NatClass::Unknown, Some(s)),
+            (Vec::new(), false, EdmEvidence::None)
+        );
+        assert_eq!(
+            advertise(NatClass::EndpointDependent, Some(s)),
+            (Vec::new(), false)
+        );
+    }
+
+    /// +ciris (strategy review): on loopback (no NAT, OS-random ports) the
+    /// live measurement says the mappings track the local ports.
+    #[tokio::test]
+    async fn the_allocation_measurement_sees_no_nat_on_loopback() {
+        let facilitator = loopback().await;
+        let port = facilitator.local_addr().unwrap().port();
+        drop(facilitator);
+        let task = spawn_facilitator(port).await.unwrap();
+        let server: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let socket = loopback().await;
+        let local = socket.local_addr().unwrap().port();
+        let public = probe(&socket, server, ProbeProtocol::Rnsp).await.unwrap();
+        let steps = allocation_steps(server, ProbeProtocol::Rnsp, public.port(), Some(local))
+            .await
+            .expect("measured");
+        task.abort();
+        assert!(steps.tracks_local, "{steps:?}");
+        assert!(!decide(NatClass::Unknown, Some(steps)).1);
     }
 
     /// The two allocation probes run at once: order them by distance from
@@ -3683,8 +4521,13 @@ mod tests {
     async fn the_allocation_measurement_keeps_its_deadline() {
         let silent = loopback().await;
         let started = tokio::time::Instant::now();
-        let steps =
-            allocation_steps(silent.local_addr().unwrap(), ProbeProtocol::Rnsp, 40000).await;
+        let steps = allocation_steps(
+            silent.local_addr().unwrap(),
+            ProbeProtocol::Rnsp,
+            40000,
+            None,
+        )
+        .await;
         assert!(steps.is_none());
         assert!(started.elapsed() < ALLOCATION_DEADLINE + Duration::from_millis(300));
     }
@@ -3723,6 +4566,7 @@ mod tests {
                 &token,
                 cycle(spray_ports),
                 test_budget(),
+                PunchShape::plain(),
             )
             .await;
             let mut buf = [0u8; 256];
@@ -3749,7 +4593,8 @@ mod tests {
                 &session,
                 &token,
                 None,
-                test_budget()
+                test_budget(),
+                PunchShape::plain()
             )
         );
         let (pa, _) = ra.expect("A punches through");
@@ -3758,6 +4603,325 @@ mod tests {
         assert_eq!(pb.peer, a_addr);
         assert_eq!(pa.peer, winner.local_addr().unwrap());
         assert!(extra_addrs.contains(&pa.peer));
+    }
+
+    /// +ciris (fourth review G): toward a silent peer the birthday sockets
+    /// open in tranches of 64, one every 500 ms from the birthday gate, up
+    /// to 256, and the diag line knows how far they got.
+    #[tokio::test]
+    async fn birthday_sockets_ramp_by_tranche_while_nothing_is_heard() {
+        let b = loopback().await;
+        let nobody = loopback().await.local_addr().unwrap();
+        let sem = Arc::new(tokio::sync::Semaphore::new(PROCESS_BIRTHDAY_SOCKETS));
+        let (session, token) = ([41u8; 16], [42u8; 32]);
+        let mut diag = PunchDiag::new(std::slice::from_ref(&nobody), &[], session);
+        let open = Arc::clone(&diag.birthday_open);
+        let tranches = Arc::clone(&diag.birthday_tranches);
+        let now = tokio::time::Instant::now();
+        let punching = punch_birthday(
+            &b,
+            Extras::OpenFrom(Arc::clone(&sem)),
+            std::slice::from_ref(&nobody),
+            &[],
+            &session,
+            &token,
+            &mut diag,
+            now + ESCALATED_PUNCH_WINDOW,
+            now + ESCALATE_AFTER,
+            None,
+            test_budget(),
+            None,
+        );
+        let sample = async {
+            let mut seen = Vec::new();
+            for at in [250u64, 750, 1_250, 1_750, 2_750] {
+                tokio::time::sleep_until(now + BIRTHDAY_AFTER + Duration::from_millis(at)).await;
+                seen.push(open.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            seen
+        };
+        let (_, seen) = tokio::join!(
+            tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(3_000), punching),
+            sample
+        );
+        assert_eq!(seen, [64, 128, 192, 256, 256]);
+        assert_eq!(tranches.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert_eq!(
+            sem.available_permits(),
+            PROCESS_BIRTHDAY_SOCKETS,
+            "every socket closed with the punch"
+        );
+    }
+
+    /// +ciris (fourth review G): a send that fails (a carrier NAT's port
+    /// quota, a host out of sockets) stops the ramp where it is.
+    #[tokio::test]
+    async fn a_failing_send_stops_the_ramp() {
+        let b = loopback().await;
+        // Nothing can be sent to port 0.
+        let nowhere: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let sem = Arc::new(tokio::sync::Semaphore::new(PROCESS_BIRTHDAY_SOCKETS));
+        let (session, token) = ([43u8; 16], [44u8; 32]);
+        let mut diag = PunchDiag::new(std::slice::from_ref(&nowhere), &[], session);
+        let open = Arc::clone(&diag.birthday_open);
+        let quota = Arc::clone(&diag.birthday_quota);
+        let now = tokio::time::Instant::now();
+        let punching = punch_birthday(
+            &b,
+            Extras::OpenFrom(Arc::clone(&sem)),
+            std::slice::from_ref(&nowhere),
+            &[],
+            &session,
+            &token,
+            &mut diag,
+            now + ESCALATED_PUNCH_WINDOW,
+            now + ESCALATE_AFTER,
+            None,
+            test_budget(),
+            None,
+        );
+        let _ = tokio::time::timeout(BIRTHDAY_AFTER + Duration::from_millis(1_800), punching).await;
+        assert_eq!(
+            open.load(std::sync::atomic::Ordering::Relaxed),
+            BIRTHDAY_TRANCHE
+        );
+        assert!(quota.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// +ciris: a relay standing in for one path between A and B: A reaches
+    /// B at `to_b` and is seen there from `to_a`, and the reverse. It drops
+    /// the punch frames of one kind in one direction, so a test decides
+    /// which pairs each side can prove.
+    struct PathRelay {
+        to_b: SocketAddr,
+        to_a: SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl PathRelay {
+        async fn new(
+            bind: &str,
+            a: SocketAddr,
+            b: SocketAddr,
+            drop_a_to_b: Option<PunchKind>,
+            drop_b_to_a: Option<PunchKind>,
+        ) -> Option<Self> {
+            let p = UdpSocket::bind(bind).await.ok()?;
+            let q = UdpSocket::bind(bind).await.ok()?;
+            let (to_b, to_a) = (p.local_addr().ok()?, q.local_addr().ok()?);
+            let task = tokio::spawn(async move {
+                let (mut bp, mut bq) = ([0u8; 2048], [0u8; 2048]);
+                loop {
+                    tokio::select! {
+                        Ok((len, _)) = p.recv_from(&mut bp) => {
+                            let f = &bp[..len];
+                            if drop_a_to_b.is_none() || wire::punch_frame_kind(f) != drop_a_to_b {
+                                let _ = q.send_to(f, b).await;
+                            }
+                        }
+                        Ok((len, _)) = q.recv_from(&mut bq) => {
+                            let f = &bq[..len];
+                            if drop_b_to_a.is_none() || wire::punch_frame_kind(f) != drop_b_to_a {
+                                let _ = p.send_to(f, a).await;
+                            }
+                        }
+                    }
+                }
+            });
+            Some(PathRelay { to_b, to_a, task })
+        }
+    }
+
+    impl Drop for PathRelay {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// Punch A (the initiator) and B (the responder) toward each other over
+    /// two relays, `first` and `second`, each side naming its targets in
+    /// its own order; `nominate` puts nomination in force.
+    async fn punch_over(
+        a: &UdpSocket,
+        b: &UdpSocket,
+        a_targets: &[SocketAddr],
+        b_targets: &[SocketAddr],
+        nominate: bool,
+        session: SessionId,
+    ) -> (Option<SocketAddr>, Option<SocketAddr>) {
+        let token = [0x3Cu8; 32];
+        let shape = |role| PunchShape {
+            window: Duration::from_secs(4),
+            nomination: nominate.then_some(role),
+        };
+        let (ra, rb) = tokio::join!(
+            punch_with_ports(
+                a,
+                None,
+                a_targets,
+                &[],
+                &session,
+                &token,
+                None,
+                test_budget(),
+                shape(Role::Initiator)
+            ),
+            async {
+                let r = punch_with_ports(
+                    b,
+                    None,
+                    b_targets,
+                    &[],
+                    &session,
+                    &token,
+                    None,
+                    test_budget(),
+                    shape(Role::Responder),
+                )
+                .await;
+                // B's direct interface (here: its MTU probe phase) acks the
+                // initiator's late punches, nominations among them.
+                if let Some((p, _)) = &r {
+                    let mut early = Vec::new();
+                    let _ = probe_path_mtu(b, p.peer, &session, &token, &mut early).await;
+                }
+                r
+            }
+        );
+        (ra.map(|(p, _)| p.peer), rb.map(|(p, _)| p.peer))
+    }
+
+    /// +ciris (pair agreement; the TLA+ model's `samenat-hairpin` trace,
+    /// property SamePath): two nodes behind one hairpinning NAT. A proves
+    /// B's host candidate first (the LAN path: its acks to B are lost),
+    /// B proves A's hairpinned public mapping first (that path's acks to A
+    /// are lost). Each settling on its own first proven pair, they commit to
+    /// different pairs and each drops the other's frames. With nomination B
+    /// takes A's pair: both ends use one 5-tuple.
+    #[tokio::test]
+    async fn samenat_hairpin_both_ends_settle_on_the_nominated_pair() {
+        let (a, b) = (loopback().await, loopback().await);
+        let (a_real, b_real) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        for nominate in [false, true] {
+            let lan = PathRelay::new("127.0.0.1:0", a_real, b_real, Some(PunchKind::Ack), None)
+                .await
+                .unwrap();
+            let hairpin = PathRelay::new("127.0.0.1:0", a_real, b_real, None, Some(PunchKind::Ack))
+                .await
+                .unwrap();
+            // Each side's public candidate first, then the host candidate.
+            let a_targets = [hairpin.to_b, lan.to_b];
+            let b_targets = [hairpin.to_a, lan.to_a];
+            let session = [0x50 + u8::from(nominate); 16];
+            let (pa, pb) = punch_over(&a, &b, &a_targets, &b_targets, nominate, session).await;
+            if nominate {
+                assert_eq!(pa, Some(lan.to_b), "A on the LAN pair");
+                assert_eq!(pb, Some(lan.to_a), "and B on the same pair");
+            } else {
+                // The bug, without nomination: two pairs.
+                assert_eq!((pa, pb), (Some(lan.to_b), Some(hairpin.to_a)));
+            }
+        }
+    }
+
+    /// +ciris (pair agreement): a dual-stack pair where each side hears a
+    /// different family first (A proves IPv4 only, B IPv6 only). With
+    /// nomination both use A's IPv4 pair.
+    #[tokio::test]
+    async fn a_dual_stack_pair_hearing_different_families_first_agrees() {
+        let dual = || async {
+            let s = bind_session_socket("127.0.0.1:1".parse().unwrap()).ok()?;
+            let s = UdpSocket::from_std(s).ok()?;
+            s.local_addr().ok()?.is_ipv6().then_some(s)
+        };
+        let (Some(a), Some(b)) = (dual().await, dual().await) else {
+            return; // no dual-stack sockets on this host
+        };
+        let (pa, pb) = (
+            a.local_addr().unwrap().port(),
+            b.local_addr().unwrap().port(),
+        );
+        let v4 = |p: u16| SocketAddr::from(([127, 0, 0, 1], p));
+        let v6 = |p: u16| SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], p));
+        let Some(r6) = PathRelay::new("[::1]:0", v6(pa), v6(pb), None, Some(PunchKind::Ack)).await
+        else {
+            return; // no IPv6 loopback
+        };
+        let r4 = PathRelay::new("127.0.0.1:0", v4(pa), v4(pb), Some(PunchKind::Ack), None)
+            .await
+            .unwrap();
+        // A lists IPv4 first, B IPv6 first.
+        let a_targets = [r4.to_b, r6.to_b];
+        let b_targets = [r6.to_a, r4.to_a];
+        let (ga, gb) = punch_over(&a, &b, &a_targets, &b_targets, false, [0x60; 16]).await;
+        assert_eq!(
+            (ga, gb),
+            (Some(r4.to_b), Some(r6.to_a)),
+            "the bug: two families"
+        );
+        let (ga, gb) = punch_over(&a, &b, &a_targets, &b_targets, true, [0x61; 16]).await;
+        assert_eq!((ga, gb), (Some(r4.to_b), Some(r4.to_a)), "one pair, A's");
+    }
+
+    /// +ciris (docs/direct_link/nomination.md, one rule): the hard side as
+    /// the responder under nomination. Its birthday sockets ack every punch
+    /// and keep listening; the initiator proves one of their pairs, names
+    /// it, and the responder settles on exactly the birthday socket the
+    /// nomination arrived on, which carries the path.
+    #[tokio::test]
+    async fn a_nominated_birthday_socket_carries_the_path() {
+        let a = loopback().await;
+        let a_addr = a.local_addr().unwrap();
+        // B's probe socket cannot reach A at all (IPv6-only, A is IPv4): only
+        // a birthday socket can.
+        let Ok(b) = UdpSocket::bind("[::1]:0").await else {
+            return;
+        };
+        let mut extras = Vec::new();
+        for _ in 0..8 {
+            extras.push(Arc::new(loopback().await));
+        }
+        let extra_addrs: Vec<SocketAddr> = extras.iter().map(|e| e.local_addr().unwrap()).collect();
+        let (session, token) = ([45u8; 16], [46u8; 32]);
+        let spray_ports: Vec<u16> = extra_addrs.iter().map(|a| a.port()).collect();
+        let to_b = [SocketAddr::new(a_addr.ip(), b.local_addr().unwrap().port())];
+        let shape = |role| PunchShape {
+            window: PUNCH_WINDOW,
+            nomination: Some(role),
+        };
+        let (ra, rb) = tokio::join!(
+            punch_with_ports(
+                &a,
+                None,
+                &to_b,
+                &[],
+                &session,
+                &token,
+                cycle(spray_ports),
+                test_budget(),
+                shape(Role::Initiator)
+            ),
+            punch_with_ports(
+                &b,
+                Some(Extras::Given(extras)),
+                std::slice::from_ref(&a_addr),
+                &[],
+                &session,
+                &token,
+                None,
+                test_budget(),
+                shape(Role::Responder)
+            )
+        );
+        let (pa, _) = ra.expect("A punches through");
+        let (pb, winner) = rb.expect("B punches through");
+        let winner = winner.expect("on a birthday socket");
+        assert_eq!(pb.peer, a_addr);
+        assert_eq!(
+            pa.peer,
+            winner.local_addr().unwrap(),
+            "A nominated B's winner"
+        );
     }
 
     /// Heard at its advertised address, the peer's mapping did not move: its
@@ -3783,6 +4947,7 @@ mod tests {
                     &token,
                     None,
                     test_budget(),
+                    PunchShape::plain(),
                 )
                 .await
                 .map(|(p, _)| p)

@@ -144,17 +144,17 @@ impl Pair {
     }
 
     fn configure(&mut self, b_policy: DirectLinkPolicy) {
-        self.a.set_direct_link_config(DirectLinkConfig {
-            policy: DirectLinkPolicy::Reject,
-            facilitator: Some(facilitator()),
-            protocol: ProbeProtocol::Rnsp,
-        });
+        self.a.set_direct_link_config(DirectLinkConfig::new(
+            DirectLinkPolicy::Reject,
+            Some(facilitator()),
+            ProbeProtocol::Rnsp,
+        ));
         // +ciris (CC 5.4.6): B answers by probing its own facilitator.
-        self.b.set_direct_link_config(DirectLinkConfig {
-            policy: b_policy,
-            facilitator: Some(facilitator()),
-            protocol: ProbeProtocol::Rnsp,
-        });
+        self.b.set_direct_link_config(DirectLinkConfig::new(
+            b_policy,
+            Some(facilitator()),
+            ProbeProtocol::Rnsp,
+        ));
     }
 
     fn propose(&mut self) {
@@ -329,11 +329,11 @@ fn a_responder_probes_its_own_facilitator_not_the_one_named() {
     let own: SocketAddr = "198.51.100.200:4343".parse().unwrap();
     let mut pair = Pair::new();
     pair.configure(DirectLinkPolicy::AcceptAll);
-    pair.b.set_direct_link_config(DirectLinkConfig {
-        policy: DirectLinkPolicy::AcceptAll,
-        facilitator: Some(own),
-        protocol: ProbeProtocol::Rnsp,
-    });
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AcceptAll,
+        Some(own),
+        ProbeProtocol::Rnsp,
+    ));
     pair.propose();
     let session = only_probe(&pair.a.take_direct_link_jobs());
     // A's REQUEST names A's facilitator.
@@ -423,11 +423,11 @@ fn escalation_is_decided_by_trust_in_the_peer_not_the_answer_policy() {
 fn a_responder_with_no_facilitator_of_its_own_refuses() {
     let mut pair = Pair::new();
     pair.configure(DirectLinkPolicy::AcceptAll);
-    pair.b.set_direct_link_config(DirectLinkConfig {
-        policy: DirectLinkPolicy::AcceptAll,
-        facilitator: None,
-        protocol: ProbeProtocol::Rnsp,
-    });
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AcceptAll,
+        None,
+        ProbeProtocol::Rnsp,
+    ));
     pair.propose();
     let session = only_probe(&pair.a.take_direct_link_jobs());
     let out = pair.a.direct_link_probed(&session, Some(a_public()));
@@ -444,6 +444,65 @@ fn a_responder_with_no_facilitator_of_its_own_refuses() {
             ..
         }
     )));
+}
+
+/// +ciris (fourth review item 1): a facilitator configured but not resolved
+/// yet is "not now": B refuses BUSY, and A's retry stays alive.
+#[test]
+fn an_unresolved_facilitator_refuses_busy_and_the_retry_lives() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.b.set_direct_link_config(
+        DirectLinkConfig::new(DirectLinkPolicy::AcceptAll, None, ProbeProtocol::Rnsp)
+            .with_facilitator_configured(true),
+    );
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert!(
+        pair.b.take_direct_link_jobs().is_empty(),
+        "B probes nothing"
+    );
+    assert!(pair.a_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkFailed {
+            failure: Failure::Rejected(wire::REJECT_BUSY),
+            proposed: true,
+            ..
+        }
+    )));
+    assert!(pair.a.direct_links.retries[&pair.link].due_ms.is_some());
+}
+
+/// +ciris (fourth review item 1): UNSUPPORTED (none configured) is not
+/// final either: the peer may gain a facilitator, so A asks again, rarely.
+#[test]
+fn unsupported_is_asked_again_after_the_long_backoff() {
+    use crate::traits::Clock;
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AcceptAll,
+        None,
+        ProbeProtocol::Rnsp,
+    ));
+    let start = pair.a.transport.clock().now_ms();
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    let due = pair.a.direct_links.retries[&pair.link]
+        .due_ms
+        .expect("a retry is scheduled");
+    assert!(
+        due >= start + super::direct_link::UNSUPPORTED_RETRY_MS,
+        "not before the long backoff (jittered): {due} vs {start}"
+    );
+    assert_eq!(
+        pair.a.direct_links.retries[&pair.link].attempt, 0,
+        "no backoff step is spent"
+    );
 }
 
 #[test]
@@ -505,6 +564,297 @@ fn identified_only_accepts_once_the_peer_identifies() {
     let out = pair.a.direct_link_probed(&session, Some(a_public()));
     pair.pump_from_a(packets(&out));
     assert_eq!(only_probe(&pair.b.take_direct_link_jobs()), session);
+}
+
+/// +ciris (fourth review B): under identified_only, an identity costs
+/// nothing to make, so being identified is no trust: B accepts the
+/// identified peer but does not escalate toward it, unless its host says
+/// so. The Punch job carries the peer's identity for the budget.
+#[test]
+fn identified_only_does_not_escalate_without_the_hosts_decision() {
+    for host in [None, Some(true)] {
+        let mut pair = Pair::new();
+        pair.configure(DirectLinkPolicy::IdentifiedOnly);
+        let identity = Identity::generate(&mut OsRng);
+        let out = pair
+            .a
+            .identify_link(&pair.link, &identity)
+            .expect("identify");
+        pair.pump_from_a(packets(&out));
+        if let Some(h) = host {
+            pair.b.set_direct_link_escalation(&pair.link, Some(h));
+        }
+        pair.propose();
+        let session = only_probe(&pair.a.take_direct_link_jobs());
+        let out = pair.a.direct_link_probed(&session, Some(a_public()));
+        pair.pump_from_a(packets(&out));
+        assert_eq!(only_probe(&pair.b.take_direct_link_jobs()), session);
+        let _ = pair.b.direct_link_probed(&session, Some(b_public()));
+        match pair.b.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch {
+                escalate,
+                peer_identity,
+                ..
+            }] => {
+                assert_eq!(*escalate, host == Some(true), "{host:?}");
+                assert_eq!(*peer_identity, Some(*identity.hash()));
+            }
+            other => panic!("expected one punch, got {other:?}"),
+        }
+    }
+}
+
+/// +ciris (fourth review B): proposing is not trust. B never initiated the
+/// link, so when it proposes (ask_host, no host decision) its punch does
+/// not escalate: a stranger's link to a node that proposes by default
+/// cannot aim its spray.
+#[test]
+fn a_proposer_on_a_link_it_did_not_open_does_not_escalate() {
+    let mut pair = Pair::new();
+    pair.a.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AcceptAll,
+        Some(facilitator()),
+        ProbeProtocol::Rnsp,
+    ));
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AskHost,
+        Some(facilitator()),
+        ProbeProtocol::Rnsp,
+    ));
+    let out = pair.b.propose_direct_link(&pair.link).expect("B proposes");
+    pair.pump_from_b(packets(&out));
+    let session = only_probe(&pair.b.take_direct_link_jobs());
+    let out = pair.b.direct_link_probed(&session, Some(b_public()));
+    pair.pump_from_b(packets(&out));
+    assert_eq!(only_probe(&pair.a.take_direct_link_jobs()), session);
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    let _ = pair.a.take_direct_link_jobs();
+    pair.pump_from_a(packets(&out));
+    match pair.b.take_direct_link_jobs().as_slice() {
+        [DirectLinkJob::Punch { escalate, .. }] => assert!(!*escalate),
+        other => panic!("expected one punch, got {other:?}"),
+    }
+}
+
+/// +ciris (strategy review, the commit race): the peer's commit wait ran
+/// out while its COMPLETE was still crossing the relay; this side moved on
+/// that COMPLETE, then hears the peer's REJECT for the same session. A
+/// direct side honours it and goes back to the relay instead of staying
+/// direct alone.
+#[test]
+fn a_direct_side_honours_the_peers_abort_for_its_own_session() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    // A stale REJECT from another session changes nothing.
+    let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+    let other = crate::direct_link::Signal::Reject {
+        session: [0x99; 16],
+        reason: wire::REJECT_PUNCH_FAILED,
+    };
+    assert!(pair.a.send_direct_link_signal(&pair.link, &other, now));
+    pair.advance(1_000);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    let abort = crate::direct_link::Signal::Reject {
+        session,
+        reason: wire::REJECT_PUNCH_FAILED,
+    };
+    let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+    assert!(pair.a.send_direct_link_signal(&pair.link, &abort, now));
+    pair.advance(1_000);
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        None,
+        "B left the direct path"
+    );
+    assert!(pair.b_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkLost { interface_index, .. } if *interface_index == b_direct
+    )));
+}
+
+/// +ciris (strategy model): a miss is retried whichever verdict lands
+/// first: the peer's REJECT PUNCH_FAILED arriving before this side's own
+/// punch ends schedules the retry exactly as this side's own PunchFailed does.
+#[test]
+fn a_miss_is_retried_whichever_verdict_lands_first() {
+    for peer_first in [true, false] {
+        let mut pair = Pair::new();
+        let (session, _) = to_punch(&mut pair);
+        if peer_first {
+            let out = pair.b.direct_link_punched(&session, None);
+            pair.pump_from_b(packets(&out));
+            // The REJECT may wait out the channel's pacing after READY.
+            pair.advance(2_000);
+            assert!(
+                a_failed(&pair).contains(&Failure::Rejected(wire::REJECT_PUNCH_FAILED)),
+                "{:?}",
+                a_failed(&pair)
+            );
+        } else {
+            let out = pair.a.direct_link_punched(&session, None);
+            pair.a_events.extend(out.events.clone());
+            pair.pump_from_a(packets(&out));
+            assert!(a_failed(&pair).contains(&Failure::PunchFailed));
+        }
+        let retry = pair
+            .a
+            .direct_links
+            .retries
+            .get(&pair.link)
+            .expect("the retry lives");
+        assert!(retry.due_ms.is_some(), "peer_first={peer_first}");
+        assert_eq!(retry.attempt, 1, "one backoff step, either way");
+    }
+}
+
+/// +ciris (fourth review): at most MAX_DEFAULT_ESCALATIONS punches escalate
+/// at once on the default rule; a third runs plain (escalate false, so no
+/// knocks, spray or birthday sockets) instead of failing, and a host's yes
+/// is not held to the cap. Ending a session frees its place.
+#[test]
+fn a_third_default_rule_escalation_runs_plain() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AskHost);
+    let mut links = std::vec![pair.link];
+    for _ in 0..3 {
+        let (link, _, out) = pair
+            .a
+            .connect(pair.dest, &pair.signing_key)
+            .expect("connect");
+        pair.pump_from_a(packets(&out));
+        links.push(link);
+    }
+    pair.b.set_direct_link_escalation(&links[3], Some(true));
+    let mut escalates = Vec::new();
+    for link in &links {
+        let out = pair.a.propose_direct_link(link).expect("propose");
+        pair.pump_from_a(packets(&out));
+        let session = only_probe(&pair.a.take_direct_link_jobs());
+        let out = pair.a.direct_link_probed(&session, Some(a_public()));
+        pair.pump_from_a(packets(&out));
+        let out = pair.b.accept_direct_link(link).expect("accept");
+        pair.pump_from_b(packets(&out));
+        let _ = only_probe(&pair.b.take_direct_link_jobs());
+        let _ = pair.b.direct_link_probed(&session, Some(b_public()));
+        match pair.b.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { escalate, .. }] => escalates.push(*escalate),
+            other => panic!("expected one punch, got {other:?}"),
+        }
+        let _ = pair.a.take_direct_link_jobs();
+    }
+    assert_eq!(
+        escalates,
+        [true, true, false, true],
+        "two on the default rule, the third plain; the host's yes is not capped"
+    );
+    assert_eq!(super::direct_link::MAX_DEFAULT_ESCALATIONS, 2);
+}
+
+/// +ciris (fourth review E): "b" asks the peer to spray toward us, which
+/// helps only if this end may open its birthday sockets: with its own gate
+/// closed A does not say it, so B (which would spray) does not.
+#[test]
+fn birthday_is_advertised_only_when_this_ends_gate_allows() {
+    for (a_gate, b_sprays) in [(Some(false), false), (None, true)] {
+        let mut pair = Pair::new();
+        pair.configure(DirectLinkPolicy::AskHost);
+        if let Some(g) = a_gate {
+            pair.a.set_direct_link_escalation(&pair.link, Some(g));
+        }
+        pair.propose();
+        let session = only_probe(&pair.a.take_direct_link_jobs());
+        let out = pair.a.direct_link_probed_with_candidates(
+            &session,
+            Some(a_public()),
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        pair.pump_from_a(packets(&out));
+        let out = pair.b.accept_direct_link(&pair.link).expect("accept");
+        pair.pump_from_b(packets(&out));
+        let _ = only_probe(&pair.b.take_direct_link_jobs());
+        let _ = pair.b.direct_link_probed(&session, Some(b_public()));
+        match pair.b.take_direct_link_jobs().as_slice() {
+            [DirectLinkJob::Punch { spray, .. }] => assert_eq!(*spray, b_sprays, "{a_gate:?}"),
+            other => panic!("expected one punch, got {other:?}"),
+        }
+    }
+}
+
+/// +ciris (fourth review D): a host's "no" given while the link is still
+/// establishing survives the establishment retry's re-key (#66) instead of
+/// silently becoming the default "allow"; a decision for a link that does
+/// not exist is not kept.
+#[test]
+fn the_hosts_no_survives_the_establishment_rekey() {
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let mut b = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        crate::traits::NoStorage,
+    );
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["directlink"],
+    )
+    .unwrap();
+    dest.set_accepts_links(true);
+    let dest_hash = *dest.hash();
+    b.register_destination(dest);
+    let mut a = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        crate::traits::NoStorage,
+    );
+    let b_mesh = add_iface(&mut b, "B_mesh");
+    let a_mesh = add_iface(&mut a, "A_mesh");
+    let (link, _, _lost) = a.connect(dest_hash, &signing_key).expect("connect");
+    a.set_direct_link_escalation(&link, Some(false));
+    // The first request is lost; A retries under a fresh id.
+    let mut retry = Vec::new();
+    for _ in 0..120 {
+        a.transport.clock().advance(1_000);
+        retry = packets(&a.handle_timeout());
+        if a.resolve_link_id(&link) != link {
+            break;
+        }
+    }
+    let new_id = a.resolve_link_id(&link);
+    assert_ne!(new_id, link, "the establishment re-keyed");
+    assert_eq!(a.direct_links.escalation_trust.get(&new_id), Some(&false));
+    assert!(
+        !a.direct_links.escalation_trust.contains_key(&link),
+        "no orphan"
+    );
+    let mut pair = Pair {
+        a,
+        b,
+        a_mesh,
+        b_mesh,
+        link,
+        dest: dest_hash,
+        signing_key,
+        a_events: Vec::new(),
+        b_events: Vec::new(),
+    };
+    pair.pump_from_a(retry);
+    assert_eq!(pair.a.active_link_count(), 1);
+    assert!(!pair
+        .a
+        .direct_link_escalation_allowed(&link, crate::direct_link::Role::Initiator));
+    // A decision for a link nobody holds is dropped.
+    let unknown = LinkId::new([0xEE; 16]);
+    pair.a.set_direct_link_escalation(&unknown, Some(true));
+    assert!(!pair.a.direct_links.escalation_trust.contains_key(&unknown));
 }
 
 #[test]
@@ -1026,6 +1376,7 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
         initiator_birthday: false,
+        initiator_nominates: false,
     };
     let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
     assert!(pair
@@ -1268,6 +1619,7 @@ fn a_peer_cannot_propose_again_inside_the_cooldown() {
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
         initiator_birthday: false,
+        initiator_nominates: false,
     };
     pair.a.transport.clock().advance(1_000);
     pair.b.transport.clock().advance(1_000);
@@ -1478,11 +1830,11 @@ fn a_held_request_blocks_our_own_proposal() {
     asked(&mut pair);
     // B could propose itself (it has a facilitator), but not over a request
     // it is still holding.
-    pair.b.set_direct_link_config(DirectLinkConfig {
-        policy: DirectLinkPolicy::AskHost,
-        facilitator: Some(facilitator()),
-        protocol: ProbeProtocol::Rnsp,
-    });
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AskHost,
+        Some(facilitator()),
+        ProbeProtocol::Rnsp,
+    ));
     assert_eq!(
         pair.b.propose_direct_link(&pair.link).unwrap_err(),
         DirectLinkError::AlreadyUpgrading
@@ -1617,11 +1969,13 @@ fn a_silent_peer_after_the_punch_moves_nothing() {
     let (session, _) = to_punch(&mut pair);
     let a_direct = add_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
-    for _ in 0..14 {
-        pair.a.transport.clock().advance(1_000);
-        let out = pair.a.handle_timeout();
-        pair.a_events.extend(out.events);
-    }
+    // Past the commit wait (which covers an escalated peer's window), the
+    // relayed link kept alive meanwhile: B says nothing about its punch.
+    pair.advance(
+        crate::direct_link::session::COMMIT_TIMEOUT_MS
+            + crate::direct_link::session::NOMINATION_GRACE_MS
+            + 2_000,
+    );
     assert_eq!(pair.a.direct_link_interface(&pair.link), None);
     assert!(a_failed(&pair).contains(&Failure::Timeout));
     assert!(pair
@@ -1829,16 +2183,16 @@ fn both_propose(pair: &mut Pair) -> ([u8; 16], [u8; 16]) {
 }
 
 fn both_may_propose(pair: &mut Pair, b_policy: DirectLinkPolicy) {
-    pair.a.set_direct_link_config(DirectLinkConfig {
-        policy: DirectLinkPolicy::AcceptAll,
-        facilitator: Some(facilitator()),
-        protocol: ProbeProtocol::Rnsp,
-    });
-    pair.b.set_direct_link_config(DirectLinkConfig {
-        policy: b_policy,
-        facilitator: Some(facilitator()),
-        protocol: ProbeProtocol::Rnsp,
-    });
+    pair.a.set_direct_link_config(DirectLinkConfig::new(
+        DirectLinkPolicy::AcceptAll,
+        Some(facilitator()),
+        ProbeProtocol::Rnsp,
+    ));
+    pair.b.set_direct_link_config(DirectLinkConfig::new(
+        b_policy,
+        Some(facilitator()),
+        ProbeProtocol::Rnsp,
+    ));
 }
 
 fn a_requests(pair: &mut Pair, session: &[u8; 16]) -> Vec<Vec<u8>> {
@@ -2034,6 +2388,7 @@ fn a_session_already_punching_stays_busy() {
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
         initiator_birthday: false,
+        initiator_nominates: false,
     };
     pair.b.transport.clock().advance(1_000);
     pair.a.transport.clock().advance(1_000);
@@ -2102,6 +2457,7 @@ fn an_old_style_link_initiators_busy_finds_the_responder_already_yielded() {
         initiator_predicted: alloc::vec::Vec::new(),
         host_payload: None,
         initiator_birthday: false,
+        initiator_nominates: false,
     };
     let busy = crate::direct_link::Signal::Reject {
         session: b_session,
