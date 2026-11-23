@@ -1687,6 +1687,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.try_recover_stale(link_id, now_ms);
             if let Some(link) = self.links.get_mut(link_id) {
                 link.record_inbound(now_ms);
+                // +ciris (leviculum#113): the proof verified.
+                link.record_authenticated_inbound(now_ms);
             }
 
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
@@ -2067,7 +2069,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let decrypted_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2383,6 +2389,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
                 plaintext.truncate(len);
 
                 match link.proof_strategy() {
@@ -2459,7 +2467,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
 
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2603,7 +2615,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2776,7 +2792,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -3133,7 +3153,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!("Resource ADV decryption failed");
                 return;
@@ -3484,7 +3508,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!("Resource REQ decryption failed");
                 return;
@@ -3934,7 +3962,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
+            Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
+                len
+            }
             Err(_) => {
                 crate::tracing::debug!("Resource HMU decryption failed");
                 return;
@@ -4633,8 +4665,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let actions = match self.links.get_mut(&link_id) {
                 Some(link) => {
                     let rtt_ms = link.rtt_ms();
+                    // +ciris (leviculum#113): a link visibly alive (an
+                    // authenticated packet since the message was sent) is
+                    // not torn down for late acks before its stale bound.
+                    let authenticated = link.last_authenticated_inbound_ms();
+                    let hold_bound_ms = link.stale_time_ms();
                     match link.channel_mut() {
-                        Some(ch) => ch.poll(now_ms, rtt_ms),
+                        Some(ch) => {
+                            ch.poll_with_inbound(now_ms, rtt_ms, authenticated, hold_bound_ms)
+                        }
                         None => continue,
                     }
                 }

@@ -141,6 +141,9 @@ struct OutboundEnvelope {
     tries: u8,
     /// When the envelope was last sent (milliseconds)
     sent_at_ms: u64,
+    /// +ciris (leviculum#113): when it was first sent: the start of its
+    /// retry span.
+    first_sent_ms: u64,
     /// tx_ring length at the time this envelope was first sent.
     /// Used for timeout calculation to avoid death-spiral where growing
     /// queue inflates timeouts during drain.
@@ -157,6 +160,7 @@ impl OutboundEnvelope {
             state: MessageState::New,
             tries: 0,
             sent_at_ms: 0,
+            first_sent_ms: 0,
             queue_len_at_send: 0,
             deadline_ms: None,
         }
@@ -622,6 +626,7 @@ impl Channel {
         outbound.state = MessageState::Sent;
         outbound.tries = 1;
         outbound.sent_at_ms = now_ms;
+        outbound.first_sent_ms = now_ms;
         outbound.queue_len_at_send = self.tx_ring.len() + 1; // +1 for this entry
 
         self.tx_ring.push_back(outbound);
@@ -934,6 +939,20 @@ impl Channel {
             outbound.queue_len_at_send,
             self.window,
         );
+        // +ciris (leviculum#113): a message held past max_tries keeps
+        // backing off, but never waits longer than CHANNEL_HELD_RETRY_MAX_MS
+        // (or the last ordinary try's wait, if that was longer).
+        let timeout = if outbound.tries > self.max_tries {
+            let last_ordinary = calculate_timeout(
+                self.max_tries,
+                eff_rtt,
+                outbound.queue_len_at_send,
+                self.window,
+            );
+            timeout.min(crate::constants::CHANNEL_HELD_RETRY_MAX_MS.max(last_ordinary))
+        } else {
+            timeout
+        };
         Some(outbound.sent_at_ms.saturating_add(timeout))
     }
 
@@ -955,6 +974,39 @@ impl Channel {
     /// * `now_ms` - Current time in milliseconds
     /// * `rtt_ms` - Round-trip time in milliseconds
     pub fn poll(&mut self, now_ms: u64, rtt_ms: u64) -> Vec<ChannelAction> {
+        self.poll_with_inbound(now_ms, rtt_ms, None, 0)
+    }
+
+    /// +ciris (leviculum#113): [`poll`](Self::poll), told when an
+    /// AUTHENTICATED packet last arrived on the link
+    /// (`authenticated_inbound_ms`) and the link's stale bound
+    /// (`hold_bound_ms`). A message out of tries is not the end of the link
+    /// while the link is visibly alive: when an authenticated packet arrived
+    /// after the message was first sent, and the stale bound since then has
+    /// not passed, the channel keeps retransmitting it (each wait capped at
+    /// [`crate::constants::CHANNEL_HELD_RETRY_MAX_MS`]) instead of tearing
+    /// the link down. Its acks are late, not lost: they queue behind the
+    /// peer's (or this node's) own traffic in a capped uplink. A silent link
+    /// (`None`, or nothing since the first send) is torn down exactly when it
+    /// always was; a held one at the stale bound at the latest.
+    ///
+    /// What counts, and what it covers: a packet that decrypted under the
+    /// link key (channel data, a datagram, a request or response, a resource
+    /// control) or a proof that verified. Keepalives are sent unencrypted and
+    /// do NOT count. So on a capped publisher's link the hold rests on the
+    /// peer's own channel frames and on its proofs of this node's EARLIER
+    /// messages as they drain from the queue; on the peers' links toward the
+    /// publisher, on its datagrams. A link whose peer sends nothing
+    /// authenticated while this node's message is out (an idle link with
+    /// late acks and nothing older still draining) is NOT held: it is torn
+    /// down at its 5th timeout, as before.
+    pub fn poll_with_inbound(
+        &mut self,
+        now_ms: u64,
+        rtt_ms: u64,
+        authenticated_inbound_ms: Option<u64>,
+        hold_bound_ms: u64,
+    ) -> Vec<ChannelAction> {
         let mut actions = self.expire_due(now_ms);
         let mut window_decrements = 0usize;
         let mut pacing_doublings = 0usize;
@@ -973,7 +1025,10 @@ impl Channel {
         // Second pass: process timed out envelopes
         for (i, tries) in timed_out {
             // Timeout occurred
-            if tries >= self.max_tries {
+            let first = self.tx_ring[i].first_sent_ms;
+            let alive = authenticated_inbound_ms.is_some_and(|t| t > first)
+                && now_ms < first.saturating_add(hold_bound_ms);
+            if tries >= self.max_tries && !alive {
                 let seq = self.tx_ring[i].envelope.sequence;
                 crate::tracing::debug!(
                     seq,
@@ -987,7 +1042,7 @@ impl Channel {
                 break; // Link is being torn down, no point continuing
             }
 
-            let new_tries = tries + 1;
+            let new_tries = tries.saturating_add(1);
             let tx_ring_len = self.tx_ring.len(); // snapshot before mutation
 
             // Mutate the outbound envelope
@@ -2299,6 +2354,100 @@ mod tests {
             "5th timeout should tear down link, got {:?}",
             actions[0]
         );
+    }
+
+    /// Drive one message to its 5th timeout, the given authenticated-inbound
+    /// time and stale bound passed on every poll; the actions of that poll.
+    fn exhaust(authenticated: Option<u64>, bound: u64) -> (Channel, u64, Vec<ChannelAction>) {
+        let mut channel = Channel::new();
+        let rtt_ms = 10;
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, 1_000, rtt_ms)
+            .unwrap();
+        for _ in 0..4 {
+            let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let actions = channel.poll_with_inbound(t, rtt_ms, authenticated, bound);
+            assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+        }
+        let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+        let actions = channel.poll_with_inbound(t, rtt_ms, authenticated, bound);
+        (channel, t, actions)
+    }
+
+    /// +ciris (leviculum#113): a silent link (no authenticated inbound at
+    /// all, or none since the message was first sent) is torn down at its
+    /// 5th timeout, exactly as before: about 1.3 s on a short path.
+    #[test]
+    fn a_silent_link_is_torn_down_as_fast_as_ever() {
+        for authenticated in [None, Some(500)] {
+            let (_, t, actions) = exhaust(authenticated, 10_000);
+            assert!(
+                matches!(&actions[0], ChannelAction::TearDownLink),
+                "{authenticated:?}"
+            );
+            assert!(t - 1_000 < 1_500, "{} ms", t - 1_000);
+        }
+        // `poll` is the same as no inbound.
+        let mut channel = Channel::new();
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, 0, 10)
+            .unwrap();
+        let mut last = Vec::new();
+        for _ in 0..5 {
+            let t = channel.next_retransmit_due_ms(10).unwrap();
+            last = channel.poll(t, 10);
+        }
+        assert!(matches!(&last[0], ChannelAction::TearDownLink));
+    }
+
+    /// +ciris (leviculum#113): a link that is visibly alive (an
+    /// authenticated packet after the message was first sent) is not torn
+    /// down for late acks: the message keeps being retransmitted, each wait
+    /// capped at CHANNEL_HELD_RETRY_MAX_MS, and an ack that comes late
+    /// still lands.
+    #[test]
+    fn a_link_with_inbound_survives_late_acks() {
+        let (mut channel, mut t, actions) = exhaust(Some(1_200), 10_000);
+        assert!(
+            matches!(&actions[0], ChannelAction::Retransmit { tries: 6, .. }),
+            "{actions:?}"
+        );
+        let mut retries = 0;
+        while t < 1_000 + 9_000 {
+            let due = channel.next_retransmit_due_ms(10).unwrap();
+            assert!(
+                due - t <= crate::constants::CHANNEL_HELD_RETRY_MAX_MS,
+                "a held wait of {} ms",
+                due - t
+            );
+            t = due;
+            let actions = channel.poll_with_inbound(t, 10, Some(t - 1), 10_000);
+            if t < 1_000 + 10_000 {
+                assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+                retries += 1;
+            }
+        }
+        assert!(retries >= 4, "retried {retries} times before the bound");
+    }
+
+    /// +ciris (leviculum#113): a held link still dies at its stale bound,
+    /// however much inbound it sees: nothing waits forever.
+    #[test]
+    fn a_held_link_dies_at_the_stale_bound() {
+        let bound = 4_000;
+        let (mut channel, _, actions) = exhaust(Some(1_200), bound);
+        assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+        let mut t;
+        loop {
+            t = channel.next_retransmit_due_ms(10).unwrap();
+            let actions = channel.poll_with_inbound(t, 10, Some(t - 1), bound);
+            if matches!(&actions[0], ChannelAction::TearDownLink) {
+                break;
+            }
+            assert!(t < 1_000 + bound, "held past the bound at {t}");
+        }
+        assert!(t >= 1_000 + bound);
+        assert!(t < 1_000 + bound + crate::constants::CHANNEL_HELD_RETRY_MAX_MS);
     }
 
     #[test]

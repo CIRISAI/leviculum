@@ -540,6 +540,17 @@ pub const CHANNEL_RTT_TIMEOUT_MULTIPLIER: f64 = 2.5;
 /// Exponential backoff base for channel retries
 pub const CHANNEL_BACKOFF_BASE: f64 = 1.5;
 
+/// +ciris (leviculum#113): the longest wait between retransmits of a message
+/// the channel holds past [`CHANNEL_MAX_TRIES`] because the link is visibly
+/// alive (authenticated inbound since the message was first sent). The
+/// backoff keeps growing 1.5x a try, but no wait exceeds this (or the wait
+/// at the last ordinary try, if that is longer): a held message is retried
+/// at least a few times before the link's stale bound (5 on a short path's
+/// 10 s), at one retransmit per message per 2 s into a queue that is
+/// already full, and a link whose queue drains recovers within 2 s instead
+/// of waiting out one very long timer.
+pub const CHANNEL_HELD_RETRY_MAX_MS: u64 = 2_000;
+
 /// Microseconds per millisecond (for time conversion)
 pub const US_PER_MS: u64 = 1000;
 

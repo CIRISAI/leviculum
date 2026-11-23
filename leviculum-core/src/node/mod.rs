@@ -8445,6 +8445,65 @@ mod tests {
         );
     }
 
+    /// +ciris (leviculum#113): a link whose channel message is out of tries
+    /// is kept while an AUTHENTICATED packet from the peer arrived since the
+    /// message was sent (its acks are only late), and torn down as before
+    /// when the only inbound is a packet that fails the link's
+    /// authentication: anyone can address a link id, so that must not hold
+    /// a dead link open.
+    #[test]
+    fn test_channel_exhaustion_is_held_only_by_authenticated_inbound() {
+        use crate::transport::InterfaceId;
+        for authentic in [true, false] {
+            let mut pair = establish_nodecore_link_pair();
+            let _ = pair
+                .initiator
+                .send_on_link(&pair.initiator_link_id, b"exhaust")
+                .unwrap();
+            pair.initiator
+                .link_mut(&pair.initiator_link_id)
+                .unwrap()
+                .channel_mut()
+                .unwrap()
+                .set_max_tries_for_test(2);
+            pair.initiator.transport().clock().set(TEST_TIME_MS + 4_000);
+            let _ = pair.initiator.handle_timeout();
+            // The peer speaks on the link meanwhile (its proof of our message
+            // is what is stuck in the queue).
+            pair.responder.transport().clock().set(TEST_TIME_MS + 5_000);
+            pair.initiator.transport().clock().set(TEST_TIME_MS + 5_000);
+            let out = pair
+                .responder
+                .send_on_link(&pair.responder_link_id, b"alive")
+                .unwrap();
+            let mut data = extract_broadcast_data(&out);
+            if !authentic {
+                // The same packet with its ciphertext damaged: addressed to
+                // the link, refused by its key.
+                let last = data.len() - 1;
+                data[last] ^= 0x5A;
+                data[last - 20] ^= 0xA5;
+            }
+            let _ = pair.initiator.handle_packet(InterfaceId(0), &data);
+            pair.initiator.transport().clock().set(TEST_TIME_MS + 9_000);
+            let output = pair.initiator.handle_timeout();
+            let closed = output.events.iter().any(|e| {
+                matches!(
+                    e,
+                    NodeEvent::LinkClosed {
+                        reason: LinkCloseReason::ChannelExhausted,
+                        ..
+                    }
+                )
+            });
+            assert_eq!(closed, !authentic, "authentic={authentic}");
+            assert_eq!(
+                pair.initiator.link(&pair.initiator_link_id).is_some(),
+                authentic
+            );
+        }
+    }
+
     #[test]
     fn test_receipts_expire_after_timeout() {
         use crate::constants::DATA_RECEIPT_TIMEOUT_MS;

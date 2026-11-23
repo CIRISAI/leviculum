@@ -138,6 +138,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut plaintext = alloc::vec![0u8; encrypted.len()];
         let delivered = match link.decrypt(encrypted, &mut plaintext) {
             Ok(len) => {
+                // +ciris (leviculum#113): it passed the link key.
+                link.record_authenticated_inbound(now_ms);
                 plaintext.truncate(len);
                 datagram::unwrap(&plaintext).map(|(sequence, payload)| (sequence, payload.to_vec()))
             }

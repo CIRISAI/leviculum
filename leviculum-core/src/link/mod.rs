@@ -455,6 +455,12 @@ pub struct Link {
     stale_time_ms: u64,
     /// Time of last inbound packet (clock milliseconds)
     last_inbound_ms: u64,
+    /// +ciris (leviculum#113): the last inbound packet on this link that
+    /// passed the link's own authentication (it decrypted under the link key,
+    /// or its proof verified). `last_inbound_ms` moves on any link packet,
+    /// as Python's does, so anyone who can address the link moves it; only
+    /// this one may hold a link the channel would tear down.
+    last_authenticated_inbound_ms: Option<u64>,
     /// Whether any inbound packet has been recorded. Distinguishes "no inbound
     /// yet" from a genuine `last_inbound` of 0 (a link established in the node's
     /// first uptime second, where the monotonic clock still reads 0), so the
@@ -632,6 +638,7 @@ impl Link {
             keepalive_override: None,
             stale_time_ms: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR * MS_PER_SECOND,
             last_inbound_ms: 0,
+            last_authenticated_inbound_ms: None,
             had_inbound: false,
             last_data_ms: None,
             last_outbound_ms: 0,
@@ -770,6 +777,7 @@ impl Link {
             keepalive_override: None,
             stale_time_ms: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR * MS_PER_SECOND,
             last_inbound_ms: 0,
+            last_authenticated_inbound_ms: None,
             had_inbound: false,
             last_data_ms: None,
             last_outbound_ms: 0,
@@ -1619,6 +1627,17 @@ impl Link {
         self.last_inbound_ms = now_ms;
         self.had_inbound = true;
         self.last_data_ms = Some(now_ms);
+    }
+
+    /// +ciris (leviculum#113): an inbound packet on this link passed its
+    /// authentication (decrypted, or its proof verified).
+    pub fn record_authenticated_inbound(&mut self, now_ms: u64) {
+        self.last_authenticated_inbound_ms = Some(now_ms);
+    }
+
+    /// +ciris (leviculum#113): when an authenticated packet last arrived.
+    pub fn last_authenticated_inbound_ms(&self) -> Option<u64> {
+        self.last_authenticated_inbound_ms
     }
 
     /// Record an inbound keepalive: it keeps the link alive but is not
