@@ -175,6 +175,20 @@ pub(super) struct ReceiptEntry {
     /// (`Channel::mark_delivered_attempt`).
     pub(super) attempt: u8,
     pub(super) sent_ms: u64,
+    /// +ciris (leviculum#113): another attempt of this message was already
+    /// proved. Kept until its own proof or its deadline: that proof is
+    /// fresh evidence the peer is alive (the retransmission was a probe the
+    /// peer answered), and confirms nothing.
+    ///
+    /// Why a replay cannot use it: the entry is bound to the exact packet
+    /// hash of one attempt THIS node sent on THIS link (a proof must name
+    /// that hash, match this link id and verify under the peer's link key,
+    /// `handle_data_proof`), and the first such proof removes it
+    /// (`confirm_delivery_attempt` swap_removes the matched entry, spent or
+    /// not). A second copy of the same proof, replayed, finds no receipt
+    /// and is dropped before it can count. It also expires at its own
+    /// deadline (DATA_RECEIPT_TIMEOUT_MS from that attempt's send).
+    pub(super) spent: bool,
 }
 
 /// +ciris (leviculum#113): what a verified proof confirmed.
@@ -186,6 +200,9 @@ pub(super) struct ConfirmedReceipt {
     pub(super) attempt: u8,
     /// When that attempt was sent.
     pub(super) sent_ms: u64,
+    /// The message was already confirmed by another attempt's proof: this
+    /// one is evidence only (no delivery, no event).
+    pub(super) spent: bool,
 }
 
 impl ReceiptTracker {
@@ -235,7 +252,7 @@ impl ReceiptTracker {
         let attempts = self
             .entries
             .iter()
-            .filter(|e| e.link_id == link_id && e.sequence == Some(sequence))
+            .filter(|e| !e.spent && e.link_id == link_id && e.sequence == Some(sequence))
             .count();
         if attempts >= RECEIPT_ATTEMPTS_MAX {
             // Order by send time (each attempt's is later than the last's):
@@ -244,7 +261,7 @@ impl ReceiptTracker {
                 .entries
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.link_id == link_id && e.sequence == Some(sequence))
+                .filter(|(_, e)| !e.spent && e.link_id == link_id && e.sequence == Some(sequence))
                 .map(|(i, e)| (e.sent_ms, i))
                 .collect();
             mine.sort_unstable();
@@ -272,6 +289,7 @@ impl ReceiptTracker {
             deadline_ms: now_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS),
             attempt,
             sent_ms: now_ms,
+            spent: false,
         });
     }
 
@@ -294,6 +312,7 @@ impl ReceiptTracker {
             deadline_ms,
             attempt: 0,
             sent_ms: 0,
+            spent: false,
         });
         full_hash
     }
@@ -332,14 +351,20 @@ impl ReceiptTracker {
             .iter()
             .position(|e| e.truncated_hash == *truncated)?;
         let entry = self.entries.swap_remove(idx);
-        if let Some(sequence) = entry.sequence {
-            self.entries
-                .retain(|e| !(e.link_id == entry.link_id && e.sequence == Some(sequence)));
+        if let (Some(sequence), false) = (entry.sequence, entry.spent) {
+            // The other attempts' receipts stay, spent: their late proofs
+            // are evidence the peer is alive, each counted once.
+            for e in self.entries.iter_mut() {
+                if e.link_id == entry.link_id && e.sequence == Some(sequence) {
+                    e.spent = true;
+                }
+            }
         }
         Some(ConfirmedReceipt {
             sequence: entry.sequence,
             attempt: entry.attempt,
             sent_ms: entry.sent_ms,
+            spent: entry.spent,
         })
     }
 
@@ -362,9 +387,10 @@ impl ReceiptTracker {
         expired
     }
 
-    /// Number of tracked receipts.
+    /// Number of receipts awaiting a delivery proof (spent ones, kept only
+    /// as evidence, are not counted).
     pub(super) fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().filter(|e| !e.spent).count()
     }
 
     /// Earliest expiry deadline across all entries, if any.
@@ -376,7 +402,7 @@ impl ReceiptTracker {
     pub(crate) fn count_for_link(&self, link_id: &LinkId) -> usize {
         self.entries
             .iter()
-            .filter(|e| e.link_id == *link_id)
+            .filter(|e| !e.spent && e.link_id == *link_id)
             .count()
     }
 
@@ -1781,7 +1807,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
             // Event only fires when the receipt still exists, a valid proof for
             // an already-expired/removed receipt is silently dropped.
-            if let Some(confirmed) = self.receipt_tracker.confirm_delivery_attempt(&truncated) {
+            let confirmed = self.receipt_tracker.confirm_delivery_attempt(&truncated);
+            // A spent receipt (the message was already proved by another
+            // attempt) was evidence only, recorded above: nothing to confirm.
+            if let Some(confirmed) = confirmed.filter(|c| !c.spent) {
                 crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),
                     ctx = ?context,

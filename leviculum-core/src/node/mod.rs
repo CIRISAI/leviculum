@@ -8954,6 +8954,103 @@ mod tests {
         );
     }
 
+    /// +ciris (leviculum#113, the receipts coupling): a link whose ONLY
+    /// evidence is the late proofs of its own messages (nothing else comes
+    /// back: no channel frames, no datagrams, no other link, no host) stays
+    /// up while those proofs keep arriving, and once they stop it is given
+    /// up at the cold ladder's time. P sends a control message every 500 ms;
+    /// A answers at once, but its proofs reach P through a delay line that
+    /// ramps from 50 ms to 2 s, past the cold ladder's 1.34 s, so every
+    /// proof answers an attempt P has since retransmitted. Only the per-
+    /// attempt receipts make those proofs count (as delivery, and as
+    /// evidence for the messages behind them); with the receipt of the
+    /// original replaced, the link dies in the ramp. A dies at 10 s; P's
+    /// next message, at 12.5 s, has no evidence after its send and is torn
+    /// down 1.32 s later, the cold ladder.
+    #[test]
+    fn a_link_held_only_by_late_proofs_of_its_own_messages_lives_and_then_dies_cold() {
+        use crate::transport::InterfaceId;
+        let mut pair = establish_nodecore_link_pair();
+        let p_link = pair.initiator_link_id;
+        let a_link = pair.responder_link_id;
+        for (node, link) in [(&mut pair.initiator, p_link), (&mut pair.responder, a_link)] {
+            let l = node.link_mut(&link).unwrap();
+            l.set_rtt_ms(10);
+            if let Some(ch) = l.channel_mut() {
+                ch.set_srtt_for_test(10.0);
+            }
+        }
+        // (arrival time at P, packet)
+        let mut delay_line: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut sent = 0usize;
+        let mut confirmed = 0usize;
+        let mut closed: Option<(u64, LinkCloseReason)> = None;
+        let mut t = 0u64;
+        while t <= 16_000 && closed.is_none() {
+            pair.initiator.transport().clock().set(TEST_TIME_MS + t);
+            pair.responder.transport().clock().set(TEST_TIME_MS + t);
+            let mut outs = Vec::new();
+            let send_now = (t.is_multiple_of(500) && t < 10_000) || t == 12_500;
+            if send_now {
+                if let Ok(out) = pair.initiator.send_on_link(&p_link, b"control") {
+                    sent += 1;
+                    outs.push(out);
+                }
+                if t == 0 {
+                    if let Some(ch) = pair
+                        .initiator
+                        .link_mut(&p_link)
+                        .and_then(|l| l.channel_mut())
+                    {
+                        ch.set_srtt_for_test(10.0);
+                    }
+                }
+            }
+            outs.push(pair.initiator.handle_timeout());
+            // Proofs due now reach P.
+            let (due, later): (Vec<_>, Vec<_>) = delay_line.drain(..).partition(|(at, _)| *at <= t);
+            delay_line = later;
+            for (_, packet) in due {
+                outs.push(pair.initiator.handle_packet(InterfaceId(0), &packet));
+            }
+            let delay = (50 + t * 35 / 100).min(2_000);
+            for out in &outs {
+                for e in &out.events {
+                    match e {
+                        NodeEvent::LinkDeliveryConfirmed { .. } => confirmed += 1,
+                        NodeEvent::LinkClosed { reason, .. } if closed.is_none() => {
+                            closed = Some((t, *reason));
+                        }
+                        _ => {}
+                    }
+                }
+                // P's packets reach A at once while A lives; A's answers go
+                // into the delay line.
+                if t < 10_000 {
+                    for packet in extract_all_action_data(out) {
+                        let back = pair.responder.handle_packet(InterfaceId(0), &packet);
+                        for answer in extract_all_action_data(&back) {
+                            delay_line.push((t + delay, answer));
+                        }
+                    }
+                }
+            }
+            t += 10;
+        }
+        let (at, reason) = closed.expect("the link is given up once A is gone");
+        assert_eq!(reason, LinkCloseReason::ChannelExhausted, "at {at} ms");
+        assert!(
+            at >= 12_500,
+            "torn down at {at} ms, while the late proofs still arrived ({confirmed} of {sent} confirmed)"
+        );
+        assert_eq!(confirmed, sent - 1, "every message A got was confirmed");
+        let after = at - 12_500;
+        assert!(
+            (1_300..1_400).contains(&after),
+            "given up {after} ms after the last send: not the cold ladder"
+        );
+    }
+
     /// What one run of [`queueing_uplink_case`] saw.
     struct UplinkOutcome {
         proof_delayed: bool,

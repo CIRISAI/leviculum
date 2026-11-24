@@ -261,6 +261,18 @@ pub struct Channel {
     /// [`Channel::poll_with_inbound`], 0 until then. It bounds the RTT
     /// estimate ([`Channel::srtt_cap_ms`]).
     hold_bound_ms: u64,
+    /// +ciris (leviculum#113, review 6 finding 4): the LEARNED RTT estimate,
+    /// fed by every attempt-tagged proof ([`Channel::mark_delivered_attempt`])
+    /// and capped at [`Channel::srtt_cap_ms`]; 0.0 when there is none.
+    /// `srtt_ms` keeps today's meaning (first-try samples only, Karn): it
+    /// drives pacing and the COLD ladder.
+    learned_srtt_ms: f64,
+    /// When the last attempt-tagged sample arrived (the learned estimate is
+    /// dropped one stale bound after it).
+    last_learned_sample_ms: u64,
+    /// The newest evidence that the peer is alive, as last handed to
+    /// [`Channel::poll_with_inbound`]: it picks the ladder per message.
+    last_evidence_ms: Option<u64>,
 }
 
 impl Default for Channel {
@@ -290,6 +302,9 @@ impl Channel {
             busy_rejections: 0,
             pacing_rejections: 0,
             hold_bound_ms: 0,
+            learned_srtt_ms: 0.0,
+            last_learned_sample_ms: 0,
+            last_evidence_ms: None,
         }
     }
 
@@ -377,6 +392,20 @@ impl Channel {
     /// Get the smoothed RTT in milliseconds (0.0 if not yet measured)
     pub fn srtt_ms(&self) -> f64 {
         self.srtt_ms
+    }
+
+    /// +ciris (leviculum#113): the learned RTT estimate (every attempt-tagged
+    /// proof, the queue delay included, capped at [`Self::srtt_cap_ms`]), or
+    /// 0.0 when there is none. The retransmission timer uses it only for a
+    /// message with evidence of the peer since its first send; `srtt_ms` is
+    /// the first-try estimate it uses otherwise.
+    pub fn learned_srtt_ms(&self) -> f64 {
+        self.learned_srtt_ms
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_learned_srtt_for_test(&mut self, srtt_ms: f64) {
+        self.learned_srtt_ms = srtt_ms;
     }
 
     /// Get the RTT variance in milliseconds (0.0 if not yet measured)
@@ -484,6 +513,17 @@ impl Channel {
             rttvar = self.rttvar_ms,
             "channel: srtt updated"
         );
+    }
+
+    /// +ciris (leviculum#113): the RTT the learned ladder uses: the learned
+    /// estimate, never below the cold one.
+    fn effective_learned_rtt_ms(&self, fallback_rtt_ms: u64) -> u64 {
+        let cold = self.effective_rtt_ms(fallback_rtt_ms);
+        if self.learned_srtt_ms > 0.0 {
+            cold.max(self.learned_srtt_ms as u64)
+        } else {
+            cold
+        }
     }
 
     /// Return the effective RTT: SRTT if measured, else fallback.
@@ -1010,10 +1050,24 @@ impl Channel {
         let tries = self.tx_ring[pos].tries;
         let sample_rtt = now_ms.saturating_sub(attempt_sent_ms);
         if sample_rtt > 0 {
-            self.update_srtt(sample_rtt);
-            if let Some(cap) = self.srtt_cap_ms(rtt_ms) {
-                self.srtt_ms = self.srtt_ms.min(cap);
+            // Today's estimator: first-try samples only (Karn), as before.
+            if attempt == 1 && tries == 1 {
+                self.update_srtt(sample_rtt);
             }
+            // The learned one: every attempt-tagged sample, capped.
+            let prior = if self.learned_srtt_ms > 0.0 {
+                self.learned_srtt_ms
+            } else if self.srtt_ms > 0.0 {
+                self.srtt_ms
+            } else {
+                sample_rtt as f64
+            };
+            let mut learned = 0.875 * prior + 0.125 * sample_rtt as f64;
+            if let Some(cap) = self.srtt_cap_ms(rtt_ms) {
+                learned = learned.min(cap);
+            }
+            self.learned_srtt_ms = learned;
+            self.last_learned_sample_ms = now_ms;
             self.min_rtt_ms = Some(match self.min_rtt_ms {
                 Some(m) => m.min(sample_rtt),
                 None => sample_rtt,
@@ -1080,33 +1134,99 @@ impl Channel {
         Some((self.hold_bound_ms as f64 / per_srtt).max(rtt_ms as f64))
     }
 
+    /// +ciris (leviculum#113, review 6 finding 3): the longest wait ordinary
+    /// try `tries` may take, once the stale bound is known: its share of the
+    /// bound, `bound × 1.5^(tries-1) / Σ_{j<max_tries} 1.5^j`, so the
+    /// `max_tries` ordinary waits add up to at most the bound WHATEVER their
+    /// terms. srtt_cap_ms alone did not guarantee it: the queue term divides
+    /// `queue_len_at_send` (up to the tier's window_max) by the CURRENT
+    /// window, which retransmissions shrink to window_min, so a wait reached
+    /// (2.5 + max/min) × SRTT: 5.5 on the fast tier (a 15.7 s span against a
+    /// 10 s bound), 8.5 on the medium tier (about 199 s against 82 s).
+    ///
+    /// It does not bind today's cold ladder on any ordinary link: that span
+    /// is at most (2.5 + max/min) × 13.19 × RTT (72.5 × RTT on the fast
+    /// tier, 112 × on the medium), and the stale bound is 2 × the keepalive
+    /// (411 × RTT, at least 10 s, at most 720 s), so it binds only past an
+    /// RTT of about 6.4 s (720 s / 112), where the link's own stale check
+    /// already ends it at the bound.
+    fn wait_share_ms(&self, tries: u8) -> Option<u64> {
+        if self.hold_bound_ms == 0 {
+            return None;
+        }
+        let span: f64 = (0..u32::from(self.max_tries))
+            .map(|k| pow_f64(CHANNEL_BACKOFF_BASE, k))
+            .sum();
+        let k = u32::from(tries.clamp(1, self.max_tries)) - 1;
+        Some((self.hold_bound_ms as f64 * pow_f64(CHANNEL_BACKOFF_BASE, k) / span) as u64)
+    }
+
     /// When `outbound` times out and [`poll`](Self::poll) retransmits it, or
     /// `None` if it is not awaiting a proof.
-    fn retransmit_due_ms(&self, outbound: &OutboundEnvelope, eff_rtt: u64) -> Option<u64> {
+    ///
+    /// +ciris (leviculum#113, review 6 finding 4), the ladder per message:
+    /// - observable: evidence the peer is alive (own link, the same proven
+    ///   peer on another link, or the host) NEWER than this message's first
+    ///   send. Action: the LEARNED ladder: the learned RTT, each ordinary
+    ///   wait capped at its share of the stale bound (finding 3), and never
+    ///   shorter than the cold ladder's wait (learning only lengthens).
+    /// - observable: no such evidence. Action: the COLD ladder, exactly
+    ///   today's: the first-try (Karn) RTT, no share cap. A peer that died,
+    ///   whatever delay its link learned before, is given up at today's
+    ///   time; a party that delays proofs to pin the learned RTT gains
+    ///   nothing once the peer is silent.
+    ///
+    /// Never: the learned RTT without evidence; a learned ordinary span past
+    /// the stale bound.
+    ///
+    /// Evidence is state-advancing packets only (finding 1), which needs the
+    /// per-attempt receipts: on a queueing path the late proof of an EARLIER
+    /// attempt is the evidence a link has; with that attempt's receipt
+    /// replaced it matches nothing, every message runs the cold ladder, and
+    /// the link dies. Never ship one without the other.
+    fn retransmit_due_ms(
+        &self,
+        outbound: &OutboundEnvelope,
+        eff_cold: u64,
+        eff_learned: u64,
+    ) -> Option<u64> {
         if outbound.state != MessageState::Sent {
             return None;
         }
+        let learned = self
+            .last_evidence_ms
+            .is_some_and(|t| t > outbound.first_sent_ms);
         // Use queue_len from when message was sent, not current tx_ring size.
         // Prevents death spiral: growing queue → inflated timeout → no retransmit → queue stays.
-        let timeout = calculate_timeout(
-            outbound.tries,
-            eff_rtt,
-            outbound.queue_len_at_send,
-            self.window,
-        );
+        // The wait for ordinary try `tries`: the cold ladder's, or with
+        // evidence the learned one capped at its share of the bound, never
+        // below the cold one (learning only ever lengthens a wait).
+        let wait = |tries: u8| {
+            let cold = calculate_timeout(tries, eff_cold, outbound.queue_len_at_send, self.window);
+            if !learned {
+                return cold;
+            }
+            let long =
+                calculate_timeout(tries, eff_learned, outbound.queue_len_at_send, self.window);
+            let long = match self.wait_share_ms(tries) {
+                Some(share) => long.min(share),
+                None => long,
+            };
+            cold.max(long)
+        };
         // +ciris (leviculum#113): a message held past max_tries keeps
         // backing off, but never waits longer than CHANNEL_HELD_RETRY_MAX_MS
         // (or the last ordinary try's wait, if that was longer).
         let timeout = if outbound.tries > self.max_tries {
-            let last_ordinary = calculate_timeout(
-                self.max_tries,
-                eff_rtt,
+            let held = calculate_timeout(
+                outbound.tries,
+                if learned { eff_learned } else { eff_cold },
                 outbound.queue_len_at_send,
                 self.window,
             );
-            timeout.min(crate::constants::CHANNEL_HELD_RETRY_MAX_MS.max(last_ordinary))
+            held.min(crate::constants::CHANNEL_HELD_RETRY_MAX_MS.max(wait(self.max_tries)))
         } else {
-            timeout
+            wait(outbound.tries)
         };
         Some(outbound.sent_at_ms.saturating_add(timeout))
     }
@@ -1115,9 +1235,10 @@ impl Channel {
     /// the timer can wake for it instead of at the next whole second (749).
     pub fn next_retransmit_due_ms(&self, rtt_ms: u64) -> Option<u64> {
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
+        let eff_learned = self.effective_learned_rtt_ms(rtt_ms);
         self.tx_ring
             .iter()
-            .filter_map(|outbound| self.retransmit_due_ms(outbound, eff_rtt))
+            .filter_map(|outbound| self.retransmit_due_ms(outbound, eff_rtt, eff_learned))
             .min()
     }
 
@@ -1169,15 +1290,30 @@ impl Channel {
         if hold_bound_ms > 0 {
             self.hold_bound_ms = hold_bound_ms;
         }
+        self.last_evidence_ms = authenticated_inbound_ms;
+        // +ciris (leviculum#113, review 6 finding 4): the learned estimate
+        // decays to nothing one stale bound after its last sample: a link
+        // that has proved nothing for that long has nothing current to say
+        // about its queue.
+        if self.learned_srtt_ms > 0.0
+            && self.hold_bound_ms > 0
+            && now_ms
+                >= self
+                    .last_learned_sample_ms
+                    .saturating_add(self.hold_bound_ms)
+        {
+            self.learned_srtt_ms = 0.0;
+        }
         let mut actions = self.expire_due(now_ms);
         let mut window_decrements = 0usize;
         let mut pacing_doublings = 0usize;
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
+        let eff_learned = self.effective_learned_rtt_ms(rtt_ms);
 
         // First pass: collect indices that need processing and their current tries
         let mut timed_out: Vec<(usize, u8)> = Vec::new();
         for (i, outbound) in self.tx_ring.iter().enumerate() {
-            if let Some(due) = self.retransmit_due_ms(outbound, eff_rtt) {
+            if let Some(due) = self.retransmit_due_ms(outbound, eff_rtt, eff_learned) {
                 if now_ms >= due {
                     timed_out.push((i, outbound.tries));
                 }
@@ -2612,17 +2748,33 @@ mod tests {
         assert!(t < 1_000 + bound + crate::constants::CHANNEL_HELD_RETRY_MAX_MS);
     }
 
-    /// The base timeout `max(srtt × 2.5, 100)` the channel would use now.
+    /// The learned ladder's base timeout `max(srtt × 2.5, 100)` now.
     fn base_rto_ms(channel: &Channel, rtt_ms: u64) -> u64 {
-        calculate_timeout(1, channel.effective_rtt_ms(rtt_ms), 0, 1)
+        calculate_timeout(1, channel.effective_learned_rtt_ms(rtt_ms), 0, 1)
+    }
+
+    /// Teach `channel` one delay `sample` through a RETRANSMITTED message
+    /// (sent at `*t`, retransmitted once, its original proved): only the
+    /// learned estimate sees it (today's first-try estimate takes no sample
+    /// from a retransmitted message).
+    fn learn(channel: &mut Channel, t: &mut u64, seq: u16, sample: u64, rtt_ms: u64) {
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, *t, rtt_ms)
+            .unwrap();
+        let due = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+        let _ = channel.poll(due, rtt_ms);
+        assert!(channel.mark_delivered_attempt(seq, 1, *t, *t + sample, rtt_ms));
+        *t += sample + 1;
     }
 
     /// +ciris (leviculum#113): a proof that names an attempt is an RTT
     /// sample even for a retransmitted message (no Karn exclusion: the
-    /// attempt is known), so the timeout learns a queue's delay. A proof of
-    /// the ORIGINAL send, 1.4 s late, after four retransmissions, raises the
-    /// base timeout from the 100 ms floor; a proof of the LATEST attempt of
-    /// a retransmitted message is a sample of that attempt.
+    /// attempt is known), so the LEARNED estimate takes the queue's delay. A
+    /// proof of the ORIGINAL send, 1.4 s late, after four retransmissions,
+    /// raises the learned base timeout from the 100 ms floor; a proof of the
+    /// LATEST attempt is a sample of that attempt. Today's first-try
+    /// estimate takes neither.
     #[test]
     fn an_attempt_tagged_proof_is_an_rtt_sample_for_a_retransmitted_message() {
         let rtt_ms = 10;
@@ -2640,11 +2792,12 @@ mod tests {
         assert!(channel.mark_delivered_attempt(0, 1, 1_000, 2_400, rtt_ms));
         // 0.875 × 10 + 0.125 × 1400 = 183.75
         assert!(
-            (channel.srtt_ms() - 183.75).abs() < 0.01,
+            (channel.learned_srtt_ms() - 183.75).abs() < 0.01,
             "{}",
-            channel.srtt_ms()
+            channel.learned_srtt_ms()
         );
         assert_eq!(base_rto_ms(&channel, rtt_ms), 457);
+        assert_eq!(channel.srtt_ms(), 10.0, "today's estimate: no sample");
 
         // The latest attempt's proof: a sample of that attempt alone.
         let mut channel = Channel::new();
@@ -2655,59 +2808,164 @@ mod tests {
         let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
         let _ = channel.poll(t, rtt_ms);
         assert!(channel.mark_delivered_attempt(0, 2, t, t + 30, rtt_ms));
-        assert!((channel.srtt_ms() - (0.875 * 10.0 + 0.125 * 30.0)).abs() < 0.01);
+        assert!((channel.learned_srtt_ms() - (0.875 * 10.0 + 0.125 * 30.0)).abs() < 0.01);
     }
 
-    /// +ciris (leviculum#113): the RTO growth is capped. However long the
-    /// samples, SRTT stops at `srtt_cap_ms`, the value whose five ordinary
-    /// waits (queue term at its largest) add up to the link's stale bound:
-    /// 216.7 ms on a 10 s bound. A channel whose peer then falls silent tears
-    /// the link down no later than the bound, as the link's own stale check
-    /// would.
+    /// Drive one message sent at `first` to its teardown, `evidence` handed
+    /// to every poll; the teardown's time after `first`.
+    fn time_to_teardown(
+        channel: &mut Channel,
+        first: u64,
+        evidence: Option<u64>,
+        bound: u64,
+    ) -> u64 {
+        let rtt_ms = 10;
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, first, rtt_ms)
+            .unwrap();
+        loop {
+            let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let actions = channel.poll_with_inbound(t, rtt_ms, evidence, bound);
+            if actions.contains(&ChannelAction::TearDownLink) {
+                return t - first;
+            }
+        }
+    }
+
+    /// +ciris (leviculum#113, review 6 finding 4): the learned timeout is
+    /// conditional on evidence. Learn a 30 s queue delay (SRTT to the cap,
+    /// 216.7 ms on a 10 s bound), then the peer goes silent on every link:
+    /// the next message has no evidence since its first send, runs the COLD
+    /// ladder, and is torn down exactly when a link that never learned
+    /// anything is: 1318 ms on this 10 ms path (100 + 150 + 225 + 337 + 506),
+    /// not the ~7 s the learned ladder would take. The cap still bounds what
+    /// was learned.
     #[test]
-    fn the_learned_timeout_is_capped_so_a_silent_link_still_dies_by_the_stale_bound() {
+    fn a_link_that_learned_a_long_delay_still_gives_a_silent_peer_up_at_todays_time() {
+        let rtt_ms = 10;
+        let bound = 10_000;
+        let fresh = || {
+            let mut channel = Channel::new();
+            channel.seed_srtt(rtt_ms);
+            let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
+            channel
+        };
+        let mut channel = fresh();
+        let cap = channel.srtt_cap_ms(rtt_ms).unwrap();
+        assert!((cap - 216.7).abs() < 0.1, "cap {cap}");
+        let mut t = 1_000;
+        for seq in 0..40u16 {
+            learn(&mut channel, &mut t, seq, 30_000, rtt_ms);
+        }
+        assert!((channel.learned_srtt_ms() - cap).abs() < 0.01, "at the cap");
+        // Today's ladder: a channel that learned nothing, in the same window.
+        let mut today = fresh();
+        today.set_window_bounds_for_test(channel.window, channel.window_min, channel.window_max);
+        let cold = time_to_teardown(&mut today, 1_000, None, bound);
+        assert!((1_318..1_330).contains(&cold), "cold ladder {cold} ms");
+        // Silent: the only evidence is older than the message.
+        let first = t;
+        let silent = time_to_teardown(&mut channel, first, Some(first - 1), bound);
+        assert_eq!(silent, cold, "the cold ladder, exactly");
+        // With evidence since the send, the learned ladder applies (and the
+        // hold, to the bound): the two ladders do differ.
+        let mut held = fresh();
+        let mut t = 1_000;
+        for seq in 0..40u16 {
+            learn(&mut held, &mut t, seq, 30_000, rtt_ms);
+        }
+        let first = t;
+        let learned = time_to_teardown(&mut held, first, Some(first + 1), bound);
+        assert!(learned >= bound, "learned and held: {learned} ms");
+    }
+
+    /// +ciris (leviculum#113, review 6 finding 4): with no attempt-tagged
+    /// sample for one stale bound, the learned estimate is dropped and the
+    /// learned ladder falls back to today's estimate.
+    #[test]
+    fn the_learned_estimate_decays_after_a_stale_bound_without_samples() {
         let rtt_ms = 10;
         let bound = 10_000;
         let mut channel = Channel::new();
         channel.seed_srtt(rtt_ms);
         let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
-        let cap = channel.srtt_cap_ms(rtt_ms).unwrap();
-        assert!((cap - 216.7).abs() < 0.1, "cap {cap}");
         let mut t = 1_000;
-        for seq in 0..40u16 {
-            channel
-                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
-                .unwrap();
-            assert!(channel.mark_delivered_attempt(seq, 1, t, t + 30_000, rtt_ms));
-            t += 31_000;
-        }
-        assert!(channel.srtt_ms() <= cap, "srtt {}", channel.srtt_ms());
-        // Now the peer is silent: the next message is torn down within the
-        // bound, never later.
-        channel.set_window_for_test(1);
-        let first = t;
-        channel
-            .send(&TestMessage { data: vec![1] }, MDU, first, rtt_ms)
-            .unwrap();
-        loop {
-            t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
-            let actions = channel.poll_with_inbound(t, rtt_ms, Some(1), bound);
-            if matches!(&actions[0], ChannelAction::TearDownLink) {
-                break;
+        learn(&mut channel, &mut t, 0, 3_000, rtt_ms);
+        assert!(channel.learned_srtt_ms() > 100.0);
+        let _ = channel.poll_with_inbound(t - 1 + bound - 1, rtt_ms, None, bound);
+        assert!(channel.learned_srtt_ms() > 100.0, "not before the bound");
+        let _ = channel.poll_with_inbound(t - 1 + bound, rtt_ms, None, bound);
+        assert_eq!(channel.learned_srtt_ms(), 0.0, "dropped at the bound");
+        assert_eq!(base_rto_ms(&channel, rtt_ms), 100);
+    }
+
+    /// +ciris (leviculum#113, review 6 finding 3): on every window tier, a
+    /// message queued at the tier's window_max with the learned SRTT at the
+    /// cap and the window then shrunk to window_min by retransmissions (the
+    /// worst queue term, (2.5 + max/min) × SRTT), whose peer showed itself
+    /// once after the send and then fell silent, is torn down by the stale
+    /// bound plus one held wait: the learned ordinary waits fit the bound.
+    /// The bounds are the link's for each tier's RTT: 2 × clamp(RTT × 360 /
+    /// 1.75 s, 5 s, 360 s).
+    #[test]
+    fn on_every_tier_the_worst_queued_message_on_a_silent_link_dies_by_the_stale_bound() {
+        for (rtt_ms, min, max) in [
+            (10u64, CHANNEL_WINDOW_MIN_FAST, CHANNEL_WINDOW_MAX_FAST),
+            (200, CHANNEL_WINDOW_MIN_SLOW, CHANNEL_WINDOW_MAX_MEDIUM),
+            (1_000, CHANNEL_WINDOW_MIN_SLOW, CHANNEL_WINDOW_MAX_SLOW),
+            (
+                2_500,
+                CHANNEL_WINDOW_MIN_VERY_SLOW,
+                CHANNEL_WINDOW_MAX_VERY_SLOW,
+            ),
+        ] {
+            let keepalive = ((rtt_ms as f64 * 360.0 / 1.75) as u64).clamp(5_000, 360_000);
+            let bound = 2 * keepalive;
+            let mut channel = Channel::new();
+            channel.seed_srtt(rtt_ms);
+            let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
+            channel.update_window_for_rtt(rtt_ms);
+            channel.set_window_bounds_for_test(max, min, max);
+            let cap = channel.srtt_cap_ms(rtt_ms).unwrap();
+            channel.set_learned_srtt_for_test(cap);
+            let first = 1_000;
+            for i in 0..max {
+                channel.set_pacing_for_test(0, 0);
+                channel
+                    .send(&TestMessage { data: vec![1] }, MDU, first, rtt_ms)
+                    .unwrap_or_else(|e| panic!("send {i} at rtt {rtt_ms}: {e:?}"));
             }
+            // Only the last (queue_len_at_send = max) stays out.
+            for seq in 0..(max as u16 - 1) {
+                channel.tx_ring.retain(|e| e.envelope.sequence != seq);
+            }
+            assert_eq!(channel.tx_ring[0].queue_len_at_send, max);
+            channel.set_window_for_test(min);
+            let mut t;
+            loop {
+                t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+                let actions = channel.poll_with_inbound(t, rtt_ms, Some(first + 1), bound);
+                channel.set_window_for_test(min);
+                if actions.contains(&ChannelAction::TearDownLink) {
+                    break;
+                }
+            }
+            let held_wait = crate::constants::CHANNEL_HELD_RETRY_MAX_MS
+                .max(channel.wait_share_ms(channel.max_tries).unwrap());
+            assert!(
+                t - first <= bound + held_wait,
+                "rtt {rtt_ms} ms: torn down {} ms after the send, bound {bound} ms + {held_wait}",
+                t - first
+            );
         }
-        assert!(
-            t - first <= bound,
-            "torn down {} ms after the send",
-            t - first
-        );
     }
 
     /// +ciris (leviculum#113): the recovery direction. Once the queue
-    /// drains, proofs of first sends come back fast and the timeout comes
-    /// down again: from the cap (SRTT 216.7 ms, base 540 ms) to the 100 ms
-    /// floor within 15 samples of 10 ms (each takes 1/8 of the excess off:
-    /// 206.7 × 0.875^15 < 31).
+    /// drains, proofs of first sends come back fast and the learned timeout
+    /// comes down again: from the cap (SRTT 216.7 ms, base 540 ms) to the
+    /// 100 ms floor within 15 samples of 10 ms (each takes 1/8 of the
+    /// excess off: 206.7 × 0.875^15 < 31).
     #[test]
     fn the_learned_timeout_comes_back_down_within_15_samples_after_the_queue_drains() {
         let rtt_ms = 10;
@@ -2716,21 +2974,20 @@ mod tests {
         let _ = channel.poll_with_inbound(0, rtt_ms, None, 10_000);
         let mut t = 1_000;
         let mut seq = 0u16;
-        let mut deliver = |channel: &mut Channel, sample: u64| {
-            channel
-                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
-                .unwrap();
-            assert!(channel.mark_delivered_attempt(seq, 1, t, t + sample, rtt_ms));
-            seq += 1;
-            t += sample + 1;
-        };
         for _ in 0..10 {
-            deliver(&mut channel, 4_000);
+            learn(&mut channel, &mut t, seq, 4_000, rtt_ms);
+            seq += 1;
         }
         assert_eq!(base_rto_ms(&channel, rtt_ms), 540, "at the cap");
         let mut samples = 0;
         while base_rto_ms(&channel, rtt_ms) > 100 {
-            deliver(&mut channel, 10);
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                .unwrap();
+            assert!(channel.mark_delivered_attempt(seq, 1, t, t + 10, rtt_ms));
+            seq += 1;
+            t += 11;
             samples += 1;
             assert!(samples <= 15, "still {} ms", base_rto_ms(&channel, rtt_ms));
         }
