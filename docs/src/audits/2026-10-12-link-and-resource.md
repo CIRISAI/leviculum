@@ -643,7 +643,7 @@ directly from RTT thresholds 180/750/2000 ms
 Karn's rule (`mark_delivered`,
 `leviculum-core/src/link/channel/mod.rs:972`), and send pacing at
 `rtt/window` with multiplicative backoff (`recalculate_pacing`,
-`leviculum-core/src/link/channel/mod.rs:1651`) that Python does not
+`leviculum-core/src/link/channel/mod.rs:1670`) that Python does not
 have at all. All of it is our side's transmit discipline over
 identical wire bytes. Class: **deviation ours (deliberate)**.
 
