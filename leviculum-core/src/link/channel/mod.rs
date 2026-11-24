@@ -152,6 +152,12 @@ struct OutboundEnvelope {
     /// first sent, before any of its retransmissions shrank it: what a
     /// proof showing them spurious restores, and no more.
     window_at_send: usize,
+    /// +ciris (re-review 7 N1): the window decrements this message's own
+    /// timeouts actually APPLIED, by retransmission (index 0 = the timeout
+    /// that sent attempt 2; the last slot gathers every one past 8). A
+    /// timeout at the window floor applies none. What a proof showing those
+    /// retransmissions spurious gives back, and no more.
+    applied_decrements: [u8; 8],
     /// +ciris (leviculum#94): past this, retransmit a [`timed::MSG_EXPIRED`]
     /// in the frame's place.
     deadline_ms: Option<u64>,
@@ -167,6 +173,7 @@ impl OutboundEnvelope {
             first_sent_ms: 0,
             queue_len_at_send: 0,
             window_at_send: 0,
+            applied_decrements: [0; 8],
             deadline_ms: None,
         }
     }
@@ -1082,18 +1089,36 @@ impl Channel {
             .delivered_bytes
             .saturating_add(self.tx_ring[pos].envelope.packed_size() as u64);
         let window_at_send = self.tx_ring[pos].window_at_send;
+        let applied = self.tx_ring[pos].applied_decrements;
         self.tx_ring.remove(pos);
         if spurious > 0 {
-            // Transition (review 6 finding 2, the Eifel response, RFC 3522
-            // section 3): a proof of an earlier attempt shows the later
-            // retransmissions spurious; RESTORE the window to what it was
-            // before them, never more. The decrements stopped at window_min,
-            // so crediting one step per spurious try would open the window
-            // past where it was before the loss (16 -> 48 on the fast tier in
-            // about 7 proofs) and re-flood the uplink that just drained. A
-            // window that has grown since (other proofs) is kept.
+            // Transition (review 6 finding 2, re-review 7 N1; the Eifel
+            // response, RFC 3522 section 3): a proof of attempt k shows the
+            // retransmissions after it (attempts k+1..=tries) spurious. Give
+            // back the window decrements THOSE timeouts of THIS message
+            // actually applied (none for a timeout at the floor), and never
+            // more than the window was at this message's first send. Both
+            // clamps: crediting one step per spurious try opened the window
+            // past where it was before the loss (16 -> 48 in about 7 proofs);
+            // restoring the whole window at send undid every OTHER message's
+            // decrements too (16 -> 48 in one proof, while the queue still
+            // held the retransmits). A window already at or above the cap is
+            // kept as it is.
+            let first = usize::from(attempt.max(1)) - 1;
+            let last = usize::from(tries).saturating_sub(2);
+            let give: usize = if first <= last {
+                applied[first.min(7)..=last.min(7)]
+                    .iter()
+                    .map(|d| usize::from(*d))
+                    .sum()
+            } else {
+                0
+            };
             self.update_window_for_rtt(rtt_ms);
-            self.window = self.window.max(window_at_send.min(self.window_max));
+            let cap = window_at_send.min(self.window_max);
+            if self.window < cap {
+                self.window = (self.window + give).min(cap);
+            }
             self.recalculate_pacing(rtt_ms);
         } else {
             self.adjust_window(true, rtt_ms);
@@ -1305,7 +1330,8 @@ impl Channel {
             self.learned_srtt_ms = 0.0;
         }
         let mut actions = self.expire_due(now_ms);
-        let mut window_decrements = 0usize;
+        // Whose timeout each window decrement is (None: the teardown's).
+        let mut decrement_for: Vec<Option<(usize, u8)>> = Vec::new();
         let mut pacing_doublings = 0usize;
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
         let eff_learned = self.effective_learned_rtt_ms(rtt_ms);
@@ -1336,7 +1362,7 @@ impl Channel {
                 );
                 self.tx_ring[i].state = MessageState::Failed;
                 actions.push(ChannelAction::TearDownLink);
-                window_decrements += 1;
+                decrement_for.push(None);
                 break; // Link is being torn down, no point continuing
             }
 
@@ -1364,7 +1390,7 @@ impl Channel {
                 "channel: retransmit"
             );
 
-            window_decrements += 1; // always — matches Python
+            decrement_for.push(Some((i, new_tries))); // always — matches Python
             if tries >= 2 {
                 pacing_doublings += 1; // only 2nd+ retry triggers pacing MD
             }
@@ -1372,8 +1398,18 @@ impl Channel {
 
         // Apply window adjustments after iteration is complete.
         // Window tiers use handshake RTT (conservative), not SRTT.
-        for _ in 0..window_decrements {
+        // +ciris (re-review 7 N1): each message records the decrement its
+        // timeout actually applied (0 at the floor), for the give-back.
+        let window_decrements = decrement_for.len();
+        for owner in decrement_for {
+            let before = self.window;
             self.adjust_window(false, rtt_ms);
+            let applied = before.saturating_sub(self.window).min(usize::from(u8::MAX)) as u8;
+            if let Some((i, new_tries)) = owner {
+                let slot = usize::from(new_tries.saturating_sub(2)).min(7);
+                let d = &mut self.tx_ring[i].applied_decrements[slot];
+                *d = d.saturating_add(applied);
+            }
         }
         // Overwrite pacing with SRTT (adjust_window used handshake RTT)
         if window_decrements > 0 {
@@ -3037,6 +3073,39 @@ mod tests {
             after_original, 30,
             "the original: restored to the send's 30"
         );
+    }
+
+    /// +ciris (re-review 7 N1): the onset case. 48 messages sent at window
+    /// 48 on the fast tier; the queue builds, every one times out and the
+    /// decrements take the window to its floor of 16 (M1's own first
+    /// timeout applied one of them; its later ones, at the floor, none).
+    /// The first late proof of M1's original gives back only M1's own: the
+    /// window rises by 1, to 17, not to the 48 it had when M1 was sent,
+    /// while the queue still holds every retransmission.
+    #[test]
+    fn one_late_proof_gives_back_only_its_own_messages_decrements() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        channel.update_window_for_rtt(rtt_ms);
+        channel.set_window_bounds_for_test(48, 16, 48);
+        for i in 0..48u64 {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, 1_000 + i, rtt_ms)
+                .unwrap();
+        }
+        assert!(channel.tx_ring.iter().all(|e| e.window_at_send == 48));
+        let mut t = 1_000;
+        while channel.tx_ring.iter().any(|e| e.tries < 4) {
+            t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let _ = channel.poll_with_inbound(t, rtt_ms, Some(t), 60_000);
+        }
+        assert_eq!(channel.window(), 16, "the floor");
+        let own: u8 = channel.tx_ring[0].applied_decrements.iter().sum();
+        assert_eq!(own, 1, "M1 applied one decrement, its later ones none");
+        assert!(channel.mark_delivered_attempt(0, 1, 1_000, t + 1, rtt_ms));
+        assert_eq!(channel.window(), 17, "16 + M1's own one, not 48");
     }
 
     /// +ciris (leviculum#113, review 6 finding 2): at the window floor the
