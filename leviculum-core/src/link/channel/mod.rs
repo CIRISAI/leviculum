@@ -280,6 +280,10 @@ pub struct Channel {
     /// The newest evidence that the peer is alive, as last handed to
     /// [`Channel::poll_with_inbound`]: it picks the ladder per message.
     last_evidence_ms: Option<u64>,
+    /// +ciris (leviculum#113): retransmissions this channel sent, and their
+    /// packed envelope bytes: what a host attributes its uplink by.
+    retransmits: u64,
+    retransmitted_bytes: u64,
 }
 
 impl Default for Channel {
@@ -312,6 +316,8 @@ impl Channel {
             learned_srtt_ms: 0.0,
             last_learned_sample_ms: 0,
             last_evidence_ms: None,
+            retransmits: 0,
+            retransmitted_bytes: 0,
         }
     }
 
@@ -429,6 +435,18 @@ impl Channel {
     /// Cumulative confirmed-delivered envelope bytes (leviculum#35).
     pub fn delivered_bytes(&self) -> u64 {
         self.delivered_bytes
+    }
+
+    /// +ciris (leviculum#113): retransmissions sent so far (each counted
+    /// once, whether the link built it or not).
+    pub fn retransmits(&self) -> u64 {
+        self.retransmits
+    }
+
+    /// +ciris (leviculum#113): the packed envelope bytes of those
+    /// retransmissions (before link encryption and the packet header).
+    pub fn retransmitted_bytes(&self) -> u64 {
+        self.retransmitted_bytes
     }
 
     /// Cumulative window-full send rejections (leviculum#35).
@@ -1291,20 +1309,42 @@ impl Channel {
     /// (`None`, or nothing since the first send) is torn down exactly when it
     /// always was; a held one at the stale bound at the latest.
     ///
-    /// What counts, and what it covers: evidence a REPLAY cannot produce
-    /// (review 6 finding 1: link tokens carry no replay protection and
-    /// channel packets are exempt from the packet-hash dedup, so a captured
-    /// frame decrypts again). A channel frame counts only when the channel
-    /// takes it as a NEW sequence (delivered or buffered; a duplicate, an
-    /// already-delivered or a refused one counts for nothing); a datagram
-    /// only when its replay window takes it as fresh; a proof only for an
-    /// outstanding receipt it verifies. Nothing else counts: requests,
-    /// responses, resource traffic, LINKIDENTIFY and keepalives (sent
-    /// unencrypted) do not. Plus, from the node: the same for any other
-    /// link whose far end proved the same identity key, and the host's
-    /// `NodeCore::note_peer_evidence`. A link whose peer sends nothing that
-    /// counts while this node's message is out is NOT held: it is torn down
-    /// at its 5th timeout, as before.
+    /// What counts, and what it covers: evidence a replay cannot produce
+    /// within one sequence lap (review 6 finding 1: link tokens carry no
+    /// replay protection and channel packets are exempt from the packet-hash
+    /// dedup, so a captured frame decrypts again). A channel frame counts
+    /// only when the channel takes it as a NEW sequence (delivered or
+    /// buffered; a duplicate, an already-delivered or a refused one counts
+    /// for nothing); a datagram only when its replay window takes it as
+    /// fresh; a proof only for an outstanding (or spent) receipt it
+    /// verifies, which it consumes. Plus, from the node: the same for any
+    /// other link whose far end proved the same identity key, and the
+    /// host's `NodeCore::note_peer_evidence`. A link whose peer sends
+    /// nothing that counts while this node's message is out is NOT held: it
+    /// is torn down at its 5th timeout, as before.
+    ///
+    /// Known limits (re-review 7), each bounded by the hold's own bound, a
+    /// message's first send plus the stale bound:
+    /// - the sequence lap (N2, leviculum#118): the 16-bit channel sequence
+    ///   wraps after 65,536 messages, and a frame is "backward" only when it
+    ///   is 32,768 or more behind, so on a link older than one lap a frame
+    ///   recorded a lap earlier is taken as NEW and counts. Only an on-path
+    ///   party that recorded that lap can do it, and the worst it gains is a
+    ///   dead peer detected at the stale bound instead of the cold ladder's
+    ///   time. (The same party can already freeze the stale check itself, by
+    ///   replaying anything addressed to the link: `record_inbound` runs
+    ///   before decrypt, as upstream does.)
+    /// - not evidence, by design (N3): requests, responses, resource
+    ///   advertisements, parts and their controls, LINKIDENTIFY and
+    ///   keepalives (sent unencrypted). A link whose peer is busy with only
+    ///   those while this node's message is out runs the cold ladder: the
+    ///   upstream timing.
+    /// - withheld, not replayed (N4): authentic packets an on-path party held
+    ///   back while the peer lived (proofs within their receipt's 30 s,
+    ///   out-of-order frames, datagrams within the window) still advance
+    ///   state when it releases them, so they count when they arrive. A
+    ///   message first sent after the peer died can be held by them, at most
+    ///   to its bound.
     pub fn poll_with_inbound(
         &mut self,
         now_ms: u64,
@@ -1375,9 +1415,12 @@ impl Channel {
             outbound.sent_at_ms = now_ms;
 
             let seq = outbound.envelope.sequence;
+            let data = outbound.envelope.pack();
+            self.retransmits = self.retransmits.saturating_add(1);
+            self.retransmitted_bytes = self.retransmitted_bytes.saturating_add(data.len() as u64);
             actions.push(ChannelAction::Retransmit {
                 sequence: seq,
-                data: outbound.envelope.pack(),
+                data,
                 tries: new_tries,
             });
 

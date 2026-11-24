@@ -383,6 +383,8 @@ pub struct LinkStats {
     pub(crate) rttvar_ms: Option<f64>,
     pub(crate) min_rtt_ms: Option<u64>,
     pub(crate) learned_srtt_ms: Option<f64>,
+    pub(crate) retransmits: u64,
+    pub(crate) retransmitted_bytes: u64,
     pub(crate) rtt_ms: Option<u64>,
     pub(crate) busy_rejections: u64,
     pub(crate) pacing_rejections: u64,
@@ -436,6 +438,20 @@ impl LinkStats {
     /// tries only) stays at the path's floor while a queue builds.
     pub fn learned_srtt_ms(&self) -> Option<f64> {
         self.learned_srtt_ms
+    }
+
+    /// +ciris (leviculum#113): channel retransmissions this link has sent.
+    /// With [`tx_ring_size`](Self::tx_ring_size) (the messages still out)
+    /// and [`retransmitted_bytes`](Self::retransmitted_bytes), what lets a
+    /// host attribute the uplink traffic it did not hand over itself.
+    pub fn retransmits(&self) -> u64 {
+        self.retransmits
+    }
+
+    /// +ciris (leviculum#113): the packed envelope bytes of those
+    /// retransmissions (before link encryption and the packet header).
+    pub fn retransmitted_bytes(&self) -> u64 {
+        self.retransmitted_bytes
     }
 
     /// RTT variance companion to [`srtt_ms`](Self::srtt_ms), in milliseconds.
@@ -8967,6 +8983,14 @@ mod tests {
         let (learned, srtt) = outcome.learned_peak;
         assert!(learned > 150.0, "learned SRTT peaked at {learned} ms");
         assert!(srtt < 50.0, "first-try SRTT {srtt} ms");
+        // LinkStats counts the retransmissions the events reported.
+        let sent = outcome
+            .log
+            .iter()
+            .filter(|l| l.contains("P retransmit"))
+            .count() as u64;
+        assert!(sent > 0);
+        assert_eq!(outcome.stats_retransmits, sent);
     }
 
     /// +ciris (leviculum#113): the other direction of edge's call shape,
@@ -9121,6 +9145,8 @@ mod tests {
         /// The sender's LinkStats at the learned estimate's peak:
         /// (learned_srtt_ms, srtt_ms).
         learned_peak: (f64, f64),
+        /// The sender's LinkStats::retransmits at the end.
+        stats_retransmits: u64,
         log: Vec<alloc::string::String>,
     }
 
@@ -9361,6 +9387,13 @@ mod tests {
             t += step;
         }
         let sender = if proof_delayed { "A" } else { "P" };
+        let stats_retransmits = if proof_delayed {
+            pair.responder.link_stats(&a_link)
+        } else {
+            pair.initiator.link_stats(&p_link)
+        }
+        .map(|s| s.retransmits())
+        .unwrap_or(0);
         let exhausted_at = dbg_log.iter().find_map(|l| {
             let rest = l.strip_prefix("DBG t=")?;
             let (time, what) = rest.split_once(' ')?;
@@ -9379,6 +9412,7 @@ mod tests {
                 .iter()
                 .any(|l| l.contains(&alloc::format!("{sender} retransmit"))),
             learned_peak,
+            stats_retransmits,
             log: dbg_log,
         }
     }

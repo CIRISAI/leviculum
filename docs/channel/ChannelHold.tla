@@ -1,130 +1,132 @@
 ---------------------------- MODULE ChannelHold ----------------------------
 (***************************************************************************)
 (* leviculum#113: a Channel message out of tries is held, not torn down,  *)
-(* while the link is visibly alive (an AUTHENTICATED packet arrived after *)
-(* the message was first sent), up to the link's stale bound.             *)
+(* while the link is visibly alive (evidence arrived after the message    *)
+(* was first sent), up to the link's stale bound.                         *)
 (*                                                                         *)
-(* Code: core link/channel/mod.rs poll_with_inbound and                    *)
-(* retransmit_due_ms (the held wait capped at CHANNEL_HELD_RETRY_MAX_MS),  *)
-(* node/link_management.rs check_channel_timeouts (authenticated time and  *)
-(* stale_time_ms passed in), the record_authenticated_inbound call sites.  *)
+(* Code: core link/channel/mod.rs poll_with_inbound, retransmit_due_ms,   *)
+(* mark_delivered_attempt; node/link_management.rs check_channel_timeouts *)
+(* and the record_authenticated_inbound call sites; the ReceiptTracker.   *)
 (*                                                                         *)
-(* Part 2, the learned timeout (Channel::mark_delivered_attempt): every    *)
-(* proof names its attempt, so every proof is an RTT sample, and the      *)
-(* waits scale with the delay the link measured. Scale is that factor:    *)
-(* whatever earlier messages taught it (Init: any value up to MaxScale),  *)
-(* changed only by a sample, so only when the peer speaks, and re-read on *)
-(* every timer, as the code recomputes each due from the current SRTT.    *)
-(* MaxScale is how far the learned waits can stretch: srtt_cap_ms and the *)
-(* queue term together (review 6 finding 3: up to (2.5 + max/min) x SRTT  *)
-(* on a tier, so ANY factor). What bounds the span is Share: each        *)
-(* ordinary wait is at most its share of the bound (wait_share_ms), the   *)
-(* shares summing to at most Bound (the ASSUME).                          *)
+(* Evidence. A packet that passed the link key AND advanced state (a new  *)
+(* channel sequence, a fresh datagram, a proof of a receipt, which it     *)
+(* consumes); replays within one sequence lap advance nothing and are not *)
+(* modelled (past a lap see leviculum#118: bounded by Bound like any      *)
+(* evidence). Three sources:                                              *)
+(*   AuthIn       the peer's own channel frames / datagrams (PeerSpeaks); *)
+(*   PeerEvidence another link to the same proven identity, or the host's *)
+(*                note_peer_evidence (PeerElsewhere);                     *)
+(*   LateProof    the late proofs of this link's own messages' EARLIER    *)
+(*                attempts, queued behind traffic, and of the spent       *)
+(*                receipts of messages already confirmed (PeerProves).    *)
+(*                They match a receipt, so count, ONLY with the           *)
+(*                per-attempt receipts (ReceiptsPerAttempt); without, they *)
+(*                arrive and count for nothing.                           *)
 (*                                                                         *)
-(* Peer evidence (form 1 and form 2): an authenticated packet on another *)
-(* link whose far end proved the same identity key (Link::               *)
-(* proven_peer_key), or the host vouching for this link's far end on its  *)
-(* own cryptographic check (NodeCore::note_peer_evidence), counts as      *)
-(* evidence of life exactly like AuthIn. PeerElsewhere says it can come.  *)
-(* It teaches no RTT (a sample is a proof of THIS link's attempt).        *)
+(* The learned timeout. Every attempt-tagged proof is an RTT sample;      *)
+(* scale is how far the learned waits stretch (srtt_cap_ms and the queue  *)
+(* term together: any factor up to MaxScale). It applies only to a        *)
+(* message with evidence since its first send (finding 4): otherwise the  *)
+(* cold ladder, Ord, today's waits, whatever they are. A learned ordinary *)
+(* wait is max(cold, min(scale x Ord[k], Share[k])) (retransmit_due_ms):  *)
+(* capped at its share of the bound, never below the cold wait. Nothing   *)
+(* is ASSUMEd between Share and Ord: the code's cold (Karn) SRTT is       *)
+(* uncapped. The learned estimate decays to nothing one Bound after its   *)
+(* last sample.                                                           *)
 (*                                                                         *)
-(* Review 6 finding 4: the learned waits apply only to a message with    *)
-(* evidence since its first send (lastAuth > 0); without, the cold ladder *)
-(* (scale 1: today's waits), whatever was learned before.                *)
-(*                                                                         *)
-(* The receipts (ReceiptsPerAttempt): a proof of an EARLIER attempt (the  *)
-(* original that queued, after retransmits) confirms the message and is   *)
-(* evidence only when every attempt's receipt is kept; with the receipt   *)
-(* replaced on retransmit it matches nothing. The late proofs of other    *)
-(* messages' earlier attempts (Sample) likewise. The rule above needs     *)
-(* them: DeliveredNeverTorn fails without them (TLC).                     *)
-(*                                                                         *)
-(* Time is whole ticks. Waits: Scale * Ord[k] for ordinary try k, then the *)
-(* held wait for every held try. The message is first sent at 0.          *)
+(* Time is whole ticks. The message is first sent at 0.                   *)
 (***************************************************************************)
 EXTENDS Integers, Sequences
 
 CONSTANTS
     Max,          \* CHANNEL_MAX_TRIES
-    Ord,          \* the ordinary waits, one per try 1..Max, nothing learned
+    Ord,          \* the cold (today's) ordinary waits, one per try 1..Max
     Cap,          \* CHANNEL_HELD_RETRY_MAX_MS at the model's scale
     Bound,        \* the link's stale bound, from the first send
     MaxScale,     \* how far a learned wait may stretch (any value)
     Share,        \* each ordinary wait's share of the bound (wait_share_ms)
-    PeerSpeaks,   \* authenticated inbound may arrive on this link
+    PeerSpeaks,   \* the peer's own frames / datagrams may arrive here
     PeerElsewhere, \* evidence of the same peer may come from elsewhere
+    PeerProves,   \* the peer proves this link's messages, late, while pending
+    ProofGap,     \* ... at least once every ProofGap ticks
     ReceiptsPerAttempt, \* every attempt's receipt kept (af1c9067b)
-    AckComes      \* the late ack may arrive at all
+    AckComes      \* this message's own (late) ack may arrive at all
 
-VARIABLES now, tries, sent, lastAuth, state, scale, scale0, proofIn
+VARIABLES now, tries, sent, lastAuth, state, scale, scale0, proofIn,
+          lastProof, lastSample
 
-vars == <<now, tries, sent, lastAuth, state, scale, scale0, proofIn>>
+vars == <<now, tries, sent, lastAuth, state, scale, scale0, proofIn,
+          lastProof, lastSample>>
 
-\* The time an unheld message is torn down today, nothing learned: the sum
-\* of its waits.
-TodayTeardown == LET RECURSIVE S(_) S(k) == IF k = 0 THEN 0 ELSE Ord[k] + S(k - 1)
-                 IN S(Max)
+Sum(f) == LET RECURSIVE S(_) S(k) == IF k = 0 THEN 0 ELSE f[k] + S(k - 1)
+          IN S(Max)
 
-SumShare == LET RECURSIVE S(_) S(k) == IF k = 0 THEN 0 ELSE Share[k] + S(k - 1)
-            IN S(Max)
+\* The time an unheld message is torn down today: the sum of its cold waits.
+TodayTeardown == Sum(Ord)
 
-\* The shares fit the bound, and never shorten today's cold waits.
-ASSUME MaxScale >= 1 /\ SumShare <= Bound /\ \A k \in 1..Max : Share[k] >= Ord[k]
+\* The shares fit the bound (wait_share_ms divides it exactly).
+ASSUME MaxScale >= 1 /\ Sum(Share) <= Bound /\ ProofGap >= 1
 
 Min(a, b) == IF a < b THEN a ELSE b
+Maxi(a, b) == IF a > b THEN a ELSE b
 
-\* An ordinary wait: the learned one, capped at its share.
-OrdWait(k, s) == Min(s * Ord[k], Share[k])
+\* An ordinary wait. s = 1 is the cold ladder (no evidence, or nothing
+\* learned): today's wait exactly. Otherwise the learned one, capped at its
+\* share, never below the cold one.
+OrdWait(k, s) == IF s = 1 THEN Ord[k] ELSE Maxi(Ord[k], Min(s * Ord[k], Share[k]))
 
 \* The held wait: max(CHANNEL_HELD_RETRY_MAX_MS, the last ordinary wait).
-HeldWait(s) == IF Cap > OrdWait(Max, s) THEN Cap ELSE OrdWait(Max, s)
+HeldWait(s) == Maxi(Cap, OrdWait(Max, s))
 
 Wait(k, s) == IF k <= Max THEN OrdWait(k, s) ELSE HeldWait(s)
 
-\* Each due is recomputed from the current estimate (retransmit_due_ms):
-\* the learned one only with evidence since the first send.
+\* Each due is recomputed from the current estimate, the learned one only
+\* with evidence since the first send.
 Due == sent + Wait(tries, IF lastAuth > 0 THEN scale ELSE 1)
 
 Init == /\ now = 0 /\ tries = 1 /\ sent = 0 /\ lastAuth = -1
         /\ state = "pending"
         /\ scale \in 1..MaxScale /\ scale0 = scale
-        /\ proofIn = FALSE
+        /\ proofIn = FALSE /\ lastProof = 0 /\ lastSample = 0
 
 Alive == lastAuth > 0 /\ now < Bound
 
+\* Time passes; a peer that proves does so within ProofGap; the learned
+\* estimate is dropped one Bound after its last sample.
 Tick ==
     /\ state = "pending" /\ now < Due
+    /\ PeerProves => now - lastProof < ProofGap
     /\ now' = now + 1
-    /\ UNCHANGED <<tries, sent, lastAuth, state, scale, scale0, proofIn>>
+    /\ scale' = IF now + 1 >= lastSample + Bound THEN 1 ELSE scale
+    /\ UNCHANGED <<tries, sent, lastAuth, state, scale0, proofIn, lastProof, lastSample>>
 
-\* Evidence from the peer on this link: a packet that passed the link key
-\* AND advanced state (a new channel sequence, a fresh datagram, a proof
-\* of an outstanding receipt). Unauthenticated packets and REPLAYS (review
-\* 6 finding 1: authentic ciphertext, but they advance nothing) are not
-\* modelled because the code counts neither: they move nothing this rule
-\* reads, which is what lets PeerSpeaks = FALSE mean a dead peer.
 AuthIn ==
     /\ PeerSpeaks /\ state = "pending" /\ lastAuth /= now
     /\ lastAuth' = now
-    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn>>
+    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample>>
 
-\* Evidence of the same peer from elsewhere: another link to the same
-\* proven identity, or the host's vouching. Tied to the peer: only when the
-\* peer is alive somewhere (PeerElsewhere), at most one a tick.
 PeerEvidence ==
     /\ PeerElsewhere /\ state = "pending" /\ lastAuth /= now
     /\ lastAuth' = now
-    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn>>
+    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample>>
 
-\* A verified proof of an attempt of some other message (this one's own is
-\* Ack): an RTT sample, moving the learned timeout anywhere within the cap,
-\* up as a queue builds or down as it drains. It is authenticated inbound,
-\* and like AuthIn at most one a tick (a proof is a packet: no Zeno run of
-\* samples at one instant).
+\* A proof of another message's LATEST attempt: evidence and an RTT sample;
+\* its receipt is there either way.
 Sample ==
-    /\ PeerSpeaks /\ ReceiptsPerAttempt /\ state = "pending" /\ lastAuth /= now
+    /\ PeerSpeaks /\ state = "pending" /\ lastAuth /= now
     /\ scale' \in 1..MaxScale /\ scale' /= scale
-    /\ lastAuth' = now
+    /\ lastAuth' = now /\ lastSample' = now
+    /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn, lastProof>>
+
+\* The late proof of an EARLIER attempt of another message, or of a spent
+\* receipt: evidence (and a sample) only with the per-attempt receipts.
+LateProof ==
+    /\ PeerProves /\ state = "pending" /\ lastProof /= now
+    /\ lastProof' = now
+    /\ IF ReceiptsPerAttempt
+       THEN /\ lastAuth' = now /\ lastSample' = now
+            /\ scale' \in 1..MaxScale
+       ELSE UNCHANGED <<lastAuth, lastSample, scale>>
     /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn>>
 
 \* A timer fires at its due, or at once when a smaller estimate moved the
@@ -136,56 +138,63 @@ Timeout ==
        ELSE /\ tries' = tries + 1
             /\ sent' = now
             /\ UNCHANGED state
-    /\ UNCHANGED <<now, lastAuth, scale, scale0, proofIn>>
+    /\ UNCHANGED <<now, lastAuth, scale, scale0, proofIn, lastProof, lastSample>>
 
-\* The proof of the latest attempt: its receipt is there either way.
+\* The proof of this message's latest attempt.
 Ack ==
     /\ AckComes /\ state = "pending"
     /\ state' = "acked" /\ proofIn' = TRUE
-    /\ UNCHANGED <<now, tries, sent, lastAuth, scale, scale0>>
+    /\ UNCHANGED <<now, tries, sent, lastAuth, scale, scale0, lastProof, lastSample>>
 
-\* The late proof of an EARLIER attempt (the original, queued): it confirms
-\* the message only if that attempt's receipt was kept.
+\* The late proof of an EARLIER attempt of this message (the original,
+\* queued): it confirms the message only if that attempt's receipt was kept.
 AckEarlier ==
     /\ AckComes /\ state = "pending" /\ tries > 1
     /\ proofIn' = TRUE
     /\ IF ReceiptsPerAttempt
        THEN state' = "acked" /\ lastAuth' = now
        ELSE UNCHANGED <<state, lastAuth>>
-    /\ UNCHANGED <<now, tries, sent, scale, scale0>>
+    /\ UNCHANGED <<now, tries, sent, scale, scale0, lastProof, lastSample>>
 
-Next == Tick \/ AuthIn \/ PeerEvidence \/ Sample \/ Timeout \/ Ack \/ AckEarlier
+Next == Tick \/ AuthIn \/ PeerEvidence \/ Sample \/ LateProof \/ Timeout
+        \/ Ack \/ AckEarlier
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Tick) /\ WF_vars(Timeout)
+        /\ WF_vars(LateProof)
 
 -----------------------------------------------------------------------------
-\* Nothing waits forever on a link this keeps alive.
+\* Nothing waits forever.
 EventuallyDone == <>(state \in {"acked", "torn"})
 
-\* A held message never outlives the stale bound by more than one held wait.
-\* (One held wait at its largest: Cap or the last share, a constant: what
-\* finding 3's share cap bounds, however far the learned waits stretch.)
-HeldMax == IF Cap > Share[Max] THEN Cap ELSE Share[Max]
+\* One held wait at its largest.
+HeldMax == Maxi(Cap, Maxi(Share[Max], Ord[Max]))
 
-HeldBounded == state \in {"pending", "torn"} => now <= Bound + HeldMax
+\* A message never outlives the later of the stale bound and today's own
+\* cold span by more than one held wait (the share caps what was learned).
+HeldBounded == state \in {"pending", "torn"} =>
+                   now <= Maxi(Bound, TodayTeardown) + HeldMax
 
-Silent == ~PeerSpeaks /\ ~PeerElsewhere
+Silent == ~PeerSpeaks /\ ~PeerElsewhere /\ ~PeerProves
 
 \* A silent link is torn down exactly when it always was, WHATEVER it
 \* learned before (finding 4: no evidence, the cold ladder).
 SilentAsToday == (Silent /\ state = "torn") => now = TodayTeardown
 
-\* A silent link is torn down by the stale bound, whatever its timeout
-\* learned before (the cap): a dead peer is not noticed later than the
-\* link's own stale check would notice it (CIRISEdge#1030).
-SilentByBound == (Silent /\ state = "torn") => now <= Bound
+\* Without inbound nothing is learned (decay may still drop what was).
+NoInboundNoLearning == (~PeerSpeaks /\ ~PeerProves) => scale \in {scale0, 1}
 
-\* Without inbound the learned timeout never moves.
-NoInboundNoLearning == ~PeerSpeaks => scale = scale0
+\* The learned estimate is gone one Bound after its last sample.
+LearnedDecays == now >= lastSample + Bound => scale = 1
 
-\* A message whose proof reached the node is never torn down for it: the
-\* coupling to the per-attempt receipts.
+\* A message whose own proof reached the node is never torn down for it.
 DeliveredNeverTorn == proofIn => state /= "torn"
+
+\* A link whose only evidence is the late proofs of its own messages
+\* (nothing else arrives) is not given up while they keep coming: torn, if
+\* at all, only at the stale bound. The coupling to the per-attempt
+\* receipts: without them those proofs count for nothing.
+HeldWhileProving == (PeerProves /\ ~PeerSpeaks /\ ~PeerElsewhere /\ ProofGap <= Ord[1]
+                     /\ state = "torn") => now >= Bound
 
 \* Torn only when it was out of tries and not alive.
 TornOnlyWhenDead == state = "torn" => (tries >= Max /\ ~Alive)

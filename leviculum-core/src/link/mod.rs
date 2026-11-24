@@ -1632,7 +1632,9 @@ impl Link {
     /// +ciris (leviculum#113): evidence the far end is alive now: an inbound
     /// packet that passed the link key AND advanced state (a new channel
     /// sequence, a fresh datagram, a proof of an outstanding receipt), or
-    /// the host's `NodeCore::note_peer_evidence`. Never a replay.
+    /// the host's `NodeCore::note_peer_evidence`. Never a replay within one
+    /// channel sequence lap (65,536 messages; past it see leviculum#118 and
+    /// `Channel::poll_with_inbound`, bounded by the stale bound).
     pub fn record_authenticated_inbound(&mut self, now_ms: u64) {
         self.last_authenticated_inbound_ms = Some(now_ms);
     }
