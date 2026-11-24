@@ -174,6 +174,10 @@ pub enum Signal {
         /// it names the pair both ends use by a flagged punch on it
         /// ([`punch_seq`]), and a responder that agrees settles only on that.
         initiator_nominates: bool,
+        /// +ciris (pair agreement, `"k"`): the nomination secret. It travels
+        /// only here, inside the encrypted link, never on the punch path; a
+        /// nomination proves it ([`nomination_frame`]). Sent with `"n"`.
+        nomination_secret: Option<NominationSecret>,
     },
     Accept {
         session: SessionId,
@@ -223,6 +227,7 @@ impl Signal {
             initiator_predicted: Vec::new(),
             initiator_birthday: false,
             initiator_nominates: false,
+            nomination_secret: None,
         }
     }
 
@@ -280,6 +285,7 @@ impl Signal {
                 initiator_predicted,
                 initiator_birthday,
                 initiator_nominates,
+                nomination_secret,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
                 let local = !initiator_local.is_empty();
@@ -291,7 +297,8 @@ impl Signal {
                         + u8::from(host_payload.is_some())
                         + u8::from(!initiator_predicted.is_empty())
                         + u8::from(*initiator_birthday)
-                        + u8::from(*initiator_nominates),
+                        + u8::from(*initiator_nominates)
+                        + u8::from(nomination_secret.is_some()),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
@@ -309,6 +316,10 @@ impl Signal {
                 write_predicted(&mut buf, initiator_predicted);
                 write_birthday(&mut buf, *initiator_birthday);
                 write_flag(&mut buf, "n", *initiator_nominates);
+                if let Some(secret) = nomination_secret {
+                    msgpack::write_fixstr(&mut buf, "k");
+                    msgpack::write_bin(&mut buf, &secret.0);
+                }
             }
             Signal::Accept { session } | Signal::Complete { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
@@ -378,6 +389,7 @@ impl Signal {
                 initiator_predicted: fields.predicted,
                 initiator_birthday: fields.birthday,
                 initiator_nominates: fields.nominate,
+                nomination_secret: fields.nomination_secret,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -416,6 +428,7 @@ struct Fields {
     predicted: Vec<u16>,
     birthday: bool,
     nominate: bool,
+    nomination_secret: Option<NominationSecret>,
 }
 
 impl Fields {
@@ -439,6 +452,10 @@ impl Fields {
                 b"q" => fields.predicted = read_predicted(data, &mut pos)?,
                 b"b" => fields.birthday = msgpack::read_bool(data, &mut pos)?,
                 b"n" => fields.nominate = msgpack::read_bool(data, &mut pos)?,
+                b"k" => {
+                    let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
+                    fields.nomination_secret = Some(NominationSecret(bin.try_into().ok()?));
+                }
                 b"h" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     if bin.len() > MAX_HOST_PAYLOAD {
@@ -867,6 +884,63 @@ pub fn punch_frame(
     out
 }
 
+/// +ciris (pair agreement): the nomination secret's length (`"k"`).
+pub const NOMINATION_SECRET_LEN: usize = 16;
+
+/// +ciris (pair agreement): the nomination secret (`"k"`). Its `Debug` says
+/// only that one is there, so no log line, diagnostic or panic message can
+/// print it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NominationSecret(pub [u8; NOMINATION_SECRET_LEN]);
+
+impl core::fmt::Debug for NominationSecret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("NominationSecret(..)")
+    }
+}
+/// +ciris (pair agreement): a nomination: a punch frame (its token, its
+/// nominate-flagged sequence number) and a 16-byte proof of the nomination
+/// secret over those 56 bytes. Parsed as a punch by every leviculum parser,
+/// so a direct interface acks it like one.
+pub const NOMINATION_FRAME_LEN: usize = PUNCH_FRAME_LEN + 16;
+const NOMINATION_INFO: &[u8] = b"leviculum direct-link nomination";
+
+fn nomination_proof(frame: &[u8], secret: &NominationSecret) -> [u8; 16] {
+    let mut proof = [0u8; 16];
+    derive_key(&secret.0, Some(frame), Some(NOMINATION_INFO), &mut proof);
+    proof
+}
+
+/// +ciris (pair agreement): the nomination for `seq` (which carries
+/// [`NOMINATE_BIT`]): the punch frame, then the proof of `secret` over it.
+pub fn nomination_frame(
+    session: &SessionId,
+    token: &[u8; 32],
+    seq: u32,
+    secret: &NominationSecret,
+) -> [u8; NOMINATION_FRAME_LEN] {
+    let punch = punch_frame(PunchKind::Punch, session, token, seq);
+    let mut out = [0u8; NOMINATION_FRAME_LEN];
+    out[..PUNCH_FRAME_LEN].copy_from_slice(&punch);
+    out[PUNCH_FRAME_LEN..].copy_from_slice(&nomination_proof(&punch, secret));
+    out
+}
+
+/// +ciris (pair agreement): whether `frame` is a nomination that proves
+/// `secret`. A punch with the nominate bit and no (or a wrong) proof is not.
+pub fn nomination_proven(frame: &[u8], secret: &NominationSecret) -> bool {
+    if frame.len() != NOMINATION_FRAME_LEN {
+        return false;
+    }
+    // Compared in constant time: how far a guess matched never shows.
+    let expected = nomination_proof(&frame[..PUNCH_FRAME_LEN], secret);
+    frame[PUNCH_FRAME_LEN..]
+        .iter()
+        .zip(expected.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 /// The kind and sequence of a frame that belongs to this session.
 pub fn parse_punch_frame(
     data: &[u8],
@@ -889,7 +963,10 @@ pub fn parse_punch_frame(
 /// transport. No Reticulum packet can look like one: its second byte would
 /// be a hop count of 78.
 pub fn punch_frame_kind(data: &[u8]) -> Option<PunchKind> {
-    if data.len() != PUNCH_FRAME_LEN {
+    // +ciris (pair agreement): a nomination is a punch frame with a proof
+    // appended; only a peer that negotiated "n" is ever sent one.
+    let nomination = data.len() == NOMINATION_FRAME_LEN && &data[..4] == PUNCH_MAGIC;
+    if data.len() != PUNCH_FRAME_LEN && !nomination {
         return None;
     }
     match &data[..4] {
@@ -1026,6 +1103,7 @@ mod tests {
             host_payload: None,
             initiator_birthday: false,
             initiator_nominates: false,
+            nomination_secret: None,
         };
         let golden = hex(
             "83a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c404c6336417cd9c40",
@@ -1047,6 +1125,7 @@ mod tests {
             host_payload: None,
             initiator_birthday: false,
             initiator_nominates: false,
+            nomination_secret: None,
         };
         let golden = hex(
             "84a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c41020010db800000000000000000000000105a17001",
@@ -1142,6 +1221,7 @@ mod tests {
             initiator_predicted: many.clone(),
             initiator_birthday: false,
             initiator_nominates: false,
+            nomination_secret: None,
         };
         let Ok(Signal::Request {
             initiator_predicted,
@@ -1226,6 +1306,7 @@ mod tests {
             initiator_predicted: Vec::new(),
             initiator_birthday: true,
             initiator_nominates: false,
+            nomination_secret: None,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -1284,6 +1365,7 @@ mod tests {
             host_payload: None,
             initiator_birthday: false,
             initiator_nominates: false,
+            nomination_secret: None,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -1464,6 +1546,7 @@ mod tests {
             Signal::decode(MSG_UPGRADE_REQUEST, &plain),
             Ok(Signal::Request {
                 initiator_nominates: false,
+                nomination_secret: None,
                 ..
             })
         ));
@@ -1479,6 +1562,54 @@ mod tests {
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
             Ok(ready)
         );
+    }
+
+    /// +ciris (pair agreement): the nomination secret travels in REQUEST
+    /// ("k"), and a nomination proves it: the right secret passes, a wrong
+    /// one, a tampered frame and a plain flagged punch do not; every parser
+    /// still reads it as a punch of this session.
+    #[test]
+    fn a_nomination_proves_the_secret_only_the_link_carried() {
+        let secret = NominationSecret([0x2Fu8; NOMINATION_SECRET_LEN]);
+        let mut request = Signal::request(SESSION, facilitator(), public_v4(), ProbeProtocol::Rnsp);
+        if let Signal::Request {
+            initiator_nominates,
+            nomination_secret,
+            commit,
+            ..
+        } = &mut request
+        {
+            *initiator_nominates = true;
+            *commit = true;
+            *nomination_secret = Some(secret);
+        }
+        assert_eq!(
+            Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
+            Ok(request)
+        );
+        let token = [7u8; 32];
+        let seq = punch_seq(3, 1, true);
+        let frame = nomination_frame(&SESSION, &token, seq, &secret);
+        assert!(nomination_proven(&frame, &secret));
+        assert!(!nomination_proven(
+            &frame,
+            &NominationSecret([0x30u8; NOMINATION_SECRET_LEN])
+        ));
+        assert_eq!(
+            alloc::format!("{secret:?}"),
+            "NominationSecret(..)",
+            "never printed"
+        );
+        let mut tampered = frame;
+        tampered[55] ^= 1;
+        assert!(!nomination_proven(&tampered, &secret), "the seq is covered");
+        let plain = punch_frame(PunchKind::Punch, &SESSION, &token, seq);
+        assert!(!nomination_proven(&plain, &secret));
+        assert_eq!(
+            parse_punch_frame(&frame, &SESSION, &token),
+            Some((PunchKind::Punch, seq))
+        );
+        assert!(!is_knock(&frame) && !is_mtu_probe(&frame));
     }
 
     /// +ciris (pair agreement): a punch's sequence number carries its

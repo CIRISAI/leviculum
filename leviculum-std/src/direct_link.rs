@@ -482,13 +482,14 @@ pub(crate) async fn punch_with(
     token: &[u8; 32],
     plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
-    let esc = Escalation::new(
+    let mut esc = Escalation::new(
         knock_budget(),
         plan.pair,
         plan.identity,
         plan.escalate,
         plan.birthday_after,
     );
+    esc.nomination_secret = plan.nomination_secret;
     let spray: Option<SprayPorts> = (plan.spray && plan.escalate).then(|| {
         let mut rng = rand_core::OsRng;
         Box::new(move || spray_port(&mut rng)) as SprayPorts
@@ -537,6 +538,8 @@ pub(crate) struct PunchPlan {
     /// Pair agreement (see [`punch`]): `Initiator` nominates, `Responder`
     /// settles on the nomination, `None` settles on its own.
     pub(crate) nomination: Option<Role>,
+    /// The secret a nomination proves (it came over the encrypted link).
+    pub(crate) nomination_secret: Option<wire::NominationSecret>,
 }
 
 impl PunchPlan {
@@ -552,6 +555,7 @@ impl PunchPlan {
             birthday_after: BIRTHDAY_AFTER,
             window: PUNCH_WINDOW,
             nomination: None,
+            nomination_secret: None,
         }
     }
 }
@@ -591,6 +595,10 @@ pub(crate) struct Escalation {
     /// Birthday sockets this punch holds open right now: its rate need is
     /// budgeted by these, not by the cap (Eric's condition on the ramp).
     pub(crate) open: Arc<std::sync::atomic::AtomicUsize>,
+    /// +ciris (pair agreement): the nomination secret, from the encrypted
+    /// link, carried with the punch's other context: the initiator proves it
+    /// in each nomination, the responder takes only a nomination that does.
+    pub(crate) nomination_secret: Option<wire::NominationSecret>,
 }
 
 impl Escalation {
@@ -609,6 +617,7 @@ impl Escalation {
             birthday_after,
             granted: Arc::new(std::sync::Mutex::new(None)),
             open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            nomination_secret: None,
         }
     }
 
@@ -1444,7 +1453,10 @@ fn birthday_task(
                             if !known && acked_here.len() < ACKED_SOURCES_MAX {
                                 acked_here.push(src);
                             }
-                            if !(wire::punch_seq_nominates(seq) && known) {
+                            let proven = esc
+                                .nomination_secret
+                                .is_some_and(|k| wire::nomination_proven(&buf[..len], &k));
+                            if !(wire::punch_seq_nominates(seq) && proven && known) {
                                 continue;
                             }
                         }
@@ -1456,6 +1468,23 @@ fn birthday_task(
         })
         .abort_handle(),
     )
+}
+
+/// +ciris (pair agreement): the initiator's nomination of target `index`:
+/// a nominate-flagged punch with the proof of the nomination secret (a plain
+/// flagged punch if, against the negotiation, there is none: never taken).
+fn nomination_frame(
+    session: &SessionId,
+    token: &[u8; 32],
+    counter: u32,
+    index: usize,
+    esc: &Escalation,
+) -> Vec<u8> {
+    let seq = wire::punch_seq(counter, index, true);
+    match &esc.nomination_secret {
+        Some(secret) => wire::nomination_frame(session, token, seq, secret).to_vec(),
+        None => wire::punch_frame(PunchKind::Punch, session, token, seq).to_vec(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1568,12 +1597,7 @@ async fn punch_inner(
                     // +ciris (pair agreement): only the settled pair, each
                     // punch on it a nomination, until one is acked.
                     let index = targets.iter().position(|t| *t == path).unwrap_or(0);
-                    let frame = wire::punch_frame(
-                        PunchKind::Punch,
-                        session,
-                        token,
-                        wire::punch_seq(counter, index, true),
-                    );
+                    let frame = nomination_frame(session, token, counter, index, esc);
                     if socket.send_to(&frame, on_socket(socket, path)).await.is_err() {
                         diag.send_errors += 1;
                     }
@@ -1685,6 +1709,9 @@ async fn punch_inner(
                         // datagram from a new address must not pin the path.
                         if nomination == Some(Role::Responder)
                             && wire::punch_seq_nominates(their_seq)
+                            && esc
+                                .nomination_secret
+                                .is_some_and(|k| wire::nomination_proven(frame, &k))
                             && acked_sources.contains(&src)
                         {
                             diag.nominated_ms = Some(diag.elapsed_ms());
@@ -1750,12 +1777,7 @@ async fn punch_inner(
                         nominating = Some(path);
                         deadline = deadline.max(tokio::time::Instant::now() + NOMINATION_GRACE);
                         let index = targets.iter().position(|t| *t == path).unwrap_or(0);
-                        let frame = wire::punch_frame(
-                            PunchKind::Punch,
-                            session,
-                            token,
-                            wire::punch_seq(counter, index, true),
-                        );
+                        let frame = nomination_frame(session, token, counter, index, esc);
                         let _ = socket.send_to(&frame, on_socket(socket, path)).await;
                         diag.nominations += 1;
                         continue;
@@ -2875,6 +2897,7 @@ pub(crate) struct PunchJobPlan {
     identity: Option<[u8; 16]>,
     escalated_window: bool,
     nomination: Option<Role>,
+    nomination_secret: Option<wire::NominationSecret>,
 }
 
 /// The sockets and tasks behind the node's direct-link sessions. Owned by
@@ -2981,6 +3004,7 @@ impl DirectLinkRuntime {
                 spray,
                 escalated_window,
                 nomination,
+                nomination_secret,
                 ..
             } => {
                 self.fast_liveness.insert(session, fast_liveness);
@@ -2998,6 +3022,7 @@ impl DirectLinkRuntime {
                         identity: peer_identity,
                         escalated_window,
                         nomination,
+                        nomination_secret,
                     },
                 )
             }
@@ -3154,6 +3179,7 @@ impl DirectLinkRuntime {
                 PUNCH_WINDOW
             },
             nomination: job.nomination,
+            nomination_secret: job.nomination_secret,
         };
         let Some(socket) = self.sockets.get(&session).cloned() else {
             // No probe socket (it failed to bind, or was released): there is
@@ -3422,6 +3448,14 @@ mod tests {
             true,
             BIRTHDAY_AFTER,
         )))
+    }
+
+    /// [`test_budget`], carrying a nomination secret.
+    fn nominating_budget(secret: [u8; wire::NOMINATION_SECRET_LEN]) -> &'static Escalation {
+        let budget: &'static KnockBudget = Box::leak(Box::new(KnockBudget::new()));
+        let mut esc = Escalation::new(budget, [9u8; 16], None, true, BIRTHDAY_AFTER);
+        esc.nomination_secret = Some(wire::NominationSecret(secret));
+        Box::leak(Box::new(esc))
     }
 
     async fn loopback() -> UdpSocket {
@@ -4813,7 +4847,7 @@ mod tests {
                 &session,
                 &token,
                 None,
-                test_budget(),
+                nominating_budget([0x4E; 16]),
                 shape(Role::Initiator)
             ),
             async {
@@ -4825,7 +4859,7 @@ mod tests {
                     &session,
                     &token,
                     None,
-                    test_budget(),
+                    nominating_budget([0x4E; 16]),
                     shape(Role::Responder),
                 )
                 .await;
@@ -4948,7 +4982,7 @@ mod tests {
                 &session,
                 &token,
                 cycle(spray_ports),
-                test_budget(),
+                nominating_budget([0x5E; 16]),
                 shape(Role::Initiator)
             ),
             punch_with_ports(
@@ -4959,7 +4993,7 @@ mod tests {
                 &session,
                 &token,
                 None,
-                test_budget(),
+                nominating_budget([0x5E; 16]),
                 shape(Role::Responder)
             )
         );
@@ -5008,7 +5042,7 @@ mod tests {
                 &session,
                 &token,
                 None,
-                test_budget(),
+                nominating_budget([0x6E; 16]),
                 shape
             ),
             send
@@ -5016,6 +5050,69 @@ mod tests {
         assert!(
             r.is_none(),
             "settled on a forged nomination: {:?}",
+            r.map(|(p, _)| p.peer)
+        );
+    }
+
+    /// +ciris (pair agreement, the nomination secret): an observer ON the
+    /// path has the token (it is in clear in every punch) but never the
+    /// secret (only the encrypted link carried it). Its two-datagram attack,
+    /// a punch to become an acked source and then a flagged punch, pins
+    /// nothing: the nomination does not prove the secret.
+    #[tokio::test]
+    async fn an_observer_with_the_token_cannot_nominate_without_the_secret() {
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        let nobody = loopback().await.local_addr().unwrap();
+        let observer = loopback().await;
+        let (session, token) = ([49u8; 16], [50u8; 32]);
+        let punch = wire::punch_frame(
+            PunchKind::Punch,
+            &session,
+            &token,
+            wire::punch_seq(1, 0, false),
+        );
+        let flagged = wire::punch_frame(
+            PunchKind::Punch,
+            &session,
+            &token,
+            wire::punch_seq(2, 0, true),
+        );
+        // A guess at the proof, with a secret of its own.
+        let guessed = wire::nomination_frame(
+            &session,
+            &token,
+            wire::punch_seq(3, 0, true),
+            &wire::NominationSecret([0u8; 16]),
+        );
+        let send = async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = observer.send_to(&punch, b_addr).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = observer.send_to(&flagged, b_addr).await;
+            let _ = observer.send_to(&guessed, b_addr).await;
+        };
+        let shape = PunchShape {
+            window: Duration::from_millis(1_500),
+            nomination: Some(Role::Responder),
+        };
+        let (r, _) = tokio::join!(
+            punch_with_ports(
+                &b,
+                None,
+                std::slice::from_ref(&nobody),
+                &[],
+                &session,
+                &token,
+                None,
+                nominating_budget([0x7E; 16]),
+                shape
+            ),
+            send
+        );
+        assert!(
+            r.is_none(),
+            "settled without the secret: {:?}",
             r.map(|(p, _)| p.peer)
         );
     }

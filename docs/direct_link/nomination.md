@@ -26,13 +26,39 @@ settles on its own, as rns-rs does.
    Then its punch succeeds on that address.
 4. The responder (controlled) never settles on its own. It settles on the
    source address a nominate-flagged punch arrived from, on the socket it
-   arrived on, and acks it, but only from a source it had already heard and
-   acked on that socket (review pass 5): one forged nominate-flagged
-   datagram from a new address pins nothing. The token travels in clear in
-   every punch frame, so an observer ON the path can still send a punch and
-   then a nomination from its own address, exactly as it could already
-   become a heard-and-acked pair without nomination; MAC'd frames
-   (frame-auth-note.md, rns-rs v0.14's framing below) are what closes that. Both direct interfaces then start on one 5-tuple;
+   arrived on, and acks it, but only a nomination that proves the
+   nomination secret, and only from a source it had already heard and acked
+   on that socket.
+5. The nomination secret: 16 random bytes the initiator draws for the
+   session and sends only in REQUEST (`"k"`, beside `"n"`), inside the
+   encrypted link. A nomination is the 56-byte punch frame (its clear
+   token, its nominate-flagged sequence number) followed by a 16-byte HKDF
+   proof of the secret over those 56 bytes (`wire::nomination_frame`,
+   72 bytes), checked in constant time. Every leviculum parser still reads
+   it as a punch of the session, so a direct interface acks a late one; only
+   a peer that negotiated `"n"` is ever sent one. The secret is a newtype
+   whose `Debug` prints nothing of it: no log line, diagnostic event or
+   panic message can carry it, nor the proof.
+
+## Threat: a passive observer on the punch path
+
+The punch token travels in clear in every punch frame, so anyone who sees
+the path's datagrams has it.
+
+- Before the secret: such an observer could send a punch from its own
+  address (to become a source the responder acked) and then a
+  nominate-flagged punch, and the responder would settle its direct path
+  on the observer's address.
+- After: a valid nomination needs the secret, which never crossed the
+  punch path. The observer cannot produce one before the genuine
+  nomination, and replaying the genuine one from another address after it
+  changes nothing: the responder took the first valid nomination and
+  stopped punching. One forged datagram from a new address pins nothing
+  either way (the acked-source rule).
+- What remains: an ACTIVE attacker on the path that drops the genuine
+  nomination and replays it from its own (already acked) address. It ends
+  up relaying the link's end-to-end-encrypted traffic, which it could
+  already black-hole or delay; it learns nothing it could not see before. Both direct interfaces then start on one 5-tuple;
    nothing is re-pointed after the move.
 
 ## A lost nomination
@@ -48,6 +74,16 @@ unchanged, on both sides (the model's `AbortLeavesLinkUnchanged`; its
 `*-net-lossy` rows lose nominations too). A responder that took a nomination
 whose ack was lost has sent COMPLETE; the initiator's REJECT ends it before
 either moves. A miss is retried whichever verdict lands first.
+
+## The link MTU after an aborted commit
+
+A side lowers its link MTU exactly when it holds both COMPLETEs, its own
+and the peer's: on its move, or when the peer's COMPLETE arrives after its
+own commit wait ran out. The signals ride the ordered, reliable channel, so
+the two ends agree once it has delivered what it carries; if the link dies
+first there is nothing to reconcile. Against an OLD peer they agree whenever
+the side whose wait runs out runs this code; when the old side times out
+silently, they disagree, as they do today: no new side can see that.
 
 ## Nomination and the birthday hand-off: one rule
 

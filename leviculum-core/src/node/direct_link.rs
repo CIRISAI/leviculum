@@ -260,6 +260,9 @@ pub enum DirectLinkJob {
         /// nominates the pair it settles on, `Responder` settles only on the
         /// pair nominated to it. `None`: each end settles on its own.
         nomination: Option<Role>,
+        /// +ciris (pair agreement): the secret a nomination proves, with
+        /// `nomination`.
+        nomination_secret: Option<wire::NominationSecret>,
     },
     /// The session is over: drop its socket and any task still running.
     Release { session: SessionId },
@@ -301,6 +304,8 @@ struct PendingRequest {
     birthday: bool,
     /// +ciris (pair agreement): the REQUEST offered nomination.
     nominate: bool,
+    /// +ciris (pair agreement): and its secret.
+    nomination_secret: Option<wire::NominationSecret>,
 }
 
 /// +ciris: a link this node proposed on, for proposing again.
@@ -656,6 +661,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             now_ms,
         );
         session.set_host_payload(host_payload);
+        // +ciris (pair agreement): the nomination secret, carried only in
+        // the REQUEST on the encrypted link.
+        let mut secret = [0u8; wire::NOMINATION_SECRET_LEN];
+        self.rng.fill_bytes(&mut secret);
+        session.set_nomination_secret(Some(wire::NominationSecret(secret)));
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session_id),
@@ -1107,6 +1117,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             initiator_predicted,
             initiator_birthday,
             initiator_nominates,
+            nomination_secret,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -1263,6 +1274,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             predicted: initiator_predicted,
             birthday: initiator_birthday,
             nominate: initiator_nominates,
+            nomination_secret,
         };
         if ask_host {
             // Held: nothing probed, nothing sent, until the host answers.
@@ -1341,6 +1353,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         session.set_commit(request.commit);
         session.set_nominate(request.nominate);
+        session.set_nomination_secret(request.nomination_secret);
         session.set_peer_predicted(request.predicted);
         session.set_peer_birthday(request.birthday);
         self.direct_links.sessions.insert(link_id, session);
@@ -1517,6 +1530,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     let predicted = if escalate { predicted } else { Vec::new() };
                     let token = *session.token();
                     let fast_liveness = session.commit();
+                    let nomination_secret = session.nomination_secret();
                     let peer_identity = self
                         .links
                         .get(&link_id)
@@ -1546,6 +1560,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         spray,
                         escalated_window,
                         nomination,
+                        nomination_secret,
                     });
                 }
                 // The attach already happened in `direct_link_punched`,

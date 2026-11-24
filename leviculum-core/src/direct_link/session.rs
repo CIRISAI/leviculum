@@ -259,6 +259,9 @@ pub struct Session {
     /// +ciris (pair agreement): nomination offered (initiator) or agreed
     /// (responder, when the REQUEST offered it); in force once both did.
     nominate: bool,
+    /// +ciris (pair agreement): the nomination secret, the initiator's own
+    /// or the one its REQUEST carried; nomination needs it.
+    nomination_secret: Option<super::wire::NominationSecret>,
 }
 
 impl Session {
@@ -290,6 +293,7 @@ impl Session {
             own_birthday: false,
             own_predicted: false,
             nominate: true,
+            nomination_secret: None,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -334,6 +338,7 @@ impl Session {
             own_predicted: false,
             // Agreed only if the REQUEST offered it: see `set_nominate`.
             nominate: false,
+            nomination_secret: None,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -386,9 +391,22 @@ impl Session {
     }
 
     /// +ciris (pair agreement): nomination is in force (as far as this side
-    /// knows so far): both ends offered it, under the two-sided commit.
+    /// knows so far): both ends offered it, under the two-sided commit, with
+    /// a secret to prove it by.
     pub fn nominate(&self) -> bool {
-        self.nominate && self.commit
+        self.nominate && self.commit && self.nomination_secret.is_some()
+    }
+
+    /// +ciris (pair agreement): set the nomination secret: the initiator's
+    /// own (random, from the node), or the one the REQUEST carried.
+    pub fn set_nomination_secret(&mut self, secret: Option<super::wire::NominationSecret>) {
+        self.nomination_secret = secret;
+    }
+
+    /// +ciris (pair agreement): the nomination secret, while nomination is
+    /// in force.
+    pub fn nomination_secret(&self) -> Option<super::wire::NominationSecret> {
+        self.nominate().then_some(self.nomination_secret).flatten()
     }
 
     /// +ciris: the punch is escalated: either side advertised "b" or "q",
@@ -526,7 +544,8 @@ impl Session {
                     host_payload: self.host_payload.take(),
                     initiator_predicted: predicted,
                     initiator_birthday: self.own_birthday,
-                    initiator_nominates: self.nominate && self.commit,
+                    initiator_nominates: self.nominate(),
+                    nomination_secret: self.nomination_secret(),
                 })]
             }
             Role::Responder => {
@@ -803,6 +822,7 @@ mod tests {
             host_payload: None,
             initiator_birthday: _,
             initiator_nominates: _,
+            nomination_secret: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -958,6 +978,7 @@ mod tests {
             host_payload: None,
             initiator_birthday: _,
             initiator_nominates: _,
+            nomination_secret: _,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -1050,6 +1071,7 @@ mod tests {
         b_agrees: bool,
     ) -> ((bool, Option<Role>), (bool, Option<Role>)) {
         let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        a.set_nomination_secret(Some(crate::direct_link::wire::NominationSecret([0x6B; 16])));
         a.set_own_birthday(a_b);
         let ports = |on: bool, p: u16| if on { alloc::vec![p] } else { Vec::new() };
         let steps = a.probed_with_candidates(a_pub(), Vec::new(), ports(a_q, 5001), 1);
@@ -1059,6 +1081,7 @@ mod tests {
             initiator_predicted,
             initiator_birthday,
             initiator_nominates,
+            nomination_secret,
             ..
         } = request_from(&steps).clone()
         else {
@@ -1075,6 +1098,7 @@ mod tests {
         );
         b.set_commit(commit && b_agrees);
         b.set_nominate(initiator_nominates && b_agrees);
+        b.set_nomination_secret(nomination_secret);
         b.set_peer_predicted(initiator_predicted);
         b.set_peer_birthday(initiator_birthday);
         deliver(&b_steps, &mut a, 3);

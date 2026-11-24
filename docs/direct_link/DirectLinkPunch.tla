@@ -843,6 +843,9 @@ NoPathToStranger ==
 \* has delivered what it carries the two ends agree; if the link dies first
 \* there is nothing to reconcile (linkUp). A lossy relay (G2) is the
 \* exception the model shows elsewhere.
+\* Both sides run this code here (Nominate or not). Against an OLD peer
+\* MtuAgree does not hold when the old side's commit wait runs out: it
+\* fails silently and never lowers on the late COMPLETE (today's behaviour).
 Lowered(s) == punch[s] = "ok" /\ (phase[s] = "Connected" \/ peerDone[s])
 MtuAgree ==
     (linkUp /\ ~RelayLossy /\ Over /\ \A s \in Sides : chan[s] = <<>>)
