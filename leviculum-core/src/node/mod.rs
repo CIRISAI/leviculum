@@ -9242,7 +9242,7 @@ mod tests {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            (state >> 33) % 10 != 0
+            !(state >> 33).is_multiple_of(10)
         };
         let mut sent = 0usize;
         let mut confirmed = 0usize;

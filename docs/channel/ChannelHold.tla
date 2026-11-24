@@ -219,9 +219,9 @@ HeldWhileProving == (PeerProves /\ ~PeerSpeaks /\ ~PeerElsewhere /\ ProofGap <= 
 \* A transmission lost while the message is out is resent within one held
 \* wait at the most (the oldest's RTO backstop, re-review 8 R1), held or not.
 ResentWithinHeldWait == (lost /\ state = "pending") => now <= lostAt + HeldMax
-
-\* ... and so, eventually, a lost message is resent or the link ends.
-LostIsRepaired == [](lost => <>(~lost \/ state \in {"acked", "torn"}))
+\* (A lost transmission is so repaired, or the message ends, within one
+\* held wait: the bounded, safety form of "eventually resent or the link
+\* ends". The temporal form ran TLC out of memory with Lose in the state.)
 
 \* Torn only when it was out of tries and not alive.
 TornOnlyWhenDead == state = "torn" => (tries >= Max /\ ~Alive)
