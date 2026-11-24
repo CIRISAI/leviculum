@@ -11,6 +11,160 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+## [0.34.0+ciris.4] — CIRIS fork
+
+### Added
+
+- The direct-link punch, end to end. An initiator that sees a hard
+  (endpoint-dependent) NAT on the far side predicts its next ports and
+  punches them; a random-mapping side holds birthday sockets open (up to
+  128) and the easy side sprays a bounded set of ports; escalation only
+  after silence, under one knock budget for every escalated send
+  (`ReticulumNode::set_direct_link_escalation`,
+  `NodeCore::set_direct_link_escalation` / `direct_link_escalation_allowed`,
+  `MAX_DEFAULT_ESCALATIONS`). A facilitator other than the relay and a
+  second observer (`DirectLinkSettings.facilitator2`, `protocol2`,
+  `facilitator_second_port`) classify the NAT from two vantage points
+  (`EdmEvidence`). The path-MTU probe sets DF and probes 1232 for IPv6 at
+  1280 (#107). `punch-probe` (leviculum-cli) runs a live probe over a relay.
+- Nomination (pair agreement): the initiator alone settles the pair
+  (`"n"`), proving a 16-byte secret that travels only inside the encrypted
+  link (REQUEST `"k"`); the responder accepts a nomination only from a
+  source it has already acked, and READY says it holds the secret (`"v"`),
+  so a build without it gets a plain punch. A source from the peer's own IP
+  may displace an observer's in a full acked-source list. Limits in
+  docs/direct_link/nomination.md.
+- Channel reliability under a queued uplink (leviculum#113):
+  - every attempt's receipt is kept, so the late proof of an original send
+    confirms its message;
+  - a proof names its attempt, so it is an RTT sample for a retransmitted
+    message too; the learned estimate (`Channel::learned_srtt_ms`,
+    `LinkStats::learned_srtt_ms`) is capped so a silent link still dies by
+    its stale bound, and applies only to a message with evidence that the
+    peer is alive since its first send; without evidence, today's cold
+    ladder exactly;
+  - a message out of tries is held, to the stale bound at most, while the
+    peer is shown alive: by a NEW channel sequence or a fresh datagram on
+    the link, a proof of an outstanding receipt, the same proven peer on
+    another link (`Link::proven_peer_key`), or the host
+    (`NodeCore::note_peer_evidence`, `ReticulumNode::note_peer_evidence`;
+    `PEER_EVIDENCE_MIN_INTERVAL_MS`). Replays within one sequence lap count
+    for nothing;
+  - RACK while held (RFC 8985): with the peer shown alive, a message behind
+    the oldest one out is resent only when a transmission sent after it was
+    proved (plus a reorder window); the oldest is resent at its own
+    backed-off, held-capped timer; only the oldest can end a held link,
+    until it is overdue. In the two-node reproduction (a 2.3x overloaded
+    uplink, 3.9 s of queue) the link lives, and the resends while the queue
+    drains fell from 10 to 2;
+  - pacing from the path's floor: `min_rtt x 1.25 / window`, the
+    multiplicative decrease capped at `min(4 x min_rtt, SRTT)` (never
+    slower than before on a clear path; 4 floors once a queue inflated
+    SRTT) and never below the base interval. `min_rtt` is the path's: the
+    minimum over two epochs of at least 120 s and 8 samples, started over
+    when the link moves interface (a direct path gained or lost). Until a
+    path's first epoch is full it counts only up to the handshake RTT, and
+    after a move, before any sample, the handshake RTT stands in, so a first
+    sample out of a queue is not taken as the floor. After a queue episode
+    that took the first-try SRTT to 1293 ms the old pacing would have been
+    46 ms per message; it is now 1 ms (the floor) from the first fast
+    proof. Under loss on a clear 1 s path pacing still backs off past what
+    the smaller window alone gives, to its cap of one SRTT, and the window
+    drops;
+  - on a move RACK's state starts over too, and the old path's RACK RTT is
+    kept: a transmission sent before a path move is judged lost at its send
+    + max(new path RTT, old path RTT) + reorder window, once a later
+    transmission is proved (the handshake RTT stands in for an old path
+    with no proof). Its late proofs measure neither the floor nor RACK. So
+    an upgrade no longer resends a relayed window (it gets the relay's
+    150 ms, not the direct path's 5 ms), and on a fallback a window lost on
+    the dead direct path is resent together once the relay proves a later
+    transmission, not one per held wait (review 10 D8: that drain could
+    tear down a live link on a working relay at first + stale bound);
+  - a late proof gives back only its own message's window decrements;
+  - `LinkStats::retransmits`, `retransmitted_bytes`.
+- Models: docs/channel/ChannelHold.tla and HeadOfLine.tla (TLC: every
+  configuration clean, every mutation breaking its invariant), and
+  docs/direct_link/DirectLinkPunch.tla with its regenerated matrix.md.
+
+### Changed
+
+- `srtt_ms` (Channel and `LinkStats`) keeps its meaning: first-try samples
+  only. `min_rtt_ms` (Channel and `LinkStats`) also takes attempt-tagged
+  samples, and is now the current path's windowed minimum (see above), not
+  the link's lifetime minimum.
+- The receipt tracker is keyed: O(log n) per send, retransmit and proof.
+- A shared instance's failed RPC bind logs at ERROR (#117).
+
+### Consumer notes (pub API since 0.34.0+ciris.3)
+
+- Breaking: `DirectLinkSettings` (std) and `DirectLinkConfig` (core) are
+  `#[non_exhaustive]`: build them from `Default` / `DirectLinkConfig::new`
+  and assign the fields. The variants `Signal::Request`, `Signal::Ready`,
+  `Step::Punch` and `DirectLinkJob::Punch` are `#[non_exhaustive]` and
+  gained fields: match them with `..`. `DirectLinkKeys` gained
+  `probe_addr2`, `probe_protocol2`, `probe_second_port`.
+  `wire::MTU_PROBE_STEPS` is `[u32; 3]` (adds 1232).
+- Behaviour: a channel message can outlive its five tries while the peer
+  is shown alive (to the stale bound); a link with no evidence is torn down
+  exactly as before. Fewer retransmissions while a link is queued.
+- For a per-leg queue gauge read `LinkStats::learned_srtt_ms()` minus
+  `min_rtt_ms()`; `srtt_ms` stays at the path's floor while a queue builds.
+- `LinkStats::min_rtt_ms()` and the FFI value may be `None` after a path
+  move (the floor starts over) and can rise (a windowed minimum, not the
+  link's lifetime one).
+- The next send is pulled in whenever the path's floor falls, not only at a
+  path move.
+- Wire: READY gains `"v"`; REQUEST `"k"` and the 72-byte nominated punch
+  only between peers that negotiated them. Nothing changes toward Python
+  Reticulum or older tags.
+
+### Known issues
+
+- leviculum#116, resolved by fixing the test: the flush holds known
+  destinations to the identity cap (#49) on purpose.
+- leviculum#117: on Windows a shared instance's hashed loopback port can
+  land in an excluded range; the daemon then runs without its RPC server,
+  or fails to start. An intermittent CI test failure; not on edge's path.
+  The cause is inferred from the error (10013), not confirmed on a Windows
+  host.
+- leviculum#118: past one 16-bit Channel sequence lap (65,536 messages) a
+  recorded lap replays as new messages (upstream parity); for the hold it
+  is bounded by the stale bound.
+- leviculum#115: heapless 0.8 advisories, ignored with reasons.
+
+### Known limits (Channel hold, leviculum#113)
+
+Each is bounded by the hold's own bound, a message's first send plus the
+stale bound:
+- Queue onset (docs/channel/HeadOfLineDeep.cfg, which fails by design): the
+  overdue point uses an RTT measured before the queue, so while the queue
+  more than doubles between two proofs head-of-line protects nothing, and a
+  message sent after the last evidence can end a live link at its cold
+  ladder. Evidence from elsewhere (`note_peer_evidence`, the same peer's
+  other link) covers it.
+- A message out of tries is judged at its own next timer, so the overdue
+  point can be exceeded by one held wait (up to 2 s on the fast tier; about
+  6 s at an RTT of 500 ms, 25 s at 2 s).
+- A lost message behind the oldest, which nothing later proves lost, waits
+  for the oldest's proof plus the rest of its queued wait (2 s on the fast
+  tier; 6 to 79 s at an RTT of 500 ms, 25 to 276 s at 2 s).
+- For one epoch after a link is made or moves, a path slower than the
+  handshake RTT is paced as if it were the handshake's; the window bounds
+  what is out.
+- The Channel models have no path move, so the fallback with loss (and the
+  upgrade) are covered by tests only
+  (`a_window_lost_on_a_dead_direct_path_is_recovered_together_on_the_relay`,
+  `an_upgrade_to_a_faster_path_does_not_resend_what_is_in_flight`,
+  `an_upgrade_judges_unproved_relay_messages_by_the_relays_rtt`).
+- The RACK losses wake is gated on evidence existing, not on it being
+  fresh (to be tightened); a stale wake only polls, the resend itself
+  needs fresh evidence.
+
+Verification note: the witnesses' red runs were made by taking the fixed
+piece out of the current tree (mutations), except the two FIFO cases,
+which were run on c75fdeb01. CI is 12 jobs.
+
 ## [0.34.0+ciris.3] — CIRIS fork
 
 ### Added
