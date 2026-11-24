@@ -1302,6 +1302,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             srtt_ms: ch.map(|c| c.srtt_ms()).filter(|s| *s > 0.0),
             rttvar_ms: ch.filter(|c| c.srtt_ms() > 0.0).map(|c| c.rttvar_ms()),
             min_rtt_ms: ch.and_then(|c| c.min_rtt_ms()),
+            learned_srtt_ms: ch.map(|c| c.learned_srtt_ms()).filter(|s| *s > 0.0),
             rtt_ms: link.rtt_us().map(|us| us / 1000),
             busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
             pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),

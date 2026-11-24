@@ -382,6 +382,7 @@ pub struct LinkStats {
     pub(crate) srtt_ms: Option<f64>,
     pub(crate) rttvar_ms: Option<f64>,
     pub(crate) min_rtt_ms: Option<u64>,
+    pub(crate) learned_srtt_ms: Option<f64>,
     pub(crate) rtt_ms: Option<u64>,
     pub(crate) busy_rejections: u64,
     pub(crate) pacing_rejections: u64,
@@ -423,6 +424,18 @@ impl LinkStats {
     /// EWMA), in milliseconds. `None` until the first valid sample.
     pub fn srtt_ms(&self) -> Option<f64> {
         self.srtt_ms
+    }
+
+    /// +ciris (leviculum#113): the LEARNED smoothed RTT, in milliseconds:
+    /// every attempt-tagged delivery proof, the queue delay included, capped
+    /// at the value whose retry span fits the link's stale bound
+    /// (`Channel::learned_srtt_ms`). `None` while the link has learned
+    /// nothing (or the estimate decayed: no sample for one stale bound).
+    /// The queue-aware figure: `learned_srtt_ms - min_rtt_ms` is the queue
+    /// delay a per-leg gauge wants, where [`srtt_ms`](Self::srtt_ms) (first
+    /// tries only) stays at the path's floor while a queue builds.
+    pub fn learned_srtt_ms(&self) -> Option<f64> {
+        self.learned_srtt_ms
     }
 
     /// RTT variance companion to [`srtt_ms`](Self::srtt_ms), in milliseconds.
@@ -8909,7 +8922,13 @@ mod tests {
     /// mark_delivered_attempt), so the timeout learns the queue's delay.
     #[test]
     fn a_queueing_uplink_at_2_3x_overload_does_not_kill_the_link() {
-        queueing_uplink_case(false, false).assert_lived();
+        let outcome = queueing_uplink_case(false, false);
+        outcome.assert_lived();
+        // LinkStats carries the queue-aware estimate (learned_srtt_ms) while
+        // srtt_ms keeps the path's first-try floor.
+        let (learned, srtt) = outcome.learned_peak;
+        assert!(learned > 150.0, "learned SRTT peaked at {learned} ms");
+        assert!(srtt < 50.0, "first-try SRTT {srtt} ms");
     }
 
     /// +ciris (leviculum#113): the other direction of edge's call shape,
@@ -9061,6 +9080,9 @@ mod tests {
         confirmed: usize,
         peak_delay_ms: f64,
         retransmitted: bool,
+        /// The sender's LinkStats at the learned estimate's peak:
+        /// (learned_srtt_ms, srtt_ms).
+        learned_peak: (f64, f64),
         log: Vec<alloc::string::String>,
     }
 
@@ -9122,6 +9144,7 @@ mod tests {
             alloc::collections::VecDeque::new();
         let mut budget = 0f64;
         let mut queued_bytes_peak = 0usize;
+        let mut learned_peak = (0.0f64, 0.0f64);
         let mut closed = false;
         let mut sent_control = 0;
         let mut confirmed = 0;
@@ -9239,6 +9262,17 @@ mod tests {
                 fifo.extend(extract_all_action_data(&out).into_iter().map(|p| (p, true)));
             }
             queued_bytes_peak = queued_bytes_peak.max(fifo.iter().map(|(p, _)| p.len()).sum());
+            let (node, link) = if proof_delayed {
+                (&pair.responder, a_link)
+            } else {
+                (&pair.initiator, p_link)
+            };
+            if let Some(stats) = node.link_stats(&link) {
+                let learned = stats.learned_srtt_ms().unwrap_or(0.0);
+                if learned > learned_peak.0 {
+                    learned_peak = (learned, stats.srtt_ms().unwrap_or(0.0));
+                }
+            }
             // P's uplink drains at its capped rate.
             budget += drain * step as f64;
             let mut to_a = Vec::new();
@@ -9306,6 +9340,7 @@ mod tests {
             retransmitted: dbg_log
                 .iter()
                 .any(|l| l.contains(&alloc::format!("{sender} retransmit"))),
+            learned_peak,
             log: dbg_log,
         }
     }
