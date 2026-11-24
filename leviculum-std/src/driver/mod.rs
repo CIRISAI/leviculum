@@ -2676,7 +2676,9 @@ impl ReticulumNode {
                 Some(self.discovery_storage_root()),
                 Arc::clone(&self.radio_cache),
             ) {
-                tracing::warn!("Failed to start RPC server: {}", e);
+                // leviculum#117: an ERROR, not a WARN: the daemon then runs
+                // without its RPC server and every client falls back.
+                tracing::error!("Failed to start RPC server: {}", e);
             }
         }
 
