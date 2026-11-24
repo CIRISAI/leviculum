@@ -4780,8 +4780,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // never extends a hold past the stale bound (poll_with_inbound
         // still bounds it from the message's first send); a peer silent on
         // every link gives no evidence and is torn down as before.
+        //
+        // Built only when it can matter (review 6 finding 6): some channel
+        // message on a link with a proven peer key is due now. Not on every
+        // tick under the core lock. The due a link reports uses the evidence
+        // of its last poll, which only grows, so a message due by it is due
+        // at least as early as by the fresh evidence: nothing is missed.
         let mut peer_latest: BTreeMap<[u8; 32], u64> = BTreeMap::new();
-        if !channel_link_ids.is_empty() {
+        let needed = channel_link_ids.iter().any(|id| {
+            self.links.get(id).is_some_and(|link| {
+                link.proven_peer_key().is_some()
+                    && link
+                        .channel()
+                        .and_then(|ch| ch.next_retransmit_due_ms(link.rtt_ms()))
+                        .is_some_and(|due| due <= now_ms)
+            })
+        });
+        if needed {
+            #[cfg(test)]
+            {
+                self.peer_evidence_scans += 1;
+            }
             for link in self.links.values() {
                 if let (Some(key), Some(t)) =
                     (link.proven_peer_key(), link.last_authenticated_inbound_ms())

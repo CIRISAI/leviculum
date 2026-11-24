@@ -583,6 +583,10 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     links: BTreeMap<LinkId, Box<Link>>,
     /// Tracks channel message receipts awaiting delivery proofs
     receipt_tracker: link_management::ReceiptTracker,
+    /// +ciris (leviculum#113, review 6 finding 6): how many times the
+    /// timeout pass built the per-peer evidence map (test observability).
+    #[cfg(test)]
+    peer_evidence_scans: u64,
     /// Count of rx_ring full drops since last log
     rx_ring_full_count: u64,
     /// Timestamp (ms) when last rx_ring full log was emitted
@@ -782,6 +786,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             transport,
             links: BTreeMap::new(),
             receipt_tracker: link_management::ReceiptTracker::new(),
+            #[cfg(test)]
+            peer_evidence_scans: 0,
             rx_ring_full_count: 0,
             rx_ring_full_last_log_ms: 0,
             channel_delivery_budget: None,
@@ -8738,6 +8744,38 @@ mod tests {
             exhausted_with(Evidence::OtherPeer),
             "another peer's traffic"
         );
+    }
+
+    /// +ciris (leviculum#113, review 6 finding 6): the per-peer evidence map
+    /// is built only on a tick where some channel message on a proven link
+    /// is due, not on every tick: idle links with channels and a message in
+    /// flight that is not yet due cost no scan.
+    #[test]
+    fn the_peer_evidence_map_is_built_only_when_a_message_is_due() {
+        let (mut a, a_dest, a_key) = listening_node();
+        let mut p = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        let (p_a1, _) = handshake(&mut p, &mut a, a_dest, &a_key);
+        let _ = p.send_on_link(&p_a1, b"x").unwrap();
+        let due = p
+            .link(&p_a1)
+            .unwrap()
+            .channel()
+            .unwrap()
+            .next_retransmit_due_ms(p.link(&p_a1).unwrap().rtt_ms())
+            .unwrap();
+        let before = p.peer_evidence_scans;
+        for step in 1..=20 {
+            let t = TEST_TIME_MS + step * 10;
+            if t >= due {
+                break;
+            }
+            p.transport().clock().set(t);
+            let _ = p.handle_timeout();
+        }
+        assert_eq!(p.peer_evidence_scans, before, "no scan before the due");
+        p.transport().clock().set(due);
+        let _ = p.handle_timeout();
+        assert_eq!(p.peer_evidence_scans, before + 1, "one scan at the due");
     }
 
     /// +ciris (leviculum#113, form 2): the host vouching for the far end
