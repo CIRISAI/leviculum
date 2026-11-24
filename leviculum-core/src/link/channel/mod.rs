@@ -148,6 +148,10 @@ struct OutboundEnvelope {
     /// Used for timeout calculation to avoid death-spiral where growing
     /// queue inflates timeouts during drain.
     queue_len_at_send: usize,
+    /// +ciris (leviculum#113, review 6 finding 2): the window when it was
+    /// first sent, before any of its retransmissions shrank it: what a
+    /// proof showing them spurious restores, and no more.
+    window_at_send: usize,
     /// +ciris (leviculum#94): past this, retransmit a [`timed::MSG_EXPIRED`]
     /// in the frame's place.
     deadline_ms: Option<u64>,
@@ -162,6 +166,7 @@ impl OutboundEnvelope {
             sent_at_ms: 0,
             first_sent_ms: 0,
             queue_len_at_send: 0,
+            window_at_send: 0,
             deadline_ms: None,
         }
     }
@@ -641,6 +646,7 @@ impl Channel {
         outbound.sent_at_ms = now_ms;
         outbound.first_sent_ms = now_ms;
         outbound.queue_len_at_send = self.tx_ring.len() + 1; // +1 for this entry
+        outbound.window_at_send = self.window;
 
         self.tx_ring.push_back(outbound);
         self.next_send_at_ms = now_ms.saturating_add(self.pacing_interval_ms);
@@ -1021,9 +1027,21 @@ impl Channel {
         self.delivered_bytes = self
             .delivered_bytes
             .saturating_add(self.tx_ring[pos].envelope.packed_size() as u64);
+        let window_at_send = self.tx_ring[pos].window_at_send;
         self.tx_ring.remove(pos);
-        // One success, and the decrements the spurious retransmissions cost.
-        for _ in 0..=spurious {
+        if spurious > 0 {
+            // Transition (review 6 finding 2, the Eifel response, RFC 3522
+            // section 3): a proof of an earlier attempt shows the later
+            // retransmissions spurious; RESTORE the window to what it was
+            // before them, never more. The decrements stopped at window_min,
+            // so crediting one step per spurious try would open the window
+            // past where it was before the loss (16 -> 48 on the fast tier in
+            // about 7 proofs) and re-flood the uplink that just drained. A
+            // window that has grown since (other proofs) is kept.
+            self.update_window_for_rtt(rtt_ms);
+            self.window = self.window.max(window_at_send.min(self.window_max));
+            self.recalculate_pacing(rtt_ms);
+        } else {
             self.adjust_window(true, rtt_ms);
         }
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
@@ -2723,11 +2741,11 @@ mod tests {
     }
 
     /// +ciris (leviculum#113, RFC 3522 / RFC 5682): a proof of an EARLIER
-    /// attempt shows the later retransmissions were spurious: the window
-    /// decrements they cost are given back, where a proof of the latest
-    /// attempt gives back only the one success.
+    /// attempt shows the later retransmissions were spurious: the window is
+    /// RESTORED to what it was at the first send (review 6 finding 2), where
+    /// a proof of the latest attempt is one ordinary success.
     #[test]
-    fn a_spurious_retransmission_gives_back_the_window_it_cost() {
+    fn a_spurious_retransmission_restores_the_window_it_cost() {
         let rtt_ms = 10;
         let mut windows = Vec::new();
         for attempt in [1u8, 4] {
@@ -2756,12 +2774,51 @@ mod tests {
         }
         let (shrunk, after_original) = windows[0];
         let (_, after_latest) = windows[1];
+        assert_eq!(shrunk, 27, "three retransmissions, three decrements");
         assert_eq!(after_latest, shrunk + 1, "the latest attempt: one success");
         assert_eq!(
-            after_original,
-            shrunk + 4,
-            "the original: one success and the three spurious decrements back"
+            after_original, 30,
+            "the original: restored to the send's 30"
         );
+    }
+
+    /// +ciris (leviculum#113, review 6 finding 2): at the window floor the
+    /// decrements stopped, so there is nothing to give back: after a storm
+    /// of spurious retransmissions and their late proofs the window is no
+    /// wider than it was when the messages were first sent. (Before, each
+    /// proof credited one step per spurious try: 16 -> 48 on the fast tier.)
+    #[test]
+    fn late_proofs_after_a_storm_never_open_the_window_past_its_value_at_send() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        channel.set_window_bounds_for_test(16, 16, 48);
+        let mut sent_at = Vec::new();
+        for i in 0..16u64 {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, 1_000 + i, rtt_ms)
+                .unwrap();
+            sent_at.push(1_000 + i);
+        }
+        // Every one is retransmitted five times while it sits in the queue.
+        let mut t = 1_000;
+        while channel.tx_ring.iter().any(|e| e.tries < 6) {
+            t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let _ = channel.poll_with_inbound(t, rtt_ms, Some(t), 60_000);
+        }
+        assert_eq!(channel.window(), 16, "the floor");
+        // Then the originals drain and are proved, one after another.
+        for (seq, at) in sent_at.iter().enumerate() {
+            t += 1;
+            assert!(channel.mark_delivered_attempt(seq as u16, 1, *at, t, rtt_ms));
+            assert!(
+                channel.window() <= 16,
+                "after {} proofs the window is {}",
+                seq + 1,
+                channel.window()
+            );
+        }
     }
 
     #[test]
