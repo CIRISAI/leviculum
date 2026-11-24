@@ -7377,11 +7377,13 @@ mod tests {
             .set(TEST_TIME_MS + 10_000);
         let _output = pair.initiator.handle_timeout();
 
-        // Receipt should still be exactly 1 (old replaced by new, no leak)
+        // +ciris (leviculum#113): one receipt per attempt, the original
+        // kept: its proof may be the one that comes back (bounded, and all
+        // cleared on the confirm: per_attempt_receipts_are_bounded_...).
         assert_eq!(
             pair.initiator.receipt_count(),
-            1,
-            "receipt count should stay at 1 after retransmit (old replaced, not leaked)"
+            2,
+            "the original's receipt and the retransmit's"
         );
     }
 
@@ -8323,8 +8325,8 @@ mod tests {
             "retransmit should produce a packet"
         );
 
-        // Receipt count should still be 1 (old replaced, not leaked)
-        assert_eq!(pair.initiator.receipt_count(), 1);
+        // +ciris (leviculum#113): one receipt per attempt (bounded).
+        assert_eq!(pair.initiator.receipt_count(), 2);
     }
 
     #[test]
@@ -8504,6 +8506,240 @@ mod tests {
         }
     }
 
+    /// +ciris (leviculum#113, the root cause): on a queueing uplink it is
+    /// the ORIGINAL send of a channel message that gets through late, after
+    /// it was retransmitted. Its proof must confirm the message: every
+    /// attempt's receipt is kept. Before, the retransmit replaced the
+    /// original's receipt, the late proof was dropped as unknown, the
+    /// delivered message was resent until the link died ChannelExhausted.
+    #[test]
+    fn a_late_proof_of_the_original_send_confirms_a_retransmitted_message() {
+        use crate::transport::InterfaceId;
+        let mut pair = establish_nodecore_link_pair();
+        let out = pair
+            .initiator
+            .send_on_link(&pair.initiator_link_id, b"queued")
+            .unwrap();
+        let original = extract_broadcast_data(&out);
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .channel_mut()
+            .unwrap()
+            .set_max_tries_for_test(2);
+        // The original is stuck in the uplink queue: the channel resends.
+        pair.initiator.transport().clock().set(TEST_TIME_MS + 4_000);
+        let output = pair.initiator.handle_timeout();
+        assert!(output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ChannelRetransmit { .. })));
+        // The ORIGINAL arrives at last, and its proof comes back.
+        pair.responder.transport().clock().set(TEST_TIME_MS + 5_000);
+        pair.initiator.transport().clock().set(TEST_TIME_MS + 5_000);
+        let out = pair.responder.handle_packet(InterfaceId(0), &original);
+        let mut confirmed = false;
+        for packet in extract_all_action_data(&out) {
+            let out = pair.initiator.handle_packet(InterfaceId(0), &packet);
+            confirmed |= out
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }));
+        }
+        assert!(confirmed, "the original's proof confirms the message");
+        assert_eq!(
+            pair.initiator
+                .receipt_count_for_link(&pair.initiator_link_id),
+            0,
+            "every attempt's receipt is cleared on the confirm"
+        );
+        // Past the time the retries would have run out: the link lives.
+        pair.initiator.transport().clock().set(TEST_TIME_MS + 9_000);
+        let output = pair.initiator.handle_timeout();
+        assert!(!output.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::LinkClosed {
+                reason: LinkCloseReason::ChannelExhausted,
+                ..
+            }
+        )));
+        assert!(pair.initiator.link(&pair.initiator_link_id).is_some());
+    }
+
+    /// +ciris (leviculum#113): the per-attempt receipts are bounded: at most
+    /// RECEIPT_ATTEMPTS_MAX per (link, sequence), the original always kept.
+    #[test]
+    fn per_attempt_receipts_are_bounded_and_keep_the_original() {
+        use super::link_management::{ReceiptTracker, RECEIPT_ATTEMPTS_MAX};
+        let mut t = ReceiptTracker::new();
+        let link = LinkId::new([3; 16]);
+        let attempt = |i: u8| alloc::vec![i; 40];
+        for i in 0..(RECEIPT_ATTEMPTS_MAX as u8 + 5) {
+            t.register(&attempt(i), link, 7, 1_000 + u64::from(i));
+        }
+        assert_eq!(t.count_for_link(&link), RECEIPT_ATTEMPTS_MAX);
+        let hash = |p: &[u8]| {
+            let full = crate::packet::packet_hash(p);
+            let mut tr = [0u8; crate::constants::TRUNCATED_HASHBYTES];
+            tr.copy_from_slice(&full[..crate::constants::TRUNCATED_HASHBYTES]);
+            tr
+        };
+        assert!(
+            t.contains_truncated(&hash(&attempt(0))),
+            "the original stays"
+        );
+        assert_eq!(t.confirm_delivery(&hash(&attempt(0))), Some(Some(7)));
+        assert_eq!(t.count_for_link(&link), 0, "one confirm clears them all");
+    }
+
+    /// +ciris (leviculum#113): edge's call shape. The sender's uplink is a
+    /// FIFO carrying datagram media at 2.3x its drain rate plus a Channel
+    /// control message a second; the media is shed after 3 s (the host's
+    /// congestion control), the queue drains. The receiver's side is not
+    /// capped. The control messages' acks come back only as their ORIGINAL
+    /// sends drain, seconds late. The link must live, and every control
+    /// message must be confirmed. (A silent link still dies as before:
+    /// test_channel_exhaustion_produces_channel_exhausted_close.)
+    #[test]
+    #[ignore = "red with per-attempt receipts alone (torn down at 4.37 s, the queue at 3.9 s): needs the attempt-tagged RTT sample, leviculum#113 part 2"]
+    fn a_queueing_uplink_at_2_3x_overload_does_not_kill_the_link() {
+        use crate::transport::InterfaceId;
+        let mut pair = establish_nodecore_link_pair();
+        let p_link = pair.initiator_link_id;
+        let a_link = pair.responder_link_id;
+        // A short path, as edge's: a 10 ms round trip, so the retry budget
+        // is the 1.3 s of the issue (100 ms floor, 1.5x a try, 5 tries).
+        for (node, link) in [(&mut pair.initiator, p_link), (&mut pair.responder, a_link)] {
+            let l = node.link_mut(&link).unwrap();
+            l.set_rtt_ms(10);
+            if let Some(ch) = l.channel_mut() {
+                ch.set_srtt_for_test(10.0);
+            }
+        }
+        let step = 10u64;
+        let media = alloc::vec![0x4Du8; 200];
+        let mut fifo: alloc::collections::VecDeque<Vec<u8>> = alloc::collections::VecDeque::new();
+        let mut budget = 0f64;
+        let mut queued_bytes_peak = 0usize;
+        let mut offered = 0usize;
+        let mut closed = false;
+        let mut sent_control = 0;
+        let mut confirmed = 0;
+        let mut t = 0u64;
+        let mut dbg_log: Vec<alloc::string::String> = Vec::new();
+        // Drain at the media rate / 2.3 (bytes per ms).
+        let media_rate = (media.len() + 80) as f64 / step as f64;
+        let drain = media_rate / 2.3;
+        while t <= 20_000 {
+            pair.initiator.transport().clock().set(TEST_TIME_MS + t);
+            pair.responder.transport().clock().set(TEST_TIME_MS + t);
+            let mut outs = Vec::new();
+            if t < 3_000 {
+                if let Ok((_, out)) = pair.initiator.send_unordered(&p_link, &media) {
+                    outs.push(out);
+                }
+            }
+            if t.is_multiple_of(1_000) && t < 6_000 {
+                if let Ok(out) = pair.initiator.send_on_link(&p_link, b"control") {
+                    sent_control += 1;
+                    outs.push(out);
+                }
+                if t == 0 {
+                    // The channel exists now: a 10 ms path's SRTT.
+                    if let Some(ch) = pair
+                        .initiator
+                        .link_mut(&p_link)
+                        .and_then(|l| l.channel_mut())
+                    {
+                        ch.set_srtt_for_test(10.0);
+                    }
+                }
+            }
+            outs.push(pair.initiator.handle_timeout());
+            for out in &outs {
+                for e in &out.events {
+                    if let NodeEvent::ChannelRetransmit {
+                        sequence, tries, ..
+                    } = e
+                    {
+                        dbg_log.push(alloc::format!(
+                            "DBG t={t} retransmit seq={sequence} tries={tries} q={}ms srtt={:?}",
+                            (fifo.iter().map(Vec::len).sum::<usize>() as f64 / drain) as u64,
+                            pair.initiator
+                                .link(&p_link)
+                                .and_then(|l| l.channel())
+                                .map(|c| c.srtt_ms())
+                        ));
+                    }
+                    if let NodeEvent::LinkClosed { reason, .. } = e {
+                        dbg_log.push(alloc::format!("DBG t={t} closed {reason:?}"));
+                    }
+                }
+                closed |= out
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                confirmed += out
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }))
+                    .count();
+                for packet in extract_all_action_data(out) {
+                    offered += packet.len();
+                    fifo.push_back(packet);
+                }
+            }
+            queued_bytes_peak = queued_bytes_peak.max(fifo.iter().map(Vec::len).sum());
+            // The uplink drains at its capped rate.
+            budget += drain * step as f64;
+            let mut to_a = Vec::new();
+            while let Some(front) = fifo.front() {
+                if (front.len() as f64) > budget {
+                    break;
+                }
+                budget -= front.len() as f64;
+                to_a.push(fifo.pop_front().unwrap());
+            }
+            if fifo.is_empty() {
+                budget = budget.min(drain * step as f64);
+            }
+            // The receiver answers at once; its uplink is not capped.
+            let mut to_p = Vec::new();
+            for packet in to_a {
+                let out = pair.responder.handle_packet(InterfaceId(0), &packet);
+                to_p.extend(extract_all_action_data(&out));
+            }
+            to_p.extend(extract_all_action_data(&pair.responder.handle_timeout()));
+            for packet in to_p {
+                let out = pair.initiator.handle_packet(InterfaceId(0), &packet);
+                closed |= out
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                confirmed += out
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }))
+                    .count();
+            }
+            t += step;
+        }
+        let _ = (a_link, offered);
+        // The queue really did build: seconds of delay at its peak.
+        let peak_delay_ms = queued_bytes_peak as f64 / drain;
+        assert!(
+            peak_delay_ms > 2_000.0,
+            "peak queue delay {peak_delay_ms:.0} ms"
+        );
+        assert!(
+            !closed,
+            "the link was torn down (peak delay {peak_delay_ms:.0} ms):\n{}",
+            dbg_log.join("\n")
+        );
+        assert!(pair.initiator.link(&p_link).is_some());
+        assert_eq!(confirmed, sent_control, "every control message confirmed");
+    }
+
     #[test]
     fn test_receipts_expire_after_timeout() {
         use crate::constants::DATA_RECEIPT_TIMEOUT_MS;
@@ -8600,8 +8836,8 @@ mod tests {
         assert_eq!(sequence, 0, "first message should be sequence 0");
         assert_eq!(tries, 2, "first retransmit should be tries=2");
 
-        // Receipt should still exist (retransmit replaced, not leaked)
-        assert_eq!(pair.initiator.receipt_count(), 1);
+        // +ciris (leviculum#113): the original's receipt and the retransmit's.
+        assert_eq!(pair.initiator.receipt_count(), 2);
     }
 
     #[test]
@@ -8680,8 +8916,8 @@ mod tests {
         let _ = pair.initiator.handle_timeout();
         assert_eq!(
             pair.initiator.receipt_count(),
-            1,
-            "should still have 1 receipt after first retransmit"
+            2,
+            "one receipt per attempt after the first retransmit (leviculum#113)"
         );
 
         // Retransmit 2
@@ -8692,8 +8928,8 @@ mod tests {
         let _ = pair.initiator.handle_timeout();
         assert_eq!(
             pair.initiator.receipt_count(),
-            1,
-            "should still have 1 receipt after second retransmit (no leak)"
+            3,
+            "one receipt per attempt after the second (bounded, leviculum#113)"
         );
     }
 

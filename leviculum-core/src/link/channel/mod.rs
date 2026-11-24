@@ -412,6 +412,11 @@ impl Channel {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_srtt_for_test(&mut self, srtt_ms: f64) {
+        self.srtt_ms = srtt_ms;
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_max_tries_for_test(&mut self, t: u8) {
         self.max_tries = t;
     }

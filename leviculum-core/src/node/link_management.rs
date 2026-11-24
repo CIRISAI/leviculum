@@ -144,6 +144,10 @@ impl Message for RawBytesMessage<'_> {
     }
 }
 
+/// +ciris (leviculum#113): the most receipts one channel message keeps, one
+/// per attempt: CHANNEL_MAX_TRIES and some held retries past it.
+pub(super) const RECEIPT_ATTEMPTS_MAX: usize = 8;
+
 /// Tracks channel message receipts awaiting delivery proofs.
 ///
 /// Each entry records a sent link packet: its packet hashes, link, optional
@@ -179,8 +183,18 @@ impl ReceiptTracker {
         crate::heap_census::vec_bytes(&self.entries)
     }
 
-    /// Register a receipt for a channel message, replacing any existing entry
-    /// for the same `(link_id, sequence)`.
+    /// Register a receipt for one attempt of a channel message.
+    ///
+    /// +ciris (leviculum#113): every attempt's receipt is KEPT, not replaced.
+    /// A retransmit is re-encrypted, so each attempt has its own packet hash,
+    /// and on a queueing uplink it is the ORIGINAL send that gets through
+    /// late: replacing its receipt dropped that attempt's proof as unknown,
+    /// so a delivered message counted as undelivered, was resent, and its
+    /// link died ChannelExhausted. A valid proof for any attempt confirms the
+    /// sequence and clears the others ([`Self::confirm_delivery`]). At most
+    /// [`RECEIPT_ATTEMPTS_MAX`] per `(link_id, sequence)`: past it the
+    /// second-oldest goes, never the original (the likeliest to arrive).
+    /// Freed on confirm, on expiry, and with the link.
     pub(super) fn register(
         &mut self,
         packet_data: &[u8],
@@ -188,8 +202,26 @@ impl ReceiptTracker {
         sequence: u16,
         now_ms: u64,
     ) {
-        self.entries
-            .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
+        let attempts = self
+            .entries
+            .iter()
+            .filter(|e| e.link_id == link_id && e.sequence == Some(sequence))
+            .count();
+        if attempts >= RECEIPT_ATTEMPTS_MAX {
+            // Order by deadline (each attempt's is later than the last's):
+            // keep the first, drop the next.
+            let mut mine: Vec<(u64, usize)> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.link_id == link_id && e.sequence == Some(sequence))
+                .map(|(i, e)| (e.deadline_ms, i))
+                .collect();
+            mine.sort_unstable();
+            if let Some(&(_, second)) = mine.get(1) {
+                self.entries.swap_remove(second);
+            }
+        }
 
         let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
@@ -243,7 +275,9 @@ impl ReceiptTracker {
             .map(|e| (e.link_id, e.full_hash))
     }
 
-    /// Remove the entry matching `truncated_hash` and return its sequence number.
+    /// Remove the entry matching `truncated_hash` and return its sequence
+    /// number; for a channel message, every other attempt's receipt of the
+    /// same `(link_id, sequence)` goes too (+ciris, leviculum#113).
     pub(super) fn confirm_delivery(
         &mut self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
@@ -253,6 +287,10 @@ impl ReceiptTracker {
             .iter()
             .position(|e| e.truncated_hash == *truncated)?;
         let entry = self.entries.swap_remove(idx);
+        if let Some(sequence) = entry.sequence {
+            self.entries
+                .retain(|e| !(e.link_id == entry.link_id && e.sequence == Some(sequence)));
+        }
         Some(entry.sequence)
     }
 
@@ -5157,7 +5195,10 @@ mod receipt_tracker_tests {
     }
 
     #[test]
-    fn test_register_retransmit_replaces_entry() {
+    fn test_register_retransmit_keeps_every_attempt() {
+        // +ciris (leviculum#113): a retransmit no longer replaces the
+        // original's receipt; a proof for either attempt confirms the
+        // sequence, and the confirm clears both.
         let mut tracker = ReceiptTracker::new();
         let link = make_link_id(0xAA);
 
@@ -5170,19 +5211,26 @@ mod receipt_tracker_tests {
 
         // Re-register same (link, seq) with different data
         tracker.register(&data_v2, link, 1, 2000);
-        assert_eq!(tracker.len(), 1);
+        assert_eq!(tracker.len(), 2);
 
-        // Entry should have the new hashes
-        let new_hash = packet_hash(&data_v2);
-        let mut new_truncated = [0u8; TRUNCATED_HASHBYTES];
-        new_truncated.copy_from_slice(&new_hash[..TRUNCATED_HASHBYTES]);
-        assert!(tracker.contains_truncated(&new_truncated));
+        let truncated = |d: &[u8]| {
+            let h = packet_hash(d);
+            let mut t = [0u8; TRUNCATED_HASHBYTES];
+            t.copy_from_slice(&h[..TRUNCATED_HASHBYTES]);
+            t
+        };
+        assert!(tracker.contains_truncated(&truncated(&data_v2)));
+        assert!(
+            tracker.contains_truncated(&truncated(&data_v1)),
+            "the original stays"
+        );
 
-        // Old entry should be gone
-        let old_hash = packet_hash(&data_v1);
-        let mut old_truncated = [0u8; TRUNCATED_HASHBYTES];
-        old_truncated.copy_from_slice(&old_hash[..TRUNCATED_HASHBYTES]);
-        assert!(!tracker.contains_truncated(&old_truncated));
+        // The ORIGINAL's proof confirms the sequence and clears both.
+        assert_eq!(
+            tracker.confirm_delivery(&truncated(&data_v1)),
+            Some(Some(1))
+        );
+        assert_eq!(tracker.len(), 0);
     }
 
     #[test]
