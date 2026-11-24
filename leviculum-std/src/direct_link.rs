@@ -4742,8 +4742,10 @@ mod tests {
     #[tokio::test]
     async fn a_failing_send_stops_the_ramp() {
         let b = loopback().await;
-        // Nothing can be sent to port 0.
-        let nowhere: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        // A broadcast without SO_BROADCAST is refused on every platform
+        // (EACCES, WSAEACCES); port 0, the first choice, sends fine on
+        // Windows.
+        let nowhere: SocketAddr = "255.255.255.255:9".parse().unwrap();
         let sem = Arc::new(tokio::sync::Semaphore::new(PROCESS_BIRTHDAY_SOCKETS));
         let (session, token) = ([43u8; 16], [44u8; 32]);
         let mut diag = PunchDiag::new(std::slice::from_ref(&nowhere), &[], session);
