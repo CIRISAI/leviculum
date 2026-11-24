@@ -1889,6 +1889,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let confirmed = self.receipt_tracker.confirm_delivery_attempt(&truncated);
             // A spent receipt (the message was already proved by another
             // attempt) was evidence only, recorded above: nothing to confirm.
+            // It still tells RACK how far the peer has caught up.
+            if let Some(spent) = confirmed.filter(|c| c.spent) {
+                let now_ms = self.transport.clock().now_ms();
+                if let Some(ch) = self.links.get_mut(link_id).and_then(|l| l.channel_mut()) {
+                    ch.note_proved_transmission(spent.sent_ms, now_ms);
+                }
+            }
             if let Some(confirmed) = confirmed.filter(|c| !c.spent) {
                 crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),

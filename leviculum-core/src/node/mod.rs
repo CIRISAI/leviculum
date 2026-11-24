@@ -8993,6 +8993,34 @@ mod tests {
         assert_eq!(outcome.stats_retransmits, sent);
     }
 
+    /// +ciris (leviculum#113, RACK while held): the same queued link once
+    /// the media is shed (3 s) and the queue drains. Every control message
+    /// still waits seconds behind the queue, but the peer is visibly alive
+    /// and nothing sent AFTER a message has been proved while it is out, so
+    /// it is queued, not lost: no retransmission while the queue drains.
+    /// (Before, each was retransmitted at every timeout, and every
+    /// retransmission joined the same queue.)
+    #[test]
+    fn a_queued_link_sends_no_spurious_resends_while_it_drains() {
+        let outcome = queueing_uplink_case(false, false);
+        outcome.assert_lived();
+        let late: Vec<&alloc::string::String> = outcome
+            .log
+            .iter()
+            .filter(|l| l.contains("P retransmit"))
+            .filter(|l| {
+                l.strip_prefix("DBG t=")
+                    .and_then(|r| r.split_once(' '))
+                    .and_then(|(t, _)| t.parse::<u64>().ok())
+                    .is_some_and(|t| t >= 3_000)
+            })
+            .collect();
+        assert!(
+            late.is_empty(),
+            "resent while the queue drained:\n{late:#?}"
+        );
+    }
+
     /// +ciris (leviculum#113): the other direction of edge's call shape,
     /// the links that died FIRST in its capped-uplink run (a listener's
     /// link toward the capped publisher, 2.17 to 2.22 s after the cap). The

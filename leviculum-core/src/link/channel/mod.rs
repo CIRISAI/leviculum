@@ -141,6 +141,13 @@ struct OutboundEnvelope {
     tries: u8,
     /// When the envelope was last sent (milliseconds)
     sent_at_ms: u64,
+    /// +ciris (leviculum#113, RACK while held): when its timer was last
+    /// armed: at each send, and at a timeout that did not resend it (a
+    /// queued message). `sent_at_ms` stays the last real transmission.
+    armed_at_ms: u64,
+    /// +ciris (RACK while held): the one tail-loss probe this message may
+    /// send while held has been sent.
+    tlp_used: bool,
     /// +ciris (leviculum#113): when it was first sent: the start of its
     /// retry span.
     first_sent_ms: u64,
@@ -170,6 +177,8 @@ impl OutboundEnvelope {
             state: MessageState::New,
             tries: 0,
             sent_at_ms: 0,
+            armed_at_ms: 0,
+            tlp_used: false,
             first_sent_ms: 0,
             queue_len_at_send: 0,
             window_at_send: 0,
@@ -284,6 +293,10 @@ pub struct Channel {
     /// packed envelope bytes: what a host attributes its uplink by.
     retransmits: u64,
     retransmitted_bytes: u64,
+    /// +ciris (leviculum#113, RACK while held, RFC 8985): the latest
+    /// transmission time among the transmissions a proof has answered
+    /// (confirming or spent), and that proof's RTT; `None` before any.
+    rack: Option<(u64, u64)>,
 }
 
 impl Default for Channel {
@@ -318,6 +331,7 @@ impl Channel {
             last_evidence_ms: None,
             retransmits: 0,
             retransmitted_bytes: 0,
+            rack: None,
         }
     }
 
@@ -709,6 +723,7 @@ impl Channel {
         outbound.state = MessageState::Sent;
         outbound.tries = 1;
         outbound.sent_at_ms = now_ms;
+        outbound.armed_at_ms = now_ms;
         outbound.first_sent_ms = now_ms;
         outbound.queue_len_at_send = self.tx_ring.len() + 1; // +1 for this entry
         outbound.window_at_send = self.window;
@@ -1073,6 +1088,7 @@ impl Channel {
             return false;
         };
         let tries = self.tx_ring[pos].tries;
+        self.note_proved_transmission(attempt_sent_ms, now_ms);
         let sample_rtt = now_ms.saturating_sub(attempt_sent_ms);
         if sample_rtt > 0 {
             // Today's estimator: first-try samples only (Karn), as before.
@@ -1155,6 +1171,46 @@ impl Channel {
             "channel: delivered (attempt-tagged)"
         );
         true
+    }
+
+    /// +ciris (leviculum#113, RACK while held): a proof answered the
+    /// transmission sent at `xmit_ms` (an attempt that confirmed its
+    /// message, or a spent one: `NodeCore`'s proof handler reports both).
+    /// RACK keeps the latest such transmission and its RTT (RFC 8985 6.2).
+    pub(crate) fn note_proved_transmission(&mut self, xmit_ms: u64, now_ms: u64) {
+        let newer = self.rack.is_none_or(|(latest, _)| xmit_ms >= latest);
+        if newer {
+            self.rack = Some((xmit_ms, now_ms.saturating_sub(xmit_ms)));
+        }
+    }
+
+    /// +ciris (RACK while held): the peer is shown alive by evidence within
+    /// the stale bound (as last handed to poll_with_inbound).
+    fn evidence_fresh(&self, now_ms: u64) -> bool {
+        self.hold_bound_ms > 0
+            && self
+                .last_evidence_ms
+                .is_some_and(|t| now_ms < t.saturating_add(self.hold_bound_ms))
+    }
+
+    /// +ciris (RACK while held): the reorder window, a quarter of the
+    /// learned RTT, at least 20 ms (RFC 8985 6.2: min_rtt / 4).
+    fn reorder_window_ms(&self, rtt_ms: u64) -> u64 {
+        (self.effective_learned_rtt_ms(rtt_ms) / 4).max(20)
+    }
+
+    /// +ciris (RACK while held): `outbound` is LOST: a transmission sent
+    /// after its last one was proved, and the RTT that proof measured plus
+    /// the reorder window has passed since its last one (RFC 8985 6.2).
+    fn rack_lost(&self, outbound: &OutboundEnvelope, now_ms: u64, reo_ms: u64) -> bool {
+        self.rack.is_some_and(|(latest, rtt)| {
+            outbound.sent_at_ms < latest
+                && now_ms
+                    >= outbound
+                        .sent_at_ms
+                        .saturating_add(rtt)
+                        .saturating_add(reo_ms)
+        })
     }
 
     /// +ciris (leviculum#113): the most an RTT sample may raise SRTT to, once
@@ -1271,7 +1327,7 @@ impl Channel {
         } else {
             wait(outbound.tries)
         };
-        Some(outbound.sent_at_ms.saturating_add(timeout))
+        Some(outbound.armed_at_ms.saturating_add(timeout))
     }
 
     /// The earliest time [`poll`](Self::poll) has an envelope to time out, so
@@ -1279,10 +1335,22 @@ impl Channel {
     pub fn next_retransmit_due_ms(&self, rtt_ms: u64) -> Option<u64> {
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
         let eff_learned = self.effective_learned_rtt_ms(rtt_ms);
-        self.tx_ring
+        let timers = self
+            .tx_ring
             .iter()
-            .filter_map(|outbound| self.retransmit_due_ms(outbound, eff_rtt, eff_learned))
-            .min()
+            .filter_map(|outbound| self.retransmit_due_ms(outbound, eff_rtt, eff_learned));
+        // +ciris (RACK while held): wake when a message behind a proved
+        // later transmission becomes lost.
+        let reo = self.reorder_window_ms(rtt_ms);
+        let rack = self
+            .rack
+            .filter(|_| self.last_evidence_ms.is_some() && self.hold_bound_ms > 0);
+        let losses = self.tx_ring.iter().filter_map(move |outbound| {
+            let (latest, rtt) = rack?;
+            (outbound.state == MessageState::Sent && outbound.sent_at_ms < latest)
+                .then(|| outbound.sent_at_ms.saturating_add(rtt).saturating_add(reo))
+        });
+        timers.chain(losses).min()
     }
 
     /// Poll for timeouts and get actions to take
@@ -1322,6 +1390,32 @@ impl Channel {
     /// host's `NodeCore::note_peer_evidence`. A link whose peer sends
     /// nothing that counts while this node's message is out is NOT held: it
     /// is torn down at its 5th timeout, as before.
+    ///
+    /// RACK while held (RFC 8985; leviculum#113, the queued link's uplink):
+    /// with the peer shown alive by evidence within the stale bound, a
+    /// timer that runs out is not a loss signal on a queued path: every
+    /// message behind a 3 to 15 s queue would be resent, and each resend
+    /// would join the same queue. Transitions:
+    /// - observable: a transmission sent after this message's last one was
+    ///   proved (confirming or spent), and that proof's RTT plus the reorder
+    ///   window (a quarter of the learned RTT, at least 20 ms) has passed
+    ///   since its last one. Action: LOST, resent at once (not waiting for
+    ///   its timer). Once resent it is not lost again until something sent
+    ///   after the resend is proved.
+    /// - observable: its timer, nothing sent after it proved. Action: the
+    ///   OLDEST message out sends its one tail-loss probe (once 2 x that
+    ///   RTT has passed since its last send); any other is QUEUED behind
+    ///   it: not resent, no window taken, but the timeout still counts
+    ///   toward the ladder.
+    /// - head-of-line: only the oldest message out can end a held link; one
+    ///   queued behind it cannot be proved before it, so its own timer says
+    ///   nothing about the peer. The oldest keeps today's rule (out of tries
+    ///   and not alive: torn down).
+    /// - no fresh evidence: exactly today's cold ladder, a resend at every
+    ///   timeout; a silent link dies as fast as ever.
+    ///
+    /// The stale bound still ends every hold. A peer (upstream Python
+    /// included) sees nothing new on the wire, only fewer resends.
     ///
     /// Known limits (re-review 7), each bounded by the hold's own bound, a
     /// message's first send plus the stale bound:
@@ -1376,23 +1470,46 @@ impl Channel {
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
         let eff_learned = self.effective_learned_rtt_ms(rtt_ms);
 
-        // First pass: collect indices that need processing and their current tries
-        let mut timed_out: Vec<(usize, u8)> = Vec::new();
+        // +ciris (leviculum#113, RACK while held): with the peer shown alive,
+        // a message is resent only on loss evidence, not because a timer
+        // ran out behind a queue (see the method doc).
+        let fresh = self.evidence_fresh(now_ms);
+        let reo = self.reorder_window_ms(rtt_ms);
+        let oldest = self
+            .tx_ring
+            .iter()
+            .position(|e| e.state == MessageState::Sent);
+
+        // First pass: collect indices that need processing and their current
+        // tries, and whether only RACK (not the timer) flagged them.
+        let mut timed_out: Vec<(usize, u8, bool)> = Vec::new();
         for (i, outbound) in self.tx_ring.iter().enumerate() {
-            if let Some(due) = self.retransmit_due_ms(outbound, eff_rtt, eff_learned) {
-                if now_ms >= due {
-                    timed_out.push((i, outbound.tries));
-                }
+            let timer = self
+                .retransmit_due_ms(outbound, eff_rtt, eff_learned)
+                .is_some_and(|due| now_ms >= due);
+            if timer {
+                timed_out.push((i, outbound.tries, false));
+            } else if fresh
+                && outbound.state == MessageState::Sent
+                && self.rack_lost(outbound, now_ms, reo)
+            {
+                timed_out.push((i, outbound.tries, true));
             }
         }
 
         // Second pass: process timed out envelopes
-        for (i, tries) in timed_out {
+        for (i, tries, rack_only) in timed_out {
             // Timeout occurred
             let first = self.tx_ring[i].first_sent_ms;
             let alive = authenticated_inbound_ms.is_some_and(|t| t > first)
                 && now_ms < first.saturating_add(hold_bound_ms);
-            if tries >= self.max_tries && !alive {
+            // +ciris (RACK while held): with the peer shown alive, only the
+            // OLDEST message out can end the link: one queued behind it
+            // cannot be proved before it is, so its own timer says nothing
+            // about the peer (head-of-line liveness). The oldest keeps
+            // today's rule: torn when out of tries and not alive.
+            let behind_oldest = fresh && oldest != Some(i);
+            if !rack_only && !behind_oldest && tries >= self.max_tries && !alive {
                 let seq = self.tx_ring[i].envelope.sequence;
                 crate::tracing::debug!(
                     seq,
@@ -1409,10 +1526,40 @@ impl Channel {
             let new_tries = tries.saturating_add(1);
             let tx_ring_len = self.tx_ring.len(); // snapshot before mutation
 
+            if fresh {
+                let outbound = &self.tx_ring[i];
+                let lost = self.rack_lost(outbound, now_ms, reo);
+                let pto = self.rack.map_or(0, |(_, rtt)| rtt.saturating_mul(2));
+                let tail_probe = !rack_only
+                    && oldest == Some(i)
+                    && !outbound.tlp_used
+                    && now_ms >= outbound.sent_at_ms.saturating_add(pto);
+                if !lost && !tail_probe {
+                    // Queued, not lost: nothing sent after it has been
+                    // proved (or the reorder window has not passed), and it
+                    // is not the oldest message's one tail probe. The timeout
+                    // counts toward the ladder (the hold and the teardown are
+                    // unchanged) but nothing is resent, no window is taken.
+                    let outbound = &mut self.tx_ring[i];
+                    outbound.tries = new_tries;
+                    outbound.armed_at_ms = now_ms;
+                    crate::tracing::debug!(
+                        seq = outbound.envelope.sequence,
+                        tries = new_tries,
+                        "channel: queued behind traffic, not resent"
+                    );
+                    continue;
+                }
+                if tail_probe && !lost {
+                    self.tx_ring[i].tlp_used = true;
+                }
+            }
+
             // Mutate the outbound envelope
             let outbound = &mut self.tx_ring[i];
             outbound.tries = new_tries;
             outbound.sent_at_ms = now_ms;
+            outbound.armed_at_ms = now_ms;
 
             let seq = outbound.envelope.sequence;
             let data = outbound.envelope.pack();
@@ -2744,7 +2891,12 @@ mod tests {
         for _ in 0..4 {
             let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
             let actions = channel.poll_with_inbound(t, rtt_ms, authenticated, bound);
-            assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+            // Resent at each timeout, unless the peer is shown alive (RACK
+            // while held: the oldest message's one tail probe, then queued).
+            assert!(
+                !actions.contains(&ChannelAction::TearDownLink),
+                "{actions:?}"
+            );
         }
         let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
         let actions = channel.poll_with_inbound(t, rtt_ms, authenticated, bound);
@@ -2779,17 +2931,19 @@ mod tests {
 
     /// +ciris (leviculum#113): a link that is visibly alive (an
     /// authenticated packet after the message was first sent) is not torn
-    /// down for late acks: the message keeps being retransmitted, each wait
-    /// capped at CHANNEL_HELD_RETRY_MAX_MS, and an ack that comes late
-    /// still lands.
+    /// down for late acks: its timer keeps running, each wait capped at
+    /// CHANNEL_HELD_RETRY_MAX_MS, and an ack that comes late still lands.
+    /// With the peer shown alive and nothing proved after it, the message
+    /// is queued, not lost (RACK while held): one tail probe, no more.
     #[test]
     fn a_link_with_inbound_survives_late_acks() {
         let (mut channel, mut t, actions) = exhaust(Some(1_200), 10_000);
         assert!(
-            matches!(&actions[0], ChannelAction::Retransmit { tries: 6, .. }),
+            !actions.contains(&ChannelAction::TearDownLink),
             "{actions:?}"
         );
-        let mut retries = 0;
+        assert_eq!(channel.tx_ring[0].tries, 6, "the timer still runs");
+        let mut timeouts = 0;
         while t < 1_000 + 9_000 {
             let due = channel.next_retransmit_due_ms(10).unwrap();
             assert!(
@@ -2800,11 +2954,14 @@ mod tests {
             t = due;
             let actions = channel.poll_with_inbound(t, 10, Some(t - 1), 10_000);
             if t < 1_000 + 10_000 {
-                assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
-                retries += 1;
+                assert!(!actions.contains(&ChannelAction::TearDownLink));
+                timeouts += 1;
             }
         }
-        assert!(retries >= 4, "retried {retries} times before the bound");
+        assert!(timeouts >= 4, "{timeouts} held timeouts before the bound");
+        // RACK while held: nothing was proved, so nothing is known lost: the
+        // one message sent its one tail probe and no more.
+        assert_eq!(channel.retransmits(), 1, "one tail probe while held");
     }
 
     /// +ciris (leviculum#113): a held link still dies at its stale bound,
@@ -2813,12 +2970,12 @@ mod tests {
     fn a_held_link_dies_at_the_stale_bound() {
         let bound = 4_000;
         let (mut channel, _, actions) = exhaust(Some(1_200), bound);
-        assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+        assert!(!actions.contains(&ChannelAction::TearDownLink));
         let mut t;
         loop {
             t = channel.next_retransmit_due_ms(10).unwrap();
             let actions = channel.poll_with_inbound(t, 10, Some(t - 1), bound);
-            if matches!(&actions[0], ChannelAction::TearDownLink) {
+            if actions.contains(&ChannelAction::TearDownLink) {
                 break;
             }
             assert!(t < 1_000 + bound, "held past the bound at {t}");
@@ -3118,6 +3275,51 @@ mod tests {
         );
     }
 
+    /// +ciris (leviculum#113, RACK while held, RFC 8985): a really lost
+    /// message on a clear path. M1's frame is dropped, M2 (sent 10 ms
+    /// later) is proved 5 ms after its send: a transmission sent after M1
+    /// was proved, so once that proof's RTT plus the reorder window (a
+    /// quarter of the RTT, at least 20 ms) has passed since M1's send, M1
+    /// is lost and resent at once, at 1025 ms, not at its timer (100 ms on
+    /// this 10 ms path). The timer wakes for it, too.
+    #[test]
+    fn a_lost_message_is_resent_within_the_reorder_window() {
+        let rtt_ms = 10;
+        let bound = 10_000;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, 1_000, rtt_ms)
+            .unwrap();
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![2] }, MDU, 1_010, rtt_ms)
+            .unwrap();
+        assert!(channel.mark_delivered_attempt(1, 1, 1_010, 1_015, rtt_ms));
+        // The proof is evidence the peer is alive.
+        let actions = channel.poll_with_inbound(1_024, rtt_ms, Some(1_015), bound);
+        assert!(actions.is_empty(), "not yet: {actions:?}");
+        assert_eq!(channel.next_retransmit_due_ms(rtt_ms), Some(1_025));
+        let actions = channel.poll_with_inbound(1_025, rtt_ms, Some(1_015), bound);
+        assert!(
+            matches!(
+                &actions[..],
+                [ChannelAction::Retransmit {
+                    sequence: 0,
+                    tries: 2,
+                    ..
+                }]
+            ),
+            "{actions:?}"
+        );
+        // Resent once: not again until something sent after the resend is
+        // proved.
+        let actions = channel.poll_with_inbound(1_060, rtt_ms, Some(1_015), bound);
+        assert!(actions.is_empty(), "{actions:?}");
+    }
+
     /// +ciris (re-review 7 N1): the onset case. 48 messages sent at window
     /// 48 on the fast tier; the queue builds, every one times out and the
     /// decrements take the window to its floor of 16 (M1's own first
@@ -3142,7 +3344,7 @@ mod tests {
         let mut t = 1_000;
         while channel.tx_ring.iter().any(|e| e.tries < 4) {
             t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
-            let _ = channel.poll_with_inbound(t, rtt_ms, Some(t), 60_000);
+            let _ = channel.poll_with_inbound(t, rtt_ms, None, 60_000);
         }
         assert_eq!(channel.window(), 16, "the floor");
         let own: u8 = channel.tx_ring[0].applied_decrements.iter().sum();
@@ -3172,9 +3374,15 @@ mod tests {
         }
         // Every one is retransmitted five times while it sits in the queue.
         let mut t = 1_000;
-        while channel.tx_ring.iter().any(|e| e.tries < 6) {
+        // (No evidence: the cold ladder resends at each timeout, as a storm
+        // without RACK's loss detection does.)
+        while channel
+            .tx_ring
+            .iter()
+            .any(|e| e.state == MessageState::Sent && e.tries < 5)
+        {
             t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
-            let _ = channel.poll_with_inbound(t, rtt_ms, Some(t), 60_000);
+            let _ = channel.poll_with_inbound(t, rtt_ms, None, 60_000);
         }
         assert_eq!(channel.window(), 16, "the floor");
         // Then the originals drain and are proved, one after another.
