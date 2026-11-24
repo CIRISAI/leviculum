@@ -1640,6 +1640,25 @@ impl Link {
         self.last_authenticated_inbound_ms
     }
 
+    /// +ciris (leviculum#113): the Ed25519 key of the identity this link's
+    /// far end has PROVEN it holds, or `None`. An initiator's peer proved its
+    /// destination's identity key by signing the link proof (only once the
+    /// link established); a responder's peer only if it identified
+    /// (LINKIDENTIFY, a signature binding its identity to this link). Two
+    /// links with the same key have the same party at their far ends, so an
+    /// authenticated packet on either is evidence that party is alive
+    /// (`NodeCore::check_channel_timeouts`).
+    pub fn proven_peer_key(&self) -> Option<[u8; 32]> {
+        if self.is_initiator() {
+            self.established_at_ms?;
+            self.peer_verifying_key.as_ref().map(|k| k.to_bytes())
+        } else {
+            self.remote_identity
+                .as_ref()
+                .map(|identity| identity.ed25519_verifying().to_bytes())
+        }
+    }
+
     /// Record an inbound keepalive: it keeps the link alive but is not
     /// payload, so the data clock stays where it was (`Link.py:979`).
     pub fn record_keepalive_inbound(&mut self, now_ms: u64) {

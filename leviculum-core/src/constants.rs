@@ -551,6 +551,13 @@ pub const CHANNEL_BACKOFF_BASE: f64 = 1.5;
 /// of waiting out one very long timer.
 pub const CHANNEL_HELD_RETRY_MAX_MS: u64 = 2_000;
 
+/// +ciris (leviculum#113): `NodeCore::note_peer_evidence` records at most
+/// one host-vouched evidence time per link per this interval. The hold it
+/// feeds is judged against a message's first send and retry waits of 100 ms
+/// and up, so a finer grain adds nothing; a 30 Hz media stream costs one
+/// lookup a frame.
+pub const PEER_EVIDENCE_MIN_INTERVAL_MS: u64 = 100;
+
 /// Microseconds per millisecond (for time conversion)
 pub const US_PER_MS: u64 = 1000;
 

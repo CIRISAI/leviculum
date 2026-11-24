@@ -18,6 +18,13 @@
 (* MaxScale stands for srtt_cap_ms: at the cap the ordinary span is at    *)
 (* most the stale bound (the ASSUME).                                     *)
 (*                                                                         *)
+(* Peer evidence (form 1 and form 2): an authenticated packet on another *)
+(* link whose far end proved the same identity key (Link::               *)
+(* proven_peer_key), or the host vouching for this link's far end on its  *)
+(* own cryptographic check (NodeCore::note_peer_evidence), counts as      *)
+(* evidence of life exactly like AuthIn. PeerElsewhere says it can come.  *)
+(* It teaches no RTT (a sample is a proof of THIS link's attempt).        *)
+(*                                                                         *)
 (* Time is whole ticks. Waits: Scale * Ord[k] for ordinary try k, then the *)
 (* held wait for every held try. The message is first sent at 0.          *)
 (***************************************************************************)
@@ -29,7 +36,8 @@ CONSTANTS
     Cap,          \* CHANNEL_HELD_RETRY_MAX_MS at the model's scale
     Bound,        \* the link's stale bound, from the first send
     MaxScale,     \* the cap on the learned timeout (srtt_cap_ms)
-    PeerSpeaks,   \* authenticated inbound may arrive (FALSE: a silent link)
+    PeerSpeaks,   \* authenticated inbound may arrive on this link
+    PeerElsewhere, \* evidence of the same peer may come from elsewhere
     AckComes      \* the late ack may arrive at all
 
 VARIABLES now, tries, sent, lastAuth, state, scale, scale0
@@ -71,6 +79,14 @@ AuthIn ==
     /\ lastAuth' = now
     /\ UNCHANGED <<now, tries, sent, state, scale, scale0>>
 
+\* Evidence of the same peer from elsewhere: another link to the same
+\* proven identity, or the host's vouching. Tied to the peer: only when the
+\* peer is alive somewhere (PeerElsewhere), at most one a tick.
+PeerEvidence ==
+    /\ PeerElsewhere /\ state = "pending" /\ lastAuth /= now
+    /\ lastAuth' = now
+    /\ UNCHANGED <<now, tries, sent, state, scale, scale0>>
+
 \* A verified proof of an attempt of some other message (this one's own is
 \* Ack): an RTT sample, moving the learned timeout anywhere within the cap,
 \* up as a queue builds or down as it drains. It is authenticated inbound,
@@ -98,7 +114,7 @@ Ack ==
     /\ state' = "acked"
     /\ UNCHANGED <<now, tries, sent, lastAuth, scale, scale0>>
 
-Next == Tick \/ AuthIn \/ Sample \/ Timeout \/ Ack
+Next == Tick \/ AuthIn \/ PeerEvidence \/ Sample \/ Timeout \/ Ack
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Tick) /\ WF_vars(Timeout)
 
@@ -111,12 +127,14 @@ HeldBounded == state = "pending" => now <= Bound + HeldWait(MaxScale)
 
 \* A silent link that learned nothing is torn down exactly when it always
 \* was.
-SilentAsToday == (~PeerSpeaks /\ scale0 = 1 /\ state = "torn") => now = TodayTeardown
+Silent == ~PeerSpeaks /\ ~PeerElsewhere
+
+SilentAsToday == (Silent /\ scale0 = 1 /\ state = "torn") => now = TodayTeardown
 
 \* A silent link is torn down by the stale bound, whatever its timeout
 \* learned before (the cap): a dead peer is not noticed later than the
 \* link's own stale check would notice it (CIRISEdge#1030).
-SilentByBound == (~PeerSpeaks /\ state = "torn") => now <= Bound
+SilentByBound == (Silent /\ state = "torn") => now <= Bound
 
 \* Without inbound the learned timeout never moves.
 NoInboundNoLearning == ~PeerSpeaks => scale = scale0

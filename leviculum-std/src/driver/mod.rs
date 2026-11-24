@@ -4237,6 +4237,21 @@ impl ReticulumNode {
         self.inner.lock_recover().set_direct_link_retry(enabled);
     }
 
+    /// +ciris (leviculum#113): the host vouches that the party at the far
+    /// end of `link_id` is alive now, on cryptographic evidence it verified
+    /// itself (a frame signed by that party's key that arrived on another
+    /// link). Feeds the channel's hold for late acks exactly as an
+    /// authenticated packet on the link would; never past the link's stale
+    /// bound, never for a closed link (`false`). The contract and the
+    /// transition are on `NodeCore::note_peer_evidence`. Takes the core
+    /// lock, once per call, as a received packet does; calls within 100 ms
+    /// of the last recorded one return at once.
+    pub fn note_peer_evidence(&self, link_id: &LinkId) -> bool {
+        let mut inner = self.inner.lock_recover();
+        let now_ms = inner.now_ms();
+        inner.note_peer_evidence(link_id, now_ms)
+    }
+
     /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<leviculum_core::Identity> {
         let inner = self.inner.lock_recover();

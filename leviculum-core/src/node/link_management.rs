@@ -4757,15 +4757,45 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map(|(id, _)| *id)
             .collect();
 
+        // +ciris (leviculum#113, form 1): the newest authenticated inbound
+        // per PROVEN peer identity, over every link. Transition: a link
+        // whose far end proved the same identity key as another's
+        // (Link::proven_peer_key) takes that other link's authenticated
+        // inbound as its own evidence of life for the #113 hold. It applies
+        // only to links with a proven key, never to an unproven one; it
+        // never extends a hold past the stale bound (poll_with_inbound
+        // still bounds it from the message's first send); a peer silent on
+        // every link gives no evidence and is torn down as before.
+        let mut peer_latest: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        if !channel_link_ids.is_empty() {
+            for link in self.links.values() {
+                if let (Some(key), Some(t)) =
+                    (link.proven_peer_key(), link.last_authenticated_inbound_ms())
+                {
+                    let slot = peer_latest.entry(key).or_insert(t);
+                    *slot = (*slot).max(t);
+                }
+            }
+        }
+
         for link_id in channel_link_ids {
             // Get link, extract RTT, poll channel, actions is owned Vec, releasing borrow
             let actions = match self.links.get_mut(&link_id) {
                 Some(link) => {
                     let rtt_ms = link.rtt_ms();
                     // +ciris (leviculum#113): a link visibly alive (an
-                    // authenticated packet since the message was sent) is
+                    // authenticated packet since the message was sent, on
+                    // this link or on another to the same proven peer, or
+                    // vouched by the host: NodeCore::note_peer_evidence) is
                     // not torn down for late acks before its stale bound.
-                    let authenticated = link.last_authenticated_inbound_ms();
+                    let own = link.last_authenticated_inbound_ms();
+                    let peer = link
+                        .proven_peer_key()
+                        .and_then(|key| peer_latest.get(&key).copied());
+                    let authenticated = match (own, peer) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
                     let hold_bound_ms = link.stale_time_ms();
                     match link.channel_mut() {
                         Some(ch) => {

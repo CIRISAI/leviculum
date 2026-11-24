@@ -3958,6 +3958,50 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Get the remote identity for a link, if the peer has identified.
+    /// +ciris (leviculum#113, form 2): the host vouches that the party at
+    /// the far end of `link_id` is alive now. It records an authenticated
+    /// inbound time for that link exactly as a packet that decrypted under
+    /// the link key would, and nothing more: no inbound for the stale
+    /// check, no state change, no packet.
+    ///
+    /// Transition: in a link whose channel message is out of tries, the
+    /// #113 hold (`Channel::poll_with_inbound`) applies while some
+    /// authenticated evidence is newer than the message's first send and the
+    /// stale bound since that send has not passed; this call is one more
+    /// source of that evidence. It can never extend a link past its stale
+    /// bound, never revive a closed or unknown link (it returns `false`),
+    /// and a host that never calls it gets exactly the behaviour without it.
+    ///
+    /// The host's contract: call it ONLY on cryptographic evidence that the
+    /// party at the far end of THIS link is alive now, such as a frame
+    /// signed by that party's key, verified just now, that arrived on
+    /// another link (a call's media rides the publisher's own link, while a
+    /// listener's link toward the publisher carries only its proofs, which
+    /// queue behind that media). Never on the clock, never on unverified
+    /// traffic, never for a different party: it would hold a dead link open
+    /// for the stale bound.
+    ///
+    /// Rate-limited: a call within
+    /// [`crate::constants::PEER_EVIDENCE_MIN_INTERVAL_MS`] of the
+    /// last recorded one returns at once, so a 30 Hz media stream costs one
+    /// map lookup a frame.
+    pub fn note_peer_evidence(&mut self, link_id: &LinkId, now_ms: u64) -> bool {
+        let link_id = self.resolve_link_id(link_id);
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return false;
+        };
+        if matches!(link.state(), crate::link::LinkState::Closed) {
+            return false;
+        }
+        let fresh = link.last_authenticated_inbound_ms().is_none_or(|t| {
+            now_ms >= t.saturating_add(crate::constants::PEER_EVIDENCE_MIN_INTERVAL_MS)
+        });
+        if fresh {
+            link.record_authenticated_inbound(now_ms);
+        }
+        true
+    }
+
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<&Identity> {
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link), mirroring link()/link_mut().
@@ -8506,6 +8550,212 @@ mod tests {
         }
     }
 
+    type TestCore = NodeCore<OsRng, MockClock, NoStorage>;
+
+    /// A node with one link-accepting destination; its hash and key.
+    fn listening_node() -> (TestCore, DestinationHash, [u8; 32]) {
+        let identity = Identity::generate(&mut OsRng);
+        let key = identity.ed25519_verifying().to_bytes();
+        let mut node = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["echo"],
+        )
+        .unwrap();
+        dest.set_accepts_links(true);
+        let hash = *dest.hash();
+        node.register_destination(dest);
+        (node, hash, key)
+    }
+
+    /// The link handshake from `i` to `r`'s destination; (i's id, r's id).
+    fn handshake(
+        i: &mut TestCore,
+        r: &mut TestCore,
+        dest: DestinationHash,
+        key: &[u8; 32],
+    ) -> (LinkId, LinkId) {
+        use crate::transport::InterfaceId;
+        let (lid, _, out) = i.connect(dest, key).expect("connect");
+        let req = extract_broadcast_data(&out);
+        let out = r.handle_packet(InterfaceId(0), &req);
+        let rid = Link::calculate_link_id(&req);
+        let proof = extract_broadcast_data(&out);
+        let out = i.handle_packet(InterfaceId(0), &proof);
+        assert!(out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })));
+        let rtt = extract_broadcast_data(&out);
+        let _ = r.handle_packet(InterfaceId(0), &rtt);
+        (lid, rid)
+    }
+
+    /// Where the evidence that the peer is alive comes from, if anywhere.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Evidence {
+        None,
+        /// The same peer speaks on a second link (form 1).
+        SamePeerOtherLink,
+        /// A different peer speaks on its link (must not count).
+        OtherPeer,
+        /// The host vouches for the far end of the held link (form 2).
+        HostVouchesThisLink,
+        /// The host vouches, but for a different peer's link.
+        HostVouchesOtherLink,
+        /// The host vouched, but only before the message was first sent.
+        HostVouchedBeforeTheSend,
+    }
+
+    /// P sends a channel message on its first link to A that is never
+    /// proved (max_tries 2, as test_channel_exhaustion_produces_channel_
+    /// exhausted_close); `evidence` arrives at +5 s; true when the link was
+    /// torn down ChannelExhausted at +9 s (today's time, inside the stale
+    /// bound).
+    fn exhausted_with(evidence: Evidence) -> bool {
+        use crate::transport::InterfaceId;
+        let (mut a, a_dest, a_key) = listening_node();
+        let (mut o, o_dest, o_key) = listening_node();
+        let mut p = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        let (p_a1, _a_p1) = handshake(&mut p, &mut a, a_dest, &a_key);
+        let (p_a2, a_p2) = handshake(&mut p, &mut a, a_dest, &a_key);
+        let (p_o, o_p) = handshake(&mut p, &mut o, o_dest, &o_key);
+        assert_eq!(
+            p.link(&p_a1).unwrap().proven_peer_key(),
+            p.link(&p_a2).unwrap().proven_peer_key()
+        );
+        assert_ne!(
+            p.link(&p_a1).unwrap().proven_peer_key(),
+            p.link(&p_o).unwrap().proven_peer_key()
+        );
+        if evidence == Evidence::HostVouchedBeforeTheSend {
+            assert!(p.note_peer_evidence(&p_a1, TEST_TIME_MS));
+        }
+        let _ = p.send_on_link(&p_a1, b"exhaust").unwrap();
+        p.link_mut(&p_a1)
+            .unwrap()
+            .channel_mut()
+            .unwrap()
+            .set_max_tries_for_test(2);
+        p.transport().clock().set(TEST_TIME_MS + 4_000);
+        let _ = p.handle_timeout();
+        for node in [&mut p, &mut a, &mut o] {
+            node.transport().clock().set(TEST_TIME_MS + 5_000);
+        }
+        let now = TEST_TIME_MS + 5_000;
+        match evidence {
+            Evidence::None | Evidence::HostVouchedBeforeTheSend => {}
+            Evidence::SamePeerOtherLink => {
+                let out = a.send_on_link(&a_p2, b"alive").unwrap();
+                let _ = p.handle_packet(InterfaceId(0), &extract_broadcast_data(&out));
+            }
+            Evidence::OtherPeer => {
+                let out = o.send_on_link(&o_p, b"alive").unwrap();
+                let _ = p.handle_packet(InterfaceId(0), &extract_broadcast_data(&out));
+            }
+            Evidence::HostVouchesThisLink => assert!(p.note_peer_evidence(&p_a1, now)),
+            Evidence::HostVouchesOtherLink => assert!(p.note_peer_evidence(&p_o, now)),
+        }
+        p.transport().clock().set(TEST_TIME_MS + 9_000);
+        let out = p.handle_timeout();
+        let exhausted = out.events.iter().any(|e| {
+            matches!(
+                e,
+                NodeEvent::LinkClosed {
+                    link_id,
+                    reason: LinkCloseReason::ChannelExhausted,
+                    ..
+                } if *link_id == p_a1
+            )
+        });
+        assert_eq!(exhausted, p.link(&p_a1).is_none());
+        exhausted
+    }
+
+    /// +ciris (leviculum#113, form 1): an authenticated packet from the
+    /// same PROVEN peer on another link holds a link out of tries, as one
+    /// on the link itself would; one from a different peer does not, and a
+    /// peer silent on every link is torn down at today's time.
+    #[test]
+    fn evidence_from_the_same_proven_peer_on_another_link_holds_the_link() {
+        assert!(exhausted_with(Evidence::None), "silent: torn down as today");
+        assert!(!exhausted_with(Evidence::SamePeerOtherLink));
+        assert!(
+            exhausted_with(Evidence::OtherPeer),
+            "another peer's traffic"
+        );
+    }
+
+    /// +ciris (leviculum#113, form 2): the host vouching for the far end
+    /// of the held link holds it; vouching for a different peer's link, or
+    /// only before the message was sent, does not; an unknown link is
+    /// refused.
+    #[test]
+    fn the_host_vouching_for_the_peer_holds_only_that_link() {
+        assert!(!exhausted_with(Evidence::HostVouchesThisLink));
+        assert!(exhausted_with(Evidence::HostVouchesOtherLink));
+        assert!(exhausted_with(Evidence::HostVouchedBeforeTheSend));
+        let (mut p, _, _) = listening_node();
+        assert!(!p.note_peer_evidence(&LinkId::new([9; 16]), TEST_TIME_MS));
+    }
+
+    /// +ciris (leviculum#113, form 1 on the responder side): a responder
+    /// knows its peer's identity only once the peer identified; two links
+    /// are the same peer's only when BOTH carry that proven identity.
+    #[test]
+    fn a_responder_takes_peer_evidence_only_from_links_identified_by_the_same_identity() {
+        use crate::transport::InterfaceId;
+        for identify_both in [true, false] {
+            let (mut a, a_dest, a_key) = listening_node();
+            let mut p =
+                NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+            let (p_a1, a_p1) = handshake(&mut p, &mut a, a_dest, &a_key);
+            let (p_a2, _a_p2) = handshake(&mut p, &mut a, a_dest, &a_key);
+            let p_identity = Identity::generate(&mut OsRng);
+            let links: &[LinkId] = if identify_both {
+                &[p_a1, p_a2]
+            } else {
+                &[p_a2]
+            };
+            for link in links {
+                let out = p.identify_link(link, &p_identity).unwrap();
+                let _ = a.handle_packet(InterfaceId(0), &extract_broadcast_data(&out));
+            }
+            assert_eq!(
+                a.link(&a_p1).unwrap().proven_peer_key().is_some(),
+                identify_both
+            );
+            // A is the control sender now, on its link a_p1.
+            let _ = a.send_on_link(&a_p1, b"exhaust").unwrap();
+            a.link_mut(&a_p1)
+                .unwrap()
+                .channel_mut()
+                .unwrap()
+                .set_max_tries_for_test(2);
+            a.transport().clock().set(TEST_TIME_MS + 4_000);
+            let _ = a.handle_timeout();
+            a.transport().clock().set(TEST_TIME_MS + 5_000);
+            p.transport().clock().set(TEST_TIME_MS + 5_000);
+            let out = p.send_on_link(&p_a2, b"alive").unwrap();
+            let _ = a.handle_packet(InterfaceId(0), &extract_broadcast_data(&out));
+            a.transport().clock().set(TEST_TIME_MS + 9_000);
+            let out = a.handle_timeout();
+            let exhausted = out.events.iter().any(|e| {
+                matches!(
+                    e,
+                    NodeEvent::LinkClosed {
+                        reason: LinkCloseReason::ChannelExhausted,
+                        ..
+                    }
+                )
+            });
+            assert_eq!(exhausted, !identify_both, "identify_both={identify_both}");
+        }
+    }
+
     /// +ciris (leviculum#113, the root cause): on a queueing uplink it is
     /// the ORIGINAL send of a channel message that gets through late, after
     /// it was retransmitted. Its proof must confirm the message: every
@@ -8607,6 +8857,102 @@ mod tests {
     /// mark_delivered_attempt), so the timeout learns the queue's delay.
     #[test]
     fn a_queueing_uplink_at_2_3x_overload_does_not_kill_the_link() {
+        queueing_uplink_case(false, false).assert_lived();
+    }
+
+    /// +ciris (leviculum#113): the other direction of edge's call shape,
+    /// the links that died FIRST in its capped-uplink run (a listener's
+    /// link toward the capped publisher, 2.17 to 2.22 s after the cap). The
+    /// sender A's own uplink is clear: its control messages reach P at
+    /// once. What is late is P's PROOF of each one, which leaves P through
+    /// the same capped FIFO, behind P's media. That media rides ANOTHER link
+    /// (edge's legs are one-directional per link: P's media to A is on P's
+    /// link to A, not on A's link to P), so A's link sees nothing
+    /// authenticated from P but those late proofs, and the #113 hold does
+    /// not apply. The proof of the original still arrives after A's
+    /// retransmits; the timeout must learn that delay, and the link must
+    /// live.
+    ///
+    /// From A's link alone P is indistinguishable from a dead peer: seq 1
+    /// meets a 1.3 s queue, its five waits end at 1.34 s, its proof lands
+    /// at about 2.43 s, and no earlier proof carried the delay (red on
+    /// c75fdeb01 AND with the learned timeout alone: torn down at 2.34 s,
+    /// edge measured 2.17 to 2.22 s). The evidence that P is alive is
+    /// elsewhere: its media, verified by the host on P's own link. Here
+    /// A's host vouches for it (NodeCore::note_peer_evidence) as each media
+    /// frame arrives; the hold keeps seq 1 until its proof, which teaches
+    /// the timeout the delay.
+    #[test]
+    fn proofs_returning_through_the_peers_queue_do_not_kill_the_link() {
+        queueing_uplink_case(true, true).assert_lived();
+    }
+
+    /// +ciris (leviculum#113): the same proof-delayed shape with NO evidence
+    /// from elsewhere (the host does not vouch): torn down ChannelExhausted
+    /// exactly when it always was, at the first message's five waits
+    /// (1.0 s + 1.34 s). Nothing holds a link on the clock alone.
+    #[test]
+    fn without_evidence_the_proof_delayed_link_dies_when_it_always_did() {
+        let outcome = queueing_uplink_case(true, false);
+        assert_eq!(
+            outcome.exhausted_at,
+            Some(2_340),
+            "{}",
+            outcome.log.join("\n")
+        );
+    }
+
+    /// What one run of [`queueing_uplink_case`] saw.
+    struct UplinkOutcome {
+        proof_delayed: bool,
+        closed: bool,
+        /// When the control sender's link was torn down ChannelExhausted.
+        exhausted_at: Option<u64>,
+        sent_control: usize,
+        confirmed: usize,
+        peak_delay_ms: f64,
+        retransmitted: bool,
+        log: Vec<alloc::string::String>,
+    }
+
+    impl UplinkOutcome {
+        fn assert_lived(&self) {
+            // The queue really did build: seconds of delay at its peak.
+            assert!(
+                self.peak_delay_ms > 2_000.0,
+                "peak queue delay {:.0} ms",
+                self.peak_delay_ms
+            );
+            assert!(
+                !self.closed,
+                "the link was torn down (proof_delayed={}, peak delay {:.0} ms):\n{}",
+                self.proof_delayed,
+                self.peak_delay_ms,
+                self.log.join("\n")
+            );
+            assert_eq!(
+                self.confirmed, self.sent_control,
+                "every control message confirmed"
+            );
+            // The late proofs were really late: the sender retransmitted.
+            assert!(
+                self.retransmitted,
+                "the control sender never retransmitted: the case did not delay it"
+            );
+        }
+    }
+
+    /// The two-node FIFO shape behind both tests. P's uplink is a FIFO
+    /// carrying datagram media at 2.3x its drain rate (shed after 3 s);
+    /// everything P sends goes through it, A's packets reach P at once.
+    /// `proof_delayed = false`: P sends a control message a second on the
+    /// link that also carries its media, its DATA is queued. `true`: A
+    /// sends them, P's PROOFS are queued, and P's media is traffic of
+    /// another link sharing the FIFO (filler of the same size, not
+    /// delivered on this link). `vouch`: as each such media frame reaches
+    /// A, A's host vouches for P on A's link (note_peer_evidence), as edge
+    /// does on verifying a chunk P signed.
+    fn queueing_uplink_case(proof_delayed: bool, vouch: bool) -> UplinkOutcome {
         use crate::transport::InterfaceId;
         let mut pair = establish_nodecore_link_pair();
         let p_link = pair.initiator_link_id;
@@ -8622,10 +8968,11 @@ mod tests {
         }
         let step = 10u64;
         let media = alloc::vec![0x4Du8; 200];
-        let mut fifo: alloc::collections::VecDeque<Vec<u8>> = alloc::collections::VecDeque::new();
+        // (packet, delivered on this link): filler is another link's media.
+        let mut fifo: alloc::collections::VecDeque<(Vec<u8>, bool)> =
+            alloc::collections::VecDeque::new();
         let mut budget = 0f64;
         let mut queued_bytes_peak = 0usize;
-        let mut offered = 0usize;
         let mut closed = false;
         let mut sent_control = 0;
         let mut confirmed = 0;
@@ -8634,114 +8981,184 @@ mod tests {
         // Drain at the media rate / 2.3 (bytes per ms).
         let media_rate = (media.len() + 80) as f64 / step as f64;
         let drain = media_rate / 2.3;
+        let note = |dbg_log: &mut Vec<alloc::string::String>,
+                    out: &crate::transport::TickOutput,
+                    t: u64,
+                    who: &str| {
+            for e in &out.events {
+                match e {
+                    NodeEvent::ChannelRetransmit {
+                        sequence, tries, ..
+                    } => dbg_log.push(alloc::format!(
+                        "DBG t={t} {who} retransmit seq={sequence} tries={tries}"
+                    )),
+                    NodeEvent::LinkClosed { reason, .. } => {
+                        dbg_log.push(alloc::format!("DBG t={t} {who} closed {reason:?}"))
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let count =
+            |out: &crate::transport::TickOutput, closed: &mut bool, confirmed: &mut usize| {
+                *closed |= out
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                *confirmed += out
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }))
+                    .count();
+            };
         while t <= 20_000 {
             pair.initiator.transport().clock().set(TEST_TIME_MS + t);
             pair.responder.transport().clock().set(TEST_TIME_MS + t);
-            let mut outs = Vec::new();
+            // P's output: into the FIFO. A's output: straight to P.
+            let mut p_outs = Vec::new();
+            let mut a_outs = Vec::new();
             if t < 3_000 {
-                if let Ok((_, out)) = pair.initiator.send_unordered(&p_link, &media) {
-                    outs.push(out);
+                if proof_delayed {
+                    fifo.push_back((alloc::vec![0u8; media.len() + 80], false));
+                } else if let Ok((_, out)) = pair.initiator.send_unordered(&p_link, &media) {
+                    p_outs.push(out);
                 }
             }
             if t.is_multiple_of(1_000) && t < 6_000 {
-                if let Ok(out) = pair.initiator.send_on_link(&p_link, b"control") {
+                let (node, link) = if proof_delayed {
+                    (&mut pair.responder, a_link)
+                } else {
+                    (&mut pair.initiator, p_link)
+                };
+                if let Ok(out) = node.send_on_link(&link, b"control") {
                     sent_control += 1;
-                    outs.push(out);
+                    if proof_delayed {
+                        a_outs.push(out);
+                    } else {
+                        p_outs.push(out);
+                    }
                 }
                 if t == 0 {
                     // The channel exists now: a 10 ms path's SRTT.
-                    if let Some(ch) = pair
-                        .initiator
-                        .link_mut(&p_link)
-                        .and_then(|l| l.channel_mut())
-                    {
+                    if let Some(ch) = node.link_mut(&link).and_then(|l| l.channel_mut()) {
                         ch.set_srtt_for_test(10.0);
                     }
                 }
             }
-            outs.push(pair.initiator.handle_timeout());
-            for out in &outs {
-                for e in &out.events {
-                    if let NodeEvent::ChannelRetransmit {
-                        sequence, tries, ..
-                    } = e
-                    {
-                        dbg_log.push(alloc::format!(
-                            "DBG t={t} retransmit seq={sequence} tries={tries} q={}ms srtt={:?}",
-                            (fifo.iter().map(Vec::len).sum::<usize>() as f64 / drain) as u64,
-                            pair.initiator
-                                .link(&p_link)
-                                .and_then(|l| l.channel())
-                                .map(|c| c.srtt_ms())
-                        ));
-                    }
-                    if let NodeEvent::LinkClosed { reason, .. } = e {
-                        dbg_log.push(alloc::format!("DBG t={t} closed {reason:?}"));
-                    }
+            p_outs.push(pair.initiator.handle_timeout());
+            a_outs.push(pair.responder.handle_timeout());
+            // The control sender's events say what is confirmed.
+            for out in &p_outs {
+                note(&mut dbg_log, out, t, "P");
+                if proof_delayed {
+                    closed |= out
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                } else {
+                    count(out, &mut closed, &mut confirmed);
                 }
-                closed |= out
-                    .events
-                    .iter()
-                    .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
-                confirmed += out
-                    .events
-                    .iter()
-                    .filter(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }))
-                    .count();
-                for packet in extract_all_action_data(out) {
-                    offered += packet.len();
-                    fifo.push_back(packet);
+                fifo.extend(extract_all_action_data(out).into_iter().map(|p| (p, true)));
+            }
+            for out in &a_outs {
+                note(&mut dbg_log, out, t, "A");
+                if proof_delayed {
+                    count(out, &mut closed, &mut confirmed);
+                } else {
+                    closed |= out
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
                 }
             }
-            queued_bytes_peak = queued_bytes_peak.max(fifo.iter().map(Vec::len).sum());
-            // The uplink drains at its capped rate.
+            // A's packets reach P at once; P's answers join the FIFO.
+            let mut to_p: Vec<Vec<u8>> = Vec::new();
+            for out in &a_outs {
+                to_p.extend(extract_all_action_data(out));
+            }
+            for packet in to_p {
+                let out = pair.initiator.handle_packet(InterfaceId(0), &packet);
+                note(&mut dbg_log, &out, t, "P");
+                if proof_delayed {
+                    closed |= out
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                } else {
+                    count(&out, &mut closed, &mut confirmed);
+                }
+                fifo.extend(extract_all_action_data(&out).into_iter().map(|p| (p, true)));
+            }
+            queued_bytes_peak = queued_bytes_peak.max(fifo.iter().map(|(p, _)| p.len()).sum());
+            // P's uplink drains at its capped rate.
             budget += drain * step as f64;
             let mut to_a = Vec::new();
-            while let Some(front) = fifo.front() {
+            while let Some((front, _)) = fifo.front() {
                 if (front.len() as f64) > budget {
                     break;
                 }
                 budget -= front.len() as f64;
-                to_a.push(fifo.pop_front().unwrap());
+                let (packet, ours) = fifo.pop_front().unwrap();
+                if ours {
+                    to_a.push(packet);
+                } else if vouch {
+                    assert!(pair.responder.note_peer_evidence(&a_link, TEST_TIME_MS + t));
+                }
             }
             if fifo.is_empty() {
                 budget = budget.min(drain * step as f64);
             }
-            // The receiver answers at once; its uplink is not capped.
-            let mut to_p = Vec::new();
+            // A answers at once; its uplink is not capped, so its answers
+            // reach P now (and P's answers to those join the FIFO).
+            let mut back_to_p = Vec::new();
             for packet in to_a {
                 let out = pair.responder.handle_packet(InterfaceId(0), &packet);
-                to_p.extend(extract_all_action_data(&out));
+                note(&mut dbg_log, &out, t, "A");
+                if proof_delayed {
+                    count(&out, &mut closed, &mut confirmed);
+                } else {
+                    closed |= out
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                }
+                back_to_p.extend(extract_all_action_data(&out));
             }
-            to_p.extend(extract_all_action_data(&pair.responder.handle_timeout()));
-            for packet in to_p {
+            for packet in back_to_p {
                 let out = pair.initiator.handle_packet(InterfaceId(0), &packet);
-                closed |= out
-                    .events
-                    .iter()
-                    .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
-                confirmed += out
-                    .events
-                    .iter()
-                    .filter(|e| matches!(e, NodeEvent::LinkDeliveryConfirmed { .. }))
-                    .count();
+                note(&mut dbg_log, &out, t, "P");
+                if proof_delayed {
+                    closed |= out
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, NodeEvent::LinkClosed { .. }));
+                } else {
+                    count(&out, &mut closed, &mut confirmed);
+                }
+                fifo.extend(extract_all_action_data(&out).into_iter().map(|p| (p, true)));
             }
             t += step;
         }
-        let _ = (a_link, offered);
-        // The queue really did build: seconds of delay at its peak.
-        let peak_delay_ms = queued_bytes_peak as f64 / drain;
-        assert!(
-            peak_delay_ms > 2_000.0,
-            "peak queue delay {peak_delay_ms:.0} ms"
-        );
-        assert!(
-            !closed,
-            "the link was torn down (peak delay {peak_delay_ms:.0} ms):\n{}",
-            dbg_log.join("\n")
-        );
-        assert!(pair.initiator.link(&p_link).is_some());
-        assert_eq!(confirmed, sent_control, "every control message confirmed");
+        let sender = if proof_delayed { "A" } else { "P" };
+        let exhausted_at = dbg_log.iter().find_map(|l| {
+            let rest = l.strip_prefix("DBG t=")?;
+            let (time, what) = rest.split_once(' ')?;
+            (what == alloc::format!("{sender} closed ChannelExhausted"))
+                .then(|| time.parse().ok())
+                .flatten()
+        });
+        UplinkOutcome {
+            proof_delayed,
+            closed,
+            exhausted_at,
+            sent_control,
+            confirmed,
+            peak_delay_ms: queued_bytes_peak as f64 / drain,
+            retransmitted: dbg_log
+                .iter()
+                .any(|l| l.contains(&alloc::format!("{sender} retransmit"))),
+            log: dbg_log,
+        }
     }
 
     #[test]
