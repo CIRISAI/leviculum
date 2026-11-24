@@ -169,6 +169,23 @@ pub(super) struct ReceiptEntry {
     /// Channel sequence, or `None` for a raw link packet such as LXMF.
     pub(super) sequence: Option<u16>,
     pub(super) deadline_ms: u64,
+    /// +ciris (leviculum#113): which attempt of the channel message this
+    /// packet was (1 = the first send; 0 for a raw link packet), and when it
+    /// went out: a proof for it is an unambiguous RTT sample of that attempt
+    /// (`Channel::mark_delivered_attempt`).
+    pub(super) attempt: u8,
+    pub(super) sent_ms: u64,
+}
+
+/// +ciris (leviculum#113): what a verified proof confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfirmedReceipt {
+    /// Channel sequence, or `None` for a raw link packet.
+    pub(super) sequence: Option<u16>,
+    /// The attempt the proof answers (1 = the first send).
+    pub(super) attempt: u8,
+    /// When that attempt was sent.
+    pub(super) sent_ms: u64,
 }
 
 impl ReceiptTracker {
@@ -202,20 +219,33 @@ impl ReceiptTracker {
         sequence: u16,
         now_ms: u64,
     ) {
+        self.register_attempt(packet_data, link_id, sequence, 1, now_ms);
+    }
+
+    /// [`Self::register`] for attempt `attempt` (1 = the first send) of a
+    /// channel message.
+    pub(super) fn register_attempt(
+        &mut self,
+        packet_data: &[u8],
+        link_id: LinkId,
+        sequence: u16,
+        attempt: u8,
+        now_ms: u64,
+    ) {
         let attempts = self
             .entries
             .iter()
             .filter(|e| e.link_id == link_id && e.sequence == Some(sequence))
             .count();
         if attempts >= RECEIPT_ATTEMPTS_MAX {
-            // Order by deadline (each attempt's is later than the last's):
+            // Order by send time (each attempt's is later than the last's):
             // keep the first, drop the next.
             let mut mine: Vec<(u64, usize)> = self
                 .entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| e.link_id == link_id && e.sequence == Some(sequence))
-                .map(|(i, e)| (e.deadline_ms, i))
+                .map(|(i, e)| (e.sent_ms, i))
                 .collect();
             mine.sort_unstable();
             if let Some(&(_, second)) = mine.get(1) {
@@ -240,6 +270,8 @@ impl ReceiptTracker {
             link_id,
             sequence: Some(sequence),
             deadline_ms: now_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS),
+            attempt,
+            sent_ms: now_ms,
         });
     }
 
@@ -260,6 +292,8 @@ impl ReceiptTracker {
             link_id,
             sequence: None,
             deadline_ms,
+            attempt: 0,
+            sent_ms: 0,
         });
         full_hash
     }
@@ -278,10 +312,21 @@ impl ReceiptTracker {
     /// Remove the entry matching `truncated_hash` and return its sequence
     /// number; for a channel message, every other attempt's receipt of the
     /// same `(link_id, sequence)` goes too (+ciris, leviculum#113).
+    #[cfg(test)]
     pub(super) fn confirm_delivery(
         &mut self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
     ) -> Option<Option<u16>> {
+        self.confirm_delivery_attempt(truncated)
+            .map(|confirmed| confirmed.sequence)
+    }
+
+    /// [`Self::confirm_delivery`], also naming the attempt the proof answers
+    /// and when it was sent (+ciris, leviculum#113).
+    pub(super) fn confirm_delivery_attempt(
+        &mut self,
+        truncated: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<ConfirmedReceipt> {
         let idx = self
             .entries
             .iter()
@@ -291,7 +336,11 @@ impl ReceiptTracker {
             self.entries
                 .retain(|e| !(e.link_id == entry.link_id && e.sequence == Some(sequence)));
         }
-        Some(entry.sequence)
+        Some(ConfirmedReceipt {
+            sequence: entry.sequence,
+            attempt: entry.attempt,
+            sent_ms: entry.sent_ms,
+        })
     }
 
     /// Remove all entries for a given link.
@@ -1732,7 +1781,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
             // Event only fires when the receipt still exists, a valid proof for
             // an already-expired/removed receipt is silently dropped.
-            if let Some(sequence) = self.receipt_tracker.confirm_delivery(&truncated) {
+            if let Some(confirmed) = self.receipt_tracker.confirm_delivery_attempt(&truncated) {
                 crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),
                     ctx = ?context,
@@ -1741,10 +1790,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 let now_ms = self.transport.clock().now_ms();
                 let rtt_ms = self.links.get(link_id).map(|l| l.rtt_ms()).unwrap_or(500);
-                if let Some(sequence) = sequence {
+                if let Some(sequence) = confirmed.sequence {
                     if let Some(link) = self.links.get_mut(link_id) {
                         if let Some(ch) = link.channel_mut() {
-                            ch.mark_delivered(sequence, now_ms, rtt_ms);
+                            // +ciris (leviculum#113): the proof names its
+                            // attempt, so it is an RTT sample even for a
+                            // retransmitted message, and shows which
+                            // retransmissions were spurious.
+                            ch.mark_delivered_attempt(
+                                sequence,
+                                confirmed.attempt,
+                                confirmed.sent_ms,
+                                now_ms,
+                                rtt_ms,
+                            );
                         }
                     }
                 }
@@ -4760,7 +4819,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         if let Some(packet) = packet {
                             // Register receipt for the re-encrypted packet
                             self.receipt_tracker
-                                .register(&packet, link_id, sequence, now_ms);
+                                .register_attempt(&packet, link_id, sequence, tries, now_ms);
 
                             self.events.push(NodeEvent::ChannelRetransmit {
                                 link_id,

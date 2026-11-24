@@ -234,7 +234,9 @@ pub struct Channel {
     srtt_ms: f64,
     /// RTT variance (f64, milliseconds). 0.0 = not yet measured.
     rttvar_ms: f64,
-    /// Minimum RTT observed across Karn-valid delivery samples (milliseconds).
+    /// Minimum RTT observed across unambiguous delivery samples: Karn-valid
+    /// ones and, +ciris (leviculum#113), every attempt-tagged one
+    /// ([`Channel::mark_delivered_attempt`]) (milliseconds).
     /// `None` until the first sample. Telemetry only (leviculum#35) — never
     /// consulted by window/pacing logic.
     min_rtt_ms: Option<u64>,
@@ -250,6 +252,10 @@ pub struct Channel {
     /// (`ChannelError::PacingDelay`) — backpressure, but from pacing rather
     /// than a full window (leviculum#35).
     pacing_rejections: u64,
+    /// +ciris (leviculum#113): the link's stale bound as last handed to
+    /// [`Channel::poll_with_inbound`], 0 until then. It bounds the RTT
+    /// estimate ([`Channel::srtt_cap_ms`]).
+    hold_bound_ms: u64,
 }
 
 impl Default for Channel {
@@ -278,6 +284,7 @@ impl Channel {
             delivered_bytes: 0,
             busy_rejections: 0,
             pacing_rejections: 0,
+            hold_bound_ms: 0,
         }
     }
 
@@ -372,7 +379,8 @@ impl Channel {
         self.rttvar_ms
     }
 
-    /// Minimum Karn-valid delivery RTT observed, in milliseconds (leviculum#35).
+    /// Minimum unambiguous delivery RTT observed, in milliseconds
+    /// (leviculum#35; attempt-tagged samples count, leviculum#113).
     pub fn min_rtt_ms(&self) -> Option<u64> {
         self.min_rtt_ms
     }
@@ -930,6 +938,130 @@ impl Channel {
         }
     }
 
+    /// +ciris (leviculum#113): a delivery proof that names the ATTEMPT it
+    /// answers. Every retransmit is re-encrypted, so each attempt has its own
+    /// packet hash and its own receipt, and the receipt says which attempt
+    /// (`attempt`, 1 = the first send) went out when (`attempt_sent_ms`).
+    /// That is what TCP's timestamp option gives a sender (RFC 7323 §4; the
+    /// Eifel detection of RFC 3522 rests on it): Karn's ambiguity (RFC 6298
+    /// §5), which [`mark_delivered`](Self::mark_delivered) honours by taking
+    /// no sample from a retransmitted message, does not arise. So:
+    ///
+    /// - every proof is an RTT sample, `now_ms - attempt_sent_ms`, fed to the
+    ///   RFC 6298 estimator. On a queueing uplink the sample is the queue
+    ///   delay, and the retransmission timeout (`max(srtt × 2.5, 100 ms) ×
+    ///   1.5^(tries-1)`, Python's `Channel.py:551` without its tx-ring
+    ///   factor) grows to cover it instead of spending the message's five
+    ///   tries in about 1.3 s on a short path. Once the queue drains, proofs
+    ///   of first sends come back fast and the same estimator brings it down
+    ///   again: each sample takes 1/8 of the excess off SRTT.
+    /// - the estimate is bounded ([`Self::srtt_cap_ms`]): SRTT never exceeds
+    ///   the value whose ordinary retry span (all `max_tries` waits, the
+    ///   queue term included) equals the link's stale bound. A channel whose
+    ///   peer then falls silent gives the link up no later than the link's
+    ///   own stale check would, however long the queue it learned was.
+    /// - a proof for an attempt EARLIER than the latest shows the later
+    ///   retransmissions were spurious (the attempt was queued, not lost: the
+    ///   detection of RFC 3522 and, by other means, RFC 5682 F-RTO). The
+    ///   message is confirmed, and the window decrements the spurious
+    ///   retransmissions cost are given back (RFC 3522's response restores
+    ///   the congestion state likewise). The messages queued BEHIND that
+    ///   attempt keep their tries: the proof is itself authenticated inbound
+    ///   (`record_authenticated_inbound` runs before the confirm), so the
+    ///   hold of [`poll_with_inbound`](Self::poll_with_inbound) already keeps
+    ///   every message first sent before it from being torn down for its
+    ///   tries until the stale bound; a per-message credit for the same
+    ///   evidence would change nothing.
+    /// - a link with no authenticated inbound gets no samples, so its timeout
+    ///   is what it was and it is torn down exactly as before.
+    ///
+    /// Python Reticulum (`Channel.py:551`) instead scales every timeout by
+    /// the tx ring's length and never updates its RTT after the handshake
+    /// (`Link.py:540`); that grows the timeout with the number of messages
+    /// outstanding, not with the delay they meet.
+    ///
+    /// Returns `true` if the sequence was outstanding.
+    pub fn mark_delivered_attempt(
+        &mut self,
+        sequence: u16,
+        attempt: u8,
+        attempt_sent_ms: u64,
+        now_ms: u64,
+        rtt_ms: u64,
+    ) -> bool {
+        let Some(pos) = self
+            .tx_ring
+            .iter()
+            .position(|e| e.envelope.sequence == sequence)
+        else {
+            crate::tracing::debug!(
+                seq = sequence,
+                attempt,
+                "channel: delivered — seq not found (duplicate ACK?)"
+            );
+            return false;
+        };
+        let tries = self.tx_ring[pos].tries;
+        let sample_rtt = now_ms.saturating_sub(attempt_sent_ms);
+        if sample_rtt > 0 {
+            self.update_srtt(sample_rtt);
+            if let Some(cap) = self.srtt_cap_ms(rtt_ms) {
+                self.srtt_ms = self.srtt_ms.min(cap);
+            }
+            self.min_rtt_ms = Some(match self.min_rtt_ms {
+                Some(m) => m.min(sample_rtt),
+                None => sample_rtt,
+            });
+        }
+        let spurious = if attempt >= 1 {
+            tries.saturating_sub(attempt)
+        } else {
+            0
+        };
+        self.delivered_bytes = self
+            .delivered_bytes
+            .saturating_add(self.tx_ring[pos].envelope.packed_size() as u64);
+        self.tx_ring.remove(pos);
+        // One success, and the decrements the spurious retransmissions cost.
+        for _ in 0..=spurious {
+            self.adjust_window(true, rtt_ms);
+        }
+        let eff_rtt = self.effective_rtt_ms(rtt_ms);
+        self.recalculate_pacing(eff_rtt);
+        crate::tracing::debug!(
+            seq = sequence,
+            attempt,
+            tries,
+            sample_rtt,
+            spurious,
+            tx_ring = self.tx_ring.len(),
+            window = self.window,
+            srtt = self.srtt_ms,
+            "channel: delivered (attempt-tagged)"
+        );
+        true
+    }
+
+    /// +ciris (leviculum#113): the most an RTT sample may raise SRTT to, once
+    /// the link's stale bound is known (`None` before): the SRTT whose
+    /// ordinary retry span, every one of `max_tries` waits at the largest
+    /// queue term (`queue_len ≤ window`, so `base + queue ≤ (2.5 + 1) ×
+    /// SRTT`), equals the stale bound. On a short path's 10 s bound that is
+    /// 216.7 ms (a 540 ms base timeout, a 7.1 s span without the queue
+    /// term, 10 s with it at its largest). Never below the
+    /// handshake RTT `rtt_ms`, so it can only hold a learned queue back,
+    /// never shorten a timeout below what the path itself measured.
+    pub fn srtt_cap_ms(&self, rtt_ms: u64) -> Option<f64> {
+        if self.hold_bound_ms == 0 {
+            return None;
+        }
+        let span: f64 = (0..u32::from(self.max_tries))
+            .map(|k| pow_f64(CHANNEL_BACKOFF_BASE, k))
+            .sum();
+        let per_srtt = (CHANNEL_RTT_TIMEOUT_MULTIPLIER + 1.0) * span;
+        Some((self.hold_bound_ms as f64 / per_srtt).max(rtt_ms as f64))
+    }
+
     /// When `outbound` times out and [`poll`](Self::poll) retransmits it, or
     /// `None` if it is not awaiting a proof.
     fn retransmit_due_ms(&self, outbound: &OutboundEnvelope, eff_rtt: u64) -> Option<u64> {
@@ -1012,6 +1144,9 @@ impl Channel {
         authenticated_inbound_ms: Option<u64>,
         hold_bound_ms: u64,
     ) -> Vec<ChannelAction> {
+        if hold_bound_ms > 0 {
+            self.hold_bound_ms = hold_bound_ms;
+        }
         let mut actions = self.expire_due(now_ms);
         let mut window_decrements = 0usize;
         let mut pacing_doublings = 0usize;
@@ -2453,6 +2588,176 @@ mod tests {
         }
         assert!(t >= 1_000 + bound);
         assert!(t < 1_000 + bound + crate::constants::CHANNEL_HELD_RETRY_MAX_MS);
+    }
+
+    /// The base timeout `max(srtt × 2.5, 100)` the channel would use now.
+    fn base_rto_ms(channel: &Channel, rtt_ms: u64) -> u64 {
+        calculate_timeout(1, channel.effective_rtt_ms(rtt_ms), 0, 1)
+    }
+
+    /// +ciris (leviculum#113): a proof that names an attempt is an RTT
+    /// sample even for a retransmitted message (no Karn exclusion: the
+    /// attempt is known), so the timeout learns a queue's delay. A proof of
+    /// the ORIGINAL send, 1.4 s late, after four retransmissions, raises the
+    /// base timeout from the 100 ms floor; a proof of the LATEST attempt of
+    /// a retransmitted message is a sample of that attempt.
+    #[test]
+    fn an_attempt_tagged_proof_is_an_rtt_sample_for_a_retransmitted_message() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let _ = channel.poll_with_inbound(0, rtt_ms, None, 10_000);
+        assert_eq!(base_rto_ms(&channel, rtt_ms), 100);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, 1_000, rtt_ms)
+            .unwrap();
+        for _ in 0..4 {
+            let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let _ = channel.poll_with_inbound(t, rtt_ms, None, 10_000);
+        }
+        assert!(channel.mark_delivered_attempt(0, 1, 1_000, 2_400, rtt_ms));
+        // 0.875 × 10 + 0.125 × 1400 = 183.75
+        assert!(
+            (channel.srtt_ms() - 183.75).abs() < 0.01,
+            "{}",
+            channel.srtt_ms()
+        );
+        assert_eq!(base_rto_ms(&channel, rtt_ms), 457);
+
+        // The latest attempt's proof: a sample of that attempt alone.
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, 0, rtt_ms)
+            .unwrap();
+        let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+        let _ = channel.poll(t, rtt_ms);
+        assert!(channel.mark_delivered_attempt(0, 2, t, t + 30, rtt_ms));
+        assert!((channel.srtt_ms() - (0.875 * 10.0 + 0.125 * 30.0)).abs() < 0.01);
+    }
+
+    /// +ciris (leviculum#113): the RTO growth is capped. However long the
+    /// samples, SRTT stops at `srtt_cap_ms`, the value whose five ordinary
+    /// waits (queue term at its largest) add up to the link's stale bound:
+    /// 216.7 ms on a 10 s bound. A channel whose peer then falls silent tears
+    /// the link down no later than the bound, as the link's own stale check
+    /// would.
+    #[test]
+    fn the_learned_timeout_is_capped_so_a_silent_link_still_dies_by_the_stale_bound() {
+        let rtt_ms = 10;
+        let bound = 10_000;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
+        let cap = channel.srtt_cap_ms(rtt_ms).unwrap();
+        assert!((cap - 216.7).abs() < 0.1, "cap {cap}");
+        let mut t = 1_000;
+        for seq in 0..40u16 {
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                .unwrap();
+            assert!(channel.mark_delivered_attempt(seq, 1, t, t + 30_000, rtt_ms));
+            t += 31_000;
+        }
+        assert!(channel.srtt_ms() <= cap, "srtt {}", channel.srtt_ms());
+        // Now the peer is silent: the next message is torn down within the
+        // bound, never later.
+        channel.set_window_for_test(1);
+        let first = t;
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, first, rtt_ms)
+            .unwrap();
+        loop {
+            t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            let actions = channel.poll_with_inbound(t, rtt_ms, Some(1), bound);
+            if matches!(&actions[0], ChannelAction::TearDownLink) {
+                break;
+            }
+        }
+        assert!(
+            t - first <= bound,
+            "torn down {} ms after the send",
+            t - first
+        );
+    }
+
+    /// +ciris (leviculum#113): the recovery direction. Once the queue
+    /// drains, proofs of first sends come back fast and the timeout comes
+    /// down again: from the cap (SRTT 216.7 ms, base 540 ms) to the 100 ms
+    /// floor within 15 samples of 10 ms (each takes 1/8 of the excess off:
+    /// 206.7 × 0.875^15 < 31).
+    #[test]
+    fn the_learned_timeout_comes_back_down_within_15_samples_after_the_queue_drains() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let _ = channel.poll_with_inbound(0, rtt_ms, None, 10_000);
+        let mut t = 1_000;
+        let mut seq = 0u16;
+        let mut deliver = |channel: &mut Channel, sample: u64| {
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                .unwrap();
+            assert!(channel.mark_delivered_attempt(seq, 1, t, t + sample, rtt_ms));
+            seq += 1;
+            t += sample + 1;
+        };
+        for _ in 0..10 {
+            deliver(&mut channel, 4_000);
+        }
+        assert_eq!(base_rto_ms(&channel, rtt_ms), 540, "at the cap");
+        let mut samples = 0;
+        while base_rto_ms(&channel, rtt_ms) > 100 {
+            deliver(&mut channel, 10);
+            samples += 1;
+            assert!(samples <= 15, "still {} ms", base_rto_ms(&channel, rtt_ms));
+        }
+        assert!(
+            samples >= 10,
+            "came down in {samples}: faster than the estimator"
+        );
+    }
+
+    /// +ciris (leviculum#113, RFC 3522 / RFC 5682): a proof of an EARLIER
+    /// attempt shows the later retransmissions were spurious: the window
+    /// decrements they cost are given back, where a proof of the latest
+    /// attempt gives back only the one success.
+    #[test]
+    fn a_spurious_retransmission_gives_back_the_window_it_cost() {
+        let rtt_ms = 10;
+        let mut windows = Vec::new();
+        for attempt in [1u8, 4] {
+            let mut channel = Channel::new();
+            channel.seed_srtt(rtt_ms);
+            channel.set_window_bounds_for_test(30, 16, 48);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, 1_000, rtt_ms)
+                .unwrap();
+            let mut sent = [0u64; 5];
+            sent[1] = 1_000;
+            for slot in sent.iter_mut().skip(2) {
+                let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+                let _ = channel.poll(t, rtt_ms);
+                *slot = t;
+            }
+            let shrunk = channel.window();
+            assert!(channel.mark_delivered_attempt(
+                0,
+                attempt,
+                sent[usize::from(attempt)],
+                sent[4] + 5,
+                rtt_ms
+            ));
+            windows.push((shrunk, channel.window()));
+        }
+        let (shrunk, after_original) = windows[0];
+        let (_, after_latest) = windows[1];
+        assert_eq!(after_latest, shrunk + 1, "the latest attempt: one success");
+        assert_eq!(
+            after_original,
+            shrunk + 4,
+            "the original: one success and the three spurious decrements back"
+        );
     }
 
     #[test]

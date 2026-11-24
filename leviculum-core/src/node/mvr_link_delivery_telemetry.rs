@@ -11,8 +11,10 @@
 //!    `busy_rejections` on the congested link while an app-limited idle link
 //!    stays at zero — the floor-vs-ceiling bit a delivery-rate consumer
 //!    needs.
-//!  - Karn gating: a retransmitted exchange must not feed `min_rtt_ms`; only
-//!    clean (first-try) samples lower the floor.
+//!  - attempt-tagged samples (+ciris, leviculum#113, was Karn gating): a
+//!    proof names the attempt it answers, so a retransmitted exchange feeds
+//!    `min_rtt_ms` the RTT of THAT attempt, never the span since the first
+//!    send; clean samples lower the floor as before.
 
 extern crate std;
 
@@ -281,10 +283,14 @@ fn busy_rejections_discriminate_congested_from_app_limited() {
     );
 }
 
-/// (d) Karn gating end-to-end: a retransmitted exchange must not feed
-/// `min_rtt_ms`; only clean first-try samples lower the floor.
+/// (d) end-to-end, a retransmitted exchange: its proof names the attempt
+/// (each retransmit is re-encrypted, so each attempt has its own hash and
+/// receipt), so the sample is that attempt's RTT, unambiguous (RFC 7323
+/// §4; Karn's rule, RFC 6298 §5, was for a sender that cannot tell the
+/// attempts apart). It must never be the span since the FIRST send, which
+/// is what an ambiguous sample would have been.
 #[test]
-fn min_rtt_ignores_retransmitted_exchanges() {
+fn min_rtt_takes_the_retransmitted_attempts_own_rtt() {
     let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
 
     // Send one envelope and DROP it (never delivered). Advance time until the
@@ -295,6 +301,7 @@ fn min_rtt_ignores_retransmitted_exchanges() {
     drop(action_data(&out)); // the packet is lost
 
     let mut retransmit = Vec::new();
+    let first_send = initiator.transport().clock().now_ms();
     for _ in 0..30 {
         initiator.transport().clock().advance(5_000);
         let out = initiator.handle_timeout();
@@ -327,11 +334,12 @@ fn min_rtt_ignores_retransmitted_exchanges() {
     );
     assert_eq!(
         stats.min_rtt_ms(),
-        None,
-        "a retransmitted exchange must not feed min_rtt (Karn)"
+        Some(500),
+        "the retransmitted attempt's own RTT, not the {} ms since the first send",
+        initiator.transport().clock().now_ms() - first_send
     );
 
-    // A clean exchange seeds the floor with its real sample …
+    // A clean exchange lowers the floor with its real sample …
     proofed_channel_send(
         &mut initiator,
         &mut responder,
@@ -345,7 +353,7 @@ fn min_rtt_ignores_retransmitted_exchanges() {
     assert_eq!(
         stats.min_rtt_ms(),
         Some(40),
-        "the first clean sample seeds the floor"
+        "a faster clean sample lowers the floor"
     );
 
     // … a slower clean exchange never raises it, a faster one lowers it.

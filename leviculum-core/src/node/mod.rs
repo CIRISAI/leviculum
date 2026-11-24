@@ -8600,8 +8600,12 @@ mod tests {
     /// sends drain, seconds late. The link must live, and every control
     /// message must be confirmed. (A silent link still dies as before:
     /// test_channel_exhaustion_produces_channel_exhausted_close.)
+    ///
+    /// Red with the per-attempt receipts alone (torn down at 4.37 s, the
+    /// queue at 3.9 s: five tries are 1.3 s on this path). Green once a proof
+    /// that names its attempt is an RTT sample (Channel::
+    /// mark_delivered_attempt), so the timeout learns the queue's delay.
     #[test]
-    #[ignore = "red with per-attempt receipts alone (torn down at 4.37 s, the queue at 3.9 s): needs the attempt-tagged RTT sample, leviculum#113 part 2"]
     fn a_queueing_uplink_at_2_3x_overload_does_not_kill_the_link() {
         use crate::transport::InterfaceId;
         let mut pair = establish_nodecore_link_pair();
