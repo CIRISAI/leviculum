@@ -2166,11 +2166,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let decrypted_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2195,6 +2191,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // What the channel refuses (ring full, malformed) is not kept and so
         // not proven: the sender's retransmit is its only copy.
         let mut rx_ring_full = false;
+        // +ciris (leviculum#113): whether the channel took a NEW sequence.
+        let mut advanced = false;
         // Direct-link signals (leviculum#70) are delivered and proofed like
         // any message, then handled by the node instead of the application.
         let mut direct_link_signals: Vec<(u16, Vec<u8>)> = Vec::new();
@@ -2216,6 +2214,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             };
             match received {
                 Ok(ReceiveOutcome::Delivered(envelope)) => {
+                    advanced = true;
                     crate::tracing::debug!(
                         seq = envelope.sequence,
                         msgtype = envelope.msgtype,
@@ -2254,6 +2253,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
                 }
                 Ok(ReceiveOutcome::Buffered) => {
+                    advanced = true;
                     crate::tracing::debug!(
                         held = hold,
                         "link_mgr: channel message buffered (out-of-order or held for the host)"
@@ -2284,6 +2284,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         // 3. Post-processing (link borrow released)
+        // +ciris (leviculum#113): evidence for the hold only when the channel
+        // took a NEW sequence. Channel packets are exempt from the packet-
+        // hash dedup and link tokens carry no replay protection, so a
+        // replayed frame decrypts: a duplicate (AlreadyDelivered,
+        // DuplicateBuffered) or a refused one counts for nothing.
+        if advanced {
+            if let Some(link) = self.links.get_mut(&link_id) {
+                link.record_authenticated_inbound(now_ms);
+            }
+        }
         // The packet decrypted under the link key: authenticated traffic
         // (leviculum#70).
         self.direct_link_authenticated(&link_id, now_ms);
@@ -2486,8 +2496,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
                 plaintext.truncate(len);
 
                 match link.proof_strategy() {
@@ -2564,11 +2572,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
 
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2712,11 +2716,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -2889,11 +2889,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
@@ -3250,11 +3246,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource ADV decryption failed");
                 return;
@@ -3605,11 +3597,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource REQ decryption failed");
                 return;
@@ -4059,11 +4047,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
-                len
-            }
+            Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource HMU decryption failed");
                 return;

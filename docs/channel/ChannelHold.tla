@@ -71,9 +71,12 @@ Tick ==
     /\ now' = now + 1
     /\ UNCHANGED <<tries, sent, lastAuth, state, scale, scale0>>
 
-\* An authenticated packet from the peer (a packet that decrypted, or a
-\* verified proof). Unauthenticated packets are not modelled: they move
-\* nothing this rule reads.
+\* Evidence from the peer on this link: a packet that passed the link key
+\* AND advanced state (a new channel sequence, a fresh datagram, a proof
+\* of an outstanding receipt). Unauthenticated packets and REPLAYS (review
+\* 6 finding 1: authentic ciphertext, but they advance nothing) are not
+\* modelled because the code counts neither: they move nothing this rule
+\* reads, which is what lets PeerSpeaks = FALSE mean a dead peer.
 AuthIn ==
     /\ PeerSpeaks /\ state = "pending" /\ lastAuth /= now
     /\ lastAuth' = now

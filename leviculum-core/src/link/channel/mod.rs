@@ -1127,16 +1127,20 @@ impl Channel {
     /// (`None`, or nothing since the first send) is torn down exactly when it
     /// always was; a held one at the stale bound at the latest.
     ///
-    /// What counts, and what it covers: a packet that decrypted under the
-    /// link key (channel data, a datagram, a request or response, a resource
-    /// control) or a proof that verified. Keepalives are sent unencrypted and
-    /// do NOT count. So on a capped publisher's link the hold rests on the
-    /// peer's own channel frames and on its proofs of this node's EARLIER
-    /// messages as they drain from the queue; on the peers' links toward the
-    /// publisher, on its datagrams. A link whose peer sends nothing
-    /// authenticated while this node's message is out (an idle link with
-    /// late acks and nothing older still draining) is NOT held: it is torn
-    /// down at its 5th timeout, as before.
+    /// What counts, and what it covers: evidence a REPLAY cannot produce
+    /// (review 6 finding 1: link tokens carry no replay protection and
+    /// channel packets are exempt from the packet-hash dedup, so a captured
+    /// frame decrypts again). A channel frame counts only when the channel
+    /// takes it as a NEW sequence (delivered or buffered; a duplicate, an
+    /// already-delivered or a refused one counts for nothing); a datagram
+    /// only when its replay window takes it as fresh; a proof only for an
+    /// outstanding receipt it verifies. Nothing else counts: requests,
+    /// responses, resource traffic, LINKIDENTIFY and keepalives (sent
+    /// unencrypted) do not. Plus, from the node: the same for any other
+    /// link whose far end proved the same identity key, and the host's
+    /// `NodeCore::note_peer_evidence`. A link whose peer sends nothing that
+    /// counts while this node's message is out is NOT held: it is torn down
+    /// at its 5th timeout, as before.
     pub fn poll_with_inbound(
         &mut self,
         now_ms: u64,

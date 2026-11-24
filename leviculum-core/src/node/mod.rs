@@ -8608,6 +8608,15 @@ mod tests {
         HostVouchesOtherLink,
         /// The host vouched, but only before the message was first sent.
         HostVouchedBeforeTheSend,
+        /// A fresh channel frame from the peer on the held link itself.
+        FreshOnThisLink,
+        /// A channel frame the peer sent (and P took) before the message,
+        /// REPLAYED by someone on the path after it.
+        ReplayedOnThisLink,
+        /// The same replay on the peer's other link (form 1).
+        ReplayedOnOtherLink,
+        /// A datagram the peer sent before, replayed, on its other link.
+        ReplayedDatagramOnOtherLink,
     }
 
     /// P sends a channel message on its first link to A that is never
@@ -8620,9 +8629,25 @@ mod tests {
         let (mut a, a_dest, a_key) = listening_node();
         let (mut o, o_dest, o_key) = listening_node();
         let mut p = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
-        let (p_a1, _a_p1) = handshake(&mut p, &mut a, a_dest, &a_key);
+        let (p_a1, a_p1) = handshake(&mut p, &mut a, a_dest, &a_key);
         let (p_a2, a_p2) = handshake(&mut p, &mut a, a_dest, &a_key);
         let (p_o, o_p) = handshake(&mut p, &mut o, o_dest, &o_key);
+        // What an observer on the path captured before the message: one
+        // channel frame A sent on each link and one datagram, each taken by
+        // P once, as it was sent.
+        let mut captured = |link: LinkId, datagram: bool| {
+            let out = if datagram {
+                a.send_unordered(&link, b"media").unwrap().1
+            } else {
+                a.send_on_link(&link, b"earlier").unwrap()
+            };
+            let frame = extract_broadcast_data(&out);
+            let _ = p.handle_packet(InterfaceId(0), &frame);
+            frame
+        };
+        let captured_this = captured(a_p1, false);
+        let captured_other = captured(a_p2, false);
+        let captured_datagram = captured(a_p2, true);
         assert_eq!(
             p.link(&p_a1).unwrap().proven_peer_key(),
             p.link(&p_a2).unwrap().proven_peer_key()
@@ -8658,6 +8683,19 @@ mod tests {
             }
             Evidence::HostVouchesThisLink => assert!(p.note_peer_evidence(&p_a1, now)),
             Evidence::HostVouchesOtherLink => assert!(p.note_peer_evidence(&p_o, now)),
+            Evidence::FreshOnThisLink => {
+                let out = a.send_on_link(&a_p1, b"alive").unwrap();
+                let _ = p.handle_packet(InterfaceId(0), &extract_broadcast_data(&out));
+            }
+            Evidence::ReplayedOnThisLink => {
+                let _ = p.handle_packet(InterfaceId(0), &captured_this);
+            }
+            Evidence::ReplayedOnOtherLink => {
+                let _ = p.handle_packet(InterfaceId(0), &captured_other);
+            }
+            Evidence::ReplayedDatagramOnOtherLink => {
+                let _ = p.handle_packet(InterfaceId(0), &captured_datagram);
+            }
         }
         p.transport().clock().set(TEST_TIME_MS + 9_000);
         let out = p.handle_timeout();
@@ -8693,6 +8731,20 @@ mod tests {
     /// of the held link holds it; vouching for a different peer's link, or
     /// only before the message was sent, does not; an unknown link is
     /// refused.
+    /// +ciris (leviculum#113, review 6 finding 1): a REPLAYED packet is
+    /// authentic ciphertext (link tokens carry no replay protection, and
+    /// channel packets are exempt from the packet-hash dedup), so it must
+    /// not count as evidence: a captured channel frame or datagram replayed
+    /// after the peer died holds neither its own link nor, through the
+    /// proven peer key, any other. A fresh frame does.
+    #[test]
+    fn a_replayed_frame_is_not_evidence_that_the_peer_is_alive() {
+        assert!(!exhausted_with(Evidence::FreshOnThisLink), "fresh holds");
+        assert!(exhausted_with(Evidence::ReplayedOnThisLink));
+        assert!(exhausted_with(Evidence::ReplayedOnOtherLink));
+        assert!(exhausted_with(Evidence::ReplayedDatagramOnOtherLink));
+    }
+
     #[test]
     fn the_host_vouching_for_the_peer_holds_only_that_link() {
         assert!(!exhausted_with(Evidence::HostVouchesThisLink));

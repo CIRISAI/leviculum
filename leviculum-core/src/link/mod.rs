@@ -1629,8 +1629,10 @@ impl Link {
         self.last_data_ms = Some(now_ms);
     }
 
-    /// +ciris (leviculum#113): an inbound packet on this link passed its
-    /// authentication (decrypted, or its proof verified).
+    /// +ciris (leviculum#113): evidence the far end is alive now: an inbound
+    /// packet that passed the link key AND advanced state (a new channel
+    /// sequence, a fresh datagram, a proof of an outstanding receipt), or
+    /// the host's `NodeCore::note_peer_evidence`. Never a replay.
     pub fn record_authenticated_inbound(&mut self, now_ms: u64) {
         self.last_authenticated_inbound_ms = Some(now_ms);
     }

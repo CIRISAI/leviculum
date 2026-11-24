@@ -138,8 +138,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut plaintext = alloc::vec![0u8; encrypted.len()];
         let delivered = match link.decrypt(encrypted, &mut plaintext) {
             Ok(len) => {
-                // +ciris (leviculum#113): it passed the link key.
-                link.record_authenticated_inbound(now_ms);
                 plaintext.truncate(len);
                 datagram::unwrap(&plaintext).map(|(sequence, payload)| (sequence, payload.to_vec()))
             }
@@ -176,6 +174,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         // Liveness only once it is known to be from the peer, and fresh.
         link.record_inbound(now_ms);
+        // +ciris (leviculum#113): evidence for the hold, only now: it passed
+        // the link key AND the replay window (a replay is authentic
+        // ciphertext; counting it would let anyone who captured one frame
+        // hold a dead link to its stale bound).
+        link.record_authenticated_inbound(now_ms);
         self.direct_link_authenticated(&link_id, now_ms);
         // Keep the host's last `datagram_sink_reserve` event slots for the
         // Channel: a datagram flood must never hold its delivery budget at 0
