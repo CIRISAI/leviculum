@@ -1407,10 +1407,19 @@ impl Channel {
     ///   RTT has passed since its last send); any other is QUEUED behind
     ///   it: not resent, no window taken, but the timeout still counts
     ///   toward the ladder.
-    /// - head-of-line: only the oldest message out can end a held link; one
-    ///   queued behind it cannot be proved before it, so its own timer says
-    ///   nothing about the peer. The oldest keeps today's rule (out of tries
-    ///   and not alive: torn down).
+    /// - head-of-line: observable, an older message out that is not
+    ///   OVERDUE (its proof is not yet later than 2 x the latest measured
+    ///   RTT since its first send). Action: this message's own timer does not
+    ///   end the link: on a FIFO path it cannot be proved before the older
+    ///   one is, so its timer says nothing about the peer. The oldest keeps
+    ///   today's rule (out of tries and not alive: torn down), and once it
+    ///   is overdue every message's does again. Must never: let a link
+    ///   outlive the stale bound (every hold ends there); delay the
+    ///   detection of a peer silent on every link past the later of the
+    ///   cold ladder of the first message sent after it fell silent and the
+    ///   oldest message's overdue point (a peer that dies mid-queue is found
+    ///   once the queue it left behind should have drained, not at the
+    ///   stale bound).
     /// - no fresh evidence: exactly today's cold ladder, a resend at every
     ///   timeout; a silent link dies as fast as ever.
     ///
@@ -1479,6 +1488,18 @@ impl Channel {
             .tx_ring
             .iter()
             .position(|e| e.state == MessageState::Sent);
+        // The oldest is OVERDUE once its proof is later than the path
+        // explains: 2 x the latest measured RTT since its FIRST send (its
+        // own probes do not move that: on a FIFO path the original is what
+        // arrives); with no RTT measured at all, at once.
+        let oldest_overdue = oldest.is_none_or(|o| {
+            self.rack.is_none_or(|(_, rtt)| {
+                now_ms
+                    >= self.tx_ring[o]
+                        .first_sent_ms
+                        .saturating_add(rtt.saturating_mul(2))
+            })
+        });
 
         // First pass: collect indices that need processing and their current
         // tries, and whether only RACK (not the timer) flagged them.
@@ -1503,12 +1524,10 @@ impl Channel {
             let first = self.tx_ring[i].first_sent_ms;
             let alive = authenticated_inbound_ms.is_some_and(|t| t > first)
                 && now_ms < first.saturating_add(hold_bound_ms);
-            // +ciris (RACK while held): with the peer shown alive, only the
-            // OLDEST message out can end the link: one queued behind it
-            // cannot be proved before it is, so its own timer says nothing
-            // about the peer (head-of-line liveness). The oldest keeps
-            // today's rule: torn when out of tries and not alive.
-            let behind_oldest = fresh && oldest != Some(i);
+            // +ciris (RACK while held): head-of-line liveness, see the
+            // method doc. Behind an oldest message that is not overdue, a
+            // message's own timer says nothing about the peer.
+            let behind_oldest = fresh && oldest != Some(i) && !oldest_overdue;
             if !rack_only && !behind_oldest && tries >= self.max_tries && !alive {
                 let seq = self.tx_ring[i].envelope.sequence;
                 crate::tracing::debug!(
@@ -3318,6 +3337,72 @@ mod tests {
         // proved.
         let actions = channel.poll_with_inbound(1_060, rtt_ms, Some(1_015), bound);
         assert!(actions.is_empty(), "{actions:?}");
+    }
+
+    /// +ciris (RACK while held, head-of-line): a peer that dies mid-queue
+    /// is found once the queue it left behind should have drained, not at
+    /// the stale bound. M0 (sent 900) is proved at 1400, 500 ms: the peer
+    /// was alive then, so M1 (sent 1000, the oldest now) is held to its
+    /// bound. The peer is silent from there. M2 (sent 2000) has nothing
+    /// after its send; behind M1 it is exempt only while M1 is not overdue
+    /// (2 x 500 ms after M1's send: 2000). So M2 is torn down at its own
+    /// cold ladder, exactly when a channel that never queued would tear it,
+    /// not at M1's bound (11 s).
+    #[test]
+    fn a_peer_that_dies_mid_queue_is_found_at_the_cold_ladder_not_the_bound() {
+        let rtt_ms = 10;
+        let bound = 10_000;
+        let fresh = || {
+            let mut channel = Channel::new();
+            channel.seed_srtt(rtt_ms);
+            let _ = channel.poll_with_inbound(0, rtt_ms, None, bound);
+            channel
+        };
+        let mut channel = fresh();
+        for (t, data) in [(900, 0u8), (1_000, 1)] {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![data] }, MDU, t, rtt_ms)
+                .unwrap();
+        }
+        assert!(channel.mark_delivered_attempt(0, 1, 900, 1_400, rtt_ms));
+        let evidence = Some(1_400);
+        let _ = channel.poll_with_inbound(1_400, rtt_ms, evidence, bound);
+        // M1's timer runs (queued, not resent) until M2 is sent at 2000.
+        let mut t;
+        loop {
+            t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            if t >= 2_000 {
+                break;
+            }
+            let _ = channel.poll_with_inbound(t, rtt_ms, evidence, bound);
+        }
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![2] }, MDU, 2_000, rtt_ms)
+            .unwrap();
+        let torn_at = loop {
+            let t = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            assert!(t < 1_000 + bound, "held to M1's bound");
+            let actions = channel.poll_with_inbound(t, rtt_ms, evidence, bound);
+            if actions.contains(&ChannelAction::TearDownLink) {
+                break t;
+            }
+        };
+        // M2's own cold ladder: its five waits at today's first-try SRTT
+        // (M0's 500 ms sample), with M2's queue term (queue_len 2).
+        let srtt = channel.srtt_ms() as u64;
+        let cold: u64 = (1..=5u8)
+            .map(|k| calculate_timeout(k, srtt, 2, channel.window()))
+            .sum();
+        assert!(cold < 3_000, "cold ladder {cold} ms");
+        // (Each wait is computed at its own poll from the window then: the
+        // sum agrees to the rounding of five integer waits.)
+        let took = torn_at - 2_000;
+        assert!(
+            took.abs_diff(cold) <= 5,
+            "M2 torn {took} ms after its send; its cold ladder is {cold} ms"
+        );
     }
 
     /// +ciris (re-review 7 N1): the onset case. 48 messages sent at window
