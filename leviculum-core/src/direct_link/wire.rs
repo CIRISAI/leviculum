@@ -202,6 +202,12 @@ pub enum Signal {
         /// +ciris (pair agreement): the responder agrees to nomination (only
         /// when the REQUEST offered it).
         responder_nominated: bool,
+        /// +ciris (review 6 finding 8, `"v"`): the responder holds the
+        /// nomination secret the REQUEST carried ("k"), so it parses the
+        /// 72-byte nominated punch frame. A responder from a build that knew
+        /// "n" but not "k" answers "n" without this; the initiator then
+        /// punches plain instead of sending frames it would drop.
+        responder_holds_secret: bool,
     },
     Complete {
         session: SessionId,
@@ -241,6 +247,7 @@ impl Signal {
             responder_predicted: Vec::new(),
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         }
     }
 
@@ -339,6 +346,7 @@ impl Signal {
                 responder_predicted,
                 responder_birthday,
                 responder_nominated,
+                responder_holds_secret,
             } => {
                 let local = !responder_local.is_empty();
                 msgpack::write_fixmap_header(
@@ -347,7 +355,8 @@ impl Signal {
                         + u8::from(*commit)
                         + u8::from(!responder_predicted.is_empty())
                         + u8::from(*responder_birthday)
-                        + u8::from(*responder_nominated),
+                        + u8::from(*responder_nominated)
+                        + u8::from(*responder_holds_secret),
                 );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
@@ -359,6 +368,7 @@ impl Signal {
                 write_predicted(&mut buf, responder_predicted);
                 write_birthday(&mut buf, *responder_birthday);
                 write_flag(&mut buf, "n", *responder_nominated);
+                write_flag(&mut buf, "v", *responder_holds_secret);
             }
         }
         buf
@@ -407,6 +417,7 @@ impl Signal {
                 responder_predicted: fields.predicted,
                 responder_birthday: fields.birthday,
                 responder_nominated: fields.nominate,
+                responder_holds_secret: fields.holds_secret,
             },
             _ => Signal::Complete { session },
         };
@@ -428,6 +439,7 @@ struct Fields {
     predicted: Vec<u16>,
     birthday: bool,
     nominate: bool,
+    holds_secret: bool,
     nomination_secret: Option<NominationSecret>,
 }
 
@@ -452,6 +464,7 @@ impl Fields {
                 b"q" => fields.predicted = read_predicted(data, &mut pos)?,
                 b"b" => fields.birthday = msgpack::read_bool(data, &mut pos)?,
                 b"n" => fields.nominate = msgpack::read_bool(data, &mut pos)?,
+                b"v" => fields.holds_secret = msgpack::read_bool(data, &mut pos)?,
                 b"k" => {
                     let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
                     fields.nomination_secret = Some(NominationSecret(bin.try_into().ok()?));
@@ -1157,6 +1170,7 @@ mod tests {
                     responder_predicted: alloc::vec::Vec::new(),
                     responder_birthday: false,
                     responder_nominated: false,
+                    responder_holds_secret: false,
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -1201,6 +1215,7 @@ mod tests {
                 responder_predicted: alloc::vec::Vec::new(),
                 responder_birthday: false,
                 responder_nominated: false,
+                responder_holds_secret: false,
             })
         );
     }
@@ -1240,6 +1255,7 @@ mod tests {
             responder_predicted: alloc::vec![0, 80, 41_000, 41_000, 41_001],
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         let Ok(Signal::Ready {
             responder_predicted,
@@ -1282,6 +1298,7 @@ mod tests {
             responder_predicted: Vec::new(),
             responder_birthday: birthday,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         for birthday in [false, true] {
             let bytes = ready(birthday).encode();
@@ -1327,6 +1344,7 @@ mod tests {
             responder_predicted: Vec::new(),
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         let mut old = Vec::new();
         msgpack::write_fixmap_header(&mut old, 3);
@@ -1343,10 +1361,36 @@ mod tests {
             responder_predicted: alloc::vec![41_000],
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         let bytes = with.encode();
         assert_eq!(bytes[0], 0x80 | 4, "one more map entry");
         assert!(bytes.windows(2).any(|w| w == [0xa1, b'q']));
+    }
+
+    /// +ciris (review 6 finding 8): `"v"` (the responder holds the
+    /// nomination secret) round-trips on READY, and a READY from a build
+    /// without it ("n" only) decodes as not holding it.
+    #[test]
+    fn ready_says_whether_the_responder_holds_the_secret() {
+        let ready = |holds| Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: Vec::new(),
+            commit: true,
+            responder_predicted: Vec::new(),
+            responder_birthday: false,
+            responder_nominated: true,
+            responder_holds_secret: holds,
+        };
+        for holds in [true, false] {
+            let bytes = ready(holds).encode();
+            assert_eq!(bytes.windows(2).any(|w| w == [0xa1, b'v']), holds);
+            assert_eq!(
+                Signal::decode(MSG_UPGRADE_READY, &bytes).unwrap(),
+                ready(holds)
+            );
+        }
     }
 
     /// +ciris: host candidates ride `"l"` on REQUEST and READY, round-trip,
@@ -1380,6 +1424,7 @@ mod tests {
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
@@ -1391,6 +1436,7 @@ mod tests {
                 responder_predicted: alloc::vec::Vec::new(),
                 responder_birthday: false,
                 responder_nominated: false,
+                responder_holds_secret: false,
             })
         );
     }

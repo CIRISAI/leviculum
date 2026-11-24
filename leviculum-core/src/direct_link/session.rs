@@ -565,6 +565,7 @@ impl Session {
                         responder_predicted: predicted,
                         responder_birthday: self.own_birthday,
                         responder_nominated: self.nominate(),
+                        responder_holds_secret: self.nominate(),
                     }),
                     Step::Punch {
                         peer,
@@ -632,12 +633,16 @@ impl Session {
                     responder_predicted,
                     responder_birthday,
                     responder_nominated,
+                    responder_holds_secret,
                     ..
                 },
             ) => {
                 // In force only when the responder agreed too.
                 self.commit = self.commit && *commit;
-                self.nominate = self.nominate && *responder_nominated;
+                // Review 6 finding 8: nominate only when the responder says it
+                // holds the secret ("v"); a build that knew "n" but not "k"
+                // would drop every 72-byte frame.
+                self.nominate = self.nominate && *responder_nominated && *responder_holds_secret;
                 self.peer_public = Some(*responder_public);
                 self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
@@ -1150,6 +1155,58 @@ mod tests {
         assert_eq!((a_nom, b_nom), (None, None));
     }
 
+    /// +ciris (review 6 finding 8): a responder that answers "n" but does
+    /// not say it holds the secret ("v"), as a build that knew "n" but not
+    /// "k" does, gets a plain punch: the initiator does not send 72-byte
+    /// nominated frames it would drop. The same READY with "v" nominates.
+    #[test]
+    fn an_initiator_nominates_only_when_the_responder_holds_the_secret() {
+        for holds in [true, false] {
+            let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+            a.set_nomination_secret(Some(crate::direct_link::wire::NominationSecret([0x6B; 16])));
+            let steps = a.probed_with_candidates(a_pub(), Vec::new(), Vec::new(), 1);
+            let Signal::Request {
+                initiator_public,
+                commit,
+                initiator_nominates,
+                nomination_secret,
+                ..
+            } = request_from(&steps).clone()
+            else {
+                unreachable!()
+            };
+            let (mut b, b_steps) = Session::respond(
+                ID,
+                TOKEN,
+                t(),
+                initiator_public,
+                Vec::new(),
+                ProbeProtocol::Rnsp,
+                2,
+            );
+            b.set_commit(commit);
+            b.set_nominate(initiator_nominates);
+            b.set_nomination_secret(nomination_secret);
+            deliver(&b_steps, &mut a, 3);
+            let mut b_steps = b.probed_with_candidates(b_pub(), Vec::new(), Vec::new(), 4);
+            for step in b_steps.iter_mut() {
+                if let Step::Send(Signal::Ready {
+                    responder_nominated,
+                    responder_holds_secret,
+                    ..
+                }) = step
+                {
+                    assert!(*responder_nominated && *responder_holds_secret);
+                    // The older build: "n" without "v".
+                    *responder_holds_secret = holds;
+                }
+            }
+            let a_steps = deliver(&b_steps, &mut a, 5);
+            let (_, a_nom) = punch_shape(&a_steps);
+            assert_eq!(a_nom.is_some(), holds, "holds={holds}");
+        }
+    }
+
     /// +ciris (review pass 5, item 3): every wait covers the slowest verdict:
     /// the responder's start delay, its punch window (the path-MTU probe now
     /// runs inside it) and, with nomination, the grace. A Punching timeout
@@ -1309,6 +1366,7 @@ mod tests {
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         a.signal(&ready, 3);
         assert_eq!(a.phase(), Phase::Punching);
@@ -1349,6 +1407,7 @@ mod tests {
             responder_predicted: alloc::vec::Vec::new(),
             responder_birthday: false,
             responder_nominated: false,
+            responder_holds_secret: false,
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);
