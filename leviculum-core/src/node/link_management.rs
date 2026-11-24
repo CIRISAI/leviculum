@@ -151,15 +151,24 @@ pub(super) const RECEIPT_ATTEMPTS_MAX: usize = 8;
 /// Tracks channel message receipts awaiting delivery proofs.
 ///
 /// Each entry records a sent link packet: its packet hashes, link, optional
-/// channel sequence number, and absolute proof deadline. A single
-/// `Vec<ReceiptEntry>` replaces the three
-/// separate maps that previously encoded this relationship in different
-/// directions (`data_receipts`, `channel_receipt_keys`, `channel_hash_to_seq`).
+/// channel sequence number, and absolute proof deadline.
 ///
-/// Every datum exists exactly once. Lookups are linear scans, n is bounded
-/// by channel window size × active links (realistically < 100, typically < 20).
+/// +ciris (review 6 finding 5): keyed, not scanned. With per-attempt
+/// receipts a message keeps up to [`RECEIPT_ATTEMPTS_MAX`] (plus spent
+/// ones), so the one Vec scanned on every send, retransmit and proof under
+/// the core lock grew about 8x in a retransmit storm. The entries live in
+/// one map by truncated hash (the lookup a proof makes); three indexes,
+/// each holding only keys, serve the other operations: the attempts of one
+/// message (register, confirm), the entries of one link (link teardown) and
+/// the deadlines (expiry, the next wakeup). Every datum exists once, in
+/// `by_hash`; the indexes are updated with it in `insert` and `remove`.
 pub(super) struct ReceiptTracker {
-    entries: Vec<ReceiptEntry>,
+    by_hash: BTreeMap<[u8; TRUNCATED_HASHBYTES], ReceiptEntry>,
+    by_message: BTreeMap<(LinkId, u16), Vec<[u8; TRUNCATED_HASHBYTES]>>,
+    by_link: alloc::collections::BTreeSet<(LinkId, [u8; TRUNCATED_HASHBYTES])>,
+    by_deadline: alloc::collections::BTreeSet<(u64, [u8; TRUNCATED_HASHBYTES])>,
+    /// Entries that are not spent (what `len` reports).
+    outstanding: usize,
 }
 
 pub(super) struct ReceiptEntry {
@@ -208,27 +217,67 @@ pub(super) struct ConfirmedReceipt {
 impl ReceiptTracker {
     pub(super) fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            by_hash: BTreeMap::new(),
+            by_message: BTreeMap::new(),
+            by_link: alloc::collections::BTreeSet::new(),
+            by_deadline: alloc::collections::BTreeSet::new(),
+            outstanding: 0,
         }
     }
 
-    /// Estimated heap bytes of the tracker's entry spine (#388 census).
+    /// Estimated heap bytes of the tracker's map and indexes (#388 census).
     pub(super) fn heap_bytes(&self) -> usize {
-        crate::heap_census::vec_bytes(&self.entries)
+        use crate::heap_census::{btree_map_bytes, btree_set_bytes};
+        btree_map_bytes(&self.by_hash)
+            + btree_map_bytes(&self.by_message)
+            + self
+                .by_message
+                .values()
+                .map(crate::heap_census::vec_bytes)
+                .sum::<usize>()
+            + btree_set_bytes(&self.by_link)
+            + btree_set_bytes(&self.by_deadline)
+    }
+
+    /// Add `entry` with its indexes (replacing one of the same hash).
+    fn insert(&mut self, entry: ReceiptEntry) {
+        let key = entry.truncated_hash;
+        let _ = self.remove(&key);
+        if let Some(sequence) = entry.sequence {
+            self.by_message
+                .entry((entry.link_id, sequence))
+                .or_default()
+                .push(key);
+        }
+        self.by_link.insert((entry.link_id, key));
+        self.by_deadline.insert((entry.deadline_ms, key));
+        if !entry.spent {
+            self.outstanding += 1;
+        }
+        self.by_hash.insert(key, entry);
+    }
+
+    /// Remove the entry of `key` and its index keys.
+    fn remove(&mut self, key: &[u8; TRUNCATED_HASHBYTES]) -> Option<ReceiptEntry> {
+        let entry = self.by_hash.remove(key)?;
+        if let Some(sequence) = entry.sequence {
+            let slot = (entry.link_id, sequence);
+            if let Some(attempts) = self.by_message.get_mut(&slot) {
+                attempts.retain(|k| k != key);
+                if attempts.is_empty() {
+                    self.by_message.remove(&slot);
+                }
+            }
+        }
+        self.by_link.remove(&(entry.link_id, *key));
+        self.by_deadline.remove(&(entry.deadline_ms, *key));
+        if !entry.spent {
+            self.outstanding -= 1;
+        }
+        Some(entry)
     }
 
     /// Register a receipt for one attempt of a channel message.
-    ///
-    /// +ciris (leviculum#113): every attempt's receipt is KEPT, not replaced.
-    /// A retransmit is re-encrypted, so each attempt has its own packet hash,
-    /// and on a queueing uplink it is the ORIGINAL send that gets through
-    /// late: replacing its receipt dropped that attempt's proof as unknown,
-    /// so a delivered message counted as undelivered, was resent, and its
-    /// link died ChannelExhausted. A valid proof for any attempt confirms the
-    /// sequence and clears the others ([`Self::confirm_delivery`]). At most
-    /// [`RECEIPT_ATTEMPTS_MAX`] per `(link_id, sequence)`: past it the
-    /// second-oldest goes, never the original (the likeliest to arrive).
-    /// Freed on confirm, on expiry, and with the link.
     pub(super) fn register(
         &mut self,
         packet_data: &[u8],
@@ -241,6 +290,17 @@ impl ReceiptTracker {
 
     /// [`Self::register`] for attempt `attempt` (1 = the first send) of a
     /// channel message.
+    ///
+    /// +ciris (leviculum#113): every attempt's receipt is KEPT, not replaced.
+    /// A retransmit is re-encrypted, so each attempt has its own packet hash,
+    /// and on a queueing uplink it is the ORIGINAL send that gets through
+    /// late: replacing its receipt dropped that attempt's proof as unknown,
+    /// so a delivered message counted as undelivered, was resent, and its
+    /// link died ChannelExhausted. A valid proof for any attempt confirms the
+    /// sequence ([`Self::confirm_delivery_attempt`]). At most
+    /// [`RECEIPT_ATTEMPTS_MAX`] unspent per `(link_id, sequence)`: past it
+    /// the second-oldest goes, never the original (the likeliest to arrive).
+    /// Freed on its proof, on expiry, and with the link.
     pub(super) fn register_attempt(
         &mut self,
         packet_data: &[u8],
@@ -249,24 +309,22 @@ impl ReceiptTracker {
         attempt: u8,
         now_ms: u64,
     ) {
-        let attempts = self
-            .entries
-            .iter()
-            .filter(|e| !e.spent && e.link_id == link_id && e.sequence == Some(sequence))
-            .count();
-        if attempts >= RECEIPT_ATTEMPTS_MAX {
-            // Order by send time (each attempt's is later than the last's):
-            // keep the first, drop the next.
-            let mut mine: Vec<(u64, usize)> = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| !e.spent && e.link_id == link_id && e.sequence == Some(sequence))
-                .map(|(i, e)| (e.sent_ms, i))
-                .collect();
+        let mut mine: Vec<(u64, [u8; TRUNCATED_HASHBYTES])> = self
+            .by_message
+            .get(&(link_id, sequence))
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|k| self.by_hash.get(k).map(|e| (e, *k)))
+                    .filter(|(e, _)| !e.spent)
+                    .map(|(e, k)| (e.sent_ms, k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if mine.len() >= RECEIPT_ATTEMPTS_MAX {
+            // Keep the first, drop the next.
             mine.sort_unstable();
             if let Some(&(_, second)) = mine.get(1) {
-                self.entries.swap_remove(second);
+                let _ = self.remove(&second);
             }
         }
 
@@ -281,7 +339,7 @@ impl ReceiptTracker {
             "link_mgr: registered channel receipt"
         );
 
-        self.entries.push(ReceiptEntry {
+        self.insert(ReceiptEntry {
             truncated_hash,
             full_hash,
             link_id,
@@ -303,8 +361,7 @@ impl ReceiptTracker {
         let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
-        self.entries.retain(|entry| entry.full_hash != full_hash);
-        self.entries.push(ReceiptEntry {
+        self.insert(ReceiptEntry {
             truncated_hash,
             full_hash,
             link_id,
@@ -322,9 +379,8 @@ impl ReceiptTracker {
         &self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
     ) -> Option<(LinkId, [u8; 32])> {
-        self.entries
-            .iter()
-            .find(|e| e.truncated_hash == *truncated)
+        self.by_hash
+            .get(truncated)
             .map(|e| (e.link_id, e.full_hash))
     }
 
@@ -346,17 +402,18 @@ impl ReceiptTracker {
         &mut self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
     ) -> Option<ConfirmedReceipt> {
-        let idx = self
-            .entries
-            .iter()
-            .position(|e| e.truncated_hash == *truncated)?;
-        let entry = self.entries.swap_remove(idx);
+        let entry = self.remove(truncated)?;
         if let (Some(sequence), false) = (entry.sequence, entry.spent) {
             // The other attempts' receipts stay, spent: their late proofs
             // are evidence the peer is alive, each counted once.
-            for e in self.entries.iter_mut() {
-                if e.link_id == entry.link_id && e.sequence == Some(sequence) {
-                    e.spent = true;
+            if let Some(keys) = self.by_message.get(&(entry.link_id, sequence)) {
+                for key in keys {
+                    if let Some(e) = self.by_hash.get_mut(key) {
+                        if !e.spent {
+                            e.spent = true;
+                            self.outstanding -= 1;
+                        }
+                    }
                 }
             }
         }
@@ -370,45 +427,64 @@ impl ReceiptTracker {
 
     /// Remove all entries for a given link.
     pub(super) fn remove_for_link(&mut self, link_id: &LinkId) {
-        self.entries.retain(|e| e.link_id != *link_id);
+        let keys: Vec<[u8; TRUNCATED_HASHBYTES]> = self
+            .by_link
+            .range((*link_id, [0u8; TRUNCATED_HASHBYTES])..=(*link_id, [0xFF; TRUNCATED_HASHBYTES]))
+            .map(|(_, k)| *k)
+            .collect();
+        for key in keys {
+            let _ = self.remove(&key);
+        }
     }
 
     /// Remove and return entries whose proof deadline has elapsed.
     pub(super) fn expire(&mut self, now_ms: u64) -> Vec<ReceiptEntry> {
-        let mut expired = Vec::new();
-        let mut index = 0;
-        while index < self.entries.len() {
-            if now_ms >= self.entries[index].deadline_ms {
-                expired.push(self.entries.swap_remove(index));
-            } else {
-                index += 1;
-            }
-        }
-        expired
+        let keys: Vec<[u8; TRUNCATED_HASHBYTES]> = self
+            .by_deadline
+            .range(..=(now_ms, [0xFF; TRUNCATED_HASHBYTES]))
+            .map(|(_, k)| *k)
+            .collect();
+        keys.iter().filter_map(|k| self.remove(k)).collect()
     }
 
     /// Number of receipts awaiting a delivery proof (spent ones, kept only
     /// as evidence, are not counted).
     pub(super) fn len(&self) -> usize {
-        self.entries.iter().filter(|e| !e.spent).count()
+        self.outstanding
     }
 
     /// Earliest expiry deadline across all entries, if any.
     pub(super) fn earliest_expiry(&self) -> Option<u64> {
-        self.entries.iter().map(|e| e.deadline_ms).min()
+        self.by_deadline.first().map(|(deadline, _)| *deadline)
     }
 
     #[cfg(test)]
     pub(crate) fn count_for_link(&self, link_id: &LinkId) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| !e.spent && e.link_id == *link_id)
+        self.by_link
+            .range((*link_id, [0u8; TRUNCATED_HASHBYTES])..=(*link_id, [0xFF; TRUNCATED_HASHBYTES]))
+            .filter(|(_, k)| self.by_hash.get(k).is_some_and(|e| !e.spent))
             .count()
     }
 
     #[cfg(test)]
     pub(crate) fn contains_truncated(&self, truncated: &[u8; TRUNCATED_HASHBYTES]) -> bool {
-        self.entries.iter().any(|e| e.truncated_hash == *truncated)
+        self.by_hash.contains_key(truncated)
+    }
+
+    /// The tracker's indexes agree with its entries (test invariant).
+    #[cfg(test)]
+    pub(crate) fn check_indexes(&self) {
+        assert_eq!(self.by_link.len(), self.by_hash.len());
+        assert_eq!(self.by_deadline.len(), self.by_hash.len());
+        let indexed: usize = self.by_message.values().map(Vec::len).sum();
+        let sequenced = self
+            .by_hash
+            .values()
+            .filter(|e| e.sequence.is_some())
+            .count();
+        assert_eq!(indexed, sequenced);
+        let outstanding = self.by_hash.values().filter(|e| !e.spent).count();
+        assert_eq!(self.outstanding, outstanding);
     }
 }
 
@@ -5316,6 +5392,82 @@ mod receipt_tracker_tests {
         LinkId::new([b; 16])
     }
 
+    /// +ciris (review 6 finding 5): the keyed tracker behaves as the Vec
+    /// did, and its indexes stay consistent, under a storm: 200 links × 16
+    /// messages × up to 10 attempts (the cap of 8 applies), raw receipts,
+    /// confirms of the original or a later attempt (the rest spent),
+    /// spent proofs consumed once, expiry and link teardown.
+    #[test]
+    fn the_keyed_receipt_tracker_survives_a_storm_with_consistent_indexes() {
+        let mut tracker = ReceiptTracker::new();
+        // Real packets differ past their two header bytes (what packet_hash
+        // hashes); so do these.
+        let packet =
+            |l: u8, seq: u16, a: u8| alloc::vec![0, 0, l, (seq >> 8) as u8, seq as u8, a, 0x55];
+        let trunc = |p: &[u8]| {
+            let full = packet_hash(p);
+            let mut t = [0u8; TRUNCATED_HASHBYTES];
+            t.copy_from_slice(&full[..TRUNCATED_HASHBYTES]);
+            t
+        };
+        let links: Vec<LinkId> = (0..200u8).map(|i| LinkId::new([i; 16])).collect();
+        for (li, link) in links.iter().enumerate() {
+            for seq in 0..16u16 {
+                for a in 1..=10u8 {
+                    tracker.register_attempt(
+                        &packet(li as u8, seq, a),
+                        *link,
+                        seq,
+                        a,
+                        1_000 + u64::from(a),
+                    );
+                }
+            }
+            let _ = tracker.register_raw(&packet(li as u8, 999, 0), *link, 50_000);
+        }
+        tracker.check_indexes();
+        assert_eq!(tracker.len(), 200 * 16 * RECEIPT_ATTEMPTS_MAX + 200);
+        // Confirm each message by its ORIGINAL (attempt 1, kept by the cap).
+        for (li, _) in links.iter().enumerate() {
+            for seq in 0..16u16 {
+                let c = tracker
+                    .confirm_delivery_attempt(&trunc(&packet(li as u8, seq, 1)))
+                    .expect("the original is kept");
+                assert_eq!((c.sequence, c.attempt, c.spent), (Some(seq), 1, false));
+            }
+        }
+        tracker.check_indexes();
+        assert_eq!(tracker.len(), 200, "only the raw receipts are outstanding");
+        // A spent attempt's proof counts once, confirming nothing.
+        let spent = trunc(&packet(0, 0, 10));
+        assert!(tracker.confirm_delivery_attempt(&spent).unwrap().spent);
+        assert!(
+            tracker.confirm_delivery_attempt(&spent).is_none(),
+            "consumed"
+        );
+        // Teardown of one link frees all of its entries, and only those.
+        tracker.remove_for_link(&links[7]);
+        assert_eq!(tracker.count_for_link(&links[7]), 0);
+        // (attempts 2 and 3 went to the cap of 8; 10 is kept, spent.)
+        assert!(!tracker.contains_truncated(&trunc(&packet(7, 3, 10))));
+        assert!(tracker.contains_truncated(&trunc(&packet(8, 3, 10))));
+        tracker.check_indexes();
+        // Expiry: the channel receipts first, the raw ones at their deadline.
+        assert_eq!(
+            tracker.earliest_expiry(),
+            Some(1_004 + DATA_RECEIPT_TIMEOUT_MS)
+        );
+        let gone = tracker.expire(1_010 + DATA_RECEIPT_TIMEOUT_MS);
+        assert!(gone.iter().all(|e| e.sequence.is_some()));
+        tracker.check_indexes();
+        assert_eq!(tracker.len(), 199);
+        let gone = tracker.expire(50_000);
+        assert_eq!(gone.len(), 199);
+        assert_eq!(tracker.len(), 0);
+        assert_eq!(tracker.earliest_expiry(), None);
+        tracker.check_indexes();
+    }
+
     #[test]
     fn test_register_retransmit_keeps_every_attempt() {
         // +ciris (leviculum#113): a retransmit no longer replaces the
@@ -5374,9 +5526,9 @@ mod receipt_tracker_tests {
         let link_a = make_link_id(0xAA);
         let link_b = make_link_id(0xBB);
 
-        tracker.register(b"a1", link_a, 1, 1000);
-        tracker.register(b"a2", link_a, 2, 1000);
-        tracker.register(b"b1", link_b, 1, 1000);
+        tracker.register(b"\0\0pkt-a1", link_a, 1, 1000);
+        tracker.register(b"\0\0pkt-a2", link_a, 2, 1000);
+        tracker.register(b"\0\0pkt-b1", link_b, 1, 1000);
         assert_eq!(tracker.count_for_link(&link_a), 2);
         assert_eq!(tracker.count_for_link(&link_b), 1);
 
