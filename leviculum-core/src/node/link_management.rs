@@ -1893,7 +1893,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(spent) = confirmed.filter(|c| c.spent) {
                 let now_ms = self.transport.clock().now_ms();
                 if let Some(ch) = self.links.get_mut(link_id).and_then(|l| l.channel_mut()) {
-                    ch.note_proved_transmission(spent.sent_ms, now_ms);
+                    if let Some(sequence) = spent.sequence {
+                        ch.note_proved_transmission(sequence, spent.sent_ms, now_ms);
+                    }
                 }
             }
             if let Some(confirmed) = confirmed.filter(|c| !c.spent) {

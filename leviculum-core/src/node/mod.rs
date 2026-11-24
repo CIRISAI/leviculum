@@ -8660,6 +8660,12 @@ mod tests {
     /// torn down ChannelExhausted at +9 s (today's time, inside the stale
     /// bound).
     fn exhausted_with(evidence: Evidence) -> bool {
+        exhausted_with_ticks(evidence, 4_000)
+    }
+
+    /// [`exhausted_with`], the node ticked every `step` ms from +5 s to +9 s
+    /// (re-review 8 R2: a tick where nothing is due must decide nothing).
+    fn exhausted_with_ticks(evidence: Evidence, step: u64) -> bool {
         use crate::transport::InterfaceId;
         let (mut a, a_dest, a_key) = listening_node();
         let (mut o, o_dest, o_key) = listening_node();
@@ -8700,6 +8706,14 @@ mod tests {
             .channel_mut()
             .unwrap()
             .set_max_tries_for_test(2);
+        // A learned estimate (a queue this link measured earlier), so the
+        // learned waits are longer than the cold ones: the window between a
+        // message's cold due and its learned due is where re-review 8 R2 bit.
+        p.link_mut(&p_a1)
+            .unwrap()
+            .channel_mut()
+            .unwrap()
+            .set_learned_srtt_for_test(2_000.0, TEST_TIME_MS + 4_000);
         p.transport().clock().set(TEST_TIME_MS + 4_000);
         let _ = p.handle_timeout();
         for node in [&mut p, &mut a, &mut o] {
@@ -8732,20 +8746,42 @@ mod tests {
                 let _ = p.handle_packet(InterfaceId(0), &captured_datagram);
             }
         }
-        p.transport().clock().set(TEST_TIME_MS + 9_000);
-        let out = p.handle_timeout();
-        let exhausted = out.events.iter().any(|e| {
-            matches!(
-                e,
-                NodeEvent::LinkClosed {
-                    link_id,
-                    reason: LinkCloseReason::ChannelExhausted,
-                    ..
-                } if *link_id == p_a1
-            )
-        });
+        let mut exhausted = false;
+        let mut t = 5_000;
+        while t < 9_000 {
+            t = (t + step).min(9_000);
+            p.transport().clock().set(TEST_TIME_MS + t);
+            let out = p.handle_timeout();
+            exhausted |= out.events.iter().any(|e| {
+                matches!(
+                    e,
+                    NodeEvent::LinkClosed {
+                        link_id,
+                        reason: LinkCloseReason::ChannelExhausted,
+                        ..
+                    } if *link_id == p_a1
+                )
+            });
+        }
         assert_eq!(exhausted, p.link(&p_a1).is_none());
         exhausted
+    }
+
+    /// +ciris (re-review 8 R2): a link held only by the same peer's evidence
+    /// on another link (form 1) survives node ticks that land between its
+    /// cold due and its learned due. On such a tick nothing is due, the
+    /// node builds no per-peer map and polls the channel with its own-link
+    /// evidence only: before the fix that OVERWROTE the newer evidence, the
+    /// cold timer and `alive` were judged from it, and the link was torn
+    /// ChannelExhausted while the peer was proving itself alive. Evidence
+    /// now only grows. Ticked every 10 ms, and with the host's vouching
+    /// too; a link with no evidence is still torn (the control).
+    #[test]
+    fn a_tick_with_nothing_due_does_not_tear_a_link_held_by_peer_evidence() {
+        assert!(!exhausted_with_ticks(Evidence::SamePeerOtherLink, 10));
+        assert!(!exhausted_with_ticks(Evidence::HostVouchesThisLink, 10));
+        assert!(exhausted_with_ticks(Evidence::None, 10), "silent: torn");
+        assert!(exhausted_with_ticks(Evidence::OtherPeer, 10));
     }
 
     /// +ciris (leviculum#113, form 1): an authenticated packet from the
@@ -8995,29 +9031,45 @@ mod tests {
 
     /// +ciris (leviculum#113, RACK while held): the same queued link once
     /// the media is shed (3 s) and the queue drains. Every control message
-    /// still waits seconds behind the queue, but the peer is visibly alive
-    /// and nothing sent AFTER a message has been proved while it is out, so
-    /// it is queued, not lost: no retransmission while the queue drains.
-    /// (Before, each was retransmitted at every timeout, and every
-    /// retransmission joined the same queue.)
+    /// still waits seconds behind the queue. A message behind the oldest
+    /// one out cannot be proved before it, and nothing sent after it has
+    /// been proved: it is queued, not lost, and is NOT resent. Only the
+    /// oldest is resent, at its own held-capped timer (re-review 8 R1's
+    /// backstop): one resend per held wait per link. Before RACK, 10
+    /// resends after the shed, from every message at every timeout; now 2,
+    /// each of the oldest message out at that moment.
     #[test]
-    fn a_queued_link_sends_no_spurious_resends_while_it_drains() {
+    fn a_queued_link_resends_only_its_oldest_message_while_it_drains() {
         let outcome = queueing_uplink_case(false, false);
         outcome.assert_lived();
-        let late: Vec<&alloc::string::String> = outcome
+        let resent: Vec<(u64, u16)> = outcome
             .log
             .iter()
-            .filter(|l| l.contains("P retransmit"))
-            .filter(|l| {
-                l.strip_prefix("DBG t=")
-                    .and_then(|r| r.split_once(' '))
-                    .and_then(|(t, _)| t.parse::<u64>().ok())
-                    .is_some_and(|t| t >= 3_000)
+            .filter_map(|l| {
+                let rest = l.strip_prefix("DBG t=")?;
+                let (t, what) = rest.split_once(' ')?;
+                let t: u64 = t.parse().ok()?;
+                let seq = what.strip_prefix("P retransmit seq=")?;
+                let seq: u16 = seq.split_once(' ')?.0.parse().ok()?;
+                (t >= 3_000).then_some((t, seq))
             })
             .collect();
+        for (t, seq) in &resent {
+            let oldest = outcome
+                .oldest_at
+                .iter()
+                .find(|(at, _)| at == t)
+                .and_then(|(_, o)| *o);
+            assert_eq!(
+                oldest,
+                Some(*seq),
+                "at {t} ms seq {seq} was resent, not the oldest"
+            );
+        }
         assert!(
-            late.is_empty(),
-            "resent while the queue drained:\n{late:#?}"
+            resent.len() <= 3,
+            "{} resends while the queue drained: {resent:?}",
+            resent.len()
         );
     }
 
@@ -9160,6 +9212,111 @@ mod tests {
         );
     }
 
+    /// +ciris (re-review 8 R1): RACK while held must not cost a lossy but
+    /// live link its retries. A clear 10 ms path that drops 10% of packets
+    /// in each direction (a fixed pseudo-random sequence). P sends a control
+    /// message every 2 s for 120 s, each the tail when it goes out; A sends
+    /// nothing but its proofs, so the evidence P holds is the proof of its
+    /// previous message: fresh, but not newer than the current one's first
+    /// send (re-review 8's case (a), the common steady state). Every P
+    /// message is delivered and the link lives. Before, such a tail message
+    /// got one probe and was then only queued: two lost round trips tore
+    /// the link down at the cold ladder, two transmissions where today's
+    /// code sends five.
+    #[test]
+    fn a_lossy_live_link_delivers_every_tail_message() {
+        use crate::transport::InterfaceId;
+        let mut pair = establish_nodecore_link_pair();
+        let p_link = pair.initiator_link_id;
+        let a_link = pair.responder_link_id;
+        for (node, link) in [(&mut pair.initiator, p_link), (&mut pair.responder, a_link)] {
+            let l = node.link_mut(&link).unwrap();
+            l.set_rtt_ms(10);
+            if let Some(ch) = l.channel_mut() {
+                ch.set_srtt_for_test(10.0);
+            }
+        }
+        // A fixed LCG: drop one packet in ten.
+        let mut state = 0x2545_f491_u64;
+        let mut keep = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % 10 != 0
+        };
+        let mut sent = 0usize;
+        let mut confirmed = 0usize;
+        let mut closed: Option<(u64, LinkCloseReason)> = None;
+        let mut dropped = 0usize;
+        let mut t = 0u64;
+        while t <= 135_000 && closed.is_none() {
+            pair.initiator.transport().clock().set(TEST_TIME_MS + t);
+            pair.responder.transport().clock().set(TEST_TIME_MS + t);
+            let mut p_outs = Vec::new();
+            let mut a_outs = Vec::new();
+            if t.is_multiple_of(2_000) && t < 120_000 {
+                if let Ok(out) = pair.initiator.send_on_link(&p_link, b"control") {
+                    sent += 1;
+                    p_outs.push(out);
+                }
+            }
+            p_outs.push(pair.initiator.handle_timeout());
+            a_outs.push(pair.responder.handle_timeout());
+            // Deliver what each side sent, through the lossy path, until
+            // nothing more is produced this tick.
+            for _ in 0..4 {
+                let mut to_a = Vec::new();
+                let mut to_p = Vec::new();
+                for out in p_outs.drain(..) {
+                    for e in &out.events {
+                        match e {
+                            NodeEvent::LinkDeliveryConfirmed { .. } => confirmed += 1,
+                            NodeEvent::LinkClosed { reason, .. } if closed.is_none() => {
+                                closed = Some((t, *reason))
+                            }
+                            _ => {}
+                        }
+                    }
+                    to_a.extend(extract_all_action_data(&out));
+                }
+                for out in a_outs.drain(..) {
+                    for e in &out.events {
+                        if let NodeEvent::LinkClosed { reason, .. } = e {
+                            if closed.is_none() {
+                                closed = Some((t, *reason));
+                            }
+                        }
+                    }
+                    to_p.extend(extract_all_action_data(&out));
+                }
+                if to_a.is_empty() && to_p.is_empty() {
+                    break;
+                }
+                for packet in to_a {
+                    if keep() {
+                        a_outs.push(pair.responder.handle_packet(InterfaceId(0), &packet));
+                    } else {
+                        dropped += 1;
+                    }
+                }
+                for packet in to_p {
+                    if keep() {
+                        p_outs.push(pair.initiator.handle_packet(InterfaceId(0), &packet));
+                    } else {
+                        dropped += 1;
+                    }
+                }
+            }
+            t += 10;
+        }
+        assert_eq!(
+            closed, None,
+            "torn down ({confirmed} of {sent} confirmed, {dropped} packets dropped)"
+        );
+        assert_eq!(confirmed, sent, "every P message delivered");
+        assert!(dropped >= 20, "the path dropped only {dropped}");
+    }
+
     /// What one run of [`queueing_uplink_case`] saw.
     struct UplinkOutcome {
         proof_delayed: bool,
@@ -9175,6 +9332,8 @@ mod tests {
         learned_peak: (f64, f64),
         /// The sender's LinkStats::retransmits at the end.
         stats_retransmits: u64,
+        /// P's oldest unproved sequence just before each tick's timeout pass.
+        oldest_at: Vec<(u64, Option<u16>)>,
         log: Vec<alloc::string::String>,
     }
 
@@ -9237,6 +9396,7 @@ mod tests {
         let mut budget = 0f64;
         let mut queued_bytes_peak = 0usize;
         let mut learned_peak = (0.0f64, 0.0f64);
+        let mut oldest_at: Vec<(u64, Option<u16>)> = Vec::new();
         let mut closed = false;
         let mut sent_control = 0;
         let mut confirmed = 0;
@@ -9309,6 +9469,13 @@ mod tests {
                     }
                 }
             }
+            oldest_at.push((
+                t,
+                pair.initiator
+                    .link(&p_link)
+                    .and_then(|l| l.channel())
+                    .and_then(|c| c.oldest_unacked_sequence()),
+            ));
             p_outs.push(pair.initiator.handle_timeout());
             a_outs.push(pair.responder.handle_timeout());
             // The control sender's events say what is confirmed.
@@ -9441,6 +9608,7 @@ mod tests {
                 .any(|l| l.contains(&alloc::format!("{sender} retransmit"))),
             learned_peak,
             stats_retransmits,
+            oldest_at,
             log: dbg_log,
         }
     }

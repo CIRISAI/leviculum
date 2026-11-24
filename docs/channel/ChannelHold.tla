@@ -34,15 +34,12 @@
 (* uncapped. The learned estimate decays to nothing one Bound after its   *)
 (* last sample.                                                           *)
 (*                                                                         *)
-(* RACK while held (RFC 8985). With the peer shown alive by evidence      *)
-(* within the bound (Fresh), a timeout resends the message only on loss   *)
-(* evidence (a transmission sent after it proved) or as its one tail-loss *)
-(* probe; otherwise it is queued: the timeout still counts toward the     *)
-(* ladder (the hold and the teardown are as before), nothing is resent.   *)
-(* This single-message model has no later message, so it checks the probe *)
-(* bound (HeldResendsAtMostOne); RACK's loss detection and the            *)
-(* head-of-line rule (only the oldest message out can end a held link)    *)
-(* involve several messages and are witnessed in the code's tests.        *)
+(* RACK while held (RFC 8985). The one message here is the OLDEST out,    *)
+(* which is resent at every one of its own timers, held or not (the RTO   *)
+(* backstop, re-review 8 R1): only messages BEHIND it are suppressed, and *)
+(* those, with RACK's loss detection and the head-of-line rule, are in    *)
+(* HeadOfLine.tla and the code's tests. A transmission may be LOST (Lose); *)
+(* the next timer resends it, so a loss is repaired within one held wait. *)
 (*                                                                         *)
 (* Time is whole ticks. The message is first sent at 0.                   *)
 (***************************************************************************)
@@ -60,13 +57,14 @@ CONSTANTS
     PeerProves,   \* the peer proves this link's messages, late, while pending
     ProofGap,     \* ... at least once every ProofGap ticks
     ReceiptsPerAttempt, \* every attempt's receipt kept (af1c9067b)
+    MaxLosses,    \* how many transmissions may be lost (keeps TLC finite)
     AckComes      \* this message's own (late) ack may arrive at all
 
 VARIABLES now, tries, sent, lastAuth, state, scale, scale0, proofIn,
-          lastProof, lastSample, tlp, heldResends
+          lastProof, lastSample, lost, lostAt, losses
 
 vars == <<now, tries, sent, lastAuth, state, scale, scale0, proofIn,
-          lastProof, lastSample, tlp, heldResends>>
+          lastProof, lastSample, lost, lostAt, losses>>
 
 Sum(f) == LET RECURSIVE S(_) S(k) == IF k = 0 THEN 0 ELSE f[k] + S(k - 1)
           IN S(Max)
@@ -98,7 +96,7 @@ Init == /\ now = 0 /\ tries = 1 /\ sent = 0 /\ lastAuth = -1
         /\ state = "pending"
         /\ scale \in 1..MaxScale /\ scale0 = scale
         /\ proofIn = FALSE /\ lastProof = 0 /\ lastSample = 0
-        /\ tlp = FALSE /\ heldResends = 0
+        /\ lost = FALSE /\ lostAt = 0 /\ losses = 0
 
 Alive == lastAuth > 0 /\ now < Bound
 
@@ -112,17 +110,17 @@ Tick ==
     /\ PeerProves => now - lastProof < ProofGap
     /\ now' = now + 1
     /\ scale' = IF now + 1 >= lastSample + Bound THEN 1 ELSE scale
-    /\ UNCHANGED <<tries, sent, lastAuth, state, scale0, proofIn, lastProof, lastSample, tlp, heldResends>>
+    /\ UNCHANGED <<tries, sent, lastAuth, state, scale0, proofIn, lastProof, lastSample, lost, lostAt, losses>>
 
 AuthIn ==
     /\ PeerSpeaks /\ state = "pending" /\ lastAuth /= now
     /\ lastAuth' = now
-    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample, lost, lostAt, losses>>
 
 PeerEvidence ==
     /\ PeerElsewhere /\ state = "pending" /\ lastAuth /= now
     /\ lastAuth' = now
-    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, state, scale, scale0, proofIn, lastProof, lastSample, lost, lostAt, losses>>
 
 \* A proof of another message's LATEST attempt: evidence and an RTT sample;
 \* its receipt is there either way.
@@ -130,7 +128,7 @@ Sample ==
     /\ PeerSpeaks /\ state = "pending" /\ lastAuth /= now
     /\ scale' \in 1..MaxScale /\ scale' /= scale
     /\ lastAuth' = now /\ lastSample' = now
-    /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn, lastProof, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn, lastProof, lost, lostAt, losses>>
 
 \* The late proof of an EARLIER attempt of another message, or of a spent
 \* receipt: evidence (and a sample) only with the per-attempt receipts.
@@ -141,29 +139,32 @@ LateProof ==
        THEN /\ lastAuth' = now /\ lastSample' = now
             /\ scale' \in 1..MaxScale
        ELSE UNCHANGED <<lastAuth, lastSample, scale>>
-    /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, state, scale0, proofIn, lost, lostAt, losses>>
 
 \* A timer fires at its due, or at once when a smaller estimate moved the
 \* due into the past (the next poll).
 Timeout ==
     /\ state = "pending" /\ now >= Due
     /\ IF tries >= Max /\ ~Alive
-       THEN /\ state' = "torn" /\ UNCHANGED <<tries, sent, tlp, heldResends>>
+       THEN /\ state' = "torn" /\ UNCHANGED <<tries, sent, lost, lostAt, losses>>
        ELSE /\ tries' = tries + 1
             /\ sent' = now
             /\ UNCHANGED state
-            \* Fresh: resent only as its one tail probe (no later message
-            \* here can show it lost); else queued, not resent.
-            /\ IF Fresh /\ ~tlp
-               THEN tlp' = TRUE /\ heldResends' = heldResends + 1
-               ELSE UNCHANGED <<tlp, heldResends>>
+            \* The oldest: resent at every timer, held or not.
+            /\ lost' = FALSE /\ UNCHANGED <<lostAt, losses>>
     /\ UNCHANGED <<now, lastAuth, scale, scale0, proofIn, lastProof, lastSample>>
 
-\* The proof of this message's latest attempt.
+\* The latest transmission is dropped on the way.
+Lose ==
+    /\ state = "pending" /\ ~lost /\ losses < MaxLosses
+    /\ lost' = TRUE /\ lostAt' = now /\ losses' = losses + 1
+    /\ UNCHANGED <<now, tries, sent, lastAuth, state, scale, scale0, proofIn, lastProof, lastSample>>
+
+\* The proof of this message's latest attempt (not if it was lost).
 Ack ==
-    /\ AckComes /\ state = "pending"
+    /\ AckComes /\ state = "pending" /\ ~lost
     /\ state' = "acked" /\ proofIn' = TRUE
-    /\ UNCHANGED <<now, tries, sent, lastAuth, scale, scale0, lastProof, lastSample, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, lastAuth, scale, scale0, lastProof, lastSample, lost, lostAt, losses>>
 
 \* The late proof of an EARLIER attempt of this message (the original,
 \* queued): it confirms the message only if that attempt's receipt was kept.
@@ -173,10 +174,10 @@ AckEarlier ==
     /\ IF ReceiptsPerAttempt
        THEN state' = "acked" /\ lastAuth' = now
        ELSE UNCHANGED <<state, lastAuth>>
-    /\ UNCHANGED <<now, tries, sent, scale, scale0, lastProof, lastSample, tlp, heldResends>>
+    /\ UNCHANGED <<now, tries, sent, scale, scale0, lastProof, lastSample, lost, lostAt, losses>>
 
 Next == Tick \/ AuthIn \/ PeerEvidence \/ Sample \/ LateProof \/ Timeout
-        \/ Ack \/ AckEarlier
+        \/ Ack \/ AckEarlier \/ Lose
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Tick) /\ WF_vars(Timeout)
         /\ WF_vars(LateProof)
@@ -215,9 +216,12 @@ DeliveredNeverTorn == proofIn => state /= "torn"
 HeldWhileProving == (PeerProves /\ ~PeerSpeaks /\ ~PeerElsewhere /\ ProofGap <= Ord[1]
                      /\ state = "torn") => now >= Bound
 
-\* While held, a message merely queued is resent at most once (its tail
-\* probe): its retransmits do not re-enter the queue.
-HeldResendsAtMostOne == heldResends <= 1
+\* A transmission lost while the message is out is resent within one held
+\* wait at the most (the oldest's RTO backstop, re-review 8 R1), held or not.
+ResentWithinHeldWait == (lost /\ state = "pending") => now <= lostAt + HeldMax
+
+\* ... and so, eventually, a lost message is resent or the link ends.
+LostIsRepaired == [](lost => <>(~lost \/ state \in {"acked", "torn"}))
 
 \* Torn only when it was out of tries and not alive.
 TornOnlyWhenDead == state = "torn" => (tries >= Max /\ ~Alive)
