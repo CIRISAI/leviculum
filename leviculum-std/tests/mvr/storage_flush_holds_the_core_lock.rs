@@ -62,8 +62,8 @@ use leviculum_std::test_support::event_log::init_event_log;
 const KNOWN_DESTINATIONS: usize = 87_000;
 
 /// The runtime identities the field node holds: `known_identities: 50000`,
-/// which is the cap. A node loads every known destination it has on disk,
-/// so the cap keeps the last 50 000 in hash order.
+/// which is the cap. The flush holds the known-destinations file to it too
+/// (leviculum#49), so the file the test seeds with 87,000 keeps 50,000.
 const IDENTITY_CAP: usize = 50_000;
 
 /// The field node's path table and announce cache (`PATH_TABLE` last=16815,
@@ -379,10 +379,16 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
         .into_iter()
         .find(|c| c.name == "known_dest_entries")
         .map(|c| c.entries);
+    // leviculum#116: the flush holds the known-destinations file to the
+    // identity cap on purpose (leviculum#49, 5867f221c: an entry evicted
+    // under pressure is the least recent, so it falls off the file instead
+    // of coming back from it at every flush). Of the 87,000 the node was
+    // given, the cap's 50,000 come back; this test's subject is the core
+    // lock, asserted above, unchanged.
     assert_eq!(
         known,
-        Some(KNOWN_DESTINATIONS),
-        "every known destination must come back from the flushed file"
+        Some(IDENTITY_CAP),
+        "the flushed file holds the identity cap's known destinations (leviculum#49)"
     );
     let recalled = paths
         .clone()
