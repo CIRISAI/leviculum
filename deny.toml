@@ -47,6 +47,23 @@ ignore = [
     # Unmaintained, not a vulnerability, and no successor release exists. It is
     # a small transitive dependency; drop this when its dependents move off it.
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; transitive only, no fix exists" },
+    # Unmaintained, not a vulnerability, and no successor release exists. It
+    # reaches the graph only through rustls-acme in lblogd (upstream's log
+    # daemon); no node or core crate uses it. Drop it when rustls-acme moves.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; only via rustls-acme in lblogd, no fix exists" },
+    # heapless 0.8.0 (leviculum-core, and embassy-sync 0.7.2 via ble-tx, pin
+    # ^0.8): these are fixed only in 0.9.4, no 0.8.x carries them. Each entry
+    # says why our use is not affected; moving off 0.8 is tracked in
+    # https://github.com/CIRISAI/leviculum/issues/115.
+    { id = "RUSTSEC-2026-0574", reason = "SortedLinkedList FindMutView::pop: not called (leviculum#115)" },
+    { id = "RUSTSEC-2026-0575", reason = "spsc::Spsc::peek: not used (leviculum#115)" },
+    { id = "RUSTSEC-2026-0576", reason = "IndexMap::truncate: not called (leviculum#115)" },
+    { id = "RUSTSEC-2026-0577", reason = "IndexMap clear/retain unwinding: our keys/values cannot panic in Drop, retain closures cannot panic (leviculum#115)" },
+    { id = "RUSTSEC-2026-0578", reason = "SortedLinkedList::zeroize: not called (leviculum#115)" },
+    { id = "RUSTSEC-2026-0579", reason = "Deque::try_from: affects 0.9.2-0.9.3 only, we are on 0.8.0 (leviculum#115)" },
+    { id = "RUSTSEC-2026-0580", reason = "arc/object/box pools: not used (leviculum#115)" },
+    { id = "RUSTSEC-2026-0581", reason = "Deque::make_contiguous: not called; embassy-sync channels unused (leviculum#115)" },
+    { id = "RUSTSEC-2026-0582", reason = "IndexMap::insert at u16::MAX elements: every map holds 256 or fewer (leviculum#115)" },
 ]
 
 [bans]
