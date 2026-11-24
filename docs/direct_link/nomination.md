@@ -36,7 +36,9 @@ settles on its own, as rns-rs does.
    proof of the secret over those 56 bytes (`wire::nomination_frame`,
    72 bytes), checked in constant time. Every leviculum parser still reads
    it as a punch of the session, so a direct interface acks a late one; only
-   a peer that negotiated `"n"` is ever sent one. The secret is a newtype
+   a peer that negotiated `"n"` AND answered `"v"` in READY (it holds the
+   secret, review 6 finding 8) is ever sent one: a build that knew `"n"`
+   but not `"k"` gets a plain punch instead of frames it would drop. The secret is a newtype
    whose `Debug` prints nothing of it: no log line, diagnostic event or
    panic message can carry it, nor the proof.
 
@@ -55,6 +57,27 @@ the path's datagrams has it.
   changes nothing: the responder took the first valid nomination and
   stopped punching. One forged datagram from a new address pins nothing
   either way (the acked-source rule).
+- Filling the acked-source list (review 6 finding 7): the list a
+  nomination is taken from holds at most `PUNCH_TARGETS_MAX` sources, and
+  an observer with the token can fill it from distinct ports before the
+  genuine peer's first punch arrives. A source from one of the peer's own
+  IPs (its advertised candidates; the peer's IP on a birthday socket) now
+  takes the place of the oldest source that is not, and an unpreferred
+  source never displaces anything (`remember_acked`). Limit: an observer
+  BEHIND THE PEER'S OWN IP (its NAT, or a host sharing that public
+  address) is preferred too and can still crowd the list; the outcome is a
+  refused nomination, so the punch fails and the link stays relayed.
+- A race won by replay: the proof binds the session, the token, the
+  sequence number (target index and nominate bit) and the secret, but not
+  the source address. It cannot: the initiator does not know the address
+  its own socket's mapping shows the responder (an EDM NAT gives each
+  destination its own), so there is nothing it could sign. An acked
+  observer that receives the genuine nomination and re-sends it from its
+  own address before the genuine copy arrives wins the race; the responder
+  then settles on the observer, which relays or drops the link's
+  end-to-end-encrypted traffic (it learns nothing, and could already
+  delay or drop). A path that carries nothing back fails the direct link's
+  liveness (silence: path down) and the link falls back to the relay.
 - What remains: an ACTIVE attacker on the path that drops the genuine
   nomination and replays it from its own (already acked) address. It ends
   up relaying the link's end-to-end-encrypted traffic, which it could

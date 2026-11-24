@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1049,6 +1049,32 @@ pub(crate) const SPRAY_PER_TICK: usize = 32;
 /// acked, for nominations; a punch has at most PUNCH_TARGETS_MAX targets.
 const ACKED_SOURCES_MAX: usize = wire::PUNCH_TARGETS_MAX;
 
+/// +ciris (review 6 finding 7): remember `src` as a source this socket
+/// acked, at most [`ACKED_SOURCES_MAX`]. The list is what a nomination is
+/// taken from, and an observer holding the cleartext token could fill it
+/// from distinct ports before the genuine peer's first punch arrived, so
+/// that every proven nomination was refused. When full, a source from one
+/// of the `preferred` IPs (the peer's own: its advertised candidates, or
+/// the peer's IP for a birthday socket) takes the place of the oldest that
+/// is not from one; an unpreferred source never displaces anything. An
+/// observer elsewhere can then delay nothing; one behind the peer's own
+/// IP (its NAT) is the limit, stated in nomination.md.
+fn remember_acked(list: &mut Vec<SocketAddr>, src: SocketAddr, preferred: &[IpAddr]) {
+    if list.contains(&src) {
+        return;
+    }
+    if list.len() < ACKED_SOURCES_MAX {
+        list.push(src);
+        return;
+    }
+    if preferred.contains(&src.ip()) {
+        if let Some(pos) = list.iter().position(|a| !preferred.contains(&a.ip())) {
+            list.remove(pos);
+            list.push(src);
+        }
+    }
+}
+
 /// +ciris (review pass 5, item 3): how long the punch itself may run in a
 /// `window`: the path-MTU probe that follows a success runs inside the same
 /// window, so the verdict is in by its end and no wait an older peer shares
@@ -1450,9 +1476,7 @@ fn birthday_task(
                             // socket had already acked (review pass 5,
                             // item 2).
                             let known = acked_here.contains(&src);
-                            if !known && acked_here.len() < ACKED_SOURCES_MAX {
-                                acked_here.push(src);
-                            }
+                            remember_acked(&mut acked_here, src, &[canonical(peer).ip()]);
                             let proven = esc
                                 .nomination_secret
                                 .is_some_and(|k| wire::nomination_proven(&buf[..len], &k));
@@ -1542,6 +1566,10 @@ async fn punch_inner(
     // +ciris (review pass 5, item 2): sources whose punch this socket has
     // acked, the only ones a nomination is taken from.
     let mut acked_sources: Vec<SocketAddr> = Vec::new();
+    // +ciris (review 6 finding 7): the peer's own IPs (its advertised
+    // candidates, before any peer-reflexive one is added): a source from
+    // one of them may take the place of another in a full list.
+    let candidate_ips: Vec<IpAddr> = targets.iter().map(|a| a.ip()).collect();
     // The initiator nominates up to NOMINATION_GRACE past its window: the
     // responder waits as long.
     let mut deadline = deadline;
@@ -1718,9 +1746,7 @@ async fn punch_inner(
                             diag.path = Some(src);
                             return Some(Punched { peer: src, early });
                         }
-                        if !acked_sources.contains(&src) && acked_sources.len() < ACKED_SOURCES_MAX {
-                            acked_sources.push(src);
-                        }
+                        remember_acked(&mut acked_sources, src, &candidate_ips);
                         // A source that sent a valid punch proved the token:
                         // it is punched (tokened) from now on.
                         if !targets.contains(&src) && targets.len() < reflexive_max {
@@ -3435,6 +3461,40 @@ mod pmtu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// +ciris (review 6 finding 7): an observer holding the cleartext token
+    /// fills the acked-source list from distinct ports before the genuine
+    /// peer's first punch arrives. The peer's own IP still gets in (taking
+    /// the place of the oldest observer source), so its nomination is not
+    /// refused; an observer's source never displaces one from the peer's
+    /// IP; and with no room and nothing to displace, the list is unchanged.
+    #[test]
+    fn an_observer_cannot_fill_the_acked_sources_ahead_of_the_peer() {
+        let observer = |port: u16| SocketAddr::from(([203, 0, 113, 9], port));
+        let peer = SocketAddr::from(([198, 51, 100, 7], 40_000));
+        let preferred = [peer.ip()];
+        let mut list = Vec::new();
+        for port in 0..(ACKED_SOURCES_MAX as u16 + 4) {
+            remember_acked(&mut list, observer(1_000 + port), &preferred);
+        }
+        assert_eq!(list.len(), ACKED_SOURCES_MAX, "the observer filled it");
+        remember_acked(&mut list, peer, &preferred);
+        assert!(list.contains(&peer), "the peer's own IP still gets in");
+        assert_eq!(list.len(), ACKED_SOURCES_MAX);
+        // More observer ports do not push the peer out.
+        for port in 0..(2 * ACKED_SOURCES_MAX as u16) {
+            remember_acked(&mut list, observer(5_000 + port), &preferred);
+        }
+        assert!(list.contains(&peer));
+        // A list full of the peer's own sources stays as it is.
+        let mut own: Vec<SocketAddr> = (0..ACKED_SOURCES_MAX as u16)
+            .map(|p| SocketAddr::from(([198, 51, 100, 7], 41_000 + p)))
+            .collect();
+        let before = own.clone();
+        remember_acked(&mut own, peer, &preferred);
+        remember_acked(&mut own, observer(9), &preferred);
+        assert_eq!(own, before);
+    }
 
     /// A knock budget of a test's own: the process one is shared by every
     /// test running at once, and its per-IP cooldown would refuse each
