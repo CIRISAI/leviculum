@@ -79,6 +79,14 @@ use crate::constants::{
 /// pow_f64(1.5, 1) == 1.5
 /// pow_f64(1.5, 2) == 2.25
 /// ```
+fn pow_f64(base: f64, exp: u32) -> f64 {
+    let mut result = 1.0;
+    for _ in 0..exp {
+        result *= base;
+    }
+    result
+}
+
 /// +ciris (RACK, re-review 8 R4): `a` comes after `b` in 16-bit serial
 /// order (RFC 1982); the ring never holds more than a window, far below 2^15.
 fn seq_after(a: u16, b: u16) -> bool {
@@ -93,14 +101,6 @@ fn seq_after(a: u16, b: u16) -> bool {
 fn sent_before(outbound: &OutboundEnvelope, latest: u64, latest_seq: u16) -> bool {
     outbound.sent_at_ms < latest
         || (outbound.sent_at_ms == latest && seq_after(latest_seq, outbound.envelope.sequence))
-}
-
-fn pow_f64(base: f64, exp: u32) -> f64 {
-    let mut result = 1.0;
-    for _ in 0..exp {
-        result *= base;
-    }
-    result
 }
 
 /// Calculate retransmit timeout with additive queue delay.
@@ -144,6 +144,50 @@ pub enum MessageState {
     Delivered,
     /// Message delivery failed (max retries exceeded)
     Failed,
+}
+
+/// +ciris: the path's RTT floor: the minimum over two epochs, the running
+/// one and the one before (see [`crate::constants::CHANNEL_RTT_FLOOR_EPOCH_MS`]).
+/// It falls at once on a lower sample and rises only when an epoch that held
+/// the lower one ages out, or when the link moves to another interface.
+#[derive(Debug, Default)]
+struct RttFloor {
+    previous: Option<u64>,
+    current: Option<u64>,
+    started_ms: u64,
+    samples: u32,
+    /// The first epoch on this path is full (its time and its samples):
+    /// until then a queue may be all the floor has seen.
+    seasoned: bool,
+}
+
+impl RttFloor {
+    fn value(&self) -> Option<u64> {
+        match (self.previous, self.current) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn record(&mut self, sent_ms: u64, now_ms: u64) {
+        let rtt = now_ms.saturating_sub(sent_ms);
+        if rtt == 0 {
+            return;
+        }
+        let epoch_over = self.samples >= crate::constants::CHANNEL_RTT_FLOOR_EPOCH_SAMPLES
+            && now_ms.saturating_sub(self.started_ms)
+                >= crate::constants::CHANNEL_RTT_FLOOR_EPOCH_MS;
+        if epoch_over {
+            self.seasoned = true;
+            self.previous = self.current.take();
+            self.samples = 0;
+        }
+        if self.samples == 0 {
+            self.started_ms = now_ms;
+        }
+        self.samples = self.samples.saturating_add(1);
+        self.current = Some(self.current.map_or(rtt, |m| m.min(rtt)));
+    }
 }
 
 /// Outbound envelope tracking
@@ -276,9 +320,17 @@ pub struct Channel {
     /// Minimum RTT observed across unambiguous delivery samples: Karn-valid
     /// ones and, +ciris (leviculum#113), every attempt-tagged one
     /// ([`Channel::mark_delivered_attempt`]) (milliseconds).
-    /// `None` until the first sample. Telemetry only (leviculum#35) — never
-    /// consulted by window/pacing logic.
-    min_rtt_ms: Option<u64>,
+    /// `None` until the first sample. Telemetry (leviculum#35) and, +ciris,
+    /// what pacing divides by the window ([`Self::pacing_rtt_ms`]): so it is
+    /// the floor of the path the link is on NOW, not of the link's life.
+    rtt_floor: RttFloor,
+    /// +ciris: the latest clock value this channel was handed.
+    last_seen_ms: u64,
+    /// +ciris: the link moved to another interface when the clock read this.
+    /// A transmission sent no later went out on the path it left: its proof
+    /// measures neither the new path's floor nor RACK's RTT, and RACK does
+    /// not judge it (its own timer does).
+    path_since_ms: Option<u64>,
     /// Cumulative bytes confirmed delivered on this channel: the packed size
     /// of every envelope removed from `tx_ring` by a delivery proof. The
     /// BBR-style delivery-rate numerator (leviculum#35); callers sample this
@@ -339,7 +391,9 @@ impl Channel {
             next_send_at_ms: 0,
             srtt_ms: 0.0,
             rttvar_ms: 0.0,
-            min_rtt_ms: None,
+            rtt_floor: RttFloor::default(),
+            last_seen_ms: 0,
+            path_since_ms: None,
             delivered_bytes: 0,
             busy_rejections: 0,
             pacing_rejections: 0,
@@ -459,10 +513,45 @@ impl Channel {
         self.rttvar_ms
     }
 
-    /// Minimum unambiguous delivery RTT observed, in milliseconds
-    /// (leviculum#35; attempt-tagged samples count, leviculum#113).
+    /// Minimum unambiguous delivery RTT of the link's current path, in
+    /// milliseconds (leviculum#35; attempt-tagged samples count,
+    /// leviculum#113). +ciris: over the last one to two epochs of
+    /// [`crate::constants::CHANNEL_RTT_FLOOR_EPOCH_MS`], and from the start
+    /// when the link moves to another interface.
     pub fn min_rtt_ms(&self) -> Option<u64> {
-        self.min_rtt_ms
+        self.rtt_floor.value()
+    }
+
+    /// +ciris: the link moved to another interface (a direct path gained or
+    /// lost): the old path's floor and RACK's RTT say nothing about this
+    /// one, and transmissions already out when it moved are not its samples
+    /// (RACK judged a whole relayed window lost by the first direct proof).
+    /// Pacing follows at once, off the handshake RTT: neither the old path's
+    /// backed-off interval nor a next send it put far out carries over.
+    pub(crate) fn path_changed(&mut self, handshake_rtt_ms: u64) {
+        self.rtt_floor = RttFloor::default();
+        self.rack = None;
+        self.path_since_ms = Some(self.last_seen_ms);
+        let pacing_rtt = self.pacing_rtt_ms(handshake_rtt_ms);
+        self.recalculate_pacing(pacing_rtt);
+        self.pull_in_next_send(true, self.last_seen_ms);
+    }
+
+    /// `sent_ms` is a transmission on the path the link is on now.
+    fn on_this_path(&self, sent_ms: u64) -> bool {
+        self.path_since_ms.is_none_or(|since| sent_ms > since)
+    }
+
+    /// Take one floor sample; a floor that FELL also pulls in the next send,
+    /// which an older, higher floor (a queue longer than an epoch) may have
+    /// put seconds away.
+    fn note_rtt_floor(&mut self, sent_ms: u64, now_ms: u64) -> bool {
+        if !self.on_this_path(sent_ms) {
+            return false;
+        }
+        let before = self.rtt_floor.value();
+        self.rtt_floor.record(sent_ms, now_ms);
+        matches!((before, self.rtt_floor.value()), (Some(b), Some(a)) if a < b)
     }
 
     /// Cumulative confirmed-delivered envelope bytes (leviculum#35).
@@ -585,8 +674,11 @@ impl Channel {
     }
 
     /// +ciris (the post-drain pacing jam): the RTT pacing divides by the
-    /// window. The path's floor, `min_rtt_ms` (every unambiguous sample's
-    /// minimum: it never holds a queue's delay), with a quarter's margin;
+    /// window. The path's floor, `min_rtt_ms` (the minimum of every
+    /// unambiguous sample of one to two epochs on this path: a queue shorter
+    /// than an epoch never raises it, one fast proof after a longer queue
+    /// brings it back, and a path that slowed is followed within two epochs,
+    /// at once when the link moved interface), with a quarter's margin;
     /// before the first sample, today's effective RTT. Not SRTT: a queue
     /// episode's first-try proofs carry the queue's delay into SRTT, which
     /// comes down only 1/8 of its excess per new first-try sample, and each
@@ -595,24 +687,49 @@ impl Channel {
     /// Timeouts keep their own estimates (cold Karn SRTT, the learned one);
     /// SRTT keeps its other readers (LinkStats, the FFI).
     fn pacing_rtt_ms(&self, fallback_rtt_ms: u64) -> u64 {
-        match self.min_rtt_ms {
+        match self.pacing_floor_ms(fallback_rtt_ms) {
             Some(floor) => (floor + floor / 4).max(1),
             None => self.effective_rtt_ms(fallback_rtt_ms),
         }
     }
 
-    /// +ciris: the most multiplicative decrease may stretch the pacing
-    /// interval: 4 x the path's floor (`min_rtt_ms`), or today's effective
-    /// RTT before the first sample. Why 4: the decrease is a loss response,
-    /// and four floors per message is a quarter of the rate a clear path
-    /// carries at window 1, a strong back-off that still lets enough proofs
-    /// through to measure the path again. The old cap, SRTT, grew with the
-    /// queue: a storm drove pacing to seconds per message.
-    fn pacing_cap_ms(&self, fallback_rtt_ms: u64) -> u64 {
-        match self.min_rtt_ms {
-            Some(floor) => floor.saturating_mul(4).max(1),
-            None => self.effective_rtt_ms(fallback_rtt_ms).max(1),
+    /// +ciris (review 9 D1): the floor pacing may use. Until the first epoch
+    /// on this path is full, all its samples may come out of one queue (a
+    /// link whose first channel message goes out behind datagram media; a
+    /// link that moves mid-media, which is when a punch completes), so the
+    /// floor counts only up to the handshake RTT, and after a move, before
+    /// any sample, the handshake RTT stands in (SRTT may hold the old path's
+    /// queue). The handshake was measured on the path the link was made on,
+    /// the relay's where a direct path is gained: slower than the direct one,
+    /// so a conservative figure, yet never a queue this channel sat in. That
+    /// "nothing else of this channel was outstanding" would not tell a queue
+    /// apart: it is other traffic's. The price: a path really slower than the
+    /// handshake is paced too fast for that one epoch (the window still
+    /// bounds what is out); after it the measured floor stands alone.
+    fn pacing_floor_ms(&self, handshake_rtt_ms: u64) -> Option<u64> {
+        let handshake = (handshake_rtt_ms > 0).then_some(handshake_rtt_ms);
+        match self.min_rtt_ms() {
+            Some(floor) if self.rtt_floor.seasoned => Some(floor),
+            Some(floor) => Some(handshake.map_or(floor, |h| floor.min(h))),
+            None => handshake.filter(|_| self.path_since_ms.is_some()),
         }
+    }
+
+    /// +ciris: the most multiplicative decrease may stretch the pacing
+    /// interval: SRTT as it always was (never slower on a clear path), but no
+    /// more than 4 x the path's floor (`pacing_floor_ms`): SRTT grows with a
+    /// queue, and a storm drove pacing to seconds per message. Why 4: four
+    /// floors per message is a quarter of the rate a clear path carries at
+    /// window 1, a strong back-off that still lets enough proofs through to
+    /// measure the path again. An SRTT still below the floor is the path the
+    /// link left (a move): the floor stands.
+    fn pacing_cap_ms(&self, fallback_rtt_ms: u64) -> u64 {
+        let srtt = self.effective_rtt_ms(fallback_rtt_ms);
+        match self.pacing_floor_ms(fallback_rtt_ms) {
+            Some(floor) => floor.saturating_mul(4).min(srtt.max(floor)),
+            None => srtt,
+        }
+        .max(1)
     }
 
     /// Return the effective RTT: SRTT if measured, else fallback.
@@ -761,6 +878,7 @@ impl Channel {
             });
         }
 
+        self.last_seen_ms = self.last_seen_ms.max(now_ms);
         let sequence = self.next_sequence();
         // Unreachable while the mdu() cap holds (checked above), but a length
         // that slipped through must surface as TooLarge, never as the
@@ -1028,6 +1146,8 @@ impl Channel {
             // Karn's algorithm: update SRTT only from non-retransmitted messages
             let sent_at = self.tx_ring[pos].sent_at_ms;
             let tries = self.tx_ring[pos].tries;
+            self.last_seen_ms = self.last_seen_ms.max(now_ms);
+            let mut floor_fell = false;
             if tries == 1 {
                 let sample_rtt = now_ms.saturating_sub(sent_at);
                 if sample_rtt > 0 {
@@ -1035,10 +1155,7 @@ impl Channel {
                     // Telemetry (leviculum#35): track the floor of Karn-valid
                     // samples — the conservative propagation-delay estimate a
                     // delivery-rate consumer wants alongside the smoothed RTT.
-                    self.min_rtt_ms = Some(match self.min_rtt_ms {
-                        Some(m) => m.min(sample_rtt),
-                        None => sample_rtt,
-                    });
+                    floor_fell = self.note_rtt_floor(sent_at, now_ms);
                 }
             }
 
@@ -1057,6 +1174,7 @@ impl Channel {
             // handshake RTT): the path's floor, not its queue (+ciris).
             let pacing_rtt = self.pacing_rtt_ms(rtt_ms);
             self.recalculate_pacing(pacing_rtt);
+            self.pull_in_next_send(floor_fell, now_ms);
             crate::tracing::debug!(
                 seq = sequence,
                 tx_ring = self.tx_ring.len(),
@@ -1139,6 +1257,8 @@ impl Channel {
             return false;
         };
         let tries = self.tx_ring[pos].tries;
+        self.last_seen_ms = self.last_seen_ms.max(now_ms);
+        let mut floor_fell = false;
         self.note_proved_transmission(sequence, attempt_sent_ms, now_ms);
         let sample_rtt = now_ms.saturating_sub(attempt_sent_ms);
         if sample_rtt > 0 {
@@ -1160,10 +1280,7 @@ impl Channel {
             }
             self.learned_srtt_ms = learned;
             self.last_learned_sample_ms = now_ms;
-            self.min_rtt_ms = Some(match self.min_rtt_ms {
-                Some(m) => m.min(sample_rtt),
-                None => sample_rtt,
-            });
+            floor_fell = self.note_rtt_floor(attempt_sent_ms, now_ms);
         }
         let spurious = if attempt >= 1 {
             tries.saturating_sub(attempt)
@@ -1210,6 +1327,7 @@ impl Channel {
         }
         let pacing_rtt = self.pacing_rtt_ms(rtt_ms);
         self.recalculate_pacing(pacing_rtt);
+        self.pull_in_next_send(floor_fell, now_ms);
         crate::tracing::debug!(
             seq = sequence,
             attempt,
@@ -1229,6 +1347,9 @@ impl Channel {
     /// message, or a spent one: `NodeCore`'s proof handler reports both).
     /// RACK keeps the latest such transmission and its RTT (RFC 8985 6.2).
     pub(crate) fn note_proved_transmission(&mut self, sequence: u16, xmit_ms: u64, now_ms: u64) {
+        if !self.on_this_path(xmit_ms) {
+            return;
+        }
         let newer = self.rack.is_none_or(|(latest, _, latest_seq)| {
             xmit_ms > latest || (xmit_ms == latest && seq_after(sequence, latest_seq))
         });
@@ -1246,6 +1367,25 @@ impl Channel {
                 .is_some_and(|t| now_ms < t.saturating_add(self.hold_bound_ms))
     }
 
+    /// +ciris (RACK while held): the oldest message out is OVERDUE: its proof
+    /// is later than the path explains, 2 x the latest measured RTT since its
+    /// FIRST send (its own probes do not move that: on a FIFO path the
+    /// original is what arrives). On a path the link just moved to, with
+    /// nothing measured yet, 2 x the handshake RTT (review 9 D7: a direct
+    /// path's 5 ms on the relay it fell back to switched head-of-line off);
+    /// with no RTT measured ever, at once.
+    fn oldest_overdue(&self, now_ms: u64, handshake_rtt_ms: u64) -> bool {
+        let Some(oldest) = self.tx_ring.iter().find(|e| e.state == MessageState::Sent) else {
+            return true;
+        };
+        let rtt = match self.rack {
+            Some((_, rtt, _)) => rtt,
+            None if self.path_since_ms.is_some() => handshake_rtt_ms,
+            None => return true,
+        };
+        now_ms >= oldest.first_sent_ms.saturating_add(rtt.saturating_mul(2))
+    }
+
     /// +ciris (RACK while held): the reorder window, a quarter of the
     /// learned RTT, at least 20 ms (RFC 8985 6.2: min_rtt / 4).
     fn reorder_window_ms(&self, rtt_ms: u64) -> u64 {
@@ -1257,7 +1397,8 @@ impl Channel {
     /// the reorder window has passed since its last one (RFC 8985 6.2).
     fn rack_lost(&self, outbound: &OutboundEnvelope, now_ms: u64, reo_ms: u64) -> bool {
         self.rack.is_some_and(|(latest, rtt, latest_seq)| {
-            sent_before(outbound, latest, latest_seq)
+            self.on_this_path(outbound.sent_at_ms)
+                && sent_before(outbound, latest, latest_seq)
                 && now_ms
                     >= outbound
                         .sent_at_ms
@@ -1400,8 +1541,10 @@ impl Channel {
             .filter(|_| self.last_evidence_ms.is_some() && self.hold_bound_ms > 0);
         let losses = self.tx_ring.iter().filter_map(move |outbound| {
             let (latest, rtt, latest_seq) = rack?;
-            (outbound.state == MessageState::Sent && sent_before(outbound, latest, latest_seq))
-                .then(|| outbound.sent_at_ms.saturating_add(rtt).saturating_add(reo))
+            (outbound.state == MessageState::Sent
+                && self.on_this_path(outbound.sent_at_ms)
+                && sent_before(outbound, latest, latest_seq))
+            .then(|| outbound.sent_at_ms.saturating_add(rtt).saturating_add(reo))
         });
         timers.chain(losses).min()
     }
@@ -1473,17 +1616,33 @@ impl Channel {
     ///   outlive the stale bound (every hold ends there); delay the
     ///   detection of a peer silent on every link past the later of the
     ///   cold ladder of the first message sent after it fell silent and the
-    ///   oldest message's overdue point (a peer that dies mid-queue is found
-    ///   once the queue it left behind should have drained, not at the
-    ///   stale bound).
+    ///   oldest message's overdue point, plus at most one held wait: the
+    ///   overdue point is not a wake, a message already out of tries is
+    ///   judged at its next timer (review 9 D2: up to 2 s on the fast tier;
+    ///   elsewhere up to its 5th wait, about 6 s at an RTT of 500 ms, 25 s at
+    ///   2 s, 56 s there with a full queue term). A peer that dies mid-queue
+    ///   is so found once the queue it left behind should have drained, not
+    ///   at the stale bound.
     /// - no fresh evidence: exactly today's cold ladder, a resend at every
     ///   timeout; a silent link dies as fast as ever.
     ///
     /// The stale bound still ends every hold. A peer (upstream Python
     /// included) sees nothing new on the wire, only fewer resends.
     ///
-    /// Known limits (re-review 7), each bounded by the hold's own bound, a
-    /// message's first send plus the stale bound:
+    /// Known limits, each bounded by the hold's own bound, a message's first
+    /// send plus the stale bound:
+    /// - queue onset (review 9 D4; HeadOfLineDeep.cfg): the RTT the overdue
+    ///   point uses was measured before the queue, so while a queue more than
+    ///   doubles between two proofs (10 ms to seconds at its onset) the oldest
+    ///   is overdue at once and head-of-line protects nothing: a message sent
+    ///   after the last evidence can end a live link at its cold ladder.
+    ///   Evidence from elsewhere (the same peer's other link, the host's
+    ///   `note_peer_evidence`) is what covers it.
+    /// - a lost message behind the oldest (review 9 D6) that nothing later
+    ///   proves lost waits for the oldest's proof plus the rest of the wait
+    ///   it had re-armed as queued (2 s on the fast tier, its 5th wait
+    ///   elsewhere: 6 to 79 s at an RTT of 500 ms, 25 to 276 s at 2 s), then
+    ///   is resent at its own timers as the oldest.
     /// - the sequence lap (N2, leviculum#118): the 16-bit channel sequence
     ///   wraps after 65,536 messages, and a frame is "backward" only when it
     ///   is 32,768 or more behind, so on a link older than one lap a frame
@@ -1511,6 +1670,7 @@ impl Channel {
         authenticated_inbound_ms: Option<u64>,
         hold_bound_ms: u64,
     ) -> Vec<ChannelAction> {
+        self.last_seen_ms = self.last_seen_ms.max(now_ms);
         if hold_bound_ms > 0 {
             self.hold_bound_ms = hold_bound_ms;
         }
@@ -1551,18 +1711,7 @@ impl Channel {
             .tx_ring
             .iter()
             .position(|e| e.state == MessageState::Sent);
-        // The oldest is OVERDUE once its proof is later than the path
-        // explains: 2 x the latest measured RTT since its FIRST send (its
-        // own probes do not move that: on a FIFO path the original is what
-        // arrives); with no RTT measured at all, at once.
-        let oldest_overdue = oldest.is_none_or(|o| {
-            self.rack.is_none_or(|(_, rtt, _)| {
-                now_ms
-                    >= self.tx_ring[o]
-                        .first_sent_ms
-                        .saturating_add(rtt.saturating_mul(2))
-            })
-        });
+        let oldest_overdue = self.oldest_overdue(now_ms, rtt_ms);
 
         // First pass: collect indices that need processing and their current
         // tries, and whether only RACK (not the timer) flagged them.
@@ -1690,8 +1839,8 @@ impl Channel {
         }
 
         // Multiplicative decrease: double pacing per retransmit, capped (+ciris)
-        // at pacing_cap_ms, 4 x the path's floor, not at the (queue-inflated)
-        // SRTT.
+        // at pacing_cap_ms: SRTT, but no more than 4 x the path's floor once a
+        // queue inflated it; never below the base (window 1: 1.25 floors).
         // adjust_window() already called recalculate_pacing(), so pacing_interval_ms > 0
         // (assuming RTT is known). If still 0 (no RTT yet), skip, no timing data to pace with.
         // Only 2nd+ retransmits trigger MD, first retransmit may be spurious (jitter).
@@ -1700,7 +1849,7 @@ impl Channel {
             self.pacing_interval_ms = self
                 .pacing_interval_ms
                 .saturating_mul(1u64 << doublings)
-                .min(self.pacing_cap_ms(rtt_ms));
+                .min(self.pacing_cap_ms(rtt_ms).max(self.pacing_interval_ms));
             crate::tracing::debug!(
                 pacing_ms = self.pacing_interval_ms,
                 doublings,
@@ -1739,6 +1888,16 @@ impl Channel {
         }
         let base = rtt_ms / self.window as u64;
         self.pacing_interval_ms = base.clamp(1, rtt_ms);
+    }
+
+    /// +ciris: after the floor fell, the next send is at most one interval
+    /// away (see [`Self::note_rtt_floor`]).
+    fn pull_in_next_send(&mut self, floor_fell: bool, now_ms: u64) {
+        if floor_fell {
+            self.next_send_at_ms = self
+                .next_send_at_ms
+                .min(now_ms.saturating_add(self.pacing_interval_ms));
+        }
     }
 
     /// Clear all pending outbound envelopes
@@ -3628,33 +3787,310 @@ mod tests {
         assert_eq!(channel.pacing_interval_ms(), floor);
     }
 
-    /// +ciris (post-drain pacing): the congestion response still works. On
-    /// a clear path with real loss (nothing proved, no evidence: the cold
-    /// ladder), retransmissions still take the window down and still
-    /// stretch the pacing interval, up to its cap of 4 x the path's floor.
+    /// +ciris: a path that slows tenfold with no interface move. Proofs
+    /// every 10 s, first at 10 ms, then at 100 ms: the old floor is kept for
+    /// at least one epoch (120 s), so a shorter queue cannot pass for a
+    /// slower path, and is gone within two: 240 s here, 25 proofs (the rule's
+    /// own bound at any rate is two epochs of at least 8 samples). A lifetime
+    /// minimum paced the link off 10 ms for good.
     #[test]
-    fn under_loss_pacing_still_backs_off_to_its_cap_and_the_window_drops() {
-        let rtt_ms = 1_000;
+    fn a_path_that_slows_is_followed_within_two_epochs() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let epoch = crate::constants::CHANNEL_RTT_FLOOR_EPOCH_MS;
+        let mut seq = 0u16;
+        let mut prove_at = |channel: &mut Channel, at: u64, sample: u64| {
+            let mut t = at;
+            prove_one(channel, &mut t, seq, sample, rtt_ms);
+            seq += 1;
+        };
+        for i in 0..3u64 {
+            prove_at(&mut channel, 1_000 + i * 10_000, 10);
+        }
+        let slow_from = 31_000;
+        let mut proofs = 0u64;
+        while channel.min_rtt_ms() == Some(10) {
+            prove_at(&mut channel, slow_from + proofs * 10_000, 100);
+            proofs += 1;
+            assert!(proofs <= 25, "still the old floor after {proofs} proofs");
+        }
+        let took = (proofs - 1) * 10_000;
+        assert_eq!(channel.min_rtt_ms(), Some(100));
+        assert!(took >= epoch - 30_000, "dropped after {took} ms");
+        assert!(took <= 2 * epoch, "followed after {took} ms");
+        assert_eq!(
+            channel.pacing_interval_ms(),
+            (125 / channel.window() as u64).max(1)
+        );
+    }
+
+    /// +ciris: a queue does not raise the floor, and one longer than an
+    /// epoch cannot leave it raised. Two-second proofs every second for
+    /// 119 s: the floor stays 10 ms. Kept up for 400 s they do raise it (by
+    /// then nothing distinguishes them from a slow path), and the first
+    /// 10 ms proof after the drain brings the floor, the pacing interval and
+    /// the next send back at once.
+    #[test]
+    fn a_queue_shorter_than_an_epoch_never_raises_the_floor_and_a_drain_restores_it() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut seq = 0u16;
+        let mut prove_at = |channel: &mut Channel, at: u64, sample: u64| {
+            let mut t = at;
+            prove_one(channel, &mut t, seq, sample, rtt_ms);
+            seq += 1;
+        };
+        for i in 0..20u64 {
+            prove_at(&mut channel, 1_000 + i * 7_000, 10);
+        }
+        let queue_from = 141_000;
+        for i in 0..119u64 {
+            prove_at(&mut channel, queue_from + i * 1_000, 2_000);
+            assert_eq!(channel.min_rtt_ms(), Some(10), "{i} s into the queue");
+        }
+        for i in 119..400u64 {
+            prove_at(&mut channel, queue_from + i * 1_000, 2_000);
+        }
+        assert_eq!(channel.min_rtt_ms(), Some(2_000), "a 400 s queue raises it");
+        let now = queue_from + 403_000;
+        prove_at(&mut channel, now, 10);
+        assert_eq!(channel.min_rtt_ms(), Some(10), "one fast proof");
+        let floor = (12 / channel.window() as u64).max(1);
+        assert_eq!(channel.pacing_interval_ms(), floor);
+        assert!(channel.next_send_at_ms() <= now + 10 + floor);
+    }
+
+    /// +ciris (review 9 D1): a link whose FIRST sample comes out of a queue
+    /// (handshake 10 ms, first proof 3 s late) paces off the handshake RTT,
+    /// not off the queue: 12 ms over the window, a 40 ms back-off cap.
+    /// Before, 3750 ms over the window and a 12 s cap.
+    #[test]
+    fn a_first_sample_out_of_a_queue_is_not_the_floor() {
+        let rtt_ms = 10;
         let mut channel = Channel::new();
         channel.seed_srtt(rtt_ms);
         let mut t = 1_000;
-        prove_one(&mut channel, &mut t, 0, 1_000, rtt_ms);
-        let base = channel.pacing_interval_ms();
-        let window = channel.window();
-        channel.set_pacing_for_test(base, 0);
+        prove_one(&mut channel, &mut t, 0, 3_000, rtt_ms);
+        let paced = (12 / channel.window() as u64).max(1);
+        assert_eq!(channel.pacing_interval_ms(), paced);
+        assert_eq!(channel.pacing_cap_ms(rtt_ms), 40);
+        assert_eq!(channel.min_rtt_ms(), Some(3_000), "what was measured");
+    }
+
+    /// +ciris (review 9 D1 after a move): a link moves mid-media; every
+    /// sample of its new path comes out of a queue for 100 s. Pacing does
+    /// not take the queue as its floor. A path that IS that slow is followed
+    /// once its first epoch is full (120 s and 8 samples).
+    #[test]
+    fn a_move_mid_media_does_not_take_the_queue_as_its_floor() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        let mut seq = 0u16;
+        prove_one(&mut channel, &mut t, seq, 10, rtt_ms);
+        seq += 1;
+        // The old path's queue is in SRTT, and not in the pacing after the
+        // move, before any sample of the new path.
+        for _ in 0..6 {
+            prove_one(&mut channel, &mut t, seq, 3_000, rtt_ms);
+            seq += 1;
+        }
+        assert!(channel.srtt_ms() > 1_000.0);
+        channel.set_pacing_for_test(40, t + 60_000);
+        channel.path_changed(rtt_ms);
+        let paced = (12 / channel.window() as u64).max(1);
+        assert_eq!(channel.pacing_interval_ms(), paced, "at the move");
+        assert!(channel.next_send_at_ms() <= t + paced, "at the move");
+        let moved = t;
+        while t < moved + 100_000 {
+            prove_one(&mut channel, &mut t, seq, 3_000, rtt_ms);
+            seq += 1;
+            let paced = (12 / channel.window() as u64).max(1);
+            assert_eq!(channel.pacing_interval_ms(), paced, "at {t} ms");
+        }
+        while t < moved + 130_000 {
+            prove_one(&mut channel, &mut t, seq, 3_000, rtt_ms);
+            seq += 1;
+        }
+        let followed = (3_750 / channel.window() as u64).max(1);
+        assert_eq!(
+            channel.pacing_interval_ms(),
+            followed,
+            "a slow path is followed"
+        );
+    }
+
+    /// +ciris (review 9 D1 after a move): a link whose first path only ever
+    /// gave it queue samples moves; what it measured there is not a bound on
+    /// the new path either.
+    #[test]
+    fn a_queue_measured_before_a_move_does_not_bound_the_path_after_it() {
+        let rtt_ms = 10;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        prove_one(&mut channel, &mut t, 0, 3_000, rtt_ms);
+        channel.path_changed(rtt_ms);
+        prove_one(&mut channel, &mut t, 1, 2_000, rtt_ms);
+        let paced = (12 / channel.window() as u64).max(1);
+        assert_eq!(channel.pacing_interval_ms(), paced);
+        assert_eq!(channel.pacing_cap_ms(rtt_ms), 40);
+    }
+
+    /// +ciris (review 9 D7, upgrade): relay (150 ms) to direct (5 ms). Four
+    /// messages are in flight on the relay when the link moves; one sent on
+    /// the direct path is proved 5 ms later. They are not lost: nothing is
+    /// resent before their own timers (RACK judged them all lost 25 ms after
+    /// their send), and no wake is scheduled for it.
+    #[test]
+    fn an_upgrade_to_a_faster_path_does_not_resend_what_is_in_flight() {
+        let rtt_ms = 150;
+        let bound = 10_000;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        prove_one(&mut channel, &mut t, 0, 150, rtt_ms);
+        channel.set_window_bounds_for_test(8, 2, 48);
+        for _ in 0..4 {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                .unwrap();
+        }
+        channel.path_changed(rtt_ms);
+        let sent = t + 10;
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, sent, rtt_ms)
+            .unwrap();
+        assert!(channel.mark_delivered_attempt(5, 1, sent, sent + 5, rtt_ms));
+        // Their earliest own timer: the cold first wait (the 5 ms proof is a
+        // first-try sample, so SRTT is 131 ms).
+        let own_timer = t + calculate_timeout(1, channel.srtt_ms() as u64, 0, 1);
+        assert!(own_timer > t + 300);
+        for at in (sent + 5..own_timer).step_by(5) {
+            let actions = channel.poll_with_inbound(at, rtt_ms, Some(sent + 5), bound);
+            assert!(actions.is_empty(), "at {at}: {actions:?}");
+            let wake = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+            assert!(wake >= own_timer, "a wake at {wake} for no loss");
+        }
+        // A late relay proof measures neither the floor nor RACK.
+        assert!(channel.mark_delivered_attempt(1, 1, t, t + 150, rtt_ms));
+        assert_eq!(channel.min_rtt_ms(), Some(5));
+        assert_eq!(channel.rack.map(|(_, rtt, _)| rtt), Some(5));
+    }
+
+    /// +ciris (review 9 D7, fallback): direct (5 ms) to relay (handshake
+    /// 150 ms). The first message sent on the relay is not overdue at 10 ms
+    /// (2 x the direct RTT) but at 300 ms (2 x the handshake's), until a
+    /// relay proof measures the path.
+    #[test]
+    fn a_fallback_to_a_slower_path_does_not_collapse_the_overdue_point() {
+        let rtt_ms = 150;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        prove_one(&mut channel, &mut t, 0, 5, rtt_ms);
+        // One more on the direct path, proved only after the move: its 5 ms
+        // is the old path's and measures nothing here.
+        let direct = t;
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, direct, rtt_ms)
+            .unwrap();
+        channel.path_changed(rtt_ms);
+        t += 1;
+        channel.set_pacing_for_test(0, 0);
         channel
             .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
             .unwrap();
-        let mut peak = 0;
-        for _ in 0..4 {
+        assert!(channel.mark_delivered_attempt(1, 1, direct, direct + 5, rtt_ms));
+        assert!(!channel.oldest_overdue(t + 299, rtt_ms));
+        assert!(channel.oldest_overdue(t + 300, rtt_ms));
+        // SRTT (131 ms) is still partly the left path's: the cap is the
+        // handshake's 150 ms.
+        assert!(channel.srtt_ms() < 150.0);
+        assert_eq!(channel.pacing_cap_ms(rtt_ms), 150);
+    }
+
+    /// +ciris (post-drain pacing): the congestion response still works. On
+    /// a clear 1 s path with real loss (nothing proved, no evidence: the
+    /// cold ladder) the window drops, and the multiplicative decrease
+    /// stretches the pacing interval PAST what the smaller window alone
+    /// gives, to its cap of one SRTT and no further (4 x the floor, 4000 ms,
+    /// is the looser limit here; `a_first_sample_out_of_a_queue_is_not_the_floor`
+    /// has the case where it is the tighter one).
+    #[test]
+    fn under_loss_pacing_still_backs_off_to_its_cap_and_the_window_drops() {
+        let rtt_ms = 1_000;
+        let run = |messages: usize| {
+            let mut channel = Channel::new();
+            channel.seed_srtt(rtt_ms);
+            let mut t = 1_000;
+            let mut seq = 0;
+            // The window opens to the tier's 5.
+            while channel.window() < 5 {
+                prove_one(&mut channel, &mut t, seq, 1_000, rtt_ms);
+                seq += 1;
+            }
+            for _ in 0..messages {
+                channel.set_pacing_for_test(channel.pacing_interval_ms(), 0);
+                channel
+                    .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                    .unwrap();
+            }
+            let mut peak = 0;
+            let mut window_alone = 0;
+            let mut due = t;
+            while channel.tx_ring.iter().any(|e| e.tries < 4) {
+                // One message: at its own timer. Several: once all are due,
+                // so they are lost together.
+                due = if messages == 1 {
+                    channel.next_retransmit_due_ms(rtt_ms).unwrap()
+                } else {
+                    due + 100_000
+                };
+                let actions = channel.poll(due, rtt_ms);
+                assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+                peak = peak.max(channel.pacing_interval_ms());
+                window_alone = window_alone.max(1_250 / channel.window() as u64);
+            }
+            assert!(channel.window() < 5, "the window dropped");
+            (peak, window_alone)
+        };
+        let (peak, window_alone) = run(1);
+        assert!(
+            peak > window_alone,
+            "{peak} ms is the smaller window alone ({window_alone} ms), no decrease"
+        );
+        let (peak, _) = run(5);
+        assert_eq!(peak, 1_000, "five losses at once: the cap");
+    }
+
+    /// +ciris: at window 1 the base interval (1.25 floors) is over the cap
+    /// (one SRTT on a clear path): a loss never paces the link FASTER than
+    /// the base.
+    #[test]
+    fn at_window_one_a_back_off_never_goes_below_the_base_interval() {
+        let rtt_ms = 2_000;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        prove_one(&mut channel, &mut t, 0, 2_000, rtt_ms);
+        channel.set_window_bounds_for_test(1, 1, 1);
+        channel.set_pacing_for_test(2_500, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+            .unwrap();
+        while channel.tx_ring[0].tries < 4 {
             let due = channel.next_retransmit_due_ms(rtt_ms).unwrap();
-            let actions = channel.poll(due, rtt_ms);
-            assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
-            peak = peak.max(channel.pacing_interval_ms());
+            let _ = channel.poll(due, rtt_ms);
+            assert_eq!(channel.window(), 1, "the very slow tier");
+            assert_eq!(channel.pacing_interval_ms(), 2_500);
         }
-        assert!(channel.window() < window, "the window dropped");
-        assert!(peak > base, "pacing backed off: {base} -> {peak}");
-        assert!(peak <= 4 * 1_000, "capped at 4 x the floor: {peak}");
     }
 
     /// +ciris (re-review 7 N1): the onset case. 48 messages sent at window

@@ -605,8 +605,9 @@ async fn an_asking_host_refuses_and_the_proposer_hears_rejected() {
 /// can meet `PacingDelay`, and that this is the Channel working, not a fault.
 /// The upgrade signals (REQUEST, ACCEPT, READY, COMPLETE, REJECT) are Channel
 /// messages on the link, paced like any other: after each send the Channel
-/// holds the next for `pacing_interval_ms` = srtt / window. On a starved host
-/// the measured RTT is long and the window small, so the interval can reach
+/// holds the next for `pacing_interval_ms` = the path's RTT floor / window
+/// (under loss up to 4 floors). On a starved host the measured RTT is long and
+/// the window small, so the interval can reach
 /// hundreds of milliseconds; a `try_send` (which never waits, by contract)
 /// inside it reports `PacingDelay`. This witness: the first send after an
 /// upgrade either goes, or meets pacing only while the link reports a
@@ -624,10 +625,11 @@ async fn the_first_send_after_an_upgrade_waits_at_most_one_pacing_interval() {
     })
     .await
     .expect("the upgrade ends");
-    // The Channel clamps the pacing interval to at most one RTT
-    // (Channel::recalculate_pacing), and the interval in force is the one set
-    // at the last send, which later RTT samples may have changed: so the
-    // bound is one RTT from now, and nothing but pacing may hold it back.
+    // The Channel clamps the base pacing interval to at most 1.25 x the RTT
+    // floor (Channel::recalculate_pacing) and a loss may stretch it to 4
+    // (pacing_cap_ms); the interval in force is the one set at the last send.
+    // So the bound is the larger of the RTT and the interval, from now, and
+    // nothing but pacing may hold it back.
     let stats = b.node.link_stats(&link_id).expect("the link");
     let rtt_ms = stats.rtt_ms().unwrap_or(0).max(stats.pacing_interval_ms());
     let deadline = tokio::time::Instant::now() + Duration::from_millis(2 * rtt_ms + 200);

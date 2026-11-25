@@ -459,8 +459,11 @@ impl LinkStats {
         self.rttvar_ms
     }
 
-    /// Minimum Karn-valid delivery RTT observed, in milliseconds — the
-    /// conservative propagation-delay floor (leviculum#35).
+    /// Minimum unambiguous delivery RTT of the link's current path, in
+    /// milliseconds — the conservative propagation-delay floor
+    /// (leviculum#35). +ciris: it starts over when the link moves to another
+    /// interface, and otherwise forgets a value after one to two epochs of
+    /// `CHANNEL_RTT_FLOOR_EPOCH_MS`, so it can rise.
     pub fn min_rtt_ms(&self) -> Option<u64> {
         self.min_rtt_ms
     }
@@ -3992,7 +3995,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.identity()
     }
 
-    /// Get the remote identity for a link, if the peer has identified.
     /// +ciris (leviculum#113, form 2): the host vouches that the party at
     /// the far end of `link_id` is alive now. It records an authenticated
     /// inbound time for that link exactly as a packet that decrypted under
@@ -4037,6 +4039,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         true
     }
 
+    /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<&Identity> {
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link), mirroring link()/link_mut().
@@ -8830,10 +8833,6 @@ mod tests {
         assert_eq!(p.peer_evidence_scans, before + 1, "one scan at the due");
     }
 
-    /// +ciris (leviculum#113, form 2): the host vouching for the far end
-    /// of the held link holds it; vouching for a different peer's link, or
-    /// only before the message was sent, does not; an unknown link is
-    /// refused.
     /// +ciris (leviculum#113, review 6 finding 1): a REPLAYED packet is
     /// authentic ciphertext (link tokens carry no replay protection, and
     /// channel packets are exempt from the packet-hash dedup), so it must
@@ -8848,6 +8847,10 @@ mod tests {
         assert!(exhausted_with(Evidence::ReplayedDatagramOnOtherLink));
     }
 
+    /// +ciris (leviculum#113, form 2): the host vouching for the far end
+    /// of the held link holds it; vouching for a different peer's link, or
+    /// only before the message was sent, does not; an unknown link is
+    /// refused.
     #[test]
     fn the_host_vouching_for_the_peer_holds_only_that_link() {
         assert!(!exhausted_with(Evidence::HostVouchesThisLink));
@@ -9315,6 +9318,52 @@ mod tests {
         );
         assert_eq!(confirmed, sent, "every P message delivered");
         assert!(dropped >= 20, "the path dropped only {dropped}");
+    }
+
+    /// +ciris: the RTT floor (and so pacing) is the path's, not the link's
+    /// life's. A link made over a 150 ms relay and measured at 10 ms on a
+    /// direct path falls back to the relay: the first proof of a message sent after the move
+    /// sets the floor, and pacing follows on that ONE proof; a proof of a
+    /// message that was already out when it moved (sent on the old path) is
+    /// not a sample. Setting the same interface again is no move.
+    #[test]
+    fn the_rtt_floor_starts_over_when_the_link_moves_interface() {
+        let mut pair = establish_nodecore_link_pair();
+        let id = pair.initiator_link_id;
+        let _ = pair.initiator.send_on_link(&id, b"create").unwrap();
+        let link = pair.initiator.link_mut(&id).unwrap();
+        let home = link.attached_interface().expect("attached");
+        let ch = link.channel_mut().unwrap();
+        ch.clear_tx();
+        let msg = |ch: &mut crate::link::channel::Channel, now: u64| {
+            ch.set_pacing_for_test(ch.pacing_interval_ms(), 0);
+            ch.send_system_raw(0x0001, &[1], 400, now, 150).unwrap();
+            ch.last_sent_sequence()
+        };
+        let t0 = TEST_TIME_MS + 1_000;
+        let s = msg(ch, t0);
+        assert!(ch.mark_delivered_attempt(s, 1, t0, t0 + 10, 150));
+        assert_eq!(ch.min_rtt_ms(), Some(10));
+        let old_path = msg(ch, t0 + 50);
+        link.set_attached_interface(home);
+        assert_eq!(
+            link.channel().unwrap().min_rtt_ms(),
+            Some(10),
+            "the same interface is no move"
+        );
+        link.set_attached_interface(home + 7);
+        let ch = link.channel_mut().unwrap();
+        assert_eq!(ch.min_rtt_ms(), None, "the old path's floor is gone");
+        assert!(ch.mark_delivered_attempt(old_path, 1, t0 + 50, t0 + 62, 150));
+        assert_eq!(ch.min_rtt_ms(), None, "sent on the old path: no sample");
+        let s = msg(ch, t0 + 70);
+        assert!(ch.mark_delivered_attempt(s, 1, t0 + 70, t0 + 220, 150));
+        assert_eq!(ch.min_rtt_ms(), Some(150), "one proof on the new path");
+        assert_eq!(
+            ch.pacing_interval_ms(),
+            (187 / ch.window() as u64).max(1),
+            "pacing follows on that proof"
+        );
     }
 
     /// What one run of [`queueing_uplink_case`] saw.

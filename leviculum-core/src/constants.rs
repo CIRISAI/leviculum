@@ -558,6 +558,18 @@ pub const CHANNEL_HELD_RETRY_MAX_MS: u64 = 2_000;
 /// lookup a frame.
 pub const PEER_EVIDENCE_MIN_INTERVAL_MS: u64 = 100;
 
+/// +ciris: how long one epoch of the path's RTT floor lasts at least. The
+/// floor is the minimum over the running epoch and the one before, so a
+/// value lives one to two epochs: no queue episode shorter than this can
+/// raise the floor, and a path that slowed is followed within two. BBR's
+/// 10 s is too short here: the queues measured on a capped call last 90 s
+/// and more, and nothing drains them on purpose as BBR's PROBE_RTT does.
+pub const CHANNEL_RTT_FLOOR_EPOCH_MS: u64 = 120_000;
+
+/// +ciris: how many samples one epoch of the RTT floor holds at least: a
+/// sparse link does not forget its floor on one or two samples.
+pub const CHANNEL_RTT_FLOOR_EPOCH_SAMPLES: u32 = 8;
+
 /// Microseconds per millisecond (for time conversion)
 pub const US_PER_MS: u64 = 1000;
 

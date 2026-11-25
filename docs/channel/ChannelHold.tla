@@ -100,9 +100,6 @@ Init == /\ now = 0 /\ tries = 1 /\ sent = 0 /\ lastAuth = -1
 
 Alive == lastAuth > 0 /\ now < Bound
 
-\* The peer shown alive by evidence within the bound (RACK while held).
-Fresh == lastAuth >= 0 /\ now < lastAuth + Bound
-
 \* Time passes; a peer that proves does so within ProofGap; the learned
 \* estimate is dropped one Bound after its last sample.
 Tick ==
@@ -199,6 +196,20 @@ Silent == ~PeerSpeaks /\ ~PeerElsewhere /\ ~PeerProves
 \* A silent link is torn down exactly when it always was, WHATEVER it
 \* learned before (finding 4: no evidence, the cold ladder).
 SilentAsToday == (Silent /\ state = "torn") => now = TodayTeardown
+
+\* A silent link is torn down by the stale bound, whatever it learned. The
+\* assumption, stated: its cold ladder fits the bound (TodayTeardown <=
+\* Bound). The code does not guarantee that (the first-try SRTT is uncapped):
+\* past it the link dies at its cold ladder, as before this work
+\* (SilentAsToday, and ChannelHoldCold.cfg, where this one is vacuous).
+SilentByBound == (Silent /\ state = "torn" /\ TodayTeardown <= Bound)
+                     => now <= Bound
+
+\* Guard pins: TornOnlyWhenDead, LearnedDecays and NoInboundNoLearning
+\* restate an action's own guard, and DeliveredNeverTorn holds by
+\* construction while ReceiptsPerAttempt is TRUE: each is here for its
+\* mutation, not as evidence. (AckEarlier does not ask whether that earlier
+\* transmission was lost: over-permissive, so safe for these.)
 
 \* Without inbound nothing is learned (decay may still drop what was).
 NoInboundNoLearning == (~PeerSpeaks /\ ~PeerProves) => scale \in {scale0, 1}

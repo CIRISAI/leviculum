@@ -1081,8 +1081,18 @@ impl Link {
     }
 
     /// Set the interface this link is attached to
+    ///
+    /// +ciris: a link that MOVES (a direct path gained or lost) starts its
+    /// channel's RTT floor and RACK's RTT over: both are the path's.
     pub fn set_attached_interface(&mut self, iface: usize) {
+        let moved = self.attached_interface.is_some_and(|old| old != iface);
         self.attached_interface = Some(iface);
+        if moved {
+            let handshake_rtt_ms = self.rtt_ms();
+            if let Some(channel) = self.channel.as_mut() {
+                channel.path_changed(handshake_rtt_ms);
+            }
+        }
     }
 
     /// Record a send rejected by the attached interface's airtime/next-slot

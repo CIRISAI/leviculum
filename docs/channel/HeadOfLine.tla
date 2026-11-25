@@ -28,9 +28,9 @@ CONSTANTS
     Death     \* the peer's last tick of life
 
 VARIABLES now, lastAuth, aState, aTries, aSent, bState, bTries, bSent,
-          bTornQueued
+          bTornLive
 
-vars == <<now, lastAuth, aState, aTries, aSent, bState, bTries, bSent, bTornQueued>>
+vars == <<now, lastAuth, aState, aTries, aSent, bState, bTries, bSent, bTornLive>>
 
 Sum(f) == LET RECURSIVE S(_) S(k) == IF k = 0 THEN 0 ELSE f[k] + S(k - 1)
           IN S(Max)
@@ -44,13 +44,17 @@ ASSUME BSend > 0 /\ Rtt >= 1 /\ QA >= 1 /\ QB >= 1
 Init == /\ now = 0 /\ lastAuth = -1
         /\ aState = "pending" /\ aTries = 1 /\ aSent = 0
         /\ bState = "unsent" /\ bTries = 0 /\ bSent = 0
-        /\ bTornQueued = FALSE
+        /\ bTornLive = FALSE
 
 Fresh == lastAuth >= 0 /\ now < lastAuth + Bound
 AliveA == lastAuth > 0 /\ now < Bound
 AliveB == lastAuth > BSend /\ now < BSend + Bound
 Overdue == now >= 2 * Rtt
 Queued == Fresh /\ aState = "pending" /\ ~Overdue
+\* The ground truth the rule (Queued) only estimates: the peer is alive,
+\* showed itself within the bound, and A's proof is still in the queue.
+TrulyQueued == /\ Fresh /\ now <= Death
+               /\ aState = "pending" /\ now < QA
 LinkTorn == aState = "torn" \/ bState = "torn"
 Live == ~LinkTorn
 
@@ -63,49 +67,49 @@ Tick ==
     /\ bState = "pending" => now < BDue
     /\ bState = "unsent" => now < BSend
     /\ now' = now + 1
-    /\ UNCHANGED <<lastAuth, aState, aTries, aSent, bState, bTries, bSent, bTornQueued>>
+    /\ UNCHANGED <<lastAuth, aState, aTries, aSent, bState, bTries, bSent, bTornLive>>
 
 SendB ==
     /\ Live /\ bState = "unsent" /\ now = BSend
     /\ bState' = "pending" /\ bTries' = 1 /\ bSent' = now
-    /\ UNCHANGED <<now, lastAuth, aState, aTries, aSent, bTornQueued>>
+    /\ UNCHANGED <<now, lastAuth, aState, aTries, aSent, bTornLive>>
 
 \* Evidence while the peer lives (its frames, other links, the host).
 AuthIn ==
     /\ Live /\ now <= Death /\ lastAuth /= now
     /\ lastAuth' = now
-    /\ UNCHANGED <<now, aState, aTries, aSent, bState, bTries, bSent, bTornQueued>>
+    /\ UNCHANGED <<now, aState, aTries, aSent, bState, bTries, bSent, bTornLive>>
 
 \* A's original is proved after its queue delay, if the peer was alive to
 \* prove it (it is evidence too).
 AckA ==
     /\ Live /\ aState = "pending" /\ now >= QA /\ QA <= Death
     /\ aState' = "acked" /\ lastAuth' = now
-    /\ UNCHANGED <<now, aTries, aSent, bState, bTries, bSent, bTornQueued>>
+    /\ UNCHANGED <<now, aTries, aSent, bState, bTries, bSent, bTornLive>>
 
 \* B's, never before A's (FIFO).
 AckB ==
     /\ Live /\ bState = "pending" /\ aState = "acked"
     /\ now >= BSend + QB /\ BSend + QB <= Death
     /\ bState' = "acked" /\ lastAuth' = now
-    /\ UNCHANGED <<now, aState, aTries, aSent, bTries, bSent, bTornQueued>>
+    /\ UNCHANGED <<now, aState, aTries, aSent, bTries, bSent, bTornLive>>
 
 TimeoutA ==
     /\ Live /\ aState = "pending" /\ now >= ADue
     /\ IF aTries >= Max /\ ~AliveA
        THEN aState' = "torn" /\ UNCHANGED <<aTries, aSent>>
        ELSE aTries' = aTries + 1 /\ aSent' = now /\ UNCHANGED aState
-    /\ UNCHANGED <<now, lastAuth, bState, bTries, bSent, bTornQueued>>
+    /\ UNCHANGED <<now, lastAuth, bState, bTries, bSent, bTornLive>>
 
 \* B's timer: its own rule ends the link only when it is not queued
 \* behind a held, not overdue A (the head-of-line rule).
 TimeoutB ==
     /\ Live /\ bState = "pending" /\ now >= BDue
     /\ IF bTries >= Max /\ ~AliveB /\ ~Queued
-       THEN /\ bState' = "torn" /\ bTornQueued' = Queued
+       THEN /\ bState' = "torn" /\ bTornLive' = TrulyQueued
             /\ UNCHANGED <<bTries, bSent>>
        ELSE bTries' = bTries + 1 /\ bSent' = now
-            /\ UNCHANGED <<bState, bTornQueued>>
+            /\ UNCHANGED <<bState, bTornLive>>
     /\ UNCHANGED <<now, lastAuth, aState, aTries, aSent>>
 
 Next == Tick \/ SendB \/ AuthIn \/ AckA \/ AckB \/ TimeoutA \/ TimeoutB
@@ -117,9 +121,15 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Tick) /\ WF_vars(SendB)
 \* Nothing waits forever.
 EventuallyDone == <>(LinkTorn \/ (aState = "acked" /\ bState = "acked"))
 
-\* B is never torn down while it is queued behind a held, not overdue A:
-\* its own timer says nothing about the peer there.
-QueuedNotTorn == ~bTornQueued
+\* B is never torn down while A's proof is truly still coming, PROVIDED the
+\* queue is not deeper than the rule allows for: A's delay QA at most 2 x the
+\* latest measured RTT. Stated against the ground truth, not against the
+\* rule's own condition, so it can fail. Without the proviso it does (QA = 9,
+\* Rtt = 2, HeadOfLineDeep.cfg): a queue that more than doubled since the
+\* last proof, as at its very onset, is not covered, and B ends the link at
+\* its own cold ladder unless evidence newer than B's send holds it.
+QueuedNotTornAtAll == ~bTornLive
+QueuedNotTorn == (QA <= 2 * Rtt) => ~bTornLive
 
 \* Never past the stale bound: every message out ends by the later of the
 \* bound and today's cold span after its send, plus one held wait.
@@ -128,7 +138,7 @@ NeverPastBound == /\ aState = "pending" => now <= Maxi(Bound, Today) + HeldWait
 
 \* A peer silent from before B's send is found by the later of B's cold
 \* ladder and A's overdue point (plus one held wait), never at the bound.
-DeadFound == (Live /\ lastAuth < BSend /\ Death < BSend
+DeadFound == (Live /\ lastAuth < BSend
               /\ now > Maxi(BSend + Today, 2 * Rtt) + HeldWait)
                  => bState /= "pending"
 =============================================================================
