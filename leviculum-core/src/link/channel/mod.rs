@@ -328,9 +328,17 @@ pub struct Channel {
     last_seen_ms: u64,
     /// +ciris: the link moved to another interface when the clock read this.
     /// A transmission sent no later went out on the path it left: its proof
-    /// measures neither the new path's floor nor RACK's RTT, and RACK does
-    /// not judge it (its own timer does).
+    /// measures neither the new path's floor nor RACK's RTT, and RACK judges
+    /// it with the slower of the two paths' RTTs ([`Self::old_path_rtt_ms`]).
     path_since_ms: Option<u64>,
+    /// +ciris (review 10 D8): RACK's RTT on the path the link left, kept at
+    /// the move (the handshake RTT stands in when that path had no proof).
+    /// A transmission sent before the move is lost at its send plus the
+    /// larger of this and the new path's RACK RTT, plus the reorder window:
+    /// a relay's window is not judged by a direct path's 5 ms (D7), and a
+    /// window lost on a dead direct path is resent together once the relay
+    /// proves a later transmission, not one per held wait (D8).
+    old_path_rtt_ms: u64,
     /// Cumulative bytes confirmed delivered on this channel: the packed size
     /// of every envelope removed from `tx_ring` by a delivery proof. The
     /// BBR-style delivery-rate numerator (leviculum#35); callers sample this
@@ -394,6 +402,7 @@ impl Channel {
             rtt_floor: RttFloor::default(),
             last_seen_ms: 0,
             path_since_ms: None,
+            old_path_rtt_ms: 0,
             delivered_bytes: 0,
             busy_rejections: 0,
             pacing_rejections: 0,
@@ -526,10 +535,13 @@ impl Channel {
     /// lost): the old path's floor and RACK's RTT say nothing about this
     /// one, and transmissions already out when it moved are not its samples
     /// (RACK judged a whole relayed window lost by the first direct proof).
-    /// Pacing follows at once, off the handshake RTT: neither the old path's
-    /// backed-off interval nor a next send it put far out carries over.
+    /// The old path's RACK RTT is kept for judging those transmissions
+    /// ([`Self::rack_rtt_for`]). Pacing follows at once, off the handshake
+    /// RTT: neither the old path's backed-off interval nor a next send it
+    /// put far out carries over.
     pub(crate) fn path_changed(&mut self, handshake_rtt_ms: u64) {
         self.rtt_floor = RttFloor::default();
+        self.old_path_rtt_ms = self.rack.map_or(handshake_rtt_ms, |(_, rtt, _)| rtt);
         self.rack = None;
         self.path_since_ms = Some(self.last_seen_ms);
         let pacing_rtt = self.pacing_rtt_ms(handshake_rtt_ms);
@@ -540,6 +552,19 @@ impl Channel {
     /// `sent_ms` is a transmission on the path the link is on now.
     fn on_this_path(&self, sent_ms: u64) -> bool {
         self.path_since_ms.is_none_or(|since| sent_ms > since)
+    }
+
+    /// +ciris (review 10 D8): the RTT RACK judges the transmission sent at
+    /// `sent_ms` by, given the current path's RACK RTT `rtt_ms`: that RTT
+    /// for one sent on this path; for one sent before the move, the larger
+    /// of it and the old path's ([`Self::old_path_rtt_ms`]), so neither a
+    /// faster new path (D7) nor a dead old one (D8) misjudges it.
+    fn rack_rtt_for(&self, sent_ms: u64, rtt_ms: u64) -> u64 {
+        if self.on_this_path(sent_ms) {
+            rtt_ms
+        } else {
+            rtt_ms.max(self.old_path_rtt_ms)
+        }
     }
 
     /// Take one floor sample; a floor that FELL also pulls in the next send,
@@ -1397,12 +1422,11 @@ impl Channel {
     /// the reorder window has passed since its last one (RFC 8985 6.2).
     fn rack_lost(&self, outbound: &OutboundEnvelope, now_ms: u64, reo_ms: u64) -> bool {
         self.rack.is_some_and(|(latest, rtt, latest_seq)| {
-            self.on_this_path(outbound.sent_at_ms)
-                && sent_before(outbound, latest, latest_seq)
+            sent_before(outbound, latest, latest_seq)
                 && now_ms
                     >= outbound
                         .sent_at_ms
-                        .saturating_add(rtt)
+                        .saturating_add(self.rack_rtt_for(outbound.sent_at_ms, rtt))
                         .saturating_add(reo_ms)
         })
     }
@@ -1541,10 +1565,13 @@ impl Channel {
             .filter(|_| self.last_evidence_ms.is_some() && self.hold_bound_ms > 0);
         let losses = self.tx_ring.iter().filter_map(move |outbound| {
             let (latest, rtt, latest_seq) = rack?;
-            (outbound.state == MessageState::Sent
-                && self.on_this_path(outbound.sent_at_ms)
-                && sent_before(outbound, latest, latest_seq))
-            .then(|| outbound.sent_at_ms.saturating_add(rtt).saturating_add(reo))
+            (outbound.state == MessageState::Sent && sent_before(outbound, latest, latest_seq))
+                .then(|| {
+                    outbound
+                        .sent_at_ms
+                        .saturating_add(self.rack_rtt_for(outbound.sent_at_ms, rtt))
+                        .saturating_add(reo)
+                })
         });
         timers.chain(losses).min()
     }
@@ -3942,17 +3969,24 @@ mod tests {
 
     /// +ciris (review 9 D7, upgrade): relay (150 ms) to direct (5 ms). Four
     /// messages are in flight on the relay when the link moves; one sent on
-    /// the direct path is proved 5 ms later. They are not lost: nothing is
-    /// resent before their own timers (RACK judged them all lost 25 ms after
-    /// their send), and no wake is scheduled for it.
+    /// the direct path is proved 5 ms later, and the relay delivers the four
+    /// proofs at 150 ms, as a real relay does. They were not lost: nothing is
+    /// resent, through their own timers (RACK by the direct path's 5 ms
+    /// judged them all lost 37 ms after their send). Review 10 D8: before,
+    /// this test never delivered the relay's proofs and asserted no resend
+    /// and "a wake ... for no loss" until their own timers, which is false of
+    /// a network: a relay message unproved after the relay's RTT and the
+    /// reorder window is lost (the boundary is
+    /// `an_upgrade_judges_unproved_relay_messages_by_the_relays_rtt`).
     #[test]
     fn an_upgrade_to_a_faster_path_does_not_resend_what_is_in_flight() {
         let rtt_ms = 150;
+        let relay = 150;
         let bound = 10_000;
         let mut channel = Channel::new();
         channel.seed_srtt(rtt_ms);
         let mut t = 1_000;
-        prove_one(&mut channel, &mut t, 0, 150, rtt_ms);
+        prove_one(&mut channel, &mut t, 0, relay, rtt_ms);
         channel.set_window_bounds_for_test(8, 2, 48);
         for _ in 0..4 {
             channel.set_pacing_for_test(0, 0);
@@ -3971,16 +4005,84 @@ mod tests {
         // first-try sample, so SRTT is 131 ms).
         let own_timer = t + calculate_timeout(1, channel.srtt_ms() as u64, 0, 1);
         assert!(own_timer > t + 300);
+        let mut evidence = sent + 5;
+        let mut delivered = false;
         for at in (sent + 5..own_timer).step_by(5) {
-            let actions = channel.poll_with_inbound(at, rtt_ms, Some(sent + 5), bound);
+            if !delivered && at >= t + relay {
+                for seq in 1..=4 {
+                    assert!(channel.mark_delivered_attempt(seq, 1, t, t + relay, rtt_ms));
+                }
+                evidence = t + relay;
+                delivered = true;
+            }
+            let actions = channel.poll_with_inbound(at, rtt_ms, Some(evidence), bound);
             assert!(actions.is_empty(), "at {at}: {actions:?}");
-            let wake = channel.next_retransmit_due_ms(rtt_ms).unwrap();
-            assert!(wake >= own_timer, "a wake at {wake} for no loss");
+            if let Some(wake) = channel.next_retransmit_due_ms(rtt_ms) {
+                assert!(wake > t + relay, "a wake at {wake} before the relay's RTT");
+            }
         }
-        // A late relay proof measures neither the floor nor RACK.
-        assert!(channel.mark_delivered_attempt(1, 1, t, t + 150, rtt_ms));
+        assert!(delivered && channel.tx_ring.is_empty());
+        // The late relay proofs measured neither the floor nor RACK.
         assert_eq!(channel.min_rtt_ms(), Some(5));
         assert_eq!(channel.rack.map(|(_, rtt, _)| rtt), Some(5));
+    }
+
+    /// +ciris (review 10 D8, the upgrade's boundary): the same move, but the
+    /// relay's four proofs never come. RACK judges them by the relay's RTT
+    /// kept at the move, not the direct path's: no resend and no loss wake
+    /// before their send + 150 ms + the reorder window (not at about 37 ms,
+    /// the D7 bug), and at that point all four are resent together, once
+    /// (not left to their own timers one by one, the D8 bug).
+    #[test]
+    fn an_upgrade_judges_unproved_relay_messages_by_the_relays_rtt() {
+        let rtt_ms = 150;
+        let relay = 150;
+        let bound = 10_000;
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        let mut t = 1_000;
+        prove_one(&mut channel, &mut t, 0, relay, rtt_ms);
+        channel.set_window_bounds_for_test(8, 2, 48);
+        for _ in 0..4 {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, t, rtt_ms)
+                .unwrap();
+        }
+        channel.path_changed(rtt_ms);
+        let sent = t + 10;
+        channel.set_pacing_for_test(0, 0);
+        channel
+            .send(&TestMessage { data: vec![1] }, MDU, sent, rtt_ms)
+            .unwrap();
+        assert!(channel.mark_delivered_attempt(5, 1, sent, sent + 5, rtt_ms));
+        let own_timer = t + calculate_timeout(1, channel.srtt_ms() as u64, 0, 1);
+        let reo = channel.reorder_window_ms(rtt_ms);
+        let lost_at = t + relay + reo;
+        assert!(
+            lost_at > t + 5 + reo,
+            "judged by the relay's RTT, not the direct one's"
+        );
+        assert!(lost_at < own_timer, "before their own timers");
+        let mut resent: Vec<(u16, u64)> = Vec::new();
+        for at in sent + 5..own_timer {
+            for action in channel.poll_with_inbound(at, rtt_ms, Some(sent + 5), bound) {
+                match action {
+                    ChannelAction::Retransmit { sequence, .. } => resent.push((sequence, at)),
+                    other => panic!("at {at}: {other:?}"),
+                }
+            }
+            if at < lost_at {
+                assert!(resent.is_empty(), "resent at {at}, before {lost_at}");
+                let wake = channel.next_retransmit_due_ms(rtt_ms).unwrap();
+                assert!(wake >= lost_at, "a wake at {wake}, before {lost_at}");
+            }
+        }
+        assert_eq!(
+            resent,
+            (1..=4).map(|seq| (seq, lost_at)).collect::<Vec<_>>(),
+            "all four resent together at {lost_at}, once"
+        );
     }
 
     /// +ciris (review 9 D7, fallback): direct (5 ms) to relay (handshake
@@ -4014,6 +4116,118 @@ mod tests {
         // handshake's 150 ms.
         assert!(channel.srtt_ms() < 150.0);
         assert_eq!(channel.pacing_cap_ms(rtt_ms), 150);
+    }
+
+    /// +ciris (review 10 D8, fallback with loss): a window of five is out on
+    /// a 5 ms direct path when that path dies (nothing sent on it is
+    /// delivered or proved); 1 s later the link falls back to a 150 ms relay
+    /// that works, and the peer answers the fallback's keepalive nudge over
+    /// it. The oldest's resend is proved on the relay, and RACK then
+    /// judges the rest lost by the old path's RTT: they go out together, not
+    /// one per held wait, and the live link is not torn at first + B.
+    #[test]
+    fn a_window_lost_on_a_dead_direct_path_is_recovered_together_on_the_relay() {
+        let rtt_ms = 150; // the handshake: the link was made on the relay
+        let direct = 5;
+        let relay = 150;
+        let bound = 10_000; // the fast tier's stale bound B
+        let mut channel = Channel::new();
+        channel.seed_srtt(rtt_ms);
+        channel.set_window_bounds_for_test(8, 2, 48);
+        let mut t = 1_000;
+        let mut seq = 0u16;
+        for _ in 0..8 {
+            prove_one(&mut channel, &mut t, seq, direct, rtt_ms);
+            seq += 1;
+        }
+        let mut evidence = t - 1;
+        let first = t;
+        for _ in 0..5 {
+            channel.set_pacing_for_test(0, 0);
+            channel
+                .send(&TestMessage { data: vec![1] }, MDU, first, rtt_ms)
+                .unwrap();
+        }
+        let lost: Vec<u16> = (seq..seq + 5).collect();
+        let moved = first + 1_000;
+        let mut has_moved = false;
+        // Relay transmissions in flight: (sequence, attempt, sent).
+        let mut in_flight: Vec<(u16, u8, u64)> = Vec::new();
+        let mut resent_at: alloc::collections::BTreeMap<u16, u64> = Default::default();
+        let mut first_proof: Option<u64> = None;
+        let mut reo = 0;
+        let mut now = first;
+        while !channel.tx_ring.is_empty() {
+            assert!(now < first + bound, "still undelivered at {now} ms");
+            if !has_moved && now >= moved {
+                channel.path_changed(rtt_ms);
+                has_moved = true;
+            }
+            if has_moved && now >= moved + relay {
+                // The peer's answer to the fallback's keepalive nudge.
+                evidence = evidence.max(moved + relay);
+            }
+            in_flight.retain(|&(s, attempt, sent)| {
+                if sent + relay > now {
+                    return true;
+                }
+                channel.mark_delivered_attempt(s, attempt, sent, sent + relay, rtt_ms);
+                evidence = evidence.max(sent + relay);
+                if first_proof.is_none() {
+                    first_proof = Some(sent + relay);
+                    reo = channel.reorder_window_ms(rtt_ms);
+                }
+                false
+            });
+            for action in channel.poll_with_inbound(now, rtt_ms, Some(evidence), bound) {
+                match action {
+                    ChannelAction::Retransmit {
+                        sequence, tries, ..
+                    } => {
+                        // On the dead direct path nothing arrives.
+                        if has_moved {
+                            in_flight.push((sequence, tries, now));
+                            resent_at.entry(sequence).or_insert(now);
+                        }
+                    }
+                    ChannelAction::TearDownLink => {
+                        panic!("a live link on a working relay torn at {now} ms")
+                    }
+                    ChannelAction::Expired { .. } => {}
+                }
+            }
+            let next = [
+                channel.next_retransmit_due_ms(rtt_ms),
+                in_flight.iter().map(|&(_, _, sent)| sent + relay).min(),
+                Some(moved),
+                Some(moved + relay),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|&at| at > now)
+            .min();
+            now = next.unwrap_or(now + 1);
+        }
+        let first_proof = first_proof.expect("a relay proof");
+        // The rule: a message sent before the move is lost at
+        // sent + max(relay RTT, direct RTT) + reorder window once a later
+        // transmission is proved; theirs went out at `first`, long before,
+        // so all are due at the first relay proof. Allow one relay RTT and
+        // the reorder window on top (one held wait each was the defect).
+        let latest = first_proof + relay + reo;
+        for s in &lost {
+            let at = resent_at.get(s).copied();
+            assert!(
+                at.is_some_and(|at| at <= latest),
+                "seq {s} resent at {at:?}, not by {latest} (first relay proof {first_proof})"
+            );
+        }
+        assert!(
+            now <= latest + relay,
+            "all delivered by {now} ms, not {} ms",
+            latest + relay
+        );
+        assert!(now < first + bound / 2, "{now} ms is near first + B");
     }
 
     /// +ciris (post-drain pacing): the congestion response still works. On
