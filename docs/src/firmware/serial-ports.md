@@ -262,7 +262,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:972-973`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:975-976`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:219`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated
