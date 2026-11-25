@@ -4966,8 +4966,16 @@ mod tests {
                 assert_eq!(pa, Some(lan.to_b), "A on the LAN pair");
                 assert_eq!(pb, Some(lan.to_a), "and B on the same pair");
             } else {
-                // The bug, without nomination: two pairs.
-                assert_eq!((pa, pb), (Some(lan.to_b), Some(hairpin.to_a)));
+                // The bug, without nomination: never one pair. B settles on
+                // the hairpin at once; A proves the LAN pair only if its
+                // punch reached B before that (after it, B listens to the
+                // hairpin peer alone), else A ends with none. Which of the
+                // two is a race (a slow runner gave None).
+                assert_eq!(pb, Some(hairpin.to_a), "B on the hairpin pair");
+                assert!(
+                    pa == Some(lan.to_b) || pa.is_none(),
+                    "A on another pair or none: {pa:?}"
+                );
             }
         }
     }
@@ -5002,10 +5010,13 @@ mod tests {
         let a_targets = [r4.to_b, r6.to_b];
         let b_targets = [r6.to_a, r4.to_a];
         let (ga, gb) = punch_over(&a, &b, &a_targets, &b_targets, false, [0x60; 16]).await;
-        assert_eq!(
-            (ga, gb),
-            (Some(r4.to_b), Some(r6.to_a)),
-            "the bug: two families"
+        // The bug: never one pair. B settles on IPv6 at once; A proves IPv4
+        // only if its punch reached B before that, else A ends with none (a
+        // race, as in samenat_hairpin_both_ends_settle_on_the_nominated_pair).
+        assert_eq!(gb, Some(r6.to_a), "the bug: B on IPv6");
+        assert!(
+            ga == Some(r4.to_b) || ga.is_none(),
+            "A on IPv4 or none: {ga:?}"
         );
         let (ga, gb) = punch_over(&a, &b, &a_targets, &b_targets, true, [0x61; 16]).await;
         assert_eq!((ga, gb), (Some(r4.to_b), Some(r4.to_a)), "one pair, A's");
