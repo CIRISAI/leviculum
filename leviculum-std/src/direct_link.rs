@@ -2754,6 +2754,12 @@ fn host_candidates(socket: &UdpSocket, server: SocketAddr) -> Vec<SocketAddr> {
 /// address its datagram arrived from. Stateless; runs until aborted.
 pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
     let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
+    Ok(serve_facilitator(socket))
+}
+
+/// [`spawn_facilitator`] on a socket the caller holds: a test that picks a
+/// free port, lets it go and binds it again can lose it to another test.
+fn serve_facilitator(socket: UdpSocket) -> AbortHandle {
     // By role, never by number (the no-addresses rule covers ports).
     tracing::info!("direct link: facilitator listening (udp)");
     let task = tokio::spawn(async move {
@@ -2783,7 +2789,7 @@ pub(crate) async fn spawn_facilitator(port: u16) -> io::Result<AbortHandle> {
             let _ = socket.send_to(&answer, src).await;
         }
     });
-    Ok(task.abort_handle())
+    task.abort_handle()
 }
 
 /// +ciris (third review N4, fourth review C): what a facilitator port
@@ -3525,10 +3531,8 @@ mod tests {
     #[tokio::test]
     async fn a_probe_learns_its_address_from_our_facilitator_both_protocols() {
         let facilitator = loopback().await;
-        let port = facilitator.local_addr().unwrap().port();
-        drop(facilitator);
-        let task = spawn_facilitator(port).await.unwrap();
-        let server: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let server = facilitator.local_addr().unwrap();
+        let task = serve_facilitator(facilitator);
         for protocol in [ProbeProtocol::Rnsp, ProbeProtocol::Stun] {
             let socket = loopback().await;
             let public = probe(&socket, server, protocol).await.unwrap();
@@ -4632,10 +4636,8 @@ mod tests {
     #[tokio::test]
     async fn the_allocation_measurement_sees_no_nat_on_loopback() {
         let facilitator = loopback().await;
-        let port = facilitator.local_addr().unwrap().port();
-        drop(facilitator);
-        let task = spawn_facilitator(port).await.unwrap();
-        let server: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let server = facilitator.local_addr().unwrap();
+        let task = serve_facilitator(facilitator);
         let socket = loopback().await;
         let local = socket.local_addr().unwrap().port();
         let public = probe(&socket, server, ProbeProtocol::Rnsp).await.unwrap();
