@@ -298,6 +298,7 @@ pub(crate) fn spawn_ble_interface(
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info,
         incoming: incoming_rx,
         outgoing: outgoing_tx,

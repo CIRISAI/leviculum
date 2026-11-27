@@ -383,6 +383,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,
@@ -660,6 +661,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,

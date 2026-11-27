@@ -127,3 +127,10 @@ pub use leviculum_core::node::{
 /// Direct-link upgrade (+ciris, leviculum#70). Declared last so the fork
 /// moves no line an upstream citation points at.
 pub mod direct_link;
+/// The per-node egress scheduler (+ciris). Declared last so the fork moves
+/// no line an upstream citation points at.
+pub mod egress;
+pub use egress::{
+    EgressClass, EgressClassCounters, EgressClassDepth, EgressDepth, EgressFloor, EgressStats,
+    MediaKind,
+};

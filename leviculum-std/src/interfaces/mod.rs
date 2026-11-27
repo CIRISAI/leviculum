@@ -872,6 +872,31 @@ pub(crate) struct InterfaceHandle {
     /// the next enqueue whatever its outcome, so it never outlives the one
     /// frame it names.
     pub next_tag: Option<leviculum_core::traits::FrameTag>,
+    /// The node's egress scheduler and the hint for the next frame (+ciris,
+    /// `crate::egress`). Default (no scheduler) until the registry adopts
+    /// the handle, so a handle built outside a node sends as before.
+    pub egress: EgressPort,
+}
+
+/// An interface handle's way into the node's egress scheduler (+ciris).
+#[derive(Default)]
+pub(crate) struct EgressPort {
+    /// Set by [`InterfaceRegistry::register`].
+    pub scheduler: Option<Arc<crate::egress::EgressScheduler>>,
+    /// The class `dispatch_actions` read for the frame it is about to send
+    /// ([`leviculum_core::traits::Interface::hint_next_frame`]), taken by
+    /// the next enqueue like [`InterfaceHandle::next_tag`].
+    pub next_hint: Option<leviculum_core::egress::FrameHint>,
+}
+
+impl Drop for InterfaceHandle {
+    fn drop(&mut self) {
+        // Its queued frames, and the sender clone that keeps its channel
+        // (and so its task) alive, go with it.
+        if let Some(s) = &self.egress.scheduler {
+            s.forget(self.info.id);
+        }
+    }
 }
 
 /// One interface's carrier-teardown hook: the driver sends the ack
@@ -933,6 +958,10 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         self.next_tag = ph;
     }
 
+    fn hint_next_frame(&mut self, hint: leviculum_core::egress::FrameHint) {
+        self.egress.next_hint = Some(hint);
+    }
+
     fn frame_turnaround_ms(&self) -> u64 {
         // The interface stated it at spawn from the PHY it programmed;
         // absent means a medium with no post-TX wait.
@@ -975,6 +1004,7 @@ impl InterfaceHandle {
         high_priority: bool,
     ) -> Result<(), InterfaceError> {
         let ph = self.next_tag.take();
+        let hint = self.egress.next_hint.take();
         // Airtime-credit check for constrained interfaces. LoRa-Serial
         // populates `credit`; TCP/UDP/Local leave it `None` and skip the
         // charge entirely. See `airtime.rs` for the bucket semantics.
@@ -984,12 +1014,20 @@ impl InterfaceHandle {
                 return Err(InterfaceError::BufferFull);
             }
         }
-        match self.outgoing.try_send(OutgoingPacket {
+        let packet = OutgoingPacket {
             data: data(),
             high_priority,
             peer: peer.copied(),
             ph,
-        }) {
+        };
+        // +ciris: a network interface's frame goes through the node's egress
+        // scheduler, which hands it straight on when nothing is queued.
+        if let Some(scheduler) = &self.egress.scheduler {
+            if !crate::egress::exempt(self.info.kind) {
+                return scheduler.submit(self.info.id, &self.outgoing, hint, packet);
+            }
+        }
+        match self.outgoing.try_send(packet) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(InterfaceError::BufferFull),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -1004,6 +1042,9 @@ pub(crate) struct InterfaceRegistry {
     handles: Vec<InterfaceHandle>,
     /// Round-robin start index to prevent busy interfaces from starving others
     poll_start: usize,
+    /// The node's egress scheduler, handed to every handle registered
+    /// (+ciris). `None` for a registry built outside a node (tests).
+    egress: Option<Arc<crate::egress::EgressScheduler>>,
 }
 
 impl InterfaceRegistry {
@@ -1012,11 +1053,28 @@ impl InterfaceRegistry {
         Self {
             handles: Vec::new(),
             poll_start: 0,
+            egress: None,
         }
     }
 
+    /// A registry whose handles share `egress` (+ciris).
+    pub(crate) fn with_egress(egress: Arc<crate::egress::EgressScheduler>) -> Self {
+        Self {
+            egress: Some(egress),
+            ..Self::new()
+        }
+    }
+
+    /// The node's egress scheduler, when this registry has one.
+    pub(crate) fn egress(&self) -> Option<&Arc<crate::egress::EgressScheduler>> {
+        self.egress.as_ref()
+    }
+
     /// Register a new interface handle
-    pub(crate) fn register(&mut self, handle: InterfaceHandle) {
+    pub(crate) fn register(&mut self, mut handle: InterfaceHandle) {
+        if handle.egress.scheduler.is_none() {
+            handle.egress.scheduler = self.egress.clone();
+        }
         self.handles.push(handle);
     }
 
@@ -1117,6 +1175,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(4);
         let handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(id),
@@ -1516,5 +1575,61 @@ mod tests {
             .try_send_prioritized(&[0u8; 500], true)
             .expect_err("exhausted credit → BufferFull");
         assert!(matches!(err, InterfaceError::BufferFull));
+    }
+
+    /// +ciris egress scheduler: every handle a registry registers shares the
+    /// node's scheduler. A frame is scheduled by the class dispatch read
+    /// before the IFAC wrap (an IFAC'd datagram still queues as Video), an
+    /// exempt kind (local IPC) bypasses the scheduler and its rate, and a
+    /// handle that goes away takes its queued frames with it.
+    #[test]
+    fn registered_handles_share_the_egress_scheduler() {
+        use crate::egress::{EgressClass, EgressScheduler};
+        use leviculum_core::transport::{dispatch_actions, Action};
+        let raw = |context: u8, len: usize| {
+            let mut v = vec![0u8, 0];
+            v.extend_from_slice(&[0x42; 16]);
+            v.push(context);
+            v.resize(len, 0x5A);
+            v
+        };
+        let egress = EgressScheduler::new();
+        let mut reg = InterfaceRegistry::with_egress(Arc::clone(&egress));
+        let (net, mut net_rx) = make_handle(0);
+        let (mut local, mut local_rx) = make_handle(1);
+        local.info.kind = InterfaceKind::Local;
+        reg.register(net);
+        reg.register(local);
+        egress.set_rate(Some(1_000));
+        let mut ifac = std::collections::BTreeMap::new();
+        ifac.insert(
+            0,
+            leviculum_core::ifac::IfacConfig::new(Some("net"), Some("pass"), 16).unwrap(),
+        );
+        let send = |iface: usize, data: Vec<u8>| Action::SendPacket {
+            iface: InterfaceId(iface),
+            data,
+            peer: None,
+        };
+        let actions = vec![
+            // Takes the whole bucket and then some.
+            send(0, raw(0x0E, 4_000)),
+            // Waits for the rate, as Video although it leaves IFAC-masked.
+            send(0, raw(0xF0, 200)),
+            // Local IPC: not paced.
+            send(1, raw(0xF0, 200)),
+        ];
+        let result = dispatch_actions(reg.handles_mut_slice(), actions, &ifac);
+        assert!(result.is_clean());
+        assert_eq!(net_rx.try_recv().unwrap().data.len(), 4_000 + 16);
+        assert!(net_rx.try_recv().is_err(), "the datagram waits");
+        assert_eq!(local_rx.try_recv().unwrap().data.len(), 200);
+        let depth = egress.depth();
+        assert_eq!(depth.class(EgressClass::Video).queued_packets, 1);
+        assert_eq!(depth.class(EgressClass::Video).queued_bytes, 216);
+        assert_eq!(depth.total_bytes(), 216);
+        drop(reg);
+        assert_eq!(egress.depth().total_bytes(), 0);
+        assert_eq!(egress.stats().class(EgressClass::Video).dropped_packets, 1);
     }
 }

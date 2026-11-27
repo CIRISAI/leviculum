@@ -94,6 +94,7 @@ pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> Interface
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,

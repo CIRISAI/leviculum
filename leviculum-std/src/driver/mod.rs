@@ -1622,6 +1622,9 @@ pub struct ReticulumNode {
     /// Cumulative plane drop counters, shared with the runner's `EventSink`
     /// so [`plane_stats`](Self::plane_stats) can report them (leviculum#60).
     plane_counters: Arc<PlaneCounters>,
+    /// The node's egress scheduler (+ciris, `crate::egress`), shared by every
+    /// interface handle the run registers.
+    pub(crate) egress: Arc<crate::egress::EgressScheduler>,
     /// Per-transfer ceiling for multi-segment resource assembly
     /// (leviculum#62).
     pub(crate) max_assembled_resource_size: usize,
@@ -1825,6 +1828,7 @@ impl ReticulumNode {
             control_channel_capacity,
             control_dropped,
             plane_counters: Arc::new(PlaneCounters::default()),
+            egress: crate::egress::EgressScheduler::new(),
             max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             metrics_baseline: Mutex::default(),
             direct_link: crate::direct_link::DirectLinkSettings::default(),
@@ -2465,7 +2469,7 @@ impl ReticulumNode {
             ));
         }
 
-        let mut registry = InterfaceRegistry::new();
+        let mut registry = InterfaceRegistry::with_egress(Arc::clone(&self.egress));
         let is_client_mode = self.connect_instance_name.is_some();
 
         // Only load config interfaces if NOT in shared-instance client mode.
@@ -3313,11 +3317,10 @@ impl ReticulumNode {
         })
         .await?;
 
-        Ok(LinkHandle::new(
-            link_id,
-            Arc::clone(&self.inner),
-            self.action_dispatch_tx(),
-        ))
+        Ok(
+            LinkHandle::new(link_id, Arc::clone(&self.inner), self.action_dispatch_tx())
+                .with_egress(Arc::clone(&self.egress)),
+        )
     }
 
     /// The first hop's timeout toward `dest_hash` as this node's shared
@@ -3398,6 +3401,7 @@ impl ReticulumNode {
     /// * `link_id` - The link ID from the responder-side `LinkEstablished` event
     pub fn link_handle(&self, link_id: &LinkId) -> LinkHandle {
         LinkHandle::new(*link_id, Arc::clone(&self.inner), self.action_dispatch_tx())
+            .with_egress(Arc::clone(&self.egress))
     }
 
     /// Take the event receiver
@@ -4658,7 +4662,8 @@ impl ReticulumNode {
         })
         .await?;
         Ok((
-            LinkHandle::new(link_id, Arc::clone(&self.inner), self.action_dispatch_tx()),
+            LinkHandle::new(link_id, Arc::clone(&self.inner), self.action_dispatch_tx())
+                .with_egress(Arc::clone(&self.egress)),
             established,
         ))
     }
@@ -7250,6 +7255,14 @@ fn dispatch_output(
     // emission, so the registry, the tap and the consumer all see the same
     // whole-transfer event rather than slices.
     output.events = assembler.process(std::mem::take(&mut output.events));
+    if let Some(egress) = registry.egress() {
+        // +ciris: a closed link's egress hint goes with it.
+        for ev in &output.events {
+            if let NodeEvent::LinkClosed { link_id, .. } = ev {
+                egress.forget_link(link_id.as_bytes());
+            }
+        }
+    }
 
     for ev in drop_events.iter().chain(output.events.iter()) {
         completions.observe(ev);
@@ -8097,6 +8110,7 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
     }
 }
 
+mod egress; // +ciris egress scheduler API, own file so no cited line moves
 mod lifecycle;
 mod relay_route; // +ciris leviculum#91, own file so no cited line moves
 mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves // leviculum#90: what a run owns, restartable through &self
@@ -8172,6 +8186,7 @@ mod tests {
         let (out_tx, _out_rx) = mpsc::channel(4);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 id: InterfaceId(7),
                 name: "closing".into(),
@@ -8495,6 +8510,7 @@ mod tests {
             let (out_tx, _out_rx) = mpsc::channel(1);
             InterfaceHandle {
                 next_tag: None,
+                egress: Default::default(),
                 info: InterfaceInfo {
                     transit: true,
                     id: InterfaceId(7),
@@ -9318,6 +9334,7 @@ mod tests {
         drop(out_rx);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(12),
@@ -10167,6 +10184,7 @@ mod tests {
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(0),
@@ -10225,6 +10243,7 @@ mod tests {
             let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
             registry.register(InterfaceHandle {
                 next_tag: None,
+                egress: Default::default(),
                 info: InterfaceInfo {
                     transit: true,
                     id: InterfaceId(idx),
@@ -10300,6 +10319,7 @@ mod tests {
         let (l_out_tx, mut l_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(1),
@@ -10330,6 +10350,7 @@ mod tests {
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(2),
@@ -10389,6 +10410,7 @@ mod tests {
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(0),
@@ -10469,6 +10491,7 @@ mod tests {
         lora_credit.try_charge(500, 0).unwrap();
         let lora_handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(1),
@@ -10498,6 +10521,7 @@ mod tests {
         let (plain_out_tx, _plain_out_rx) = tokio::sync::mpsc::channel(4);
         let plain_handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(2),
@@ -10581,6 +10605,7 @@ mod tests {
         let expected_airtime = credit.max_airtime_ms();
         let handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(1),
@@ -10644,6 +10669,7 @@ mod tests {
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         let handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(2),
@@ -10707,6 +10733,7 @@ mod tests {
         let credit = Arc::new(Mutex::new(AirtimeCredit::new(125_000, 7, 5, 24, 500)));
         let handle = InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(1),
@@ -10986,6 +11013,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(id),
@@ -11721,6 +11749,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: InterfaceId(0),
@@ -12441,6 +12470,7 @@ mod tests {
             .expect("one slot");
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: false,
                 id: InterfaceId(9),

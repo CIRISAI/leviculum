@@ -193,3 +193,7 @@ pub use traits::{
 /// Direct-link upgrade (+ciris, leviculum#70). Declared last so the fork
 /// moves no line an upstream citation points at.
 pub mod direct_link;
+
+/// Frame classes for an egress scheduler (+ciris). Declared after
+/// `direct_link` for the same reason.
+pub mod egress;

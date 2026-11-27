@@ -3796,6 +3796,7 @@ where
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,
@@ -4746,6 +4747,7 @@ pub(crate) fn spawn_rnode_multi_interface(
 
         handles.push(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 transit: true,
                 id: sub.id,
@@ -5403,8 +5405,12 @@ mod tests {
         // Brief wait, then drop the handle to trigger shutdown
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Drop outgoing sender to signal shutdown
-        drop(handle.outgoing);
+        // Drop outgoing sender to signal shutdown (swapped out: the handle
+        // itself implements Drop, +ciris egress scheduler)
+        drop(std::mem::replace(
+            &mut handle.outgoing,
+            tokio::sync::mpsc::channel(1).0,
+        ));
 
         // Read remaining incoming (drain)
         while let Ok(pkt) = handle.incoming.try_recv() {
@@ -10696,6 +10702,7 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
         registry.register(InterfaceHandle {
             next_tag: None,
+            egress: Default::default(),
             info: InterfaceInfo {
                 id: InterfaceId(0),
                 name: "test_rnode_duty".into(),

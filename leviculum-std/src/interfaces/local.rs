@@ -272,6 +272,7 @@ fn spawn_local_interface_from_stream(
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,
@@ -499,6 +500,7 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
 
     Ok(InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id: config.id,

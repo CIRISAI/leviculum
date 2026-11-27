@@ -168,6 +168,7 @@ pub(crate) fn spawn_direct_udp_interface(
         ready: super::ReadySignal::ready_immediate(),
         teardown: None,
         next_tag: None,
+        egress: Default::default(),
     };
     (handle, task.abort_handle())
 }

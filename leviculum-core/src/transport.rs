@@ -817,6 +817,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // Hashed before the IFAC wrap, so the tag is the `ph` this
                 // frame's `PKT_TX` named (T-0013).
                 let tag = frame_tag(&data);
+                let hint = crate::egress::classify_frame(&data); // +ciris: before the IFAC wrap
                 let is_datagram =
                     wire_context(&data) == Some(crate::packet::PacketContext::Datagram);
                 let send_data = match ifac_configs.get(&iface.0) {
@@ -839,6 +840,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // #376): a multi-peer interface serves the one link it
                 // names, every other interface ignores it.
                 iface_obj.tag_next_frame(tag);
+                iface_obj.hint_next_frame(hint);
                 if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
                     if matches!(e, crate::traits::InterfaceError::BufferFull) && is_datagram {
                         // +ciris (leviculum#102): shed, never retried, and
@@ -870,6 +872,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // the bytes shares it instead of copying it (513).
                 // One hash for every interface the broadcast reaches.
                 let tag = frame_tag(&data);
+                let hint = crate::egress::classify_frame(&data); // +ciris: before the IFAC wrap
                 let mut frame = crate::traits::SharedFrame::new(data);
                 for slot in interfaces.iter_mut() {
                     let iface_obj = slot.as_interface();
@@ -903,6 +906,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                     };
                     // Broadcast = announce rebroadcasts → normal priority
                     iface_obj.tag_next_frame(tag);
+                    iface_obj.hint_next_frame(hint);
                     let result = match (spare_one_link, wrapped) {
                         (Some(peer), wrapped) => {
                             let bytes = wrapped.as_deref().unwrap_or(frame.as_bytes());

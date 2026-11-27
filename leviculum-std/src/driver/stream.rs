@@ -53,6 +53,8 @@ pub struct LinkHandle {
     action_dispatch_tx: mpsc::Sender<TickOutput>,
     /// Whether the handle is closed
     closed: bool,
+    /// The node's egress scheduler, for the per-send media hint (+ciris).
+    egress: Option<Arc<crate::egress::EgressScheduler>>,
 }
 
 impl LinkHandle {
@@ -67,7 +69,14 @@ impl LinkHandle {
             inner,
             action_dispatch_tx,
             closed: false,
+            egress: None,
         }
+    }
+
+    /// This handle, able to hint its datagrams' media kind to `egress`.
+    pub(crate) fn with_egress(mut self, egress: Arc<crate::egress::EgressScheduler>) -> Self {
+        self.egress = Some(egress);
+        self
     }
 
     /// Get the link ID
