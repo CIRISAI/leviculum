@@ -66,23 +66,23 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:2040` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2692` | Stop and flush |
-| `fn is_running(&self) -> bool` — `driver/mod.rs:2808` | Loop state |
-| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2961` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4095` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3297` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3399` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4562` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4517` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3411` | Take the event stream, once |
-| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3544` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3695` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3841` | Hop count to a destination |
+| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:2044` | Spawn the event loop, bring interfaces up |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2696` | Stop and flush |
+| `fn is_running(&self) -> bool` — `driver/mod.rs:2812` | Loop state |
+| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2965` | Make a local destination reachable (consumes it) |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:4099` | Announce a registered destination |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:3301` | Open a link; returns a pending handle |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:3402` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:4566` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:4521` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:3415` | Take the event stream, once |
+| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3548` | The node's own identity hash |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3699` | Whether a path is known |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3845` | Hop count to a destination |
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3724` | Send a PATH_REQUEST; result arrives as `PathFound` |
 | `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3702` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3956` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4601` | Relay mode flag |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3960` | `rnstatus`-style counters |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:4605` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:245`) — re-projects this surface with core internals
@@ -100,10 +100,10 @@ re-exported as `leviculum_std::LinkHandle`. Incoming data is delivered via
 | Signature | Purpose |
 |-----------|---------|
 | `fn link_id(&self) -> &LinkId` — `stream.rs:74` | The link's id |
-| `fn is_closed(&self) -> bool` — `stream.rs:79` | Handle state |
-| `async fn try_send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:88` | Non-blocking send; surfaces `Busy` / `PacingDelay` |
+| `fn is_closed(&self) -> bool` — `stream.rs:88` | Handle state |
+| `async fn try_send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:97` | Non-blocking send; surfaces `Busy` / `PacingDelay` |
 | `async fn send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:105` | Send, retrying pacing/busy internally |
-| `async fn close(&mut self) -> Result<(), Error>` — `stream.rs:137` | Graceful close (sends LINKCLOSE) |
+| `async fn close(&mut self) -> Result<(), Error>` — `stream.rs:146` | Graceful close (sends LINKCLOSE) |
 
 ### `PacketSender`
 
@@ -258,11 +258,11 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:531` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:543` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
 | `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:359` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:1072`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:1084`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`, `heapless`-backed
