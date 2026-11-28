@@ -46,7 +46,8 @@ impl ReticulumNode {
     /// frames keep their own class, and a frame moved this way is never
     /// dropped by age: only a datagram is. Nothing changes on the wire.
     ///
-    /// The hint is forgotten when the link closes.
+    /// The hint is forgotten when the link closes. Takes the core lock, to
+    /// resolve the link's wire id.
     pub fn set_link_egress_class(&self, link_id: &LinkId, class: Option<EgressClass>) {
         let wire = self
             .inner

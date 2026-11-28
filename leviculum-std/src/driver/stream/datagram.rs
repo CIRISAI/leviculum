@@ -103,6 +103,7 @@ impl LinkHandle {
     /// has its own age bound (`ReticulumNode::set_egress_media_age_bound`).
     /// Without a kind a datagram takes its link's
     /// (`ReticulumNode::set_link_egress_class`), or video.
+    /// Takes the core lock, as `send_unordered` does.
     pub async fn send_unordered_as(
         &self,
         data: &[u8],

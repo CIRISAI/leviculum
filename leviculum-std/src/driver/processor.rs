@@ -46,7 +46,7 @@
 //! channel has room, which is nearly always, such a call gets past the
 //! channel and deadlocks on the mutex.
 //!
-//! And no `block_on` is needed to get there. 83 public methods of this crate
+//! And no `block_on` is needed to get there. 94 public methods of this crate
 //! open by taking the core lock: 53 on [`super::ReticulumNode`] —
 //! `has_path`, `hops_to`, `get_identity`, `transport_stats`,
 //! `link_is_established` and so on — and five on [`super::PacketSender`] and
@@ -237,7 +237,7 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 /// **It may not own a handle to the node it runs inside.** Both methods are
 /// called with the core mutex held, and that mutex is not reentrant, so any
 /// call that re-locks it hangs the node. That is not confined to the async
-/// API: 83 public methods of this crate lock the core — `has_path`,
+/// API: 94 public methods of this crate lock the core — `has_path`,
 /// `hops_to`, `get_identity`, `transport_stats` and 49 more on
 /// [`super::ReticulumNode`], plus five on [`super::PacketSender`] and
 /// [`super::LinkHandle`] — and one of them in an `on_event` body is a
