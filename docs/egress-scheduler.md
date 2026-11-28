@@ -64,9 +64,14 @@ nor audio from video, so the owner says so, without any wire change:
   its datagrams default to that kind. Proofs, link setup and resource frames
   keep their own class. Forgotten when the link closes.
 - **Per send**, `LinkHandle::send_unordered_as(data, MediaKind::Audio)` (and
-  `try_send_unordered_as`): the datagram is tagged by a fingerprint of its
-  frame (its length and the head of the token's random IV), looked up once
-  when it reaches the scheduler.
+  `try_send_unordered_as`) for a datagram, and
+  `LinkHandle::send_as(data, EgressClass::Bulk)` (and `try_send_as`) for a
+  Channel message: the frame is tagged by a fingerprint of its bytes (its
+  length and the head of the token's random IV), looked up once when it
+  reaches the scheduler. So one link can carry urgent control (Control) and
+  bulk replication (Bulk) apart. A Channel frame sent as a media class is
+  still never dropped by age. A Resource needs no hint: its frames are Bulk
+  by their context.
 
 An untagged datagram on an unmarked link is Video.
 
@@ -148,6 +153,12 @@ a loopback client at the uplink's rate would be wrong. TCP, UDP (punched
 too), I2P, Auto, byte-channel and unknown kinds are scheduled.
 
 ## Known limits
+
+- Channel retransmits are scheduled as Control: a retransmit is encrypted
+  afresh, so the per-send hint (keyed by the first frame's bytes) does not
+  survive it. Safe (Control is never dropped), but not shaped. A Resource
+  is always Bulk; a class for a Resource, or retransmits that keep their
+  class, would need the core to stamp every frame it emits (deferred).
 
 - The class of a frame the driver's retry queue re-sends after `BufferFull`
   is read again from its bytes; on an IFAC'd interface those are masked, so

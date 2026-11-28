@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 94
+TOTAL 96
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -114,6 +114,8 @@ driver::seq_stats::ReticulumNode::link_seq_stats
 driver::stream::LinkHandle::close
 driver::stream::LinkHandle::send
 driver::stream::LinkHandle::try_send
+driver::stream::class::LinkHandle::send_as
+driver::stream::class::LinkHandle::try_send_as
 driver::stream::datagram::LinkHandle::send_unordered
 driver::stream::datagram::LinkHandle::send_unordered_as
 driver::stream::datagram::LinkHandle::try_send_unordered

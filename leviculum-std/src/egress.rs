@@ -354,7 +354,9 @@ struct State {
     depth_bytes: [u64; EGRESS_CLASSES],
     stats: EgressStats,
     link_class: HashMap<[u8; 16], EgressClass>,
-    media_hint: HashMap<u64, MediaKind>,
+    /// Per-send hints, by frame fingerprint: a datagram's media kind or a
+    /// Channel frame's class. Used once.
+    media_hint: HashMap<u64, EgressClass>,
     media_hint_order: VecDeque<u64>,
     pump_running: bool,
     next_seq: u64,
@@ -468,6 +470,12 @@ impl EgressScheduler {
     /// Note the media kind of a frame not yet dispatched, by its
     /// [`leviculum_core::egress::frame_fingerprint`].
     pub(crate) fn hint_media(&self, fingerprint: u64, kind: MediaKind) {
+        self.hint_class(fingerprint, kind.class());
+    }
+
+    /// Note the class of a frame not yet dispatched (a per-send hint). A
+    /// Control frame takes it as it is; a datagram only a media class.
+    pub(crate) fn hint_class(&self, fingerprint: u64, kind: EgressClass) {
         let mut st = self.state.lock_recover();
         if st.media_hint_order.len() >= MEDIA_HINTS_MAX {
             if let Some(old) = st.media_hint_order.pop_front() {
@@ -700,13 +708,17 @@ impl State {
             None => return (EgressClass::Control, false),
         };
         match hint.class {
-            FrameClass::Control => (
-                self.link_class
-                    .get(&hint.dst)
-                    .copied()
-                    .unwrap_or(EgressClass::Control),
-                false,
-            ),
+            FrameClass::Control => {
+                let sent_as = if self.media_hint.is_empty() {
+                    None
+                } else {
+                    self.media_hint.remove(&hint.fingerprint)
+                };
+                let class = sent_as
+                    .or_else(|| self.link_class.get(&hint.dst).copied())
+                    .unwrap_or(EgressClass::Control);
+                (class, false)
+            }
             FrameClass::Proof => (EgressClass::Proof, false),
             FrameClass::LinkSetup => (EgressClass::LinkSetup, false),
             FrameClass::Announce => (EgressClass::Announce, false),
@@ -718,8 +730,8 @@ impl State {
                     self.media_hint.remove(&hint.fingerprint)
                 };
                 let class = match kind {
-                    Some(k) => k.class(),
-                    None => match self.link_class.get(&hint.dst) {
+                    Some(c @ (EgressClass::Audio | EgressClass::Video)) => c,
+                    _ => match self.link_class.get(&hint.dst) {
                         Some(c @ (EgressClass::Audio | EgressClass::Video)) => *c,
                         _ => EgressClass::Video,
                     },
@@ -1452,5 +1464,68 @@ mod tests {
         // Idle again: the pump has ended.
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!s.state.lock_recover().pump_running);
+    }
+
+    /// On one link, under a rate: a Control (Channel) message handed after a
+    /// large Bulk Resource is under way leaves ahead of the Resource's
+    /// remaining parts, which the header alone classes Bulk.
+    #[test]
+    fn control_overtakes_a_resource_in_flight_on_one_link() {
+        let mut r = rig(1_024);
+        r.s.set_rate(Some(300_000));
+        // 100 parts of a Resource on the link, all queued behind the rate.
+        for n in 0..100u8 {
+            r.submit(0, raw(0, 0x01, 480, n)).unwrap();
+        }
+        // A few go.
+        let mut out = Vec::new();
+        for ms in 0..50 {
+            r.s.run(r.at(ms));
+            out.extend(r.drain());
+        }
+        let before = out.len();
+        assert!(before < 100, "the transfer is still under way");
+        // Now a Channel message on the same link.
+        let ctl = raw(0, 0x0E, 120, 0xCC);
+        r.submit(50, ctl.clone()).unwrap();
+        let mut next = Vec::new();
+        for ms in 50..200 {
+            r.s.run(r.at(ms));
+            next.extend(r.drain());
+            if !next.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(&next[0][..], &ctl[..], "Control left first");
+        assert!(
+            r.s.depth_at(r.at(60))
+                .class(EgressClass::Bulk)
+                .queued_packets
+                > 0
+        );
+    }
+
+    /// A per-send class on a Channel frame: the frame takes it once; another
+    /// frame on the link (or the same send re-encrypted) stays Control; a
+    /// datagram takes only a media class from it.
+    #[test]
+    fn a_channel_frame_takes_its_per_send_class_once() {
+        let s = EgressScheduler::new();
+        let first = raw(0, 0x0E, 200, 1);
+        let resent = raw(0, 0x0E, 200, 2);
+        s.hint_class(classify_frame(&first).fingerprint, EgressClass::Bulk);
+        assert_eq!(class_of(&s, &resent), EgressClass::Control);
+        assert_eq!(class_of(&s, &first), EgressClass::Bulk);
+        assert_eq!(class_of(&s, &first), EgressClass::Control, "used once");
+        // Never droppable by age, whatever the class.
+        s.hint_class(classify_frame(&first).fingerprint, EgressClass::Video);
+        assert_eq!(
+            s.state.lock_recover().resolve(hint(&first), &first),
+            (EgressClass::Video, false)
+        );
+        // A datagram ignores a non-media class.
+        let d = frame_of(EgressClass::Video, 100, 9);
+        s.hint_class(classify_frame(&d).fingerprint, EgressClass::Bulk);
+        assert_eq!(class_of(&s, &d), EgressClass::Video);
     }
 }

@@ -312,3 +312,7 @@ mod datagram;
 // +ciris: a send that returns its Channel sequence, for a per-message
 // delivery proof, in a child module for the same reason.
 mod send_seq;
+
+// +ciris (egress scheduler): reliable sends with an egress class, in a
+// child module for the same reason.
+mod class;
