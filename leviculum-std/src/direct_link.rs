@@ -3139,16 +3139,17 @@ impl DirectLinkRuntime {
                 (true, Some(p)) => allocation_steps(server, protocol, p.port(), local_port).await,
                 _ => None,
             };
-            // The fallback ends once a usable second observer is resolved
-            // (third review N1d): then only two-observer evidence counts.
-            let observer_resolved =
-                observer2.is_some_and(|(s2, _)| second_observer_usable(server, s2));
-            let (predicted, birthday, evidence) = if observer_resolved && class == NatClass::Unknown
-            {
-                (Vec::new(), false, EdmEvidence::None)
-            } else {
-                decide(class, steps)
-            };
+            // +ciris: only an ANSWER ends the own-evidence fallback. A second
+            // observer that answered classifies the NAT (`class` is never
+            // Unknown with an answer, since one is asked only after the
+            // first answered); one configured but silent, or skipped on a
+            // late probe, leaves this node where a node with none is. The
+            // third review's N1d ended the fallback once one merely resolved
+            // (2cf992a8a), to hold weak evidence to fewer birthday sockets;
+            // the fourth review's G made the caps equal on both kinds, and a
+            // silenced observer gives nothing an unconfigured node does not,
+            // behind the same trust gate.
+            let (predicted, birthday, evidence) = decide(class, steps);
             log_probe_diag(
                 &session,
                 &socket,
@@ -5609,5 +5610,108 @@ mod tests {
             None
         );
         assert_eq!(pmtu::current(&dual), before);
+    }
+
+    /// A facilitator that reports every probe as coming from one public IP
+    /// at a scripted series of ports (a random-allocating NAT), and answers
+    /// nothing until `answer_after` has passed.
+    async fn random_nat_facilitator(answer_after: Duration) -> (SocketAddr, AbortOnDrop) {
+        let fac = loopback().await;
+        let addr = fac.local_addr().unwrap();
+        let start = tokio::time::Instant::now();
+        let task = tokio::spawn(async move {
+            let ports = [20_000u16, 41_000, 9_000, 52_000, 13_000];
+            let mut n = 0usize;
+            let mut buf = [0u8; 576];
+            loop {
+                let Ok((len, src)) = fac.recv_from(&mut buf).await else {
+                    continue;
+                };
+                let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) else {
+                    continue;
+                };
+                if start.elapsed() < answer_after {
+                    continue;
+                }
+                let seen = SocketAddr::from(([198, 51, 100, 9], ports[n % ports.len()]));
+                n += 1;
+                let _ = fac.send_to(&wire::rnsp_response(&nonce, &seen), src).await;
+            }
+        });
+        (addr, AbortOnDrop(task.abort_handle()))
+    }
+
+    /// Run one probe through the runtime: `(birthday, evidence)` it reports.
+    async fn probe_outcome(
+        server: SocketAddr,
+        observer2: Option<SocketAddr>,
+        session: SessionId,
+    ) -> (bool, EdmEvidence) {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut rt = DirectLinkRuntime::new(tx);
+        if let Some(o) = observer2 {
+            *rt.observer2.lock().unwrap() = Some((o, ProbeProtocol::Rnsp));
+        }
+        rt.run(DirectLinkJob::Probe {
+            session,
+            server,
+            protocol: ProbeProtocol::Rnsp,
+        });
+        match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+            Ok(Some(Outcome::Probed {
+                public: Some(_),
+                birthday,
+                evidence,
+                ..
+            })) => (birthday, evidence),
+            other => panic!("no probe outcome: {other:?}"),
+        }
+    }
+
+    /// +ciris (GAP 2): a second observer that is configured but never
+    /// answers leaves the node on its own evidence, exactly as with none
+    /// configured: its random allocation steps still give the fallback
+    /// birthday ("b"). Until this fix a resolved-but-silent observer ended
+    /// the fallback (2cf992a8a, N1d) and the node got no spray at all.
+    #[tokio::test]
+    async fn a_silent_second_observer_keeps_the_fallback_spray() {
+        // One facilitator each, so the two probes' mappings never interleave.
+        let (server_a, _fa) = random_nat_facilitator(Duration::ZERO).await;
+        let (server_b, _fb) = random_nat_facilitator(Duration::ZERO).await;
+        let silent = loopback().await;
+        let silent_addr = silent.local_addr().unwrap();
+        let (with_silent, without) = tokio::join!(
+            probe_outcome(server_a, Some(silent_addr), [61u8; 16]),
+            probe_outcome(server_b, None, [62u8; 16]),
+        );
+        assert_eq!(without, (true, EdmEvidence::FallbackSilenceRandom));
+        assert_eq!(with_silent, without, "a silent observer changes nothing");
+        drop(silent);
+    }
+
+    /// +ciris (GAP 2): a late probe (the main probe took past
+    /// DISCOVERY_EXTRAS_UNTIL) skips the second observer AND the
+    /// allocation probes, so it holds no own evidence either way: with an
+    /// observer configured it ends exactly where it ends with none. A parity
+    /// pin: the old code agreed here too, since without steps there was no
+    /// fallback to suppress.
+    #[tokio::test]
+    async fn a_late_probe_ends_as_if_no_observer_were_configured() {
+        let late = DISCOVERY_EXTRAS_UNTIL + Duration::from_millis(300);
+        let (server_a, _fa) = random_nat_facilitator(late).await;
+        let (server_b, _fb) = random_nat_facilitator(late).await;
+        let silent = loopback().await;
+        let silent_addr = silent.local_addr().unwrap();
+        let (with_observer, without) = tokio::join!(
+            probe_outcome(server_a, Some(silent_addr), [63u8; 16]),
+            probe_outcome(server_b, None, [64u8; 16]),
+        );
+        assert_eq!(with_observer, without);
+        assert_eq!(
+            without,
+            (false, EdmEvidence::None),
+            "late: no steps were measured"
+        );
+        drop(silent);
     }
 }

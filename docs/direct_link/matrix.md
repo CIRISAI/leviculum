@@ -2,6 +2,8 @@
 
 TLC explores every behaviour the model allows, so each row says which outcomes are REACHABLE for that pair and scenario, never how likely they are. "direct or relayed" means both can happen, not that they are equally common: the live runs measure likelihood. In particular a pair where BOTH sides map at random (EDMrand x EDMrand) needs the spray to hit a birthday socket on each side at once; the odds of that are the single-side odds squared over a far larger space, and in practice such pairs are negligible (two random carrier NATs facing each other), so a direct outcome there is reachable but not to be expected.
 
+`Observers` counts the observers that ANSWER a side's probe: a second observer configured but silent (or skipped on a late probe) is `Observers = 1`, which is what the code does since ciris.5 (it used to end the own-evidence fallback once one merely resolved).
+
 ## NAT pairs (outcome class over every reachable terminal state)
 
 | A \ B | EIM-EIF | EIM-ADF | EIM-APDF | EDMseq-EIF | EDMseq-ADF | EDMseq-APDF | EDMrand-EIF | EDMrand-ADF | EDMrand-APDF |
