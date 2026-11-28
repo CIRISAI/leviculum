@@ -474,6 +474,7 @@ pub(crate) async fn punch(
 /// - `spray` (the peer's NAT is the random one): also knock random ports on
 ///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is
 ///   heard from it or [`wire::MAX_SPRAY_PORTS`] are used.
+#[cfg(test)]
 pub(crate) async fn punch_with(
     socket: &UdpSocket,
     targets: &[SocketAddr],
@@ -482,6 +483,24 @@ pub(crate) async fn punch_with(
     token: &[u8; 32],
     plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
+    punch_with_counted(socket, targets, predicted, session, token, plan)
+        .await
+        .0
+}
+
+/// +ciris — [`punch_with`], and what the punch sent beyond plain punches
+/// (for `DirectLinkEstablished` / `DirectLinkFailed`).
+pub(crate) async fn punch_with_counted(
+    socket: &UdpSocket,
+    targets: &[SocketAddr],
+    predicted: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    plan: PunchPlan,
+) -> (
+    Option<(Punched, Option<Arc<UdpSocket>>)>,
+    leviculum_core::direct_link::PunchCounts,
+) {
     let mut esc = Escalation::new(
         knock_budget(),
         plan.pair,
@@ -496,7 +515,7 @@ pub(crate) async fn punch_with(
     });
     let predicted: &[SocketAddr] = if plan.escalate { predicted } else { &[] };
     let extras = (plan.birthday && plan.escalate).then_some(Extras::Open);
-    punch_with_ports(
+    punch_with_ports_counted(
         socket,
         extras,
         targets,
@@ -966,6 +985,7 @@ pub(crate) enum Extras {
 
 /// [`punch_with`], with the spray's port source and the birthday sockets
 /// given.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn punch_with_ports(
     socket: &UdpSocket,
@@ -978,6 +998,29 @@ pub(crate) async fn punch_with_ports(
     esc: &Escalation,
     shape: PunchShape,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
+    punch_with_ports_counted(
+        socket, extras, targets, predicted, session, token, spray, esc, shape,
+    )
+    .await
+    .0
+}
+
+/// +ciris — [`punch_with_ports`], and the punch's [`PunchDiag::counts`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn punch_with_ports_counted(
+    socket: &UdpSocket,
+    extras: Option<Extras>,
+    targets: &[SocketAddr],
+    predicted: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    spray: Option<SprayPorts>,
+    esc: &Escalation,
+    shape: PunchShape,
+) -> (
+    Option<(Punched, Option<Arc<UdpSocket>>)>,
+    leviculum_core::direct_link::PunchCounts,
+) {
     let mut diag = PunchDiag::new(targets, predicted, *session);
     diag.escalation = Some(Arc::clone(&esc.granted));
     diag.escalation_allowed = esc.allowed();
@@ -1035,7 +1078,7 @@ pub(crate) async fn punch_with_ports(
     } else {
         "window_expired"
     });
-    result
+    (result, diag.counts())
 }
 
 /// Random ports knocked on the peer's IP per punch tick (see [`punch_with`]):
@@ -1947,22 +1990,10 @@ pub(crate) fn steps_from(base: u16, a: u16, b: u16) -> AllocationSteps {
 /// +ciris (review item 8): the whole allocation measurement's budget.
 const ALLOCATION_DEADLINE: Duration = Duration::from_millis(1_000);
 
-/// +ciris (review item 6): this NAT's mapping, from the SESSION socket's
-/// own mappings toward two observers. A NAT that gives each socket a random
-/// port but keeps one mapping per socket (an endpoint-independent CGNAT)
-/// differs only between sockets, so only the same socket toward two
-/// destinations can tell it from one that maps per destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NatClass {
-    /// The first observer saw the socket's own address.
-    NoNat,
-    /// Both observers saw the same mapping.
-    EndpointIndependent,
-    /// The two observers saw different mappings.
-    EndpointDependent,
-    /// Not decidable: no second observer, or it did not answer.
-    Unknown,
-}
+/// +ciris (review item 6): this NAT's mapping, and on what evidence it is
+/// held random; defined in core so `NodeEvent::DirectLinkProbed` carries
+/// them.
+pub use leviculum_core::direct_link::{EdmEvidence, NatClass};
 
 /// Classify from what the two observers saw (`first`, `second`) and this
 /// socket's host candidates.
@@ -1981,32 +2012,6 @@ pub(crate) fn classify_nat(
         None => NatClass::Unknown,
         Some(second) if second == first => NatClass::EndpointIndependent,
         Some(_) => NatClass::EndpointDependent,
-    }
-}
-
-/// +ciris (Eric's ruling on review item 6): on what evidence this node holds
-/// its NAT to be a random endpoint-dependent one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdmEvidence {
-    /// The session socket's mapping moved between two observers. (Two ports
-    /// on one IP detect a port-dependent mapping, not an address-only one.)
-    TwoObserver,
-    /// No observer could tell; our own allocation probes look random. The
-    /// birthday phase then opens only once the punch has been silent past
-    /// ESCALATE_AFTER, the rest of the evidence.
-    FallbackSilenceRandom,
-    /// Nothing says the NAT is random.
-    None,
-}
-
-impl EdmEvidence {
-    /// The word logged.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EdmEvidence::TwoObserver => "two_observer",
-            EdmEvidence::FallbackSilenceRandom => "fallback_silence_random",
-            EdmEvidence::None => "none",
-        }
     }
 }
 
@@ -2363,6 +2368,15 @@ impl PunchDiag {
     fn classes(list: &[(SocketAddr, HeardRelation)]) -> String {
         let words: Vec<&str> = list.iter().map(|(_, r)| r.as_str()).collect();
         format!("[{}]", words.join(","))
+    }
+
+    /// +ciris: what the punch sent beyond plain punches, for the host.
+    pub(crate) fn counts(&self) -> leviculum_core::direct_link::PunchCounts {
+        leviculum_core::direct_link::PunchCounts {
+            knocks: self.knocks,
+            sprayed_ports: u32::try_from(self.sprayed).unwrap_or(u32::MAX),
+            birthday_sockets: u32::try_from(self.birthday_sockets()).unwrap_or(u32::MAX),
+        }
     }
 
     /// Birthday sockets held open toward the peer (this NAT is random).
@@ -2904,6 +2918,10 @@ pub(crate) enum Outcome {
         birthday: bool,
         /// +ciris: on what evidence (two observers, or own evidence alone).
         evidence: EdmEvidence,
+        /// +ciris: the NAT's mapping, for `NodeEvent::DirectLinkProbed`.
+        class: NatClass,
+        /// +ciris: a second observer answered this probe.
+        second_answered: bool,
     },
     Punched {
         session: SessionId,
@@ -2916,6 +2934,8 @@ pub(crate) enum Outcome {
         /// +ciris: the birthday socket the peer reached, when the path runs
         /// on it rather than on the session's probe socket.
         socket: Option<Arc<UdpSocket>>,
+        /// +ciris: what this side's punch sent beyond plain punches.
+        counts: leviculum_core::direct_link::PunchCounts,
     },
 }
 
@@ -3081,6 +3101,8 @@ impl DirectLinkRuntime {
                     predicted: Vec::new(),
                     birthday: false,
                     evidence: EdmEvidence::None,
+                    class: NatClass::Unknown,
+                    second_answered: false,
                 });
                 return;
             }
@@ -3172,6 +3194,8 @@ impl DirectLinkRuntime {
                     predicted,
                     birthday,
                     evidence,
+                    class,
+                    second_answered: second.is_some(),
                 })
                 .await;
         });
@@ -3223,6 +3247,7 @@ impl DirectLinkRuntime {
                 early: Vec::new(),
                 mtu: None,
                 socket: None,
+                counts: Default::default(),
             });
             return;
         };
@@ -3241,7 +3266,8 @@ impl DirectLinkRuntime {
                 birthday,
                 "direct link: punching"
             );
-            let seen = punch_with(&socket, &targets, &predicted, &session, &token, plan).await;
+            let (seen, counts) =
+                punch_with_counted(&socket, &targets, &predicted, &session, &token, plan).await;
             match &seen {
                 Some((_, winner)) => tracing::info!(
                     on_birthday_socket = winner.is_some(),
@@ -3265,6 +3291,7 @@ impl DirectLinkRuntime {
                     early,
                     mtu,
                     socket: winner,
+                    counts,
                 })
                 .await;
         });
@@ -4481,6 +4508,7 @@ mod tests {
             outcome,
             Ok(Some(Outcome::Probed {
                 public: Some(_),
+                second_answered: true,
                 ..
             }))
         ));
@@ -5646,7 +5674,7 @@ mod tests {
         server: SocketAddr,
         observer2: Option<SocketAddr>,
         session: SessionId,
-    ) -> (bool, EdmEvidence) {
+    ) -> (bool, EdmEvidence, NatClass, bool) {
         let (tx, mut rx) = mpsc::channel(4);
         let mut rt = DirectLinkRuntime::new(tx);
         if let Some(o) = observer2 {
@@ -5662,8 +5690,10 @@ mod tests {
                 public: Some(_),
                 birthday,
                 evidence,
+                class,
+                second_answered,
                 ..
-            })) => (birthday, evidence),
+            })) => (birthday, evidence, class, second_answered),
             other => panic!("no probe outcome: {other:?}"),
         }
     }
@@ -5684,7 +5714,15 @@ mod tests {
             probe_outcome(server_a, Some(silent_addr), [61u8; 16]),
             probe_outcome(server_b, None, [62u8; 16]),
         );
-        assert_eq!(without, (true, EdmEvidence::FallbackSilenceRandom));
+        assert_eq!(
+            without,
+            (
+                true,
+                EdmEvidence::FallbackSilenceRandom,
+                NatClass::Unknown,
+                false
+            )
+        );
         assert_eq!(with_silent, without, "a silent observer changes nothing");
         drop(silent);
     }
@@ -5709,7 +5747,7 @@ mod tests {
         assert_eq!(with_observer, without);
         assert_eq!(
             without,
-            (false, EdmEvidence::None),
+            (false, EdmEvidence::None, NatClass::Unknown, false),
             "late: no steps were measured"
         );
         drop(silent);

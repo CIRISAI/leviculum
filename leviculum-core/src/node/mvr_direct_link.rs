@@ -258,7 +258,7 @@ fn an_upgrade_moves_the_link_and_a_lost_interface_moves_it_back() {
 
     assert!(pair.a_events.iter().any(|e| matches!(
         e,
-        NodeEvent::DirectLinkEstablished { link_id, interface_index, proposed: true }
+        NodeEvent::DirectLinkEstablished { link_id, interface_index, proposed: true, .. }
             if *link_id == pair.link && *interface_index == a_direct
     )));
     assert!(pair.b_events.iter().any(|e| matches!(
@@ -3002,4 +3002,94 @@ fn a_replayed_relay_datagram_does_not_pull_the_link_back() {
         "the link stays on its direct path"
     );
     assert_eq!(pair.b.link_datagram_stats(&pair.link).unwrap().replayed, 1);
+}
+
+/// +ciris (GAP 1): what a probe found reaches the host as one
+/// `DirectLinkProbed`, classes and counts only, for a session still running;
+/// a probe whose session is gone says nothing.
+#[test]
+fn a_probe_reports_its_classes_as_an_event() {
+    use crate::direct_link::{EdmEvidence, NatClass, ProbeFindings};
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let findings = ProbeFindings {
+        mapping: NatClass::EndpointDependent,
+        evidence: EdmEvidence::None,
+        second_observer_answered: true,
+    };
+    let out = pair.a.direct_link_probed_found(
+        &session,
+        Some(a_public()),
+        Vec::new(),
+        std::vec![40_000, 40_001],
+        false,
+        findings,
+    );
+    let probed: Vec<&NodeEvent> = out
+        .events
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::DirectLinkProbed { .. }))
+        .collect();
+    assert_eq!(probed.len(), 1);
+    assert!(matches!(
+        probed[0],
+        NodeEvent::DirectLinkProbed {
+            link_id,
+            mapping: NatClass::EndpointDependent,
+            evidence: EdmEvidence::None,
+            predicted: 2,
+            birthday: false,
+            second_observer_answered: true,
+        } if *link_id == pair.link
+    ));
+    let out = pair.a.direct_link_probed_found(
+        &[0xEE; 16],
+        Some(a_public()),
+        Vec::new(),
+        Vec::new(),
+        false,
+        findings,
+    );
+    assert!(!out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkProbed { .. })));
+}
+
+/// +ciris (GAP 1): the attempt's closing event carries what this side's
+/// punch sent: `DirectLinkEstablished` on success, `DirectLinkFailed` on a
+/// failed punch, and zero on a side that reported no counts.
+#[test]
+fn the_closing_event_carries_the_punch_counts() {
+    use crate::direct_link::PunchCounts;
+    let counts = PunchCounts {
+        knocks: 7,
+        sprayed_ports: 5,
+        birthday_sockets: 3,
+    };
+    // Success: A counted, B did not.
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    pair.a.note_direct_link_punch(&session, counts);
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    assert!(pair.a_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkEstablished { punch, .. } if *punch == counts
+    )));
+    assert!(pair.b_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkEstablished { punch, .. } if *punch == PunchCounts::default()
+    )));
+    // Failure: A's punch got nowhere.
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let out = pair.a.direct_link_punched_counted(&session, None, counts);
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkFailed { punch, .. } if *punch == counts
+    )));
 }

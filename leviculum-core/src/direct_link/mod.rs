@@ -36,3 +36,8 @@ pub mod wire;
 
 pub use session::{Failure, Phase, Role, Session, Step};
 pub use wire::{ProbeProtocol, SessionId, Signal};
+
+/// +ciris: the probe's classes and the punch's counts, for the host. Declared
+/// last so no cited line moves.
+pub mod report;
+pub use report::{EdmEvidence, NatClass, ProbeFindings, PunchCounts};

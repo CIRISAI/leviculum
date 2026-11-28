@@ -5681,13 +5681,20 @@ async fn run_event_loop(
                         predicted,
                         birthday,
                         evidence,
+                        class,
+                        second_answered,
                     } => {
                         direct_links.note_birthday(session, evidence);
-                        Some(inner.lock_recover().direct_link_probed_with_candidates(
-                            &session, public, local, predicted, birthday,
+                        let findings = leviculum_core::direct_link::ProbeFindings {
+                            mapping: class,
+                            evidence,
+                            second_observer_answered: second_answered,
+                        };
+                        Some(inner.lock_recover().direct_link_probed_found(
+                            &session, public, local, predicted, birthday, findings,
                         ))
                     }
-                    Outcome::Punched { session, peer: Some(peer), early, mtu, socket } => {
+                    Outcome::Punched { session, peer: Some(peer), early, mtu, socket, counts } => {
                         let id = InterfaceId(
                             autoconnect_wiring
                                 .next_id
@@ -5697,20 +5704,25 @@ async fn run_event_loop(
                         // so waiting on a full channel would never end.
                         match direct_links.interface_for(session, peer, early, mtu, id, socket) {
                             Some(handle) => match autoconnect_wiring.new_iface_tx.try_send(handle) {
-                                Ok(()) => None,
+                                Ok(()) => {
+                                    // +ciris: the attempt's closing event
+                                    // carries what the punch sent.
+                                    inner.lock_recover().note_direct_link_punch(&session, counts);
+                                    None
+                                }
                                 Err(_) => {
                                     direct_links.run(leviculum_core::node::DirectLinkJob::CloseInterface {
                                         interface_index: id.0,
                                     });
                                     direct_links.registered(id);
-                                    Some(inner.lock_recover().direct_link_punched(&session, None))
+                                    Some(inner.lock_recover().direct_link_punched_counted(&session, None, counts))
                                 }
                             },
-                            None => Some(inner.lock_recover().direct_link_punched(&session, None)),
+                            None => Some(inner.lock_recover().direct_link_punched_counted(&session, None, counts)),
                         }
                     }
-                    Outcome::Punched { session, peer: None, .. } => {
-                        Some(inner.lock_recover().direct_link_punched(&session, None))
+                    Outcome::Punched { session, peer: None, counts, .. } => {
+                        Some(inner.lock_recover().direct_link_punched_counted(&session, None, counts))
                     }
                 };
                 if let Some(output) = output {

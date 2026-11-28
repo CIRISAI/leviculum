@@ -319,13 +319,28 @@ async fn nat_check(role: &str, relay: SocketAddr, protocol: ProbeProtocol, stun:
 
 fn event_json(role: &str, ev: &NodeEvent) -> Option<Value> {
     Some(match ev {
-        NodeEvent::DirectLinkEstablished { proposed, .. } => {
-            json!({"role": role, "kind": "event", "event": "DirectLinkEstablished", "proposed": proposed})
+        NodeEvent::DirectLinkEstablished {
+            proposed, punch, ..
+        } => {
+            json!({"role": role, "kind": "event", "event": "DirectLinkEstablished", "proposed": proposed, "knocks": punch.knocks, "sprayed_ports": punch.sprayed_ports, "birthday_sockets": punch.birthday_sockets})
         }
         NodeEvent::DirectLinkFailed {
-            failure, proposed, ..
+            failure,
+            proposed,
+            punch,
+            ..
         } => {
-            json!({"role": role, "kind": "event", "event": "DirectLinkFailed", "failure": format!("{failure:?}"), "proposed": proposed})
+            json!({"role": role, "kind": "event", "event": "DirectLinkFailed", "failure": format!("{failure:?}"), "proposed": proposed, "knocks": punch.knocks, "sprayed_ports": punch.sprayed_ports, "birthday_sockets": punch.birthday_sockets})
+        }
+        NodeEvent::DirectLinkProbed {
+            mapping,
+            evidence,
+            predicted,
+            birthday,
+            second_observer_answered,
+            ..
+        } => {
+            json!({"role": role, "kind": "event", "event": "DirectLinkProbed", "mapping": mapping.as_str(), "evidence": evidence.as_str(), "predicted": predicted, "birthday": birthday, "second_observer_answered": second_observer_answered})
         }
         NodeEvent::DirectLinkLost { .. } => {
             json!({"role": role, "kind": "event", "event": "DirectLinkLost"})
