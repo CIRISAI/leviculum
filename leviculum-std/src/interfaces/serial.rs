@@ -302,6 +302,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,

@@ -208,6 +208,8 @@ pub enum NodeEvent {
         interface_index: usize,
         /// Whether this node proposed the upgrade
         proposed: bool,
+        /// +ciris: what this side's punch sent beyond plain punches.
+        punch: crate::direct_link::PunchCounts,
     },
 
     /// +ciris (leviculum#82): a peer asked to move `link_id` onto a direct
@@ -234,6 +236,29 @@ pub enum NodeEvent {
         failure: crate::direct_link::Failure,
         /// Whether this node proposed the upgrade
         proposed: bool,
+        /// +ciris: what this side's punch sent beyond plain punches; zero
+        /// when it failed before this side punched.
+        punch: crate::direct_link::PunchCounts,
+    },
+
+    /// +ciris: this side's probe for a direct-link upgrade of `link_id`
+    /// finished: what it found its NAT to be. Classes and counts only, no
+    /// address or port. One per probe that found its session still running.
+    DirectLinkProbed {
+        /// The link ID
+        link_id: LinkId,
+        /// The NAT's mapping, from the facilitator and the second observer
+        mapping: crate::direct_link::NatClass,
+        /// On what evidence the NAT is held random, if it is
+        evidence: crate::direct_link::EdmEvidence,
+        /// How many ports this node predicted its NAT will map toward the
+        /// peer (sent to the peer to punch)
+        predicted: u8,
+        /// The probe holds this NAT random: the punch may open birthday
+        /// sockets (before the escalation gate, which may still refuse)
+        birthday: bool,
+        /// A second observer answered this probe
+        second_observer_answered: bool,
     },
 
     /// +ciris (leviculum#70): a link's direct interface went down (NAT
@@ -755,6 +780,7 @@ impl NodeEvent {
             | NodeEvent::DirectLinkRequested { link_id, .. }
             | NodeEvent::DirectLinkFailed { link_id, .. }
             | NodeEvent::DirectLinkLost { link_id, .. }
+            | NodeEvent::DirectLinkProbed { link_id, .. }
             | NodeEvent::LinkClosed { link_id, .. }
             | NodeEvent::LinkProofRequested { link_id, .. }
             | NodeEvent::LinkDeliveryConfirmed { link_id, .. }
@@ -884,7 +910,8 @@ impl NodeEvent {
             NodeEvent::DirectLinkEstablished { .. }
             | NodeEvent::DirectLinkRequested { .. }
             | NodeEvent::DirectLinkFailed { .. }
-            | NodeEvent::DirectLinkLost { .. } => EventClass::Control,
+            | NodeEvent::DirectLinkLost { .. }
+            | NodeEvent::DirectLinkProbed { .. } => EventClass::Control,
 
             // Proof decisions — require an application call to make progress.
             NodeEvent::PacketProofRequested { .. } | NodeEvent::LinkProofRequested { .. } => {
@@ -988,6 +1015,7 @@ impl NodeEvent {
             NodeEvent::DirectLinkRequested { .. } => "DirectLinkRequested",
             NodeEvent::DirectLinkFailed { .. } => "DirectLinkFailed",
             NodeEvent::DirectLinkLost { .. } => "DirectLinkLost",
+            NodeEvent::DirectLinkProbed { .. } => "DirectLinkProbed",
             NodeEvent::LinkClosed { .. } => "LinkClosed",
             NodeEvent::LinkRefused { .. } => "LinkRefused",
             NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",

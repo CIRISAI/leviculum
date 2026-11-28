@@ -817,6 +817,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // Hashed before the IFAC wrap, so the tag is the `ph` this
                 // frame's `PKT_TX` named (T-0013).
                 let tag = frame_tag(&data);
+                let hint = crate::egress::classify_frame(&data); // +ciris: before the IFAC wrap
                 let is_datagram =
                     wire_context(&data) == Some(crate::packet::PacketContext::Datagram);
                 let send_data = match ifac_configs.get(&iface.0) {
@@ -839,6 +840,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // #376): a multi-peer interface serves the one link it
                 // names, every other interface ignores it.
                 iface_obj.tag_next_frame(tag);
+                iface_obj.hint_next_frame(hint);
                 if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
                     if matches!(e, crate::traits::InterfaceError::BufferFull) && is_datagram {
                         // +ciris (leviculum#102): shed, never retried, and
@@ -870,6 +872,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // the bytes shares it instead of copying it (513).
                 // One hash for every interface the broadcast reaches.
                 let tag = frame_tag(&data);
+                let hint = crate::egress::classify_frame(&data); // +ciris: before the IFAC wrap
                 let mut frame = crate::traits::SharedFrame::new(data);
                 for slot in interfaces.iter_mut() {
                     let iface_obj = slot.as_interface();
@@ -903,6 +906,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                     };
                     // Broadcast = announce rebroadcasts → normal priority
                     iface_obj.tag_next_frame(tag);
+                    iface_obj.hint_next_frame(hint);
                     let result = match (spare_one_link, wrapped) {
                         (Some(peer), wrapped) => {
                             let bytes = wrapped.as_deref().unwrap_or(frame.as_bytes());
@@ -3179,7 +3183,7 @@ pub enum TransportError {
     NoPath,
     /// Target interface is pacing, retry no earlier than `ready_at_ms`.
     /// Mirrors `ChannelError::PacingDelay` / `SendError::PacingDelay` so
-    /// async callers (see `driver/stream.rs:119`) can `sleep_until` to
+    /// async callers (see `driver/stream.rs:128`) can `sleep_until` to
     /// the exact ready time instead of polling.
     PacingDelay { ready_at_ms: u64 },
     /// Packet parsing error
@@ -6363,7 +6367,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4517. A destination with no cached
+    /// link-request path uses at transport.rs:4521. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7165,7 +7169,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1771 ran in the
+        // Gate on the already-incremented hops (transport.rs:1775 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -12607,7 +12611,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2954`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2958`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -18963,7 +18967,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7936,,), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7940,,), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -25257,7 +25261,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1771) before
+        // The inbound path increments hops once (transport.rs:1775) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

@@ -332,6 +332,7 @@ fn spawn_udp_interface_inner(
 
     Ok(InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,

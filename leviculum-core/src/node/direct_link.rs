@@ -394,6 +394,9 @@ pub(crate) struct DirectLinks {
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
     pub(super) jobs: VecDeque<DirectLinkJob>,
+    /// +ciris: what each link's last punch on this side sent, until the
+    /// event that ends the attempt carries it.
+    punch_counts: BTreeMap<LinkId, crate::direct_link::PunchCounts>,
 }
 
 impl DirectLinks {
@@ -837,6 +840,68 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// +ciris — [`Self::direct_link_probed_with_candidates`], with what the
+    /// probe found: emits [`NodeEvent::DirectLinkProbed`] (classes and
+    /// counts, no address) for a session still running, then proceeds as
+    /// that method does.
+    #[allow(clippy::too_many_arguments)]
+    pub fn direct_link_probed_found(
+        &mut self,
+        session: &SessionId,
+        public: Option<SocketAddr>,
+        local: Vec<SocketAddr>,
+        predicted: Vec<u16>,
+        birthday: bool,
+        findings: crate::direct_link::ProbeFindings,
+    ) -> crate::transport::TickOutput {
+        if let Some(link_id) = self.direct_links.link_of_session(session) {
+            self.events.push(NodeEvent::DirectLinkProbed {
+                link_id,
+                mapping: findings.mapping,
+                evidence: findings.evidence,
+                predicted: u8::try_from(predicted.len()).unwrap_or(u8::MAX),
+                birthday,
+                second_observer_answered: findings.second_observer_answered,
+            });
+        }
+        self.direct_link_probed_with_candidates(session, public, local, predicted, birthday)
+    }
+
+    /// +ciris — [`Self::direct_link_punched`], with what this side's punch
+    /// sent, which the attempt's `DirectLinkEstablished` or
+    /// `DirectLinkFailed` then carries.
+    pub fn direct_link_punched_counted(
+        &mut self,
+        session: &SessionId,
+        interface_index: Option<usize>,
+        counts: crate::direct_link::PunchCounts,
+    ) -> crate::transport::TickOutput {
+        self.note_direct_link_punch(session, counts);
+        self.direct_link_punched(session, interface_index)
+    }
+
+    /// +ciris: record what this side's punch for `session` sent, for a punch
+    /// whose interface is still being brought up (the driver calls
+    /// [`Self::direct_link_punched`] once it is live).
+    pub fn note_direct_link_punch(
+        &mut self,
+        session: &SessionId,
+        counts: crate::direct_link::PunchCounts,
+    ) {
+        if let Some(link_id) = self.direct_links.link_of_session(session) {
+            self.direct_links.punch_counts.insert(link_id, counts);
+        }
+    }
+
+    /// The counts the attempt's closing event carries; zero when this side
+    /// did not punch.
+    fn take_punch_counts(&mut self, link_id: &LinkId) -> crate::direct_link::PunchCounts {
+        self.direct_links
+            .punch_counts
+            .remove(link_id)
+            .unwrap_or_default()
+    }
+
     /// The driver's punch for `session` finished. `Some(index)` is the direct
     /// interface the driver brought up and registered; `None` means the punch
     /// failed.
@@ -987,10 +1052,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 now_ms,
             );
         }
+        let punch = self.take_punch_counts(&link_id);
         self.events.push(NodeEvent::DirectLinkFailed {
             link_id,
             failure,
             proposed: held.proposed,
+            punch,
         });
         self.schedule_direct_link_retry(link_id, now_ms);
     }
@@ -1061,10 +1128,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if recovered {
             self.events.push(NodeEvent::LinkRecovered { link_id });
         }
+        let punch = self.take_punch_counts(&link_id);
         self.events.push(NodeEvent::DirectLinkEstablished {
             link_id,
             interface_index: index,
             proposed,
+            punch,
         });
         // The initiator linked to a destination it can name: ask for it over
         // the new interface, so the owner's announce answer installs a
@@ -1655,10 +1724,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.direct_links.jobs.push_back(DirectLinkJob::Release {
                 session: *session.id(),
             });
+            let punch = self.take_punch_counts(&link_id);
             self.events.push(NodeEvent::DirectLinkFailed {
                 link_id,
                 failure,
                 proposed: session.role() == Role::Initiator,
+                punch,
             });
             // Beaten in a crossing, the REQUEST that won is on its way or
             // here, and the cooldown of the proposal that lost must not
@@ -1964,6 +2035,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.last_proposal_ms.remove(link_id);
         self.direct_links.escalation_trust.remove(link_id);
         self.direct_links.default_escalating.remove(link_id);
+        self.direct_links.punch_counts.remove(link_id);
         self.direct_links.committing_aborted.remove(link_id);
         self.direct_links.peer_holding.remove(link_id);
         self.direct_links.mtu_before_move.remove(link_id);
@@ -2336,10 +2408,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.pending.clear();
         let sessions = core::mem::take(&mut self.direct_links.sessions);
         for (link_id, session) in sessions {
+            let punch = self.take_punch_counts(&link_id);
             self.events.push(NodeEvent::DirectLinkFailed {
                 link_id,
                 failure: Failure::Timeout,
                 proposed: session.role() == Role::Initiator,
+                punch,
             });
         }
         // Each direct interface of the previous run is gone: take it down the

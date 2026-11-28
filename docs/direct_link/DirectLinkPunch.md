@@ -256,6 +256,12 @@ through `TearDown`.
   own steps and, with one observer, take the fallback ("b") though its
   mapping is endpoint-independent. The model's EIM allocates in order. The
   live arms saw no such NAT (every EIM runner: evidence none).
+- **Observers are the ones that answer.** `Observers` counts the observers
+  that answer a side's probe. A second observer that is configured but
+  silent, or skipped because the main probe took over 3 s, is
+  `Observers = 1`: the side keeps its own-evidence fallback. The code agrees
+  since ciris.5; before, a configured observer that merely resolved ended
+  the fallback (third review N1d), a state the model never had.
 
 ## Results (2cf992a, `matrix.md`)
 

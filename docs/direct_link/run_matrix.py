@@ -291,6 +291,7 @@ def table(results):
            "the odds of that are the single-side odds squared over a far larger space, and in "
            "practice such pairs are negligible (two random carrier NATs facing each other), "
            "so a direct outcome there is reachable but not to be expected.", "",
+           "`Observers` counts the observers that ANSWER a side's probe: a second observer configured but silent (or skipped on a late probe) is `Observers = 1`, which is what the code does since ciris.5 (it used to end the own-evidence fallback once one merely resolved).", "",
            "## NAT pairs (outcome class over every reachable terminal state)", "",
            pair_grid(results), "## Every scenario", "",
            "| scenario | outcomes reached (terminal states) | invariants violated | liveness | run |",

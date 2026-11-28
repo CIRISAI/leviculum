@@ -81,11 +81,10 @@ impl ReticulumNode {
             Ok((link_id, output))
         })
         .await?;
-        Ok(LinkHandle::new(
-            link_id,
-            Arc::clone(&self.inner),
-            self.action_dispatch_tx(),
-        ))
+        Ok(
+            LinkHandle::new(link_id, Arc::clone(&self.inner), self.action_dispatch_tx())
+                .with_egress(Arc::clone(&self.egress)),
+        )
     }
 }
 

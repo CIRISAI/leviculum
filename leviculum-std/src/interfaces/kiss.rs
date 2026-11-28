@@ -422,6 +422,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
 
     InterfaceHandle {
         next_tag: None,
+        egress: Default::default(),
         info: InterfaceInfo {
             transit: true,
             id,

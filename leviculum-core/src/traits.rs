@@ -517,6 +517,18 @@ pub trait Interface {
     fn acquisition_max_ms(&self) -> u64 {
         0
     }
+
+    /// What the frame the next `try_send*` call hands over IS (+ciris,
+    /// egress scheduler): its class, destination and fingerprint, read by
+    /// `dispatch_actions` from the header before any IFAC wrap.
+    ///
+    /// Called immediately before every send, beside
+    /// [`Self::tag_next_frame`]. Unlike the tag, a scheduler may read it: the
+    /// std driver queues by its class. The default ignores it, which is right
+    /// for every interface that schedules nothing.
+    fn hint_next_frame(&mut self, hint: crate::egress::FrameHint) {
+        let _ = hint;
+    }
 }
 
 /// Clock for timestamps and timeouts

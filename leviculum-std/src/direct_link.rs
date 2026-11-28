@@ -474,6 +474,7 @@ pub(crate) async fn punch(
 /// - `spray` (the peer's NAT is the random one): also knock random ports on
 ///   the peer's public IP, [`SPRAY_PER_TICK`] a tick, until anything is
 ///   heard from it or [`wire::MAX_SPRAY_PORTS`] are used.
+#[cfg(test)]
 pub(crate) async fn punch_with(
     socket: &UdpSocket,
     targets: &[SocketAddr],
@@ -482,6 +483,24 @@ pub(crate) async fn punch_with(
     token: &[u8; 32],
     plan: PunchPlan,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
+    punch_with_counted(socket, targets, predicted, session, token, plan)
+        .await
+        .0
+}
+
+/// +ciris — [`punch_with`], and what the punch sent beyond plain punches
+/// (for `DirectLinkEstablished` / `DirectLinkFailed`).
+pub(crate) async fn punch_with_counted(
+    socket: &UdpSocket,
+    targets: &[SocketAddr],
+    predicted: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    plan: PunchPlan,
+) -> (
+    Option<(Punched, Option<Arc<UdpSocket>>)>,
+    leviculum_core::direct_link::PunchCounts,
+) {
     let mut esc = Escalation::new(
         knock_budget(),
         plan.pair,
@@ -496,7 +515,7 @@ pub(crate) async fn punch_with(
     });
     let predicted: &[SocketAddr] = if plan.escalate { predicted } else { &[] };
     let extras = (plan.birthday && plan.escalate).then_some(Extras::Open);
-    punch_with_ports(
+    punch_with_ports_counted(
         socket,
         extras,
         targets,
@@ -966,6 +985,7 @@ pub(crate) enum Extras {
 
 /// [`punch_with`], with the spray's port source and the birthday sockets
 /// given.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn punch_with_ports(
     socket: &UdpSocket,
@@ -978,6 +998,29 @@ pub(crate) async fn punch_with_ports(
     esc: &Escalation,
     shape: PunchShape,
 ) -> Option<(Punched, Option<Arc<UdpSocket>>)> {
+    punch_with_ports_counted(
+        socket, extras, targets, predicted, session, token, spray, esc, shape,
+    )
+    .await
+    .0
+}
+
+/// +ciris — [`punch_with_ports`], and the punch's [`PunchDiag::counts`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn punch_with_ports_counted(
+    socket: &UdpSocket,
+    extras: Option<Extras>,
+    targets: &[SocketAddr],
+    predicted: &[SocketAddr],
+    session: &SessionId,
+    token: &[u8; 32],
+    spray: Option<SprayPorts>,
+    esc: &Escalation,
+    shape: PunchShape,
+) -> (
+    Option<(Punched, Option<Arc<UdpSocket>>)>,
+    leviculum_core::direct_link::PunchCounts,
+) {
     let mut diag = PunchDiag::new(targets, predicted, *session);
     diag.escalation = Some(Arc::clone(&esc.granted));
     diag.escalation_allowed = esc.allowed();
@@ -1035,7 +1078,7 @@ pub(crate) async fn punch_with_ports(
     } else {
         "window_expired"
     });
-    result
+    (result, diag.counts())
 }
 
 /// Random ports knocked on the peer's IP per punch tick (see [`punch_with`]):
@@ -1947,22 +1990,10 @@ pub(crate) fn steps_from(base: u16, a: u16, b: u16) -> AllocationSteps {
 /// +ciris (review item 8): the whole allocation measurement's budget.
 const ALLOCATION_DEADLINE: Duration = Duration::from_millis(1_000);
 
-/// +ciris (review item 6): this NAT's mapping, from the SESSION socket's
-/// own mappings toward two observers. A NAT that gives each socket a random
-/// port but keeps one mapping per socket (an endpoint-independent CGNAT)
-/// differs only between sockets, so only the same socket toward two
-/// destinations can tell it from one that maps per destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NatClass {
-    /// The first observer saw the socket's own address.
-    NoNat,
-    /// Both observers saw the same mapping.
-    EndpointIndependent,
-    /// The two observers saw different mappings.
-    EndpointDependent,
-    /// Not decidable: no second observer, or it did not answer.
-    Unknown,
-}
+/// +ciris (review item 6): this NAT's mapping, and on what evidence it is
+/// held random; defined in core so `NodeEvent::DirectLinkProbed` carries
+/// them.
+pub use leviculum_core::direct_link::{EdmEvidence, NatClass};
 
 /// Classify from what the two observers saw (`first`, `second`) and this
 /// socket's host candidates.
@@ -1981,32 +2012,6 @@ pub(crate) fn classify_nat(
         None => NatClass::Unknown,
         Some(second) if second == first => NatClass::EndpointIndependent,
         Some(_) => NatClass::EndpointDependent,
-    }
-}
-
-/// +ciris (Eric's ruling on review item 6): on what evidence this node holds
-/// its NAT to be a random endpoint-dependent one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdmEvidence {
-    /// The session socket's mapping moved between two observers. (Two ports
-    /// on one IP detect a port-dependent mapping, not an address-only one.)
-    TwoObserver,
-    /// No observer could tell; our own allocation probes look random. The
-    /// birthday phase then opens only once the punch has been silent past
-    /// ESCALATE_AFTER, the rest of the evidence.
-    FallbackSilenceRandom,
-    /// Nothing says the NAT is random.
-    None,
-}
-
-impl EdmEvidence {
-    /// The word logged.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EdmEvidence::TwoObserver => "two_observer",
-            EdmEvidence::FallbackSilenceRandom => "fallback_silence_random",
-            EdmEvidence::None => "none",
-        }
     }
 }
 
@@ -2363,6 +2368,15 @@ impl PunchDiag {
     fn classes(list: &[(SocketAddr, HeardRelation)]) -> String {
         let words: Vec<&str> = list.iter().map(|(_, r)| r.as_str()).collect();
         format!("[{}]", words.join(","))
+    }
+
+    /// +ciris: what the punch sent beyond plain punches, for the host.
+    pub(crate) fn counts(&self) -> leviculum_core::direct_link::PunchCounts {
+        leviculum_core::direct_link::PunchCounts {
+            knocks: self.knocks,
+            sprayed_ports: u32::try_from(self.sprayed).unwrap_or(u32::MAX),
+            birthday_sockets: u32::try_from(self.birthday_sockets()).unwrap_or(u32::MAX),
+        }
     }
 
     /// Birthday sockets held open toward the peer (this NAT is random).
@@ -2904,6 +2918,10 @@ pub(crate) enum Outcome {
         birthday: bool,
         /// +ciris: on what evidence (two observers, or own evidence alone).
         evidence: EdmEvidence,
+        /// +ciris: the NAT's mapping, for `NodeEvent::DirectLinkProbed`.
+        class: NatClass,
+        /// +ciris: a second observer answered this probe.
+        second_answered: bool,
     },
     Punched {
         session: SessionId,
@@ -2916,6 +2934,8 @@ pub(crate) enum Outcome {
         /// +ciris: the birthday socket the peer reached, when the path runs
         /// on it rather than on the session's probe socket.
         socket: Option<Arc<UdpSocket>>,
+        /// +ciris: what this side's punch sent beyond plain punches.
+        counts: leviculum_core::direct_link::PunchCounts,
     },
 }
 
@@ -3081,6 +3101,8 @@ impl DirectLinkRuntime {
                     predicted: Vec::new(),
                     birthday: false,
                     evidence: EdmEvidence::None,
+                    class: NatClass::Unknown,
+                    second_answered: false,
                 });
                 return;
             }
@@ -3139,16 +3161,17 @@ impl DirectLinkRuntime {
                 (true, Some(p)) => allocation_steps(server, protocol, p.port(), local_port).await,
                 _ => None,
             };
-            // The fallback ends once a usable second observer is resolved
-            // (third review N1d): then only two-observer evidence counts.
-            let observer_resolved =
-                observer2.is_some_and(|(s2, _)| second_observer_usable(server, s2));
-            let (predicted, birthday, evidence) = if observer_resolved && class == NatClass::Unknown
-            {
-                (Vec::new(), false, EdmEvidence::None)
-            } else {
-                decide(class, steps)
-            };
+            // +ciris: only an ANSWER ends the own-evidence fallback. A second
+            // observer that answered classifies the NAT (`class` is never
+            // Unknown with an answer, since one is asked only after the
+            // first answered); one configured but silent, or skipped on a
+            // late probe, leaves this node where a node with none is. The
+            // third review's N1d ended the fallback once one merely resolved
+            // (2cf992a8a), to hold weak evidence to fewer birthday sockets;
+            // the fourth review's G made the caps equal on both kinds, and a
+            // silenced observer gives nothing an unconfigured node does not,
+            // behind the same trust gate.
+            let (predicted, birthday, evidence) = decide(class, steps);
             log_probe_diag(
                 &session,
                 &socket,
@@ -3171,6 +3194,8 @@ impl DirectLinkRuntime {
                     predicted,
                     birthday,
                     evidence,
+                    class,
+                    second_answered: second.is_some(),
                 })
                 .await;
         });
@@ -3222,6 +3247,7 @@ impl DirectLinkRuntime {
                 early: Vec::new(),
                 mtu: None,
                 socket: None,
+                counts: Default::default(),
             });
             return;
         };
@@ -3240,7 +3266,8 @@ impl DirectLinkRuntime {
                 birthday,
                 "direct link: punching"
             );
-            let seen = punch_with(&socket, &targets, &predicted, &session, &token, plan).await;
+            let (seen, counts) =
+                punch_with_counted(&socket, &targets, &predicted, &session, &token, plan).await;
             match &seen {
                 Some((_, winner)) => tracing::info!(
                     on_birthday_socket = winner.is_some(),
@@ -3264,6 +3291,7 @@ impl DirectLinkRuntime {
                     early,
                     mtu,
                     socket: winner,
+                    counts,
                 })
                 .await;
         });
@@ -4480,6 +4508,7 @@ mod tests {
             outcome,
             Ok(Some(Outcome::Probed {
                 public: Some(_),
+                second_answered: true,
                 ..
             }))
         ));
@@ -5609,5 +5638,118 @@ mod tests {
             None
         );
         assert_eq!(pmtu::current(&dual), before);
+    }
+
+    /// A facilitator that reports every probe as coming from one public IP
+    /// at a scripted series of ports (a random-allocating NAT), and answers
+    /// nothing until `answer_after` has passed.
+    async fn random_nat_facilitator(answer_after: Duration) -> (SocketAddr, AbortOnDrop) {
+        let fac = loopback().await;
+        let addr = fac.local_addr().unwrap();
+        let start = tokio::time::Instant::now();
+        let task = tokio::spawn(async move {
+            let ports = [20_000u16, 41_000, 9_000, 52_000, 13_000];
+            let mut n = 0usize;
+            let mut buf = [0u8; 576];
+            loop {
+                let Ok((len, src)) = fac.recv_from(&mut buf).await else {
+                    continue;
+                };
+                let Some(nonce) = wire::parse_rnsp_request(&buf[..len]) else {
+                    continue;
+                };
+                if start.elapsed() < answer_after {
+                    continue;
+                }
+                let seen = SocketAddr::from(([198, 51, 100, 9], ports[n % ports.len()]));
+                n += 1;
+                let _ = fac.send_to(&wire::rnsp_response(&nonce, &seen), src).await;
+            }
+        });
+        (addr, AbortOnDrop(task.abort_handle()))
+    }
+
+    /// Run one probe through the runtime: `(birthday, evidence)` it reports.
+    async fn probe_outcome(
+        server: SocketAddr,
+        observer2: Option<SocketAddr>,
+        session: SessionId,
+    ) -> (bool, EdmEvidence, NatClass, bool) {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut rt = DirectLinkRuntime::new(tx);
+        if let Some(o) = observer2 {
+            *rt.observer2.lock().unwrap() = Some((o, ProbeProtocol::Rnsp));
+        }
+        rt.run(DirectLinkJob::Probe {
+            session,
+            server,
+            protocol: ProbeProtocol::Rnsp,
+        });
+        match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+            Ok(Some(Outcome::Probed {
+                public: Some(_),
+                birthday,
+                evidence,
+                class,
+                second_answered,
+                ..
+            })) => (birthday, evidence, class, second_answered),
+            other => panic!("no probe outcome: {other:?}"),
+        }
+    }
+
+    /// +ciris (GAP 2): a second observer that is configured but never
+    /// answers leaves the node on its own evidence, exactly as with none
+    /// configured: its random allocation steps still give the fallback
+    /// birthday ("b"). Until this fix a resolved-but-silent observer ended
+    /// the fallback (2cf992a8a, N1d) and the node got no spray at all.
+    #[tokio::test]
+    async fn a_silent_second_observer_keeps_the_fallback_spray() {
+        // One facilitator each, so the two probes' mappings never interleave.
+        let (server_a, _fa) = random_nat_facilitator(Duration::ZERO).await;
+        let (server_b, _fb) = random_nat_facilitator(Duration::ZERO).await;
+        let silent = loopback().await;
+        let silent_addr = silent.local_addr().unwrap();
+        let (with_silent, without) = tokio::join!(
+            probe_outcome(server_a, Some(silent_addr), [61u8; 16]),
+            probe_outcome(server_b, None, [62u8; 16]),
+        );
+        assert_eq!(
+            without,
+            (
+                true,
+                EdmEvidence::FallbackSilenceRandom,
+                NatClass::Unknown,
+                false
+            )
+        );
+        assert_eq!(with_silent, without, "a silent observer changes nothing");
+        drop(silent);
+    }
+
+    /// +ciris (GAP 2): a late probe (the main probe took past
+    /// DISCOVERY_EXTRAS_UNTIL) skips the second observer AND the
+    /// allocation probes, so it holds no own evidence either way: with an
+    /// observer configured it ends exactly where it ends with none. A parity
+    /// pin: the old code agreed here too, since without steps there was no
+    /// fallback to suppress.
+    #[tokio::test]
+    async fn a_late_probe_ends_as_if_no_observer_were_configured() {
+        let late = DISCOVERY_EXTRAS_UNTIL + Duration::from_millis(300);
+        let (server_a, _fa) = random_nat_facilitator(late).await;
+        let (server_b, _fb) = random_nat_facilitator(late).await;
+        let silent = loopback().await;
+        let silent_addr = silent.local_addr().unwrap();
+        let (with_observer, without) = tokio::join!(
+            probe_outcome(server_a, Some(silent_addr), [63u8; 16]),
+            probe_outcome(server_b, None, [64u8; 16]),
+        );
+        assert_eq!(with_observer, without);
+        assert_eq!(
+            without,
+            (false, EdmEvidence::None, NatClass::Unknown, false),
+            "late: no steps were measured"
+        );
+        drop(silent);
     }
 }

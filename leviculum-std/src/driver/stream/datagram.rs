@@ -76,3 +76,72 @@ impl ReticulumNode {
         self.inner.lock_recover().link_datagram_stats(link_id)
     }
 }
+
+/// Note the media kind of every datagram `output` carries, before the event
+/// loop dispatches it (+ciris, egress scheduler).
+fn hint_datagrams(
+    egress: Option<&crate::egress::EgressScheduler>,
+    output: &leviculum_core::TickOutput,
+    kind: crate::egress::MediaKind,
+) {
+    let Some(egress) = egress else {
+        return;
+    };
+    for action in &output.actions {
+        if let leviculum_core::Action::SendPacket { data, .. } = action {
+            let hint = leviculum_core::egress::classify_frame(data);
+            if hint.class == leviculum_core::egress::FrameClass::Media {
+                egress.hint_media(hint.fingerprint, kind);
+            }
+        }
+    }
+}
+
+impl LinkHandle {
+    /// [`Self::send_unordered`], scheduled as `kind` (+ciris, egress
+    /// scheduler): an audio datagram goes ahead of video ones, and each kind
+    /// has its own age bound (`ReticulumNode::set_egress_media_age_bound`).
+    /// Without a kind a datagram takes its link's
+    /// (`ReticulumNode::set_link_egress_class`), or video.
+    /// Takes the core lock, as `send_unordered` does.
+    pub async fn send_unordered_as(
+        &self,
+        data: &[u8],
+        kind: crate::egress::MediaKind,
+    ) -> Result<u32, Error> {
+        if self.closed {
+            return Err(Error::NotRunning);
+        }
+        crate::driver::dispatch_committed(&self.action_dispatch_tx, || {
+            let mut core = self.inner.lock_recover();
+            let (sequence, output) = core.send_unordered(&self.link_id, data)?;
+            hint_datagrams(self.egress.as_deref(), &output, kind);
+            Ok((sequence, output))
+        })
+        .await
+    }
+
+    /// [`Self::try_send_unordered`], scheduled as `kind`; see
+    /// [`Self::send_unordered_as`].
+    pub fn try_send_unordered_as(
+        &self,
+        data: &[u8],
+        kind: crate::egress::MediaKind,
+    ) -> Result<u32, Error> {
+        use tokio::sync::mpsc::error::TrySendError;
+        if self.closed {
+            return Err(Error::NotRunning);
+        }
+        let permit = self.action_dispatch_tx.try_reserve().map_err(|e| match e {
+            TrySendError::Full(()) => Error::from(leviculum_core::SendError::Busy),
+            TrySendError::Closed(()) => Error::NotRunning,
+        })?;
+        let (sequence, output) = {
+            let mut core = self.inner.lock_recover();
+            core.send_unordered(&self.link_id, data)?
+        };
+        hint_datagrams(self.egress.as_deref(), &output, kind);
+        permit.send(output);
+        Ok(sequence)
+    }
+}
