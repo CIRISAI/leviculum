@@ -11,6 +11,89 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+## [0.34.0+ciris.5] — CIRIS fork
+
+### Added
+
+- The egress scheduler: one queue per node between `dispatch_actions` and
+  the interface channels, always on, with no runtime off switch. Design and
+  limits are in docs/egress-scheduler.md.
+  - Class at dispatch, read from the wire type and context before the IFAC
+    wrap and handed to the interface beside the journey tag
+    (`Interface::hint_next_frame`, `leviculum_core::egress::{FrameClass,
+    FrameHint, classify_frame, frame_fingerprint}`). No wire change.
+  - Strict priority: Control and Proof, then LinkSetup, Audio, Video,
+    Announce, Bulk; FIFO within a class. Announce and Bulk together have a
+    floor: `share / (100 - share)` of every higher byte (default 10 %) plus
+    an absolute minimum over time (4 kbit/s); `set_egress_floor`.
+  - Pacing at an owner-set rate (`ReticulumNode::set_egress_rate`,
+    `egress_rate`). With no rate set (the default) nothing is ever queued:
+    a full interface channel refuses with `BufferFull` exactly as before.
+    With nothing queued a frame reaches its interface on the same call, in
+    order.
+  - Head-drop by age for datagrams only (default 800 ms per media kind,
+    `set_egress_media_age_bound`); counted, never sent.
+  - The depth reading (`egress_depth`: per class, queued packets and bytes
+    and the oldest's age) and counters (`egress_stats`: sent, dropped,
+    refused per class), with no allocation.
+  - Hints with no wire change: per link, `set_link_egress_class`; per send,
+    `LinkHandle::send_unordered_as` / `try_send_unordered_as` (a datagram's
+    `MediaKind`) and `LinkHandle::send_as` / `try_send_as` (a Channel
+    message's `EgressClass`).
+  - TCP, UDP, punched direct UDP, I2P, Auto and byte-channel interfaces are
+    scheduled. Serial, RNode, KISS, BLE, pipe and local IPC bypass it.
+    Under a rate, a full channel holds its frame at the head; queues are
+    bounded per interface and class (64-256 KiB) and past that refuse with
+    `BufferFull`, so the circuit breaker still opens on a peer that stops
+    draining.
+- `NodeEvent::DirectLinkProbed { link_id, mapping, evidence, predicted,
+  birthday, second_observer_answered }`: what a direct-link probe found,
+  classes and counts only. `NatClass` and `EdmEvidence` are public, in
+  `leviculum_core::direct_link` (re-exported by `leviculum_std::direct_link`).
+- `DirectLinkEstablished` and `DirectLinkFailed` carry `punch: PunchCounts
+  { knocks, sprayed_ports, birthday_sockets }`, zero when this side did not
+  punch.
+
+### Fixed
+
+- Direct link: only a second observer that ANSWERS ends the own-evidence
+  fallback. A configured but silent one (for example a bundle host before
+  dial+1/udp is open) left the node with no spray at all. The suppression
+  dated from the third review (N1d, 2cf992a8a); its reason lapsed with the
+  fourth review's equal socket caps. README and the model's docs say
+  "answers".
+- The core-lock census counts the fork's surface again: 96, with the eight
+  +ciris methods it had missed since before ciris.4.
+
+### Consumer notes (pub API since 0.34.0+ciris.4)
+
+- Breaking: `DirectLinkEstablished` and `DirectLinkFailed` gained `punch`.
+  A pattern naming every field needs `..`. The std driver now calls
+  `NodeCore::direct_link_probed_found` and `direct_link_punched_counted` /
+  `note_direct_link_punch`; the older probe and punch entry points behave
+  as before and emit no `DirectLinkProbed`.
+- `leviculum_std::direct_link::EdmEvidence` is now the core type (same
+  variants). `NatClass` is new public API.
+- `Interface` gained `hint_next_frame`, with a no-op default.
+- Behaviour, only with a rate set: frames may wait in the scheduler and
+  `try_send*` answers `Ok` for a queued frame; a datagram that waits past
+  its bound is dropped there, counted in `egress_stats`, not in
+  `DropReason::DatagramShed`.
+
+### Known limits
+
+- Channel retransmits are scheduled as Control (the hint does not survive
+  re-encryption).
+- A Resource is always Bulk by its context. A class per Resource needs the
+  core to stamp every frame it emits, which is deferred.
+- What the kernel holds is not observed: the TCP send buffer (no
+  `SIOCOUTQ`), and anything past the host for UDP. The punch, ack,
+  MTU-probe and keepalive frames of a direct interface bypass the
+  scheduler.
+- A late direct-link probe (the main probe took over 3 s) measures no
+  allocation steps, so it has no own evidence and no fallback spray,
+  whether or not an observer is configured.
+
 ## [0.34.0+ciris.4] — CIRIS fork
 
 ### Added
